@@ -3680,8 +3680,9 @@ mod tests {
 
     struct VerifyFailureRegistration {
         inner: CatalogHostComponentRegistrationAuthority,
-        expected_removed_path: PathBuf,
-        injected_after_apply: bool,
+        stale_export_path: PathBuf,
+        stale_export_present_at_verify: bool,
+        verify_failure_injected: bool,
     }
 
     impl HostComponentSetRegistrationV1 for VerifyFailureRegistration {
@@ -3751,7 +3752,8 @@ mod tests {
             request: &HostComponentSetExecutionRequestV1,
         ) -> Result<(), HostBundleError> {
             self.inner.verify(component_set, request)?;
-            self.injected_after_apply = !self.expected_removed_path.exists();
+            self.stale_export_present_at_verify = self.stale_export_path.exists();
+            self.verify_failure_injected = true;
             Err(tracedecay_host_integration::host_bundle_storage_failure!())
         }
 
@@ -4740,8 +4742,9 @@ mod tests {
                 request.lifecycle.operation,
             )
             .unwrap(),
-            expected_removed_path: stale_path.clone(),
-            injected_after_apply: false,
+            stale_export_path: stale_path.clone(),
+            stale_export_present_at_verify: true,
+            verify_failure_injected: false,
         };
         let mut writer =
             tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
@@ -4772,8 +4775,13 @@ mod tests {
             "the injected post-apply verification failure must abort the transaction"
         );
         assert!(
-            registration.injected_after_apply,
-            "the failure must be injected after stale export replacement: {:?}",
+            registration.verify_failure_injected,
+            "verification must run so the failure lands after apply: {:?}",
+            result.as_ref().err()
+        );
+        assert!(
+            !registration.stale_export_present_at_verify,
+            "apply must retire the stale managed export before verification: {:?}",
             result.as_ref().err()
         );
 
@@ -5292,10 +5300,16 @@ mod tests {
 
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
+        // The reinstall path renders the canonical Codex component set with
+        // the PATH-resolved binary, and the host-native activation probe
+        // compares the staged source byte-for-byte against that rendering.
+        // Stage with the same identity or the probe reports a stale cache.
+        let tracedecay_bin =
+            tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let integration = tracedecay::agents::get_integration("codex").unwrap();
         let ctx = tracedecay::agents::InstallContext {
             home: home.path().to_path_buf(),
-            tracedecay_bin: "new-tracedecay".to_string(),
+            tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
             dashboard: true,
@@ -5320,7 +5334,7 @@ mod tests {
         copy_test_bundle(&home.path().join(".codex/plugins/tracedecay"), &cache_root);
 
         let results =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
                 .await;
         assert!(
             matches!(
@@ -5346,10 +5360,11 @@ mod tests {
         )
         .unwrap();
         let stale =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
                 .await;
         assert!(
-            matches!(stale.as_slice(), [(id, Err(error))] if id == "codex" && error.to_string().contains("loaded TraceDecay cache is stale"))
+            matches!(stale.as_slice(), [(id, Err(error))] if id == "codex" && error.to_string().contains("loaded TraceDecay cache is stale")),
+            "{stale:?}"
         );
         std::fs::copy(
             home.path()
@@ -5358,7 +5373,7 @@ mod tests {
         )
         .unwrap();
         let recovered =
-            reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
+            reinstall_agent_integrations(&["codex".to_string()], home.path(), &tracedecay_bin)
                 .await;
         assert!(
             matches!(
