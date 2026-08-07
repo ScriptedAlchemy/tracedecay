@@ -149,20 +149,26 @@ def assert_publish_job(job: dict[str, Any]) -> None:
         fail("the downloaded artifacts must be digest-verified before npm publication")
 
     publish_step = steps[publish_index]
-    publish_env = publish_step.get("env")
-    if not isinstance(publish_env, dict) or publish_env.get("NPM_TOKEN") != "${{ secrets.NPM_TOKEN }}":
-        fail(f"'{PUBLISH_JOB}' must authenticate with the NPM_TOKEN secret")
+
+    # Trusted publishing is tokenless: any configured registry credential
+    # would shadow the npm CLI's OIDC exchange.
+    job_text = str(job)
+    for forbidden_credential in ("NPM_TOKEN", "NODE_AUTH_TOKEN", "_authToken", ".npmrc"):
+        if forbidden_credential in job_text:
+            fail(
+                f"'{PUBLISH_JOB}' must stay tokenless for OIDC trusted publishing; "
+                f"found {forbidden_credential!r}"
+            )
 
     publish_command = str(publish_step.get("run", ""))
     for required in (
-        'test -n "$NPM_TOKEN"',
         "npm-12.0.2.tgz",
         "node npm-cli/package/bin/npm-cli.js",
         'publish "$tarball"',
-        "--provenance",
         "--access public",
         '--tag "$dist_tag"',
         "dist.integrity",
+        "trusted publisher",
     ):
         if required not in publish_command:
             fail(f"'{PUBLISH_JOB}' publish command is missing {required!r}")
@@ -178,7 +184,10 @@ def assert_publish_job(job: dict[str, Any]) -> None:
         ):
             fail(f"'{PUBLISH_JOB}' uses unnecessary privileged action {uses!r}")
         if "registry-url" in step.get("with", {}):
-            fail(f"'{PUBLISH_JOB}' must not configure setup-node npm authentication")
+            fail(
+                f"'{PUBLISH_JOB}' must not configure setup-node registry auth; "
+                "it would shadow the OIDC exchange"
+            )
         command = str(step.get("run", ""))
         if command and "sha256sum -c" not in command and step is not publish_step:
             fail(f"'{PUBLISH_JOB}' runs unnecessary privileged setup code {command!r}")

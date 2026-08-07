@@ -750,8 +750,9 @@ jobs:
   # tests, a package dry-run, and real-daemon installed-package conformance
   # against the exact tarball whose digest it records. It also stages and
   # digest-verifies the reviewed npm CLI. Only the publish job gets the
-  # protected environment, the NPM_TOKEN secret, and provenance authority; it
-  # verifies those exact bytes without installing executable code.
+  # protected environment and the OIDC identity that npm trusted publishing
+  # exchanges for a short-lived publish credential; it verifies those exact
+  # bytes without installing executable code and holds no registry token.
   build-typescript:
     name: Build & test @tracedecay/sdk (unprivileged)
     needs: validate-release
@@ -881,13 +882,15 @@ jobs:
       # the beta dist-tag and never take latest. Recovery re-runs are
       # byte-verified no-ops; a republished version with different bytes is a
       # hard failure that requires an SDK version bump.
+      #
+      # Authentication is tokenless npm trusted publishing: the reviewed npm
+      # CLI (>= 11.5.1) exchanges this job's GitHub OIDC token itself, and npm
+      # attaches provenance automatically. No token, registry-url, or .npmrc
+      # auth may exist here — a configured token would shadow the OIDC path.
       - name: Publish the exact conformance-tested tarball with reviewed npm
         working-directory: artifact
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$NPM_TOKEN"
           tarball="$(ls -- tracedecay-sdk-*.tgz)"
           version="${tarball#tracedecay-sdk-}"
           version="${version%.tgz}"
@@ -897,7 +900,6 @@ jobs:
           fi
           mkdir npm-cli
           tar -xzf npm-12.0.2.tgz -C npm-cli
-          printf "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}\n" > "$HOME/.npmrc"
           local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
           if published_integrity="$(node npm-cli/package/bin/npm-cli.js view "@tracedecay/sdk@${version}" dist.integrity 2>/dev/null)" \
             && [[ -n "$published_integrity" ]]; then
@@ -908,5 +910,8 @@ jobs:
             echo "@tracedecay/sdk@${version} already published with identical bytes; nothing to publish"
             exit 0
           fi
-          node npm-cli/package/bin/npm-cli.js \
-            publish "$tarball" --provenance --access public --tag "$dist_tag"
+          if ! node npm-cli/package/bin/npm-cli.js \
+            publish "$tarball" --access public --tag "$dist_tag"; then
+            echo "::error title=npm trusted publishing failed::If npm reported ENEEDAUTH or a 404, the npm trusted publisher for @tracedecay/sdk is not configured on npmjs.com (GitHub Actions: org ScriptedAlchemy, repository tracedecay, workflow release.yml, environment npm-tracedecay-sdk), or the package does not exist yet and needs its one-time manual first publish. See docs/RELEASE-AUTOMATION.md."
+            exit 1
+          fi

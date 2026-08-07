@@ -231,9 +231,10 @@ settled; it is not part of current acceptance.
 **TypeScript (now).** The npm package publishes from the stable release
 workflow on the same GitHub Release trigger as the binaries, gated on release
 verification and on registry-client codegen parity, typecheck, tests, and
-real-daemon installed-package conformance. Publication authenticates with the
-`NPM_TOKEN` secret in the protected npm environment and attaches npm
-provenance. The TypeScript package uses the same generated wire models and
+real-daemon installed-package conformance. Publication is tokenless npm OIDC
+trusted publishing from the protected npm environment, with provenance
+attached automatically. The TypeScript package uses the same generated wire
+models and
 reviewed handwritten lifecycle façades over browser/Node `fetch`.
 
 Generated low-level bindings may be used internally in either package, but

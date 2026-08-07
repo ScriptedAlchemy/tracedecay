@@ -63,8 +63,8 @@ GitHub Release trigger that ships the binaries. An unprivileged
 typecheck/unit/conformance against that same tarball, and stages both the
 artifact and digest-pinned npm tooling. A separate protected
 `publish-typescript` job — gated on the release verification job — re-verifies
-those exact bytes and publishes with npm provenance, authenticating with the
-`NPM_TOKEN` secret from the `npm-tracedecay-sdk` environment, without
+those exact bytes and publishes through tokenless npm trusted publishing
+(OIDC; provenance attached automatically; no `NPM_TOKEN` exists), without
 installing code. Prerelease package versions publish under the `beta`
 dist-tag; stable versions take `latest`. Setting `TRACEDECAY_SDK_TARBALL` to
 a prebuilt tarball path makes `test:installed` exercise that tarball instead

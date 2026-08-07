@@ -166,10 +166,51 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
         self.assert_rejected(mutated)
 
-    def test_rejects_missing_npm_token_secret(self) -> None:
+    def test_rejects_token_authentication(self) -> None:
         mutated = self.workflow.replace(
-            "        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
-            "",
+            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
+            "        working-directory: artifact\n",
+            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
+            "        working-directory: artifact\n"
+            "        env:\n"
+            "          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_node_auth_token_shadowing(self) -> None:
+        mutated = self.workflow.replace(
+            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
+            "        working-directory: artifact\n",
+            "      - name: Publish the exact conformance-tested tarball with reviewed npm\n"
+            "        working-directory: artifact\n"
+            "        env:\n"
+            "          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}\n",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_dropping_oidc_permission(self) -> None:
+        mutated = self.workflow.replace(
+            "    permissions:\n      contents: read\n      id-token: write\n    steps:\n"
+            "      - uses: actions/download-artifact@",
+            "    permissions:\n      contents: read\n    steps:\n"
+            "      - uses: actions/download-artifact@",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_silent_missing_trusted_publisher_failure(self) -> None:
+        mutated = self.workflow.replace(
+            "          if ! node npm-cli/package/bin/npm-cli.js \\\n"
+            "            publish \"$tarball\" --access public --tag \"$dist_tag\"; then",
+            "          if ! node npm-cli/package/bin/npm-cli.js \\\n"
+            "            publish \"$tarball\" --access public --tag \"$dist_tag\"; then\n"
+            "            :",
+            1,
+        ).replace(
+            "npm trusted publisher for @tracedecay/sdk is not configured",
+            "publish failed",
             1,
         )
         self.assert_rejected(mutated)

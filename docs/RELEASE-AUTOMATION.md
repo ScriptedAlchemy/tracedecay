@@ -39,11 +39,39 @@ Add these repository secrets:
   `Contents` and `Pull requests` access. The existing secret name is retained
   for compatibility. Releases created with the default `GITHUB_TOKEN` do not
   trigger the follow-up `release.yml` workflow.
-- `NPM_TOKEN`: an npm automation token with publish rights for
-  `@tracedecay/sdk`, stored in the `npm-tracedecay-sdk` protected environment
-  (or as a repository secret visible to that environment). The npm publish job
-  fails closed without it. The job additionally holds `id-token: write` so the
-  publication carries npm provenance for the exact conformance-tested tarball.
+npm publication is tokenless: no npm secret exists anywhere in the repository
+or its workflows. The publish job authenticates through npm trusted publishing
+(OIDC) — it holds `id-token: write`, and the pinned npm CLI (12.0.2, above the
+11.5.1 trusted-publishing floor; Node 22.23.2, above the 22.14.0 floor)
+exchanges the GitHub OIDC token for a short-lived publish credential itself.
+Provenance is attached automatically by trusted publishing. No
+`NPM_TOKEN`/`NODE_AUTH_TOKEN`, `registry-url`, or `.npmrc` auth may be added
+to the publish job: a configured token shadows the OIDC exchange.
+
+## One-time npm trusted publisher setup (owner, before the first release)
+
+npm's trusted publisher is configured in the settings of an existing package,
+so a brand-new package needs a one-time manual seed publish (an interactive
+`npm publish` by a maintainer with 2FA) to create `@tracedecay/sdk` before the
+trusted publisher can be added. After that, on npmjs.com under
+Package → Settings → Trusted publishing, add a GitHub Actions publisher with
+exactly:
+
+- Organization or user: `ScriptedAlchemy`
+- Repository: `tracedecay`
+- Workflow filename: `release.yml` (filename only, extension included)
+- Environment name: `npm-tracedecay-sdk`
+- Allowed actions: `npm publish`
+
+All fields are case-sensitive and unvalidated at save time; mismatches only
+surface as `ENEEDAUTH`/404 at publish time — the publish job names this
+configuration in its failure message. Only GitHub-hosted runners are
+supported (the job uses `ubuntu-latest`). After the first successful OIDC
+publish, set Package → Settings → Publishing access to "Require two-factor
+authentication and disallow tokens" so trusted publishing is the only publish
+path. On the GitHub side, create the `npm-tracedecay-sdk` environment with
+required reviewers if release-time approval is wanted; the environment gates
+review, while authentication itself is the OIDC workflow identity.
 
 Release PRs may modify only `.release-please-manifest.json`, `CHANGELOG.md`,
 `Cargo.lock`, `Cargo.toml`, and `version.txt`. The
@@ -83,8 +111,9 @@ exclusively from the canonical SDK executable-binding registry and verifies
 codegen parity before running typecheck, tests, a package dry-run, and
 real-daemon conformance against the exact tarball whose digest it records.
 The publish job depends on both that build and the release verification job,
-digest-verifies the artifact bytes, authenticates with `NPM_TOKEN`, and
-publishes with npm provenance using the digest-pinned reviewed npm CLI.
+digest-verifies the artifact bytes, and publishes through tokenless npm
+trusted publishing (OIDC, provenance attached automatically) using the
+digest-pinned reviewed npm CLI.
 Missing schemas or mounted routes remain explicit unavailable entries in the
 binding registry; they are not compared against a separate manually
 maintained HTTP operation set.
