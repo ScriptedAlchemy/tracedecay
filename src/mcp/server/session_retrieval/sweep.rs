@@ -55,7 +55,9 @@ impl DaemonSessionRetrievalSweep {
     /// but cannot disambiguate by serving database, so a project with more
     /// than one writable scope is served only when its default branch names
     /// exactly one of them.
-    fn registered_root(context: &ProjectRegistryContext) -> Result<DaemonSessionRetrievalRoot, SessionRetrievalSweepSkipReason> {
+    fn registered_root(
+        context: &ProjectRegistryContext,
+    ) -> Result<DaemonSessionRetrievalRoot, SessionRetrievalSweepSkipReason> {
         let project = &context.project;
         let mut candidates = Vec::new();
         for store in &context.stores {
