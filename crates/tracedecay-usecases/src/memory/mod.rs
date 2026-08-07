@@ -22,11 +22,11 @@ mod tests;
 pub use anchors::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
-pub use project_memory::{automation_fact_proposal_add_command, with_automation_run_id};
 pub use context::MemoryOperationContext;
 pub use error::{
     MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
 };
+pub use project_memory::{automation_fact_proposal_add_command, with_automation_run_id};
 pub use v1::{V1FactTrustHistoryV1, V1MemoryStatusWithRepairV1, V1UpdateFactOutcome};
 
 #[cfg(test)]

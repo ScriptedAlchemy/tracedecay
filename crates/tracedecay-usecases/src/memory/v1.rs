@@ -20,13 +20,13 @@ use tracedecay_runtime_core::memory::types::{
 };
 
 use super::MemoryApplication;
+use super::context::MemoryOperationContext;
+use super::error::MemoryApplicationError;
 use super::project_memory::{
     compatibility_add_command, compatibility_confidence, compatibility_projection_targets,
     fact_category, legacy_i64, project_memory_fact_record, project_memory_projection_record,
     project_memory_status_v1,
 };
-use super::context::MemoryOperationContext;
-use super::error::MemoryApplicationError;
 use super::sanitize::{
     prepare_tainted_update_fact_request, sanitize_add_fact_request, sanitize_optional_memory_text,
 };

@@ -22,9 +22,9 @@ use tracedecay_runtime_core::memory::types::{
 };
 
 use super::MemoryApplication;
-use super::project_memory::{compatibility_relation, legacy_usize};
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
+use super::project_memory::{compatibility_relation, legacy_usize};
 use super::sanitize::{
     sanitize_curation_metadata, sanitize_curation_text, sanitize_curation_texts,
 };
