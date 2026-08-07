@@ -65,7 +65,7 @@ async fn linked_worktree_registration_reconciles_its_pinned_timing() {
     let timing = state.effective_timing();
     assert_eq!(timing.debounce, Duration::from_millis(15));
     assert_eq!(timing.max_delay, Duration::from_millis(150));
-    assert_eq!(timing.backstop_interval, Some(Duration::from_secs(180)));
+    assert_eq!(timing.backstop_interval, Some(Duration::from_mins(3)));
     assert_eq!(
         state.config_for_root(&linked.canonicalize().expect("linked canonical root")),
         Some(linked_config),
@@ -182,8 +182,7 @@ fn deferred_freshness_retry_is_single_and_backoff_bounded() {
         state.schedule_retry();
     }
     assert!(
-        state.retry_not_before().expect("bounded retry")
-            <= Instant::now() + Duration::from_secs(60),
+        state.retry_not_before().expect("bounded retry") <= Instant::now() + Duration::from_mins(1),
         "retry amplification must cap at one minute"
     );
     assert!(first > started);

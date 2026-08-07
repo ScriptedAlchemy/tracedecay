@@ -30,7 +30,7 @@ pub(super) const fn coverage_action(
 }
 
 pub(super) async fn run(watcher: GitWatcher) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    let mut ticker = tokio::time::interval(Duration::from_mins(1));
     let mut due_by_root = HashMap::new();
     ticker.tick().await;
 

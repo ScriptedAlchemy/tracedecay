@@ -89,6 +89,7 @@ impl OverflowRoster {
         self.entries.contains_key(root)
     }
 
+    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
