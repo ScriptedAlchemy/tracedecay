@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 fn source_coverage() -> tracedecay_domain::SessionSourceCoverageReceiptV1 {
     let request = tracedecay_domain::SessionTemporalCoverageRequestV1::new(
@@ -400,6 +401,7 @@ impl SessionRefreshStore for InMemorySessionPorts {
         &self,
         _permit: SessionRefreshCompletePermit,
         request: SessionRefreshCompletionRequestV1,
+        _execution_control: ExecutionControl,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
         yield_once().await;
         let receipt = SessionRefreshReceiptV1::completed(request, UtcMicros(110));

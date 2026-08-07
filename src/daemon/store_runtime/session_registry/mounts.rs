@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
+use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyV1, RemoteSpoolKeyringV1,
@@ -206,7 +207,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let runtime = open_runtime(
             &self.registry,
             self.resolver.as_ref(),
-            shard_id,
+            shard_id.clone(),
             self.incarnation,
             Some(self.profile_pin.clone()),
             None,
@@ -217,6 +218,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount profile session store")
             .await?;
+        let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
+        database.bind_session_relation_graph(
+            SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
+            relation_graph,
+        )?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -509,7 +515,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let runtime = open_runtime(
             &self.registry,
             self.resolver.as_ref(),
-            shard_id,
+            shard_id.clone(),
             self.incarnation,
             Some(self.profile_pin.clone()),
             None,
@@ -524,6 +530,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
+        let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
+        database.bind_session_relation_graph(
+            SessionRelationScope::project_sessions(project_id.clone()),
+            relation_graph,
+        )?;
         self.remote_replay_transaction
             .register_target(project_id.clone(), replay_runtime, replay_authority)
             .map_err(|error| session_registry_error("register remote replay target", error))?;

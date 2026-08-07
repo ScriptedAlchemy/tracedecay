@@ -45,11 +45,6 @@ pub enum LcmLineageFaultForTest {
     CorruptRetrievalAnchorOwner {
         summary_id: String,
     },
-    ReplaceSummarySourceWithSummary {
-        summary_id: String,
-        ordinal: i64,
-        source_summary_id: String,
-    },
     ReplacePublicationReceipt {
         receipt_id: String,
         sanitizer_version: String,
@@ -645,17 +640,28 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let transaction = database
-            .begin_write_transaction()
+        let summary_hash =
+            tracedecay_sessions::compatibility::projected_content_hash(&draft.summary_text);
+        let summary_id = crate::sessions::lcm::dag::summary_node_id(
+            &draft.provider,
+            &draft.session_id,
+            draft.depth,
+            &draft.source_refs,
+            &summary_hash,
+        );
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(
+                crate::sessions::lcm::types::LcmImmutableSummaryPublication {
+                    summary_id,
+                    predecessor_summary_id: None,
+                    draft,
+                },
+                &control,
+                || Ok(()),
+            )
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let publisher =
-            crate::global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
-                &transaction,
-            );
-        let summary = crate::sessions::lcm::dag::insert_summary_node(&publisher, draft).await?;
-        transaction.commit().await?;
-        Ok(summary)
+            .map(|receipt| receipt.summary)
     }
 
     #[doc(hidden)]
@@ -690,17 +696,10 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let transaction = database
-            .begin_write_transaction()
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let receipt = crate::global_db::session_temporal_operations::publish_immutable_summary(
-            &transaction,
-            publication,
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(receipt)
     }
 
     #[doc(hidden)]
@@ -854,22 +853,6 @@ impl HostAdmissionTestRuntimeV1 {
                     )
                     .await
             }
-            LcmLineageFaultForTest::ReplaceSummarySourceWithSummary {
-                summary_id,
-                ordinal,
-                source_summary_id,
-            } => {
-                transaction
-                    .execute(
-                        "UPDATE session_summary_sources
-                         SET source_kind = 'summary',
-                             source_anchor_id = NULL,
-                             source_summary_id = ?3
-                         WHERE summary_id = ?1 AND source_ordinal = ?2",
-                        crate::db::engine::params![summary_id, ordinal, source_summary_id],
-                    )
-                    .await
-            }
             LcmLineageFaultForTest::ReplacePublicationReceipt {
                 receipt_id,
                 sanitizer_version,
@@ -937,10 +920,6 @@ impl HostAdmissionTestRuntimeV1 {
                 "DROP TRIGGER IF EXISTS retrieval_anchors_immutable_update;
                  DROP TRIGGER IF EXISTS observation_retrieval_anchors_immutable_update;",
                 "prepare corrupt lcm retrieval owner fixture",
-            ),
-            LcmLineageFaultForTest::ReplaceSummarySourceWithSummary { .. } => (
-                "DROP TRIGGER IF EXISTS session_summary_sources_immutable_update_v1",
-                "prepare corrupt lcm summary source fixture",
             ),
             LcmLineageFaultForTest::ReplacePublicationReceipt { .. } => (
                 "DROP TRIGGER IF EXISTS sanitization_receipts_immutable_update_v1",
@@ -1040,13 +1019,6 @@ impl HostAdmissionTestRuntimeV1 {
                      WHERE ?1 IS NULL OR session_id = ?1),
                     (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE ?1 IS NULL OR session_id = ?1),
-                    (SELECT COUNT(*) FROM session_summary_sources source
-                     JOIN session_summary_nodes node ON node.summary_id = source.summary_id
-                     WHERE ?1 IS NULL OR node.session_id = ?1),
-                    (SELECT COUNT(*) FROM session_summary_successors successor
-                     JOIN session_summary_nodes node
-                       ON node.summary_id = successor.successor_summary_id
-                     WHERE ?1 IS NULL OR node.session_id = ?1),
                     (SELECT COUNT(*) FROM session_query_cursor_keys)",
                 [session_id],
             )
@@ -1073,14 +1045,112 @@ impl HostAdmissionTestRuntimeV1 {
                     message: error.to_string(),
                 })
         };
+        let relations = self.lcm_relation_reads_for_test(session_id).await?;
         Ok(LcmLineageCountsForTest {
             active_generations: value(0)?,
             total_generations: value(1)?,
             summary_nodes: value(2)?,
-            summary_sources: value(3)?,
-            summary_successors: value(4)?,
-            cursor_keys: value(5)?,
+            summary_sources: i64::try_from(
+                relations
+                    .iter()
+                    .map(|relation| relation.sources.len())
+                    .sum::<usize>(),
+            )
+            .map_err(|error| TraceDecayError::Database {
+                operation: "count native lcm summary sources".to_owned(),
+                message: error.to_string(),
+            })?,
+            summary_successors: i64::try_from(
+                relations
+                    .iter()
+                    .filter(|relation| relation.predecessor_summary_id.is_some())
+                    .count(),
+            )
+            .map_err(|error| TraceDecayError::Database {
+                operation: "count native lcm summary successors".to_owned(),
+                message: error.to_string(),
+            })?,
+            cursor_keys: value(3)?,
         })
+    }
+
+    async fn lcm_relation_reads_for_test(
+        &self,
+        session_filter: Option<&str>,
+    ) -> Result<Vec<crate::global_db::session_temporal::relations::SummaryRelationRead>> {
+        let database = self.primary_lcm_fixture_database_for_test();
+        let snapshot =
+            database
+                .read_snapshot()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "open native lcm relation fixture snapshot".to_owned(),
+                    message: error.to_string(),
+                })?;
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id, summary_id
+                 FROM session_summary_nodes
+                 WHERE ?1 IS NULL OR session_id = ?1
+                 ORDER BY session_id, created_at, summary_id",
+                [session_filter],
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query native lcm relation fixture identities".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut grouped = std::collections::BTreeMap::<String, Vec<String>>::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read native lcm relation fixture identity".to_owned(),
+                message: error.to_string(),
+            })?
+        {
+            grouped
+                .entry(
+                    row.get::<String>(0)
+                        .map_err(|error| TraceDecayError::Database {
+                            operation: "decode native lcm relation session".to_owned(),
+                            message: error.to_string(),
+                        })?,
+                )
+                .or_default()
+                .push(
+                    row.get::<String>(1)
+                        .map_err(|error| TraceDecayError::Database {
+                            operation: "decode native lcm relation summary".to_owned(),
+                            message: error.to_string(),
+                        })?,
+                );
+        }
+        drop(rows);
+        drop(snapshot);
+        let mut relations = Vec::new();
+        for (session, summary_ids) in grouped {
+            let session_id = tracedecay_domain::SessionId::new(session).map_err(|error| {
+                TraceDecayError::Database {
+                    operation: "decode native lcm relation session".to_owned(),
+                    message: error.to_string(),
+                }
+            })?;
+            let (_, mut session_relations) = database
+                .active_session_summary_relations(
+                    &session_id,
+                    &summary_ids,
+                    100_000,
+                    Arc::new(tracedecay_graph_db::NeverCancelled),
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read native lcm relation fixture".to_owned(),
+                    message: error.to_string(),
+                })?;
+            relations.append(&mut session_relations);
+        }
+        Ok(relations)
     }
 
     #[doc(hidden)]
@@ -1347,49 +1417,17 @@ impl HostAdmissionTestRuntimeV1 {
 
     #[doc(hidden)]
     pub async fn lcm_summary_successor_edges_for_test(&self) -> Result<Vec<(String, String)>> {
-        let snapshot = self
-            .primary_lcm_fixture_database_for_test()
-            .read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "open registered LCM successor-edge snapshot".to_owned(),
-                message: error.to_string(),
-            })?;
-        let mut rows = snapshot
-            .query(
-                "SELECT predecessor_summary_id, successor_summary_id
-                 FROM session_summary_successors
-                 ORDER BY predecessor_summary_id, successor_summary_id",
-                (),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "query registered LCM successor edges".to_owned(),
-                message: error.to_string(),
-            })?;
-        let mut edges = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "read registered LCM successor edge".to_owned(),
-                message: error.to_string(),
-            })?
-        {
-            let predecessor = row
-                .get::<String>(0)
-                .map_err(|error| TraceDecayError::Database {
-                    operation: "decode registered LCM predecessor".to_owned(),
-                    message: error.to_string(),
-                })?;
-            let successor = row
-                .get::<String>(1)
-                .map_err(|error| TraceDecayError::Database {
-                    operation: "decode registered LCM successor".to_owned(),
-                    message: error.to_string(),
-                })?;
-            edges.push((predecessor, successor));
-        }
+        let mut edges = self
+            .lcm_relation_reads_for_test(None)
+            .await?
+            .into_iter()
+            .filter_map(|relation| {
+                relation
+                    .predecessor_summary_id
+                    .map(|predecessor| (predecessor, relation.summary_id))
+            })
+            .collect::<Vec<_>>();
+        edges.sort();
         Ok(edges)
     }
 

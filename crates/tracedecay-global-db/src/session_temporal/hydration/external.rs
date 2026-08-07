@@ -175,7 +175,7 @@ pub(in crate::session_temporal) async fn resolve_external_target(
     session_id: &str,
     payload_ref: &str,
 ) -> Result<HydrationResolution, HydrationError> {
-    match resolve_current(conn, snapshot, anchor_id)
+    match resolve_current(conn, None, snapshot, anchor_id)
         .await
         .map_err(|_| HydrationError::Unavailable)?
     {

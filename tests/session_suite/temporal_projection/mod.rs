@@ -26,6 +26,7 @@ use tracedecay_store::{
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 pub(crate) async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))

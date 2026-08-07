@@ -29,11 +29,8 @@ pub enum SessionStoreTable {
     SessionTemporalObservationEffects,
     SessionTemporalProjectionReceipts,
     SessionOccurrences,
-    SessionLogicalCopyEdges,
     SessionAssertions,
     SessionSummaryNodes,
-    SessionSummarySources,
-    SessionSummarySuccessors,
     MemoryV2Facts,
     MemoryV2CurrentFacts,
     MemoryV2Assertions,
@@ -59,11 +56,8 @@ impl SessionStoreTable {
             | Self::SessionTemporalObservationEffects
             | Self::SessionTemporalProjectionReceipts
             | Self::SessionOccurrences
-            | Self::SessionLogicalCopyEdges
             | Self::SessionAssertions => SessionStoreFamily::Temporal,
-            Self::SessionSummaryNodes
-            | Self::SessionSummarySources
-            | Self::SessionSummarySuccessors => SessionStoreFamily::Summary,
+            Self::SessionSummaryNodes => SessionStoreFamily::Summary,
             Self::MemoryV2Facts
             | Self::MemoryV2CurrentFacts
             | Self::MemoryV2Assertions
@@ -94,16 +88,8 @@ impl SessionStoreTable {
                 &["session_id", "generation", "batch_ordinal"]
             }
             Self::SessionOccurrences => &["session_id", "generation", "occurrence_id"],
-            Self::SessionLogicalCopyEdges => &[
-                "session_id",
-                "generation",
-                "occurrence_id",
-                "copied_from_occurrence_id",
-            ],
             Self::SessionAssertions => &["session_id", "generation", "assertion_id"],
             Self::SessionSummaryNodes => &["summary_id"],
-            Self::SessionSummarySources => &["summary_id", "source_ordinal"],
-            Self::SessionSummarySuccessors => &["predecessor_summary_id", "successor_summary_id"],
             Self::MemoryV2Facts | Self::MemoryV2CurrentFacts => {
                 &["fact_id", "owner_kind", "project_id"]
             }
@@ -166,12 +152,6 @@ pub enum SessionStoreCursor {
         generation: i64,
         occurrence_id: String,
     },
-    SessionLogicalCopyEdges {
-        session_id: String,
-        generation: i64,
-        occurrence_id: String,
-        copied_from_occurrence_id: String,
-    },
     SessionAssertions {
         session_id: String,
         generation: i64,
@@ -179,14 +159,6 @@ pub enum SessionStoreCursor {
     },
     SessionSummaryNodes {
         summary_id: String,
-    },
-    SessionSummarySources {
-        summary_id: String,
-        source_ordinal: i64,
-    },
-    SessionSummarySuccessors {
-        predecessor_summary_id: String,
-        successor_summary_id: String,
     },
     MemoryV2Facts {
         fact_id: String,
@@ -358,13 +330,6 @@ pub enum SessionStoreRow {
         role: String,
         row_digest: String,
     },
-    SessionLogicalCopyEdges {
-        session_id: String,
-        generation: i64,
-        occurrence_id: String,
-        copied_from_occurrence_id: String,
-        row_digest: String,
-    },
     SessionAssertions {
         session_id: String,
         generation: i64,
@@ -376,17 +341,6 @@ pub enum SessionStoreRow {
         summary_id: String,
         session_id: String,
         summary_anchor_id: String,
-        row_digest: String,
-    },
-    SessionSummarySources {
-        summary_id: String,
-        source_ordinal: i64,
-        source_kind: String,
-        row_digest: String,
-    },
-    SessionSummarySuccessors {
-        predecessor_summary_id: String,
-        successor_summary_id: String,
         row_digest: String,
     },
     MemoryV2Facts {
@@ -615,20 +569,6 @@ fn validate_page_cursor(
             *generation > 0
         }
         (
-            SessionStoreTable::SessionLogicalCopyEdges,
-            SessionStoreCursor::SessionLogicalCopyEdges {
-                session_id,
-                generation,
-                occurrence_id,
-                copied_from_occurrence_id,
-            },
-        ) => {
-            validate_cursor_text("session_id", session_id)?;
-            validate_cursor_text("occurrence_id", occurrence_id)?;
-            validate_cursor_text("copied_from_occurrence_id", copied_from_occurrence_id)?;
-            *generation > 0
-        }
-        (
             SessionStoreTable::SessionAssertions,
             SessionStoreCursor::SessionAssertions {
                 session_id,
@@ -645,27 +585,6 @@ fn validate_page_cursor(
             SessionStoreCursor::SessionSummaryNodes { summary_id },
         ) => {
             validate_cursor_text("summary_id", summary_id)?;
-            true
-        }
-        (
-            SessionStoreTable::SessionSummarySources,
-            SessionStoreCursor::SessionSummarySources {
-                summary_id,
-                source_ordinal,
-            },
-        ) => {
-            validate_cursor_text("summary_id", summary_id)?;
-            *source_ordinal >= 0
-        }
-        (
-            SessionStoreTable::SessionSummarySuccessors,
-            SessionStoreCursor::SessionSummarySuccessors {
-                predecessor_summary_id,
-                successor_summary_id,
-            },
-        ) => {
-            validate_cursor_text("predecessor_summary_id", predecessor_summary_id)?;
-            validate_cursor_text("successor_summary_id", successor_summary_id)?;
             true
         }
         (

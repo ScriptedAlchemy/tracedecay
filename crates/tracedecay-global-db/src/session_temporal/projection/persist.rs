@@ -26,19 +26,20 @@ pub async fn session_temporal_projection_record_count(
     conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
+    copy_count: u64,
 ) -> SessionStoreResult<u64> {
     let mut rows = conn
         .query(
             "SELECT
                 (SELECT COUNT(*) FROM session_occurrences
                  WHERE session_id = ?1 AND generation = ?2)
-              + (SELECT COUNT(*) FROM session_logical_copy_edges
-                 WHERE session_id = ?1 AND generation = ?2)
               + (SELECT COUNT(*) FROM session_assertions
-                 WHERE session_id = ?1 AND generation = ?2)",
+                 WHERE session_id = ?1 AND generation = ?2)
+              + ?3",
             params![
                 session_id.as_str(),
                 generation_i64(generation, MATERIALIZE_REFRESH)?,
+                i64::try_from(copy_count).map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
             ],
         )
         .await
@@ -97,7 +98,7 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         persist_occurrence(conn, batch, occurrence).await?;
     }
     for copy in batch.copies() {
-        persist_copy(conn, batch, copy).await?;
+        validate_copy(conn, batch, copy).await?;
     }
     for assertion in batch.assertions() {
         persist_assertion(conn, batch, assertion).await?;
@@ -161,30 +162,11 @@ pub async fn seed_active_projection_in_transaction(
                 sanitized_content_digest, sanitized_content_bytes,
                 snippet_text, index_text
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_logical_copy_edges (
-            session_id, generation, occurrence_id, copied_from_occurrence_id,
-            proof_json, knowledge_at, valid_time_json, created_at
-         )
-         SELECT session_id, ?2, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-         FROM session_logical_copy_edges WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_turn_members (
             session_id, generation, turn_id, occurrence_id, ordinal
          )
          SELECT session_id, ?2, turn_id, occurrence_id, ordinal
          FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_thread_hierarchy_edges (
-            session_id, generation, parent_thread_id, child_thread_id, ordinal
-         )
-         SELECT session_id, ?2, parent_thread_id, child_thread_id, ordinal
-         FROM session_thread_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_agent_hierarchy_edges (
-            session_id, generation, parent_agent_id, child_agent_id, ordinal
-         )
-         SELECT session_id, ?2, parent_agent_id, child_agent_id, ordinal
-         FROM session_agent_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_assertions (
             session_id, generation, assertion_id, assertion_kind,
             subject_anchor_id, object_anchor_id, knowledge_at,
@@ -347,10 +329,7 @@ pub(super) async fn persist_occurrence(
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(observation.payload().clone())
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if let (Some(parent_agent_id), Some(agent_id)) = (
-        envelope.relations().parent_agent_id(),
-        envelope.relations().agent_id(),
-    ) {
+    if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
         ensure_agent(
             conn,
             batch.session_id().as_str(),
@@ -359,20 +338,6 @@ pub(super) async fn persist_occurrence(
             occurrence.knowledge_at.0,
         )
         .await?;
-        conn.execute(
-            "INSERT OR IGNORE INTO session_agent_hierarchy_edges (
-                session_id, generation, parent_agent_id, child_agent_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                parent_agent_id.as_str(),
-                agent_id.as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     }
 
     let thread_grouping = occurrence
@@ -745,14 +710,13 @@ pub(super) async fn require_exact_occurrence(
     Ok(())
 }
 
-pub(super) async fn persist_copy(
+pub(super) async fn validate_copy(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     copy: &LogicalCopyRecordV1,
 ) -> SessionStoreResult<bool> {
     let generation = generation_i64(batch.generation(), PERSIST_OPERATION)?;
     validate_copy_proof(conn, batch, copy).await?;
-    let mut created_at = None;
     let mut target_knowledge_at = None;
     let mut target_valid_time = None;
     for occurrence_id in [&copy.occurrence_id, &copy.copied_from_occurrence_id] {
@@ -779,10 +743,6 @@ pub(super) async fn persist_copy(
                 )
             })?;
         if occurrence_id == &copy.occurrence_id {
-            created_at = Some(
-                row.get::<i64>(0)
-                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            );
             target_knowledge_at = Some(
                 row.get::<i64>(0)
                     .map_err(|error| storage(PERSIST_OPERATION, error))?,
@@ -793,12 +753,6 @@ pub(super) async fn persist_copy(
             );
         }
     }
-    let created_at = created_at.ok_or_else(|| {
-        storage_message(
-            PERSIST_OPERATION,
-            "logical copy target timestamp is missing",
-        )
-    })?;
     let target_knowledge_at = target_knowledge_at.ok_or_else(|| {
         storage_message(
             PERSIST_OPERATION,
@@ -819,53 +773,7 @@ pub(super) async fn persist_copy(
             "logical copy bitemporal fields must match the target occurrence",
         ));
     }
-    let proof =
-        serde_json::to_string(&copy.proof).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let inserted = conn
-        .execute(
-            "INSERT OR IGNORE INTO session_logical_copy_edges (
-                session_id, generation, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                copy.occurrence_id.as_str(),
-                copy.copied_from_occurrence_id.as_str(),
-                proof.as_str(),
-                copy.knowledge_at.0,
-                expected_valid_time.as_str(),
-                created_at,
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        == 1;
-    if !inserted {
-        require_edge_json(
-            conn,
-            "SELECT json_object(
-                'proof', json(proof_json),
-                'knowledge_at', knowledge_at,
-                'valid_time', json(valid_time_json)
-             )
-             FROM session_logical_copy_edges
-             WHERE session_id = ?1 AND generation = ?2
-               AND occurrence_id = ?3 AND copied_from_occurrence_id = ?4",
-            batch,
-            copy.occurrence_id.as_str(),
-            copy.copied_from_occurrence_id.as_str(),
-            &serde_json::to_string(&json!({
-                "proof": copy.proof,
-                "knowledge_at": copy.knowledge_at.0,
-                "valid_time": copy.valid_time,
-            }))
-            .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            "logical copy",
-        )
-        .await?;
-    }
-    Ok(inserted)
+    Ok(true)
 }
 
 pub(super) async fn occurrence_observation_and_anchor(
@@ -940,6 +848,32 @@ pub(super) async fn validate_copy_proof(
             assertion_anchor_id,
             ..
         } => {
+            let mut source_rows = conn
+                .query(
+                    "SELECT occurrence_id
+                     FROM session_occurrences
+                     WHERE session_id = ?1
+                       AND generation = ?2
+                       AND retrieval_anchor_id = ?3
+                       AND occurrence_id != ?4
+                     ORDER BY knowledge_at DESC, occurrence_id DESC
+                     LIMIT 1",
+                    params![
+                        batch.session_id().as_str(),
+                        generation_i64(batch.generation(), PERSIST_OPERATION)?,
+                        assertion_anchor_id.as_str(),
+                        copy.occurrence_id.as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let canonical_source = source_rows
+                .next()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+                .map(|row| row.get::<String>(0))
+                .transpose()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
             let mut rows = conn
                 .query(
                     "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
@@ -958,6 +892,8 @@ pub(super) async fn validate_copy_proof(
                 .and_then(|encoded| serde_json::from_str::<RetrievalAnchorRecord>(&encoded).ok())
                 .is_some_and(|anchor| {
                     assertion_anchor_id.as_str() == source_anchor_id
+                        && canonical_source.as_deref()
+                            == Some(copy.copied_from_occurrence_id.as_str())
                         && anchor.source_anchors().iter().any(|lineage| {
                             lineage.relation() == AnchorProvenanceRelationV2::CopiedFrom
                                 && lineage.anchor_id() == assertion_anchor_id
@@ -1261,52 +1197,6 @@ pub(super) const fn assertion_kind_for_relation(
         | AnchorProvenanceRelationV2::CopiedFrom
         | AnchorProvenanceRelationV2::DerivedFrom => None,
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn require_edge_json(
-    conn: &impl Executor,
-    sql: &str,
-    batch: &SessionTemporalProjectionBatchV1,
-    left: &str,
-    right: &str,
-    expected: &str,
-    edge: &str,
-) -> SessionStoreResult<()> {
-    let mut rows = conn
-        .query(
-            sql,
-            params![
-                batch.session_id().as_str(),
-                generation_i64(batch.generation(), PERSIST_OPERATION)?,
-                left,
-                right
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let actual: String = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                format!("{edge} insert was ignored without an existing row"),
-            )
-        })?
-        .get(0)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if serde_json::from_str::<Value>(&actual).map_err(|error| storage(PERSIST_OPERATION, error))?
-        != serde_json::from_str::<Value>(expected)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?
-    {
-        return Err(storage_message(
-            PERSIST_OPERATION,
-            format!("{edge} conflicts with an existing immutable row"),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) async fn rebuild_current_occurrences(

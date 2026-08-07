@@ -611,6 +611,7 @@ fn duration_micros_u64(duration: Duration) -> u64 {
 
 fn error_class(error: &TraceDecayError) -> &'static str {
     match error {
+        TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::File { .. } => "file",
         TraceDecayError::Parse { .. } => "parse",
         TraceDecayError::Database { .. } => "database",
@@ -659,5 +660,13 @@ mod tests {
         );
 
         assert_eq!(error_class(&error), "project_route");
+    }
+
+    #[test]
+    fn reset_required_error_class_is_distinct() {
+        let error =
+            TraceDecayError::reset_required("session store", "session store reset required");
+
+        assert_eq!(error_class(&error), "reset_required");
     }
 }

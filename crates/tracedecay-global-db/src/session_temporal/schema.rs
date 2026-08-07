@@ -27,7 +27,6 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     -- drops on every pre-live reopen so existing schemas converge as well.
     DROP INDEX IF EXISTS idx_session_refresh_progress_operation;
     DROP INDEX IF EXISTS idx_session_temporal_projection_receipts_digest;
-
     CREATE TABLE IF NOT EXISTS session_summary_nodes (
         summary_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -44,37 +43,38 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_root_created_order
         ON session_summary_nodes(created_at, session_id, summary_id);
 
-    CREATE TABLE IF NOT EXISTS session_summary_sources (
-        summary_id TEXT NOT NULL,
-        source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0),
-        source_kind TEXT NOT NULL CHECK(source_kind IN ('anchor', 'summary')),
-        source_anchor_id TEXT,
-        source_summary_id TEXT,
-        PRIMARY KEY(summary_id, source_ordinal),
-        CHECK(
-            (source_kind = 'anchor' AND source_anchor_id IS NOT NULL AND source_summary_id IS NULL)
-            OR (source_kind = 'summary' AND source_anchor_id IS NULL AND source_summary_id IS NOT NULL)
-        ),
-        FOREIGN KEY(summary_id) REFERENCES session_summary_nodes(summary_id) ON DELETE CASCADE,
-        FOREIGN KEY(source_anchor_id) REFERENCES retrieval_anchors(anchor_id),
-        FOREIGN KEY(source_summary_id) REFERENCES session_summary_nodes(summary_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_summary_sources_anchor
-        ON session_summary_sources(source_anchor_id);
-    CREATE INDEX IF NOT EXISTS idx_session_summary_sources_summary
-        ON session_summary_sources(source_summary_id, summary_id);
-
-    CREATE TABLE IF NOT EXISTS session_summary_successors (
-        predecessor_summary_id TEXT NOT NULL,
-        successor_summary_id TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS session_relation_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        scope_kind TEXT NOT NULL
+            CHECK(scope_kind IN ('project_sessions', 'profile_sessions')),
+        scope_id TEXT NOT NULL,
+        expected_graph_watermark TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'applied')),
+        graph_watermark TEXT,
         created_at INTEGER NOT NULL,
-        PRIMARY KEY(predecessor_summary_id, successor_summary_id),
-        CHECK(predecessor_summary_id <> successor_summary_id),
-        FOREIGN KEY(predecessor_summary_id) REFERENCES session_summary_nodes(summary_id),
-        FOREIGN KEY(successor_summary_id) REFERENCES session_summary_nodes(summary_id)
+        applied_at INTEGER,
+        PRIMARY KEY(session_id, generation),
+        CHECK(
+            (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
+            OR (state = 'applied' AND graph_watermark = expected_graph_watermark
+                AND applied_at IS NOT NULL)
+        ),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_temporal_generations(session_id, generation) ON DELETE CASCADE
     );
-    CREATE INDEX IF NOT EXISTS idx_session_summary_successors_successor
-        ON session_summary_successors(successor_summary_id, created_at, predecessor_summary_id);
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
+        ON session_relation_receipts(state, created_at, session_id, generation);
+
+    CREATE TABLE IF NOT EXISTS session_relation_effect_journal (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        projection_json TEXT NOT NULL CHECK(json_valid(projection_json)),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, generation),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_relation_receipts(session_id, generation) ON DELETE CASCADE
+    );
 
     CREATE TABLE IF NOT EXISTS session_external_payload_manifests (
         payload_ref TEXT PRIMARY KEY,
@@ -370,38 +370,6 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_occurrences_agent
         ON session_occurrences(session_id, generation, agent_id, knowledge_at, occurrence_id);
 
-    CREATE TABLE IF NOT EXISTS session_logical_copy_edges (
-        session_id TEXT NOT NULL,
-        generation INTEGER NOT NULL,
-        occurrence_id TEXT NOT NULL,
-        copied_from_occurrence_id TEXT NOT NULL,
-        proof_json TEXT NOT NULL CHECK(json_valid(proof_json)),
-        knowledge_at INTEGER NOT NULL,
-        valid_time_json TEXT NOT NULL CHECK(
-            json_valid(valid_time_json)
-            AND json_type(valid_time_json, '$.kind') IS 'text'
-            AND (
-                (
-                    json_extract(valid_time_json, '$.kind') = 'unknown'
-                    AND json_type(valid_time_json, '$.valid_at') IS NULL
-                )
-                OR (
-                    json_extract(valid_time_json, '$.kind') = 'known'
-                    AND json_type(valid_time_json, '$.valid_at') IS 'integer'
-                )
-            )
-        ),
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id),
-        CHECK(occurrence_id <> copied_from_occurrence_id),
-        FOREIGN KEY(session_id, generation, occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, copied_from_occurrence_id)
-            REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_logical_copy_edges_target
-        ON session_logical_copy_edges(session_id, generation, copied_from_occurrence_id);
-
     CREATE TABLE IF NOT EXISTS session_turn_members (
         session_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
@@ -416,38 +384,6 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     );
     CREATE INDEX IF NOT EXISTS idx_session_turn_members_occurrence
         ON session_turn_members(session_id, generation, occurrence_id);
-
-    CREATE TABLE IF NOT EXISTS session_thread_hierarchy_edges (
-        session_id TEXT NOT NULL,
-        generation INTEGER NOT NULL,
-        parent_thread_id TEXT NOT NULL,
-        child_thread_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-        PRIMARY KEY(session_id, generation, parent_thread_id, child_thread_id),
-        CHECK(parent_thread_id <> child_thread_id),
-        FOREIGN KEY(session_id, generation, parent_thread_id)
-            REFERENCES session_threads(session_id, generation, thread_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, child_thread_id)
-            REFERENCES session_threads(session_id, generation, thread_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_thread_hierarchy_edges_child
-        ON session_thread_hierarchy_edges(session_id, generation, child_thread_id);
-
-    CREATE TABLE IF NOT EXISTS session_agent_hierarchy_edges (
-        session_id TEXT NOT NULL,
-        generation INTEGER NOT NULL,
-        parent_agent_id TEXT NOT NULL,
-        child_agent_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-        PRIMARY KEY(session_id, generation, parent_agent_id, child_agent_id),
-        CHECK(parent_agent_id <> child_agent_id),
-        FOREIGN KEY(session_id, generation, parent_agent_id)
-            REFERENCES session_agents(session_id, generation, agent_id) ON DELETE CASCADE,
-        FOREIGN KEY(session_id, generation, child_agent_id)
-            REFERENCES session_agents(session_id, generation, agent_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_agent_hierarchy_edges_child
-        ON session_agent_hierarchy_edges(session_id, generation, child_agent_id);
 
     CREATE TABLE IF NOT EXISTS session_assertions (
         session_id TEXT NOT NULL,
@@ -686,22 +622,22 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "session_summary_sources",
+        "session_relation_receipts",
         &[
-            "summary_id",
-            "source_ordinal",
-            "source_kind",
-            "source_anchor_id",
-            "source_summary_id",
+            "session_id",
+            "generation",
+            "scope_kind",
+            "scope_id",
+            "expected_graph_watermark",
+            "state",
+            "graph_watermark",
+            "created_at",
+            "applied_at",
         ],
     ),
     (
-        "session_summary_successors",
-        &[
-            "predecessor_summary_id",
-            "successor_summary_id",
-            "created_at",
-        ],
+        "session_relation_effect_journal",
+        &["session_id", "generation", "projection_json", "created_at"],
     ),
     (
         "session_external_payload_manifests",
@@ -899,45 +835,12 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "session_logical_copy_edges",
-        &[
-            "session_id",
-            "generation",
-            "occurrence_id",
-            "copied_from_occurrence_id",
-            "proof_json",
-            "knowledge_at",
-            "valid_time_json",
-            "created_at",
-        ],
-    ),
-    (
         "session_turn_members",
         &[
             "session_id",
             "generation",
             "turn_id",
             "occurrence_id",
-            "ordinal",
-        ],
-    ),
-    (
-        "session_thread_hierarchy_edges",
-        &[
-            "session_id",
-            "generation",
-            "parent_thread_id",
-            "child_thread_id",
-            "ordinal",
-        ],
-    ),
-    (
-        "session_agent_hierarchy_edges",
-        &[
-            "session_id",
-            "generation",
-            "parent_agent_id",
-            "child_agent_id",
             "ordinal",
         ],
     ),
@@ -1071,7 +974,6 @@ pub async fn ensure_session_temporal_schema(
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    migrate_logical_copy_bitemporality(conn, version).await?;
     validate_temporal_table_shapes(conn).await?;
     validate_temporal_fts_contracts(conn).await?;
     if rebuild_fts {
@@ -1592,127 +1494,6 @@ async fn repair_legacy_cursor_key_bindings(
                  AND receipt.generation = session_temporal_generations.generation
            )",
         params![key_id, key_version],
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(())
-}
-
-/// Upgrade pre-v3 copy edges to carry bitemporal columns while preserving
-/// legacy unknown validity and the prior `created_at` knowledge watermark.
-async fn migrate_logical_copy_bitemporality(
-    conn: &impl Executor,
-    version: Option<i64>,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT name FROM pragma_table_info('session_logical_copy_edges') ORDER BY cid",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut columns = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        columns.push(
-            row.get::<String>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        );
-    }
-    if columns.is_empty() {
-        return Ok(());
-    }
-    let expected = [
-        "session_id",
-        "generation",
-        "occurrence_id",
-        "copied_from_occurrence_id",
-        "proof_json",
-        "knowledge_at",
-        "valid_time_json",
-        "created_at",
-    ];
-    if columns == expected {
-        return Ok(());
-    }
-    let legacy = [
-        "session_id",
-        "generation",
-        "occurrence_id",
-        "copied_from_occurrence_id",
-        "proof_json",
-        "created_at",
-    ];
-    if columns != legacy {
-        return Err(global_db_operation_message(
-            OPERATION,
-            format!(
-                "table 'session_logical_copy_edges' has an incompatible temporal schema for migration from version {version:?}"
-            ),
-        ));
-    }
-    conn.execute_batch(
-        r#"
-        CREATE TABLE session_logical_copy_edges_v3 (
-            session_id TEXT NOT NULL,
-            generation INTEGER NOT NULL,
-            occurrence_id TEXT NOT NULL,
-            copied_from_occurrence_id TEXT NOT NULL,
-            proof_json TEXT NOT NULL CHECK(json_valid(proof_json)),
-            knowledge_at INTEGER NOT NULL,
-            valid_time_json TEXT NOT NULL CHECK(
-                json_valid(valid_time_json)
-                AND json_type(valid_time_json, '$.kind') IS 'text'
-                AND (
-                    (
-                        json_extract(valid_time_json, '$.kind') = 'unknown'
-                        AND json_type(valid_time_json, '$.valid_at') IS NULL
-                    )
-                    OR (
-                        json_extract(valid_time_json, '$.kind') = 'known'
-                        AND json_type(valid_time_json, '$.valid_at') IS 'integer'
-                    )
-                )
-            ),
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id),
-            CHECK(occurrence_id <> copied_from_occurrence_id),
-            FOREIGN KEY(session_id, generation, occurrence_id)
-                REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE,
-            FOREIGN KEY(session_id, generation, copied_from_occurrence_id)
-                REFERENCES session_occurrences(session_id, generation, occurrence_id) ON DELETE CASCADE
-        );
-        INSERT INTO session_logical_copy_edges_v3 (
-            session_id, generation, occurrence_id, copied_from_occurrence_id,
-            proof_json, knowledge_at, valid_time_json, created_at
-        )
-        SELECT
-            session_id,
-            generation,
-            occurrence_id,
-            copied_from_occurrence_id,
-            proof_json,
-            COALESCE(
-                (
-                    SELECT occurrence.knowledge_at
-                    FROM session_occurrences AS occurrence
-                    WHERE occurrence.session_id = session_logical_copy_edges.session_id
-                      AND occurrence.generation = session_logical_copy_edges.generation
-                      AND occurrence.occurrence_id = session_logical_copy_edges.occurrence_id
-                ),
-                created_at
-            ),
-            '{"kind":"unknown"}',
-            created_at
-        FROM session_logical_copy_edges;
-        DROP TABLE session_logical_copy_edges;
-        ALTER TABLE session_logical_copy_edges_v3 RENAME TO session_logical_copy_edges;
-        CREATE INDEX IF NOT EXISTS idx_session_logical_copy_edges_target
-            ON session_logical_copy_edges(session_id, generation, copied_from_occurrence_id);
-        "#,
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;

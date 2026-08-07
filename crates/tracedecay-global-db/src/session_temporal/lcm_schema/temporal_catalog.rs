@@ -415,20 +415,6 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
             "idx_session_assertions_generation_order",
         ),
         (
-            "SELECT summary_id
-             FROM session_summary_sources
-             WHERE source_summary_id = 'summary-one'
-             ORDER BY summary_id",
-            "idx_session_summary_sources_summary",
-        ),
-        (
-            "SELECT predecessor_summary_id
-             FROM session_summary_successors
-             WHERE successor_summary_id = 'summary-one'
-             ORDER BY created_at DESC, predecessor_summary_id",
-            "idx_session_summary_successors_successor",
-        ),
-        (
             "SELECT payload_ref
              FROM session_external_payload_manifests
              WHERE session_id = 'session-one'",

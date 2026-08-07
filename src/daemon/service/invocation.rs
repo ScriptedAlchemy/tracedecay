@@ -59,9 +59,8 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, FeedbackCycleTerminationV1, GitHeadStateV1,
     GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1,
-    ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
-    WorkAuthority, canonical_sha256,
+    GitIndexTransactionReceiptV1, ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision,
+    UserProfileId, UtcMicros, WorkAuthority, canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;

@@ -13,6 +13,7 @@ use tracedecay_store::{
     SessionRetrievalStore, SessionTemporalProjectionStore, SessionTemporalRetrievalRequestV1,
     SessionTemporalSnapshotRequestV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::temporal_projection::{
     assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,
@@ -114,6 +115,7 @@ where
                     candidate_generation.saturating_sub(1).max(1),
                     source_frontier,
                 ),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -230,6 +232,7 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
                     session_id.clone(),
                     generation(3),
                     snapshot(&session_id, 1, 2),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )
@@ -282,12 +285,13 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     let page = store
         .retrieve_session_temporal_page(
             SessionTemporalRetrievalRequestV1::new(
-                session_id,
+                session_id.clone(),
                 TemporalModeV1::Evolution,
                 RetrievalGrainV1::Occurrence,
                 snapshot,
                 8,
                 None,
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -306,4 +310,34 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     assert_eq!(page.copies().len(), 1);
     assert_eq!(page.assertions().len(), 1);
     assert!(page.next_after_occurrence_id().is_none());
+
+    let expected_copies = page.copies().to_vec();
+    drop(store);
+    drop(observation_store);
+    drop(runtime);
+
+    let reopened = profile_runtime(&tmp).await;
+    let store = reopened
+        .session_temporal_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let snapshot = store
+        .freeze_session_temporal_snapshot(SessionTemporalSnapshotRequestV1::new(session_id.clone()))
+        .await
+        .unwrap();
+    let restarted_page = store
+        .retrieve_session_temporal_page(
+            SessionTemporalRetrievalRequestV1::new(
+                session_id,
+                TemporalModeV1::Evolution,
+                RetrievalGrainV1::Occurrence,
+                snapshot,
+                8,
+                None,
+                ExecutionControl::default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted_page.copies(), expected_copies.as_slice());
 }

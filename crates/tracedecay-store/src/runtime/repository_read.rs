@@ -16,8 +16,7 @@ use tracedecay_domain::{
     FactLineageEventV1, FileOccurrenceId, GenerationDiagnosticV1, GitIndexIdempotencyKey,
     GitIndexPreviewId, GitIndexPreviewV1, NativeAliasV2, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, SessionId, SessionProjectionGenerationV1,
-    SessionSummaryIdV1, SessionSummaryRecordV1, SourceBindingIdentityV1, SourceBindingOwnerV1,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, SourceBindingIdentityV1, SourceBindingOwnerV1,
     UtcMicros,
 };
 
@@ -26,10 +25,10 @@ use crate::{
     FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorTombstoneV1,
-    SessionTemporalProjectionBatchV1, SourceAcquisitionQueueStateV1, SourceCommitReceiptV1,
-    SourcePendingProjectionV1, SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoredFactV1,
-    StoredRetrievalAnchorRecordV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SourceAcquisitionQueueStateV1, SourceCommitReceiptV1, SourcePendingProjectionV1,
+    SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, StoreShardScopeV1, StoredFactV1, StoredRetrievalAnchorRecordV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
@@ -47,7 +46,6 @@ pub enum RepositoryReadOperationV1 {
     Profile(ProfileReadOperationV1),
     Project(ProjectReadOperationV1),
     ExternalSource(ExternalSourceReadOperationV1),
-    Session(SessionReadOperationV1),
     Code(CodeReadOperationV1),
     Effects(EffectsReadOperationV1),
 }
@@ -77,10 +75,6 @@ impl RepositoryReadOperationV1 {
             Self::Project(ProjectReadOperationV1::RetrievalAnchor(operation)) => {
                 retrieval_owner_matches_shard(retrieval_read_owner(operation), &binding.shard_id)
             }
-            Self::Session(_) => matches!(
-                &binding.shard_id.scope,
-                StoreShardScopeV1::ProfileSessions | StoreShardScopeV1::ProjectSessions { .. }
-            ),
             Self::Code(operation) => code_read_matches_shard(operation, &binding.shard_id),
             Self::Effects(operation) => effects_read_binding(operation) == binding,
         };
@@ -294,7 +288,6 @@ pub enum RepositoryReadResultV1 {
     Profile(ProfileReadResultV1),
     Project(Box<ProjectReadResultV1>),
     ExternalSource(ExternalSourceReadResultV1),
-    Session(SessionReadResultV1),
     Code(Box<CodeReadResultV1>),
     Effects(Box<EffectsReadResultV1>),
 }
@@ -526,26 +519,6 @@ pub enum DiagnosticReadResultV1 {
     CurrentGeneration(Option<CodeGenerationId>),
     Records(Vec<GenerationDiagnosticV1>),
     Record(Box<Option<GenerationDiagnosticV1>>),
-}
-
-/// Session-family read operations.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionReadOperationV1 {
-    ProjectionBatch {
-        session_id: SessionId,
-        generation: SessionProjectionGenerationV1,
-        batch_ordinal: u64,
-    },
-    Summary(SessionSummaryIdV1),
-}
-
-/// Session-family read results.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionReadResultV1 {
-    ProjectionBatch(Option<SessionTemporalProjectionBatchV1>),
-    Summary(Option<SessionSummaryRecordV1>),
 }
 
 /// Code-family (Git index transaction) read operations.

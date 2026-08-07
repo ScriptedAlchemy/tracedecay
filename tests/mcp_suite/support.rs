@@ -55,6 +55,8 @@ use tracedecay_store::{
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore, SessionTemporalSnapshotV1,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -270,8 +272,13 @@ pub(crate) async fn activate_test_temporal_generation(
         .unwrap();
     store
         .activate_session_temporal_generation(
-            SessionGenerationActivationRequestV1::new(session_id, candidate_generation, snapshot)
-                .unwrap(),
+            SessionGenerationActivationRequestV1::new(
+                session_id,
+                candidate_generation,
+                snapshot,
+                ExecutionControl::default(),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();

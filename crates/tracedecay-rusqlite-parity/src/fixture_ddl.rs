@@ -167,17 +167,6 @@ pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
                 index_text TEXT NOT NULL,
                 PRIMARY KEY(session_id, generation, occurrence_id)
             );
-            CREATE TABLE session_logical_copy_edges (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                occurrence_id TEXT NOT NULL,
-                copied_from_occurrence_id TEXT NOT NULL,
-                proof_json TEXT NOT NULL,
-                knowledge_at INTEGER NOT NULL,
-                valid_time_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY(session_id, generation, occurrence_id, copied_from_occurrence_id)
-            );
             CREATE TABLE session_assertions (
                 session_id TEXT NOT NULL,
                 generation INTEGER NOT NULL,
@@ -199,20 +188,6 @@ pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
                 source_horizon_json TEXT NOT NULL,
                 publication_json TEXT,
                 created_at INTEGER NOT NULL
-            );
-            CREATE TABLE session_summary_sources (
-                summary_id TEXT NOT NULL,
-                source_ordinal INTEGER NOT NULL,
-                source_kind TEXT NOT NULL,
-                source_anchor_id TEXT,
-                source_summary_id TEXT,
-                PRIMARY KEY(summary_id, source_ordinal)
-            );
-            CREATE TABLE session_summary_successors (
-                predecessor_summary_id TEXT NOT NULL,
-                successor_summary_id TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY(predecessor_summary_id, successor_summary_id)
             );
             CREATE TABLE memory_v2_facts (
                 fact_id TEXT NOT NULL,

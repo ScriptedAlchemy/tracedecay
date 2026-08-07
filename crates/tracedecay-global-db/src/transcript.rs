@@ -1,13 +1,18 @@
-use std::{error::Error, fmt::Write as _};
+use std::{error::Error, fmt::Write as _, sync::Arc};
 
 use serde_json::Value as JsonValue;
 
 use super::{ParseOffset, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, TranscriptBatch};
+use tracedecay_domain::SessionId;
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionRecord,
     lcm::{LcmSourceRef, LcmSummaryNodeDraft},
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
+
+const TRANSCRIPT_RELATION_WORK_LIMIT: usize = 100_000;
 
 struct TranscriptSummarySources {
     refs: Vec<LcmSourceRef>,
@@ -392,7 +397,11 @@ impl RegisteredGlobalDb {
         conn: &impl Executor,
         message: &SessionMessageRecord,
         payload_rollback: &mut tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback,
-    ) -> Result<(), TranscriptPersistenceError> {
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<
+        Option<crate::session_temporal::relations::SessionRelationProjection>,
+        TranscriptPersistenceError,
+    > {
         let mut canonical_message = message.clone();
         canonical_message.timestamp = Self::normalize_session_message_timestamp(message.timestamp);
         let storage_root = self
@@ -420,28 +429,34 @@ impl RegisteredGlobalDb {
                 "database write failed",
             ));
         }
-        Self::upsert_lcm_summary_for_transcript_summary(conn, &canonical_message).await
+        self.upsert_lcm_summary_for_transcript_summary(conn, &canonical_message, cancellation)
+            .await
     }
 
     async fn upsert_lcm_summary_for_transcript_summary(
+        &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
-    ) -> Result<(), TranscriptPersistenceError> {
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<
+        Option<crate::session_temporal::relations::SessionRelationProjection>,
+        TranscriptPersistenceError,
+    > {
         if message.kind.as_deref() != Some("summary") {
-            return Ok(());
+            return Ok(None);
         }
         let Some(metadata_json) = message.metadata_json.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let Ok(metadata) = serde_json::from_str::<JsonValue>(metadata_json) else {
-            return Ok(());
+            return Ok(None);
         };
         if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
-            return Ok(());
+            return Ok(None);
         }
         let sources = Self::transcript_summary_sources(conn, message).await?;
         if sources.refs.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let depth = metadata
             .get("codex_compaction_depth")
@@ -481,14 +496,32 @@ impl RegisteredGlobalDb {
             expand_hint: Some("Codex context compaction boundary".to_string()),
             metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
         };
+        let session_id = SessionId::new(message.session_id.clone()).map_err(|error| {
+            TranscriptPersistenceError::storage("bind transcript summary relation", error)
+        })?;
+        let relation_projection = crate::session_temporal::seed_session_relation_projection(
+            self,
+            conn,
+            &session_id,
+            cancellation,
+        )
+        .await
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("seed transcript summary relation", error)
+        })?;
         let publisher =
-            crate::session_temporal_operations::GlobalDbLcmSummaryPublication::new(conn);
+            crate::session_temporal_operations::GlobalDbLcmSummaryPublication::for_scope(
+                conn,
+                relation_projection,
+            );
         tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft)
             .await
-            .map(|_| ())
             .map_err(|error| {
                 TranscriptPersistenceError::storage("upsert transcript summary projection", error)
-            })
+            })?;
+        publisher.relation_projection().map(Some).map_err(|error| {
+            TranscriptPersistenceError::storage("read transcript summary relation", error)
+        })
     }
 
     async fn transcript_summary_sources(
@@ -755,6 +788,9 @@ impl RegisteredGlobalDb {
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
+        let control = ExecutionControl::default().with_work_limit(TRANSCRIPT_RELATION_WORK_LIMIT);
+        let cancellation =
+            crate::session_temporal::store::execution_control_graph_cancellation(&control);
         let transaction = self.begin_transcript_transaction().await?;
         let storage_root = self
             .db_path()
@@ -765,7 +801,11 @@ impl RegisteredGlobalDb {
                 storage_root,
             );
 
-        let write_result: Result<(), TranscriptPersistenceError> = async {
+        let write_result: Result<
+            Vec<crate::session_temporal::relations::SessionRelationProjection>,
+            TranscriptPersistenceError,
+        > = async {
+            let mut relation_projections = Vec::new();
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
                 require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
             }
@@ -779,12 +819,17 @@ impl RegisteredGlobalDb {
                 for message in &batch.messages {
                     match policy {
                         TranscriptWritePolicy::Full { .. } => {
-                            self.upsert_session_message_in_existing_tx(
+                            if let Some(projection) = self
+                                .upsert_session_message_in_existing_tx(
                                 &transaction,
                                 message,
                                 &mut payload_rollback,
+                                Arc::clone(&cancellation),
                             )
-                            .await?;
+                            .await?
+                            {
+                                relation_projections.push(projection);
+                            }
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text =
@@ -839,15 +884,32 @@ impl RegisteredGlobalDb {
                     TranscriptPersistenceError::message("advance projection parse offset", message)
                 })?;
             }
-            Ok(())
+            Ok(relation_projections)
         }
         .await;
 
-        write_result?;
+        let relation_projections = write_result?;
         transaction.commit().await.map_err(|error| {
             TranscriptPersistenceError::storage("commit transcript batch", error)
         })?;
         payload_rollback.disarm();
+        for projection in relation_projections {
+            control.checkpoint().map_err(|error| {
+                TranscriptPersistenceError::storage("publish transcript summary relation", error)
+            })?;
+            crate::session_temporal::apply_relation_projection(
+                self,
+                &projection,
+                Arc::clone(&cancellation),
+            )
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage("publish transcript summary relation", error)
+            })?;
+            control.checkpoint().map_err(|error| {
+                TranscriptPersistenceError::storage("publish transcript summary relation", error)
+            })?;
+        }
         Ok(())
     }
 

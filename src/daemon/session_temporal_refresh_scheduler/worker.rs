@@ -212,7 +212,10 @@ async fn complete_ready_refresh(
         report.terminal_errors += 1;
         return;
     };
-    match store.complete_session_refresh(request).await {
+    match store
+        .complete_session_refresh(request, state.completion_control())
+        .await
+    {
         Ok(_) => {
             report.completed += 1;
         }

@@ -414,6 +414,12 @@ impl RegisteredTemporalHarness {
             .await
             .expect("activate generation");
         transaction.commit().await.expect("commit session fixture");
+        tracedecay_global_db::tests::harness::publish_test_session_relation_projection(
+            self.registered.as_ref(),
+            session_id,
+            1,
+        )
+        .expect("publish fixture session relation projection");
     }
 
     async fn persist_observation(

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
@@ -12,12 +14,14 @@ use tracedecay_domain::{
     SessionId, TemporalAssertionKindV1, TemporalValidityV1, UtcMicros,
     derive_exact_observation_anchor_id,
 };
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
     SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
     SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
@@ -344,18 +348,20 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     )
     .unwrap();
     let receipt = store
-        .complete_session_refresh(request.clone())
+        .complete_session_refresh(request.clone(), ExecutionControl::default())
         .await
         .unwrap();
     assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
     assert_eq!(
-        store.complete_session_refresh(request).await.unwrap(),
+        store
+            .complete_session_refresh(request, ExecutionControl::default())
+            .await
+            .unwrap(),
         receipt
     );
     for (kind, expected) in [
         (SessionTemporalFixtureCountV1::ProjectionReceipts, 1),
         (SessionTemporalFixtureCountV1::Occurrences, 2),
-        (SessionTemporalFixtureCountV1::LogicalCopyEdges, 0),
         (SessionTemporalFixtureCountV1::Assertions, 1),
         (SessionTemporalFixtureCountV1::RefreshReceipts, 1),
     ] {
@@ -573,7 +579,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
 }
 
 #[tokio::test]
-async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_ids() {
+async fn explicit_copy_survives_reconstruction_in_the_native_relation_graph() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -587,8 +593,8 @@ async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_
     let (second, second_write) = fixture_observation(
         &session_id,
         1,
-        Some((AnchorProvenanceRelationV2::Supersedes, first_anchor)),
-        true,
+        Some((AnchorProvenanceRelationV2::CopiedFrom, first_anchor.clone())),
+        false,
     );
     Box::pin(persist_fixture(&runtime, second, second_write)).await;
     store
@@ -608,22 +614,20 @@ async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_
         .await
         .unwrap()
         .unwrap();
-    // The materializer no longer derives a copy edge from a parent-message
-    // reply — only a re-emission of the same logical message is a logical copy.
-    // Explicit typed copy records stay the persist-side authority, so this test
-    // drives the retained-copy persist path with the canonical parent-message
-    // proof for the retained pair.
+    // Explicit copy topology is supplied by the typed projection record and
+    // must remain reconstructable from the canonical anchor lineage.
     assert!(batch.copies().is_empty());
     let copy = LogicalCopyRecordV1 {
         occurrence_id: batch.occurrences()[1].occurrence_id.clone(),
         copied_from_occurrence_id: batch.occurrences()[0].occurrence_id.clone(),
-        proof: CopyProofV1::ParentMessageLinkage {
+        proof: CopyProofV1::ExplicitAnchorAssertion {
             source_occurrence_id: batch.occurrences()[0].occurrence_id.clone(),
-            parent_message_id: tracedecay_domain::MessageId::new("message.projector.0").unwrap(),
+            assertion_anchor_id: first_anchor,
         },
         knowledge_at: batch.occurrences()[1].knowledge_at,
         valid_time: batch.occurrences()[1].valid_time,
     };
+    let expected_copy = copy.clone();
     let batch = SessionTemporalProjectionBatchV1::new(
         batch.session_id().clone(),
         batch.generation(),
@@ -654,47 +658,49 @@ async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_
     if let Some(source_coverage) = source_coverage {
         progress = progress.with_source_coverage(source_coverage);
     }
-    assert_eq!(batch.item_count(), 4);
-
-    let mut forged = batch.assertions()[0].clone();
-    forged.assertion_id =
-        tracedecay_domain::TemporalAssertionIdV1::new("assertion.forged").unwrap();
-    let forged_batch = SessionTemporalProjectionBatchV1::new(
-        batch.session_id().clone(),
-        batch.generation(),
-        batch.watermarks().clone(),
-        batch.occurrences().to_vec(),
-        batch.copies().to_vec(),
-        vec![forged],
-    )
-    .unwrap()
-    .with_checkpoint(
-        batch.batch_ordinal(),
-        batch.source_through(),
-        batch.projection_through(),
-    )
-    .unwrap();
-    let forged_error = store
-        .persist_session_refresh_projection_batch(progress.clone(), forged_batch)
-        .await
-        .expect_err("forged assertion ids must be rejected");
-    let forged_detail = format!("{forged_error:?}");
-    assert!(
-        forged_detail.contains("not canonical") || forged_detail.contains("assertion temporal"),
-        "{forged_detail}"
-    );
+    assert_eq!(batch.item_count(), 3);
 
     store
         .persist_session_refresh_projection_batch(progress, batch.clone())
         .await
         .unwrap();
-    let (knowledge_at, valid_time) = runtime
-        .session_temporal_copy_edge_for_test(HostAdmissionScope::Profile, &session_id)
-        .await
-        .unwrap()
-        .expect("copy edge");
-    assert_eq!(knowledge_at, batch.copies()[0].knowledge_at.0);
-    assert_eq!(valid_time, batch.copies()[0].valid_time);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let snapshot = database.read_snapshot().await.unwrap();
+    let (scope, relation_store) = database.session_relation_store().unwrap();
+    let projection = super::super::relation_projection::reconstruct_session_relation_projection(
+        &snapshot,
+        scope,
+        &session_id,
+        batch.generation(),
+        100,
+        100,
+        Arc::new(NeverCancelled),
+    )
+    .await
+    .unwrap();
+    relation_store.replace(&projection).unwrap();
+    let loaded = relation_store
+        .load_projection(
+            scope,
+            &session_id,
+            batch.generation().value(),
+            100,
+            100,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+    assert_eq!(
+        loaded.logical_copies,
+        vec![crate::session_temporal::relations::LogicalCopyRelation {
+            occurrence_id: expected_copy.occurrence_id,
+            copied_from_occurrence_id: expected_copy.copied_from_occurrence_id,
+            proof: expected_copy.proof,
+            knowledge_at: expected_copy.knowledge_at,
+            valid_time: expected_copy.valid_time,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -782,6 +788,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
                 *progress.coverage(),
             )
             .unwrap(),
+            ExecutionControl::default(),
         )
         .await
         .unwrap();

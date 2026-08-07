@@ -6,16 +6,26 @@ use tracedecay_temporal_query::ports::{
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
+mod relations;
+
 use super::cursors::*;
 use super::rows::*;
 use super::{MAX_SUMMARY_SOURCES_PER_RECORD, RECORD_OPERATION};
+use relations::{
+    RecordCopyRelation, RecordRetainedSummaryAnchor, RecordSummaryRelation,
+    RecordSummarySourceRelation,
+};
+pub(super) use relations::{RecordRelationBatch, load_record_relations};
 
 pub(super) struct RecordQuery {
     pub(super) sql: String,
     pub(super) params: Vec<SqlValue>,
 }
 
-pub(super) fn build_record_query(
+const MAX_RECORD_QUERY_PARAMETERS: usize = 24_000;
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_record_query_with_relations(
     scope: &TemporalRetrievalScope,
     snapshot: &TemporalExecutionSnapshot,
     candidates: &[RankingCandidate],
@@ -23,13 +33,23 @@ pub(super) fn build_record_query(
     cursor: &RecordCursor,
     limit: usize,
     request: &PageRequest,
+    relations: &RecordRelationBatch,
 ) -> Result<RecordQuery, TemporalPortError> {
     if candidates.len() > request.page_item_limit().saturating_add(1) {
         return Err(TemporalPortError::BudgetExceeded {
             resource: "record candidate window",
         });
     }
-    let mut params = Vec::with_capacity(candidates.len().saturating_mul(5).saturating_add(14));
+    let mut params = Vec::with_capacity(
+        candidates
+            .len()
+            .saturating_mul(5)
+            .saturating_add(relations.copies.len().saturating_mul(7))
+            .saturating_add(relations.summaries.len().saturating_mul(4))
+            .saturating_add(relations.summary_sources.len().saturating_mul(6))
+            .saturating_add(relations.retained_summary_anchors.len().saturating_mul(4))
+            .saturating_add(14),
+    );
     let mut values = String::new();
     for (local, candidate) in candidates.iter().enumerate() {
         if local != 0 {
@@ -66,6 +86,11 @@ pub(super) fn build_record_query(
         });
         params.push(SqlValue::Text(candidate.retriever_record_id.clone()));
     }
+    let copy_relation_input = copy_relation_values(&relations.copies, &mut params)?;
+    let summary_relation_input = summary_relation_values(&relations.summaries, &mut params)?;
+    let summary_source_input = summary_source_values(&relations.summary_sources, &mut params)?;
+    let retained_summary_anchor_input =
+        retained_summary_anchor_values(&relations.retained_summary_anchors, &mut params)?;
     let scope_param = params.len() + 1;
     params.push(SqlValue::Text(
         snapshot.request().session_id().as_str().to_string(),
@@ -132,12 +157,31 @@ pub(super) fn build_record_query(
     params.push(SqlValue::Integer(
         i64::try_from(limit).map_err(|error| read_error(RECORD_OPERATION, error))?,
     ));
+    if params.len() > MAX_RECORD_QUERY_PARAMETERS {
+        return Err(TemporalPortError::BudgetExceeded {
+            resource: "record query parameters",
+        });
+    }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
     let record_scope = RecordScopeSql::new(scope, scope_param, generation_param);
     let sql = format!(
         "WITH candidate_input(
              ordinal, session_id, anchor_id, derived_kind, retriever_record_id
          ) AS (VALUES {values}),
+         copy_relation(
+             ordinal, session_id, occurrence_id, copied_from_occurrence_id,
+             proof_json, knowledge_at, valid_time_json
+         ) AS ({copy_relation_input}),
+         summary_relation(
+             ordinal, session_id, summary_id, predecessor_summary_id
+         ) AS ({summary_relation_input}),
+         summary_source_relation(
+             ordinal, session_id, summary_id, source_ordinal,
+             source_anchor_id, source_summary_id
+         ) AS ({summary_source_input}),
+         retained_summary_anchor(
+             ordinal, session_id, summary_id, anchor_id
+         ) AS ({retained_summary_anchor_input}),
          candidate(
              ordinal, session_id, anchor_id, derived_kind, retriever_record_id
          ) AS (
@@ -280,9 +324,9 @@ pub(super) fn build_record_query(
              {target_generation_join}
              JOIN observations AS copy_provider
                ON copy_provider.observation_id = target.source_observation_id
-             JOIN session_logical_copy_edges AS e
-               ON e.session_id = target.session_id
-              AND e.generation = target.generation
+             JOIN copy_relation AS e
+               ON e.ordinal = c.ordinal
+              AND e.session_id = target.session_id
               AND e.occurrence_id = target.occurrence_id
              {copy_join}
              WHERE {copy_predicate}
@@ -304,11 +348,13 @@ pub(super) fn build_record_query(
                         FROM (
                             SELECT COALESCE(ss.source_anchor_id, sn.summary_anchor_id)
                                    AS source_anchor_id
-                            FROM session_summary_sources AS ss
+                            FROM summary_source_relation AS ss
                             LEFT JOIN session_summary_nodes AS sn
                               ON sn.summary_id = ss.source_summary_id
                              AND sn.session_id = n.session_id
-                            WHERE ss.summary_id = n.summary_id
+                            WHERE ss.ordinal = c.ordinal
+                              AND ss.session_id = n.session_id
+                              AND ss.summary_id = n.summary_id
                               AND (
                                   ss.source_anchor_id IS NOT NULL
                                   OR sn.summary_anchor_id IS NOT NULL
@@ -320,51 +366,27 @@ pub(super) fn build_record_query(
                             LIMIT ?{source_count_cap_param}
                         )
                     ),
-                    (
-                        SELECT successor.predecessor_summary_id
-                        FROM session_summary_successors AS successor
-                        JOIN session_summary_nodes AS predecessor
-                          ON predecessor.summary_id = successor.predecessor_summary_id
-                         AND predecessor.session_id = n.session_id
-                        WHERE successor.successor_summary_id = n.summary_id
-                        ORDER BY successor.created_at DESC,
-                                 successor.predecessor_summary_id
-                        LIMIT 1
-                    ),
+                    relation.predecessor_summary_id,
                     n.publication_json, availability.availability, n.session_id
              FROM candidate AS c
              JOIN session_summary_nodes AS n
                ON n.summary_anchor_id = c.anchor_id
               {summary_condition}
              {summary_generation_join}
+             JOIN summary_relation AS relation
+               ON relation.ordinal = c.ordinal
+              AND relation.session_id = n.session_id
+              AND relation.summary_id = n.summary_id
              LEFT JOIN session_summary_availability AS availability
                ON availability.summary_id = n.summary_id
               AND {availability_condition}
              WHERE {summary_predicate}
                AND (?{provider_param} IS NULL OR EXISTS (
-                   WITH RECURSIVE retained_sources(
-                       source_anchor_id, source_summary_id, depth
-                   ) AS (
-                       SELECT source_anchor_id, source_summary_id, 0
-                       FROM session_summary_sources
-                       WHERE summary_id = n.summary_id
-                       UNION ALL
-                       SELECT nested.source_anchor_id, nested.source_summary_id,
-                              retained.depth + 1
-                       FROM retained_sources AS retained
-                           JOIN session_summary_nodes AS retained_summary
-                             ON retained_summary.summary_id = retained.source_summary_id
-                            AND retained_summary.session_id = n.session_id
-                       JOIN session_summary_sources AS nested
-                             ON nested.summary_id = retained_summary.summary_id
-                       WHERE retained.depth < 63
-                       LIMIT 257
-                   )
                    SELECT 1
-                   FROM retained_sources AS retained
+                   FROM retained_summary_anchor AS retained
                    JOIN session_occurrences AS summary_source_occurrence
                      ON summary_source_occurrence.retrieval_anchor_id =
-                        retained.source_anchor_id
+                        retained.anchor_id
                     AND summary_source_occurrence.session_id = n.session_id
                     AND summary_source_occurrence.generation = {summary_generation}
                    JOIN observations AS summary_source_provider
@@ -374,6 +396,9 @@ pub(super) fn build_record_query(
                        summary_source_provider.observation_json,
                        '$.identity.source.provider'
                    ), 'claude') = ?{provider_param}
+                     AND retained.ordinal = c.ordinal
+                     AND retained.session_id = n.session_id
+                     AND retained.summary_id = n.summary_id
                    LIMIT 1
                ))
                AND length(CAST(n.summary_id AS BLOB)) <= ?{item_cap_param}
@@ -385,8 +410,10 @@ pub(super) fn build_record_query(
                    SELECT COUNT(*)
                    FROM (
                        SELECT 1
-                       FROM session_summary_sources AS count_source
-                       WHERE count_source.summary_id = n.summary_id
+                       FROM summary_source_relation AS count_source
+                       WHERE count_source.ordinal = c.ordinal
+                         AND count_source.session_id = n.session_id
+                         AND count_source.summary_id = n.summary_id
                        ORDER BY count_source.source_ordinal
                        LIMIT ?{source_probe_cap_param}
                    )
@@ -400,11 +427,13 @@ pub(super) fn build_record_query(
                                   byte_source.source_anchor_id,
                                   byte_summary.summary_anchor_id
                               ) AS BLOB)) AS source_bytes
-                       FROM session_summary_sources AS byte_source
+                       FROM summary_source_relation AS byte_source
                        LEFT JOIN session_summary_nodes AS byte_summary
                          ON byte_summary.summary_id = byte_source.source_summary_id
                         AND byte_summary.session_id = n.session_id
-                       WHERE byte_source.summary_id = n.summary_id
+                       WHERE byte_source.ordinal = c.ordinal
+                         AND byte_source.session_id = n.session_id
+                         AND byte_source.summary_id = n.summary_id
                          AND (
                              byte_source.source_anchor_id IS NOT NULL
                              OR byte_summary.summary_anchor_id IS NOT NULL
@@ -426,11 +455,13 @@ pub(super) fn build_record_query(
                                       item_source.source_anchor_id,
                                       item_summary.summary_anchor_id
                                   ) AS BLOB)) AS source_bytes
-                           FROM session_summary_sources AS item_source
+                           FROM summary_source_relation AS item_source
                            LEFT JOIN session_summary_nodes AS item_summary
                              ON item_summary.summary_id = item_source.source_summary_id
                                 AND item_summary.session_id = n.session_id
-                           WHERE item_source.summary_id = n.summary_id
+                           WHERE item_source.ordinal = c.ordinal
+                             AND item_source.session_id = n.session_id
+                             AND item_source.summary_id = n.summary_id
                                  AND (
                                      item_source.source_anchor_id IS NOT NULL
                                      OR item_summary.summary_anchor_id IS NOT NULL
@@ -462,7 +493,14 @@ pub(super) fn build_record_query(
                ON n.summary_anchor_id = c.anchor_id
               {summary_condition}
              {summary_generation_join}
-             JOIN session_summary_sources AS ss ON ss.summary_id = n.summary_id
+             JOIN summary_relation AS relation
+               ON relation.ordinal = c.ordinal
+              AND relation.session_id = n.session_id
+              AND relation.summary_id = n.summary_id
+             JOIN summary_source_relation AS ss
+               ON ss.ordinal = c.ordinal
+              AND ss.session_id = n.session_id
+              AND ss.summary_id = n.summary_id
              LEFT JOIN session_summary_nodes AS source_summary
                ON source_summary.summary_id = ss.source_summary_id
               AND source_summary.session_id = n.session_id
@@ -489,27 +527,11 @@ pub(super) fn build_record_query(
              WHERE {summary_predicate}
                AND ss.source_ordinal < ?{source_count_cap_param}
                AND (?{provider_param} IS NULL OR EXISTS (
-                   WITH RECURSIVE retained_sources(
-                       source_anchor_id, source_summary_id, depth
-                   ) AS (
-                       SELECT ss.source_anchor_id, ss.source_summary_id, 0
-                       UNION ALL
-                       SELECT nested.source_anchor_id, nested.source_summary_id,
-                              retained.depth + 1
-                       FROM retained_sources AS retained
-                           JOIN session_summary_nodes AS retained_summary
-                             ON retained_summary.summary_id = retained.source_summary_id
-                            AND retained_summary.session_id = n.session_id
-                       JOIN session_summary_sources AS nested
-                             ON nested.summary_id = retained_summary.summary_id
-                       WHERE retained.depth < 63
-                       LIMIT 257
-                   )
                    SELECT 1
-                   FROM retained_sources AS retained
+                   FROM retained_summary_anchor AS retained
                    JOIN session_occurrences AS retained_occurrence
                      ON retained_occurrence.retrieval_anchor_id =
-                        retained.source_anchor_id
+                        retained.anchor_id
                     AND retained_occurrence.session_id = n.session_id
                     AND retained_occurrence.generation = {summary_generation}
                    JOIN observations AS retained_provider
@@ -519,6 +541,9 @@ pub(super) fn build_record_query(
                        retained_provider.observation_json,
                        '$.identity.source.provider'
                    ), 'claude') = ?{provider_param}
+                     AND retained.ordinal = c.ordinal
+                     AND retained.session_id = n.session_id
+                     AND retained.summary_id = n.summary_id
                    LIMIT 1
                ))
                AND length(CAST(n.summary_id AS BLOB))
@@ -583,8 +608,132 @@ pub(super) fn build_record_query(
         copy_predicate = mode.copy_predicate,
         summary_predicate = mode.summary_predicate,
         root_param = root_param,
+        copy_relation_input = copy_relation_input,
+        summary_relation_input = summary_relation_input,
+        summary_source_input = summary_source_input,
+        retained_summary_anchor_input = retained_summary_anchor_input,
     );
     Ok(RecordQuery { sql, params })
+}
+
+fn copy_relation_values(
+    relations: &[RecordCopyRelation],
+    params: &mut Vec<SqlValue>,
+) -> Result<String, TemporalPortError> {
+    if relations.is_empty() {
+        return Ok("SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL WHERE 0".to_string());
+    }
+    let mut values = String::from("VALUES ");
+    for (index, relation) in relations.iter().enumerate() {
+        if index != 0 {
+            values.push(',');
+        }
+        values.push_str("(?, ?, ?, ?, ?, ?, ?)");
+        params.push(SqlValue::Integer(
+            i64::try_from(relation.candidate)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
+        params.push(SqlValue::Text(relation.session_id.to_string()));
+        params.push(SqlValue::Text(relation.occurrence_id.to_string()));
+        params.push(SqlValue::Text(
+            relation.copied_from_occurrence_id.to_string(),
+        ));
+        params.push(SqlValue::Text(relation.proof_json.clone()));
+        params.push(SqlValue::Integer(relation.knowledge_at));
+        params.push(SqlValue::Text(relation.valid_time_json.clone()));
+    }
+    Ok(values)
+}
+
+fn summary_relation_values(
+    relations: &[RecordSummaryRelation],
+    params: &mut Vec<SqlValue>,
+) -> Result<String, TemporalPortError> {
+    if relations.is_empty() {
+        return Ok("SELECT NULL, NULL, NULL, NULL WHERE 0".to_string());
+    }
+    let mut values = String::from("VALUES ");
+    for (index, relation) in relations.iter().enumerate() {
+        if index != 0 {
+            values.push(',');
+        }
+        values.push_str("(?, ?, ?, ?)");
+        params.push(SqlValue::Integer(
+            i64::try_from(relation.candidate)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
+        params.push(SqlValue::Text(relation.session_id.to_string()));
+        params.push(SqlValue::Text(relation.summary_id.clone()));
+        params.push(
+            relation
+                .predecessor_summary_id
+                .as_ref()
+                .map_or(SqlValue::Null, |predecessor| {
+                    SqlValue::Text(predecessor.clone())
+                }),
+        );
+    }
+    Ok(values)
+}
+
+fn summary_source_values(
+    relations: &[RecordSummarySourceRelation],
+    params: &mut Vec<SqlValue>,
+) -> Result<String, TemporalPortError> {
+    if relations.is_empty() {
+        return Ok("SELECT NULL, NULL, NULL, NULL, NULL, NULL WHERE 0".to_string());
+    }
+    let mut values = String::from("VALUES ");
+    for (index, relation) in relations.iter().enumerate() {
+        if index != 0 {
+            values.push(',');
+        }
+        values.push_str("(?, ?, ?, ?, ?, ?)");
+        params.push(SqlValue::Integer(
+            i64::try_from(relation.candidate)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
+        params.push(SqlValue::Text(relation.session_id.to_string()));
+        params.push(SqlValue::Text(relation.summary_id.clone()));
+        params.push(SqlValue::Integer(i64::from(relation.ordinal)));
+        params.push(
+            relation
+                .source_anchor_id
+                .as_ref()
+                .map_or(SqlValue::Null, |anchor| SqlValue::Text(anchor.clone())),
+        );
+        params.push(
+            relation
+                .source_summary_id
+                .as_ref()
+                .map_or(SqlValue::Null, |summary| SqlValue::Text(summary.clone())),
+        );
+    }
+    Ok(values)
+}
+
+fn retained_summary_anchor_values(
+    relations: &[RecordRetainedSummaryAnchor],
+    params: &mut Vec<SqlValue>,
+) -> Result<String, TemporalPortError> {
+    if relations.is_empty() {
+        return Ok("SELECT NULL, NULL, NULL, NULL WHERE 0".to_string());
+    }
+    let mut values = String::from("VALUES ");
+    for (index, relation) in relations.iter().enumerate() {
+        if index != 0 {
+            values.push(',');
+        }
+        values.push_str("(?, ?, ?, ?)");
+        params.push(SqlValue::Integer(
+            i64::try_from(relation.candidate)
+                .map_err(|error| read_error(RECORD_OPERATION, error))?,
+        ));
+        params.push(SqlValue::Text(relation.session_id.to_string()));
+        params.push(SqlValue::Text(relation.summary_id.clone()));
+        params.push(SqlValue::Text(relation.anchor_id.clone()));
+    }
+    Ok(values)
 }
 
 impl RecordScopeSql {

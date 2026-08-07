@@ -124,22 +124,10 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
             "session_temporal_projection_receipts",
         ),
         (SessionStoreTable::SessionOccurrences, "session_occurrences"),
-        (
-            SessionStoreTable::SessionLogicalCopyEdges,
-            "session_logical_copy_edges",
-        ),
         (SessionStoreTable::SessionAssertions, "session_assertions"),
         (
             SessionStoreTable::SessionSummaryNodes,
             "session_summary_nodes",
-        ),
-        (
-            SessionStoreTable::SessionSummarySources,
-            "session_summary_sources",
-        ),
-        (
-            SessionStoreTable::SessionSummarySuccessors,
-            "session_summary_successors",
         ),
         (SessionStoreTable::MemoryV2Facts, "memory_v2_facts"),
         (
@@ -320,76 +308,6 @@ fn occurrence_pages_walk_the_generation_keyset() {
 }
 
 #[test]
-fn logical_copy_edge_pages_walk_the_composite_occurrence_keyset() {
-    let fixture = fixture();
-    let Output::SessionStorePage(first_page) = execute(
-        &fixture.path,
-        Command::SessionStorePage {
-            family: SessionStoreFamily::Temporal,
-            table: SessionStoreTable::SessionLogicalCopyEdges,
-            cursor: None,
-            limit: 1,
-        },
-    ) else {
-        panic!("logical-copy-edge page output expected");
-    };
-    assert_eq!(
-        first_page.order_columns,
-        [
-            "session_id",
-            "generation",
-            "occurrence_id",
-            "copied_from_occurrence_id"
-        ]
-    );
-    assert!(matches!(
-        &first_page.rows[0],
-        SessionStoreRow::SessionLogicalCopyEdges {
-            session_id,
-            generation: 1,
-            occurrence_id,
-            copied_from_occurrence_id,
-            row_digest,
-        } if session_id == "session-1"
-            && occurrence_id == "occurrence-2"
-            && copied_from_occurrence_id == "occurrence-1"
-            && row_digest.starts_with("sha256:")
-    ));
-    assert!(first_page.next_cursor.is_some());
-
-    let Output::SessionStorePage(second_page) = execute(
-        &fixture.path,
-        Command::SessionStorePage {
-            family: SessionStoreFamily::Temporal,
-            table: SessionStoreTable::SessionLogicalCopyEdges,
-            cursor: first_page.next_cursor,
-            limit: 1,
-        },
-    ) else {
-        panic!("second logical-copy-edge page output expected");
-    };
-    assert!(matches!(
-        &second_page.rows[0],
-        SessionStoreRow::SessionLogicalCopyEdges {
-            occurrence_id,
-            ..
-        } if occurrence_id == "occurrence-3"
-    ));
-    assert!(second_page.next_cursor.is_none());
-
-    let Output::SessionStoreCount(count) = execute(
-        &fixture.path,
-        Command::SessionStoreCount {
-            family: SessionStoreFamily::Temporal,
-            table: SessionStoreTable::SessionAssertions,
-        },
-    ) else {
-        panic!("assertion count output expected");
-    };
-    assert_eq!(count.row_count, Some(2));
-}
-
-#[test]
 fn assertion_pages_walk_the_generation_keyset_with_digest_oracle() {
     let fixture = fixture();
     let first = single_row_page(&fixture.path, SessionStoreTable::SessionAssertions, None);
@@ -456,94 +374,6 @@ fn summary_node_pages_walk_the_identifier_keyset() {
     assert!(matches!(
         &second.rows[0],
         SessionStoreRow::SessionSummaryNodes { summary_id, .. } if summary_id == "summary-2"
-    ));
-    assert!(second.next_cursor.is_none());
-}
-
-#[test]
-fn summary_source_pages_walk_the_ordinal_keyset_with_digest_oracle() {
-    let fixture = fixture();
-    let first = single_row_page(
-        &fixture.path,
-        SessionStoreTable::SessionSummarySources,
-        None,
-    );
-    assert_eq!(first.order_columns, ["summary_id", "source_ordinal"]);
-    assert!(matches!(
-        &first.rows[0],
-        SessionStoreRow::SessionSummarySources {
-            summary_id,
-            source_ordinal: 0,
-            source_kind,
-            ..
-        } if summary_id == "summary-1" && source_kind == "anchor"
-    ));
-    let mut oracle = CanonicalRowHasher::new();
-    oracle.update_text(b"summary-1");
-    oracle.update_integer(0);
-    oracle.update_text(b"anchor");
-    oracle.update_text(b"anchor-1");
-    oracle.update_null();
-    assert!(matches!(
-        &first.rows[0],
-        SessionStoreRow::SessionSummarySources { row_digest, .. }
-            if row_digest == &oracle.finish()
-    ));
-    let cursor = first.next_cursor.clone().expect("summary-source cursor");
-    let second = single_row_page(
-        &fixture.path,
-        SessionStoreTable::SessionSummarySources,
-        Some(cursor),
-    );
-    assert!(matches!(
-        &second.rows[0],
-        SessionStoreRow::SessionSummarySources {
-            source_ordinal: 1,
-            source_kind,
-            ..
-        } if source_kind == "summary"
-    ));
-    assert!(second.next_cursor.is_none());
-}
-
-#[test]
-fn summary_successor_pages_walk_the_composite_keyset_with_digest_oracle() {
-    let fixture = fixture();
-    let first = single_row_page(
-        &fixture.path,
-        SessionStoreTable::SessionSummarySuccessors,
-        None,
-    );
-    assert_eq!(
-        first.order_columns,
-        ["predecessor_summary_id", "successor_summary_id"]
-    );
-    let mut oracle = CanonicalRowHasher::new();
-    oracle.update_text(b"summary-1");
-    oracle.update_text(b"summary-2");
-    oracle.update_integer(1);
-    assert!(matches!(
-        &first.rows[0],
-        SessionStoreRow::SessionSummarySuccessors {
-            predecessor_summary_id,
-            successor_summary_id,
-            row_digest,
-        } if predecessor_summary_id == "summary-1"
-            && successor_summary_id == "summary-2"
-            && row_digest == &oracle.finish()
-    ));
-    let cursor = first.next_cursor.clone().expect("summary-successor cursor");
-    let second = single_row_page(
-        &fixture.path,
-        SessionStoreTable::SessionSummarySuccessors,
-        Some(cursor),
-    );
-    assert!(matches!(
-        &second.rows[0],
-        SessionStoreRow::SessionSummarySuccessors {
-            successor_summary_id,
-            ..
-        } if successor_summary_id == "summary-3"
     ));
     assert!(second.next_cursor.is_none());
 }
@@ -1054,7 +884,7 @@ fn single_row_page(
     page
 }
 
-const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 27] = [
+const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 24] = [
     SessionStoreTable::Observations,
     SessionStoreTable::SourceCursors,
     SessionStoreTable::Sessions,
@@ -1066,11 +896,8 @@ const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 27] = [
     SessionStoreTable::SessionTemporalObservationEffects,
     SessionStoreTable::SessionTemporalProjectionReceipts,
     SessionStoreTable::SessionOccurrences,
-    SessionStoreTable::SessionLogicalCopyEdges,
     SessionStoreTable::SessionAssertions,
     SessionStoreTable::SessionSummaryNodes,
-    SessionStoreTable::SessionSummarySources,
-    SessionStoreTable::SessionSummarySuccessors,
     SessionStoreTable::MemoryV2Facts,
     SessionStoreTable::MemoryV2CurrentFacts,
     SessionStoreTable::MemoryV2Assertions,

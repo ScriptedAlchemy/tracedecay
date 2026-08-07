@@ -199,8 +199,6 @@ async fn incremental_batch_commit_is_atomic_and_rolls_back_on_late_failure() {
         "session_turns",
         "session_agents",
         "session_turn_members",
-        "session_agent_hierarchy_edges",
-        "session_logical_copy_edges",
         "session_assertions",
         "session_assertion_supersession",
         "session_current_entities",
@@ -398,6 +396,7 @@ async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically()
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -469,6 +468,7 @@ async fn duplicate_message_ids_across_batches_are_rejected_deterministically() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -548,144 +548,11 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
         .await
         .unwrap_err();
     assert!(format!("{error:?}").contains("resolves to 2 occurrences"));
-}
-
-#[tokio::test]
-async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let path = runtime
-        .database_path(HostAdmissionScope::Profile)
-        .unwrap()
-        .to_path_buf();
-    let observation_store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let store = runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let session_id = session("session.temporal.mid-batch-abort");
-    let first = persist_observation(&observation_store, &session_id, 0, "stable").await;
-    let second = persist_observation(&observation_store, &session_id, 1, "pending").await;
-    let first = occurrence(&session_id, &first);
-    let second = occurrence(&session_id, &second);
-    begin_candidate(&store, &session_id, 2, 2).await;
-    store
-        .persist_session_temporal_projection_batch(batch(
-            &session_id,
-            2,
-            2,
-            vec![first.clone(), second.clone()],
-            vec![],
-            vec![],
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_projection_receipts
-             WHERE session_id = 'session.temporal.mid-batch-abort'"
-        )
-        .await,
-        1
-    );
-
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER abort_copy_insert
-         BEFORE INSERT ON session_logical_copy_edges
-         BEGIN
-             SELECT RAISE(ABORT, 'forced mid-batch projector failure');
-         END;",
-    )
-    .unwrap();
-    assert!(
-        store
-            .persist_session_temporal_projection_batch(
-                batch(
-                    &session_id,
-                    2,
-                    2,
-                    vec![],
-                    vec![parent_message_copy(&second, &first)],
-                    vec![],
-                )
-                .with_checkpoint(1, 2, 2)
-                .unwrap(),
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        scalar(&path, "SELECT COUNT(*) FROM session_logical_copy_edges").await,
-        0
-    );
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_projection_receipts
-             WHERE session_id = 'session.temporal.mid-batch-abort'"
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        rows(
-            &path,
-            "SELECT generation || ':' || state
-             FROM session_temporal_generations
-             WHERE session_id = 'session.temporal.mid-batch-abort'
-             ORDER BY generation"
-        )
-        .await,
-        vec!["1:active", "2:building"]
-    );
-
-    conn.execute("DROP TRIGGER abort_copy_insert", []).unwrap();
-    drop(conn);
-    drop(runtime);
-
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .session_temporal_store(HostAdmissionScope::Profile)
-        .unwrap();
-    assert_eq!(
-        begin_candidate(&store, &session_id, 2, 2).await,
-        SessionGenerationRebuildDispositionV1::Resumed
-    );
-    assert_eq!(
-        store
-            .persist_session_temporal_projection_batch(
-                batch(
-                    &session_id,
-                    2,
-                    2,
-                    vec![],
-                    vec![parent_message_copy(&second, &first)],
-                    vec![],
-                )
-                .with_checkpoint(1, 2, 2)
-                .unwrap(),
-            )
-            .await
-            .unwrap()
-            .disposition(),
-        SessionTemporalProjectionBatchDispositionV1::Applied
-    );
-    assert_eq!(
-        scalar(
-            &path,
-            "SELECT COUNT(*) FROM session_temporal_projection_receipts
-             WHERE session_id = 'session.temporal.mid-batch-abort'"
-        )
-        .await,
-        2
-    );
 }

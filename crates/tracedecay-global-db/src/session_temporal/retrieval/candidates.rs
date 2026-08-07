@@ -137,41 +137,6 @@ impl RootAuthorityChannel {
                             AND json_extract(authority_anchor.owner_json, '$.project_id')
                                 = authority_session.project_key)
                        )
-                       AND (?{provider_param} IS NULL OR EXISTS (
-                           WITH RECURSIVE retained_sources(
-                               source_anchor_id, source_summary_id, depth
-                           ) AS (
-                               SELECT source_anchor_id, source_summary_id, 0
-                               FROM session_summary_sources
-                               WHERE summary_id = summary.summary_id
-                               UNION ALL
-                               SELECT nested.source_anchor_id, nested.source_summary_id,
-                                      retained.depth + 1
-                               FROM retained_sources AS retained
-                               JOIN session_summary_nodes AS retained_summary
-                                 ON retained_summary.summary_id = retained.source_summary_id
-                                AND retained_summary.session_id = summary.session_id
-                               JOIN session_summary_sources AS nested
-                                 ON nested.summary_id = retained_summary.summary_id
-                               WHERE retained.depth < 63
-                               LIMIT 257
-                           )
-                           SELECT 1
-                           FROM retained_sources AS retained
-                           JOIN session_occurrences AS source_occurrence
-                             ON source_occurrence.retrieval_anchor_id =
-                                retained.source_anchor_id
-                            AND source_occurrence.session_id = summary.session_id
-                            AND source_occurrence.generation = generation.generation
-                           JOIN observations AS source_observation
-                             ON source_observation.observation_id =
-                                source_occurrence.source_observation_id
-                           WHERE json_extract(
-                               source_observation.observation_json,
-                               '$.identity.source.provider'
-                           ) = ?{provider_param}
-                           LIMIT 1
-                       ))
                      LIMIT 1
                  )"
             ),
@@ -344,8 +309,17 @@ pub(super) async fn resolve_root_authority(
     }
     let project_param = params.len() + 1;
     params.push(SqlValue::Text(project_key.to_string()));
+    // Summary authority no longer filters by provider in SQL (summary source
+    // lineage lives in the relation graph), so the provider placeholder is
+    // bound only when a channel predicate actually references it. An unused
+    // trailing binding would fail the strict parameter-count check.
     let provider_param = params.len() + 1;
-    params.push(provider.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string())));
+    if channels
+        .iter()
+        .any(|channel| !matches!(channel, RootAuthorityChannel::Summary))
+    {
+        params.push(provider.map_or(SqlValue::Null, |value| SqlValue::Text(value.to_string())));
+    }
     let authorized = channels
         .iter()
         .map(|channel| {
@@ -539,7 +513,6 @@ pub(super) async fn query_candidate_clause(
                 root_project_key.ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
-                provider,
                 SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
@@ -662,7 +635,6 @@ pub(super) async fn query_candidate_clause(
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
-                provider,
                 SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),

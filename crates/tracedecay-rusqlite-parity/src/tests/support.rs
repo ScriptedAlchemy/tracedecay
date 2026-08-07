@@ -112,14 +112,6 @@ pub(super) fn fixture() -> Fixture {
                     'd3086fc13819f64ed130eb6e6faeecd99fa36010867d2a58eba7a848807af612',
                     7, 'snippet', 'index'
                  );
-             INSERT INTO session_logical_copy_edges(
-                 session_id, generation, occurrence_id, copied_from_occurrence_id,
-                 proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES
-                 ('session-1', 1, 'occurrence-2', 'occurrence-1', '{}', 2,
-                  '{\"kind\":\"unknown\"}', 2),
-                 ('session-1', 1, 'occurrence-3', 'occurrence-1', '{}', 3,
-                  '{\"kind\":\"unknown\"}', 3);
              INSERT INTO session_assertions(
                  session_id, generation, assertion_id, assertion_kind, subject_anchor_id,
                  object_anchor_id, knowledge_at, valid_time_json, evidence_json
@@ -134,16 +126,6 @@ pub(super) fn fixture() -> Fixture {
              ) VALUES
                  ('summary-1', 'session-1', 'anchor-1', '', '', '{}', 1),
                  ('summary-2', 'session-1', 'anchor-2', '', '', '{}', 2);
-             INSERT INTO session_summary_sources(
-                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES
-                 ('summary-1', 0, 'anchor', 'anchor-1', NULL),
-                 ('summary-1', 1, 'summary', NULL, 'summary-1');
-             INSERT INTO session_summary_successors(
-                 predecessor_summary_id, successor_summary_id, created_at
-             ) VALUES
-                 ('summary-1', 'summary-2', 1),
-                 ('summary-1', 'summary-3', 2);
              INSERT INTO memory_v2_facts(
                  fact_id, owner_kind, project_id, owner_json, identity_json, created_at
              ) VALUES
