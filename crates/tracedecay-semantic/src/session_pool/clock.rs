@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Monotonic time source for reaping, acquisition, and cold-load deadlines.
+/// Monotonic time source for reaping, acquisition, and model-load deadlines.
 pub trait MonotonicClock: Send + Sync {
     fn now(&self) -> Duration;
 }
 
+/// Wall-clock driver for production wiring.
 #[derive(Debug)]
 pub struct SystemMonotonicClock {
     start: Instant,
@@ -26,6 +27,7 @@ impl MonotonicClock for SystemMonotonicClock {
     }
 }
 
+/// Deterministic test clock; advances only when told to.
 #[derive(Debug, Default)]
 pub struct ManualClock {
     micros: AtomicU64,

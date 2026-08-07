@@ -59,6 +59,9 @@ use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestH
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
 use crate::SemanticResourceCeilings;
 
+mod pins;
+pub use pins::ProjectionArtifactPinV1;
+
 /// Typed failure of one embedding operation or runtime admission (Plan 31:
 /// load failure, OOM, corruption, revocation, or incompatible pins disables
 /// the affected semantic stage; nothing silently substitutes another model).
@@ -149,29 +152,6 @@ impl fmt::Display for RuntimeFailureV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "runtime failure ({}): {}", self.kind, self.detail)
     }
-}
-
-/// Exact signed-manifest pin that failed projection/artifact admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectionArtifactPinV1 {
-    ArtifactIdentity,
-    ManifestIdentity,
-    ProfileKind,
-    ArtifactDigest,
-    TokenizerDigest,
-    ConfigDigest,
-    QueryInstructionDigest,
-    DocumentInstructionDigest,
-    Pooling,
-    TruncationSide,
-    TruncationLength,
-    RuntimeBackend,
-    RuntimeBuildRevision,
-    DeviceClass,
-    Dimensions,
-    Metric,
-    Normalization,
-    Precision,
 }
 
 /// Private runtime descriptor created only by successful projection/artifact

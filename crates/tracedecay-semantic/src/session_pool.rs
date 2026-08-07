@@ -33,6 +33,8 @@ use super::fastembed_adapter::{
 };
 
 mod clock;
+#[cfg(test)]
+mod cold_load_tests;
 pub use clock::{ManualClock, MonotonicClock, SystemMonotonicClock};
 
 const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
@@ -138,8 +140,8 @@ pub enum SessionAcquireError {
     Cancelled,
     /// The caller's wait budget elapsed while waiting.
     DeadlineExceeded { waited: Duration, budget: Duration },
-    /// A cold model session exceeded the artifact's admitted load deadline and
-    /// was discarded before it could enter the reusable pool.
+    /// A cold model session finished opening after the artifact's admitted
+    /// load deadline and was discarded before it could enter the pool.
     LoadDeadlineExceeded {
         elapsed: Duration,
         deadline: Duration,
@@ -195,6 +197,8 @@ pub struct SessionPoolStats {
     pub sessions_opened: usize,
     pub sessions_closed: usize,
     pub sessions_reaped: usize,
+    /// Most recent completed runtime model/session open, including an open
+    /// discarded for exceeding its deadline.
     pub last_cold_load_micros: Option<u64>,
     pub closed: bool,
 }
