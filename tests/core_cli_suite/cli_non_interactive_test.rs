@@ -1900,7 +1900,7 @@ async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable
 }
 
 #[test]
-fn branch_add_writes_new_branch_db_into_profile_shard() {
+fn branch_add_tracks_the_branch_on_the_single_project_store() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -1916,21 +1916,27 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let copied_db = shard_root.join("branches/feature_new.db");
 
     assert!(
         output.status.success() || stderr.contains("file is not a database"),
-        "branch add should resolve and copy profile-sharded DB before sync\nstdout:\n{}\nstderr:\n{}",
+        "branch add should track the branch on the profile-sharded store\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         stderr
     );
+    let meta = tracedecay::branch_meta::load_branch_meta(&shard_root)
+        .expect("branch add must publish tracking metadata in the profile shard");
+    let entry = meta
+        .branches
+        .get("feature/new")
+        .expect("branch add must track the branch");
     assert!(
-        copied_db.exists(),
-        "branch add should create branch DB under the profile shard"
+        entry.served_by_project_store(),
+        "tracked branch must be served by the single project store, found '{}'",
+        entry.db_file
     );
     assert!(
-        !stderr.contains("parent DB not found"),
-        "branch add should not look for parent DB in repo-local storage\nstderr:\n{stderr}"
+        !shard_root.join("branches").exists(),
+        "branch add must not create a per-branch database"
     );
 }
 

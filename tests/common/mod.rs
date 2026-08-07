@@ -1231,14 +1231,20 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
             let (db, _) = initialize_test_database(&init_path)
                 .await
                 .expect("template graph db initialize");
+            db.close();
             // The registered runtime's bounded `checkpoint` can leave a fresh
             // schema in the WAL, so a bare file read would capture an empty (v0)
-            // database. Snapshot a transactionally consistent standalone copy
-            // instead — the same primitive the global-db/session templates use.
-            db.snapshot_to(&snapshot_path)
-                .await
+            // database. `VACUUM INTO` writes a transactionally consistent
+            // standalone copy of the closed fixture.
+            let template_source =
+                rusqlite::Connection::open(&init_path).expect("open template graph db");
+            template_source
+                .execute(
+                    "VACUUM INTO ?1",
+                    [snapshot_path.to_str().expect("utf-8 template path")],
+                )
                 .expect("template graph db snapshot");
-            db.close();
+            drop(template_source);
             fs::read(&snapshot_path).unwrap_or_else(|err| {
                 panic!(
                     "failed to read graph test DB template '{}': {err}",

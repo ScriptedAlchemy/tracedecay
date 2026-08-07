@@ -123,17 +123,22 @@ pub async fn seed_latest_graph_db(dest: &Path) {
         // `path`. The registered runtime's `checkpoint` follows a bounded WAL
         // policy that no-ops below its soft threshold, so a freshly-created
         // schema can still live entirely in the WAL — copying the bare `.db`
-        // file would then capture an empty (v0) database. `snapshot_to` writes a
-        // transactionally consistent standalone copy, matching how the global-db
-        // and session template helpers stage their fixtures.
+        // file would then capture an empty (v0) database. `VACUUM INTO` writes
+        // a transactionally consistent standalone copy of the closed fixture.
         let init_path = path.with_file_name("template-init.db");
         let (db, _) = crate::common::initialize_test_database(&init_path)
             .await
             .expect("failed to initialize template database");
-        db.snapshot_to(&path)
-            .await
-            .expect("failed to snapshot template database");
         db.close();
+        let template_source =
+            rusqlite::Connection::open(&init_path).expect("failed to open template database");
+        template_source
+            .execute(
+                "VACUUM INTO ?1",
+                [path.to_str().expect("utf-8 template path")],
+            )
+            .expect("failed to snapshot template database");
+        drop(template_source);
     })
     .await;
     if let Some(parent) = dest.parent() {

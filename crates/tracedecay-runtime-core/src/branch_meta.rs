@@ -14,10 +14,14 @@ use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 /// Metadata for a single tracked branch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchEntry {
-    /// Relative path to the DB file, such as `tracedecay.db` or
-    /// `branches/feature_foo.db`.
+    /// Relative path to the database serving this branch. Branches tracked on
+    /// the single project graph store reference the canonical main database
+    /// (`tracedecay.db`) — the same shape the default branch has always used.
+    /// Legacy private branch copies reference `branches/<stem>.db`; those
+    /// files are retained only for garbage collection and never serve.
     pub db_file: String,
-    /// Branch this was copied from (None for the default branch).
+    /// Nearest tracked ancestor at tracking time (None for the default
+    /// branch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     /// UNIX timestamp (seconds) when this branch DB was created.
@@ -33,6 +37,17 @@ pub struct BranchEntry {
     /// eligible until the next sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_source: Option<BranchGraphSourceV1>,
+}
+
+impl BranchEntry {
+    /// True when this branch is served by the single project graph store.
+    ///
+    /// Only legacy entries reference a private `branches/<stem>.db` copy;
+    /// physical deletion inventories must be limited to those.
+    #[must_use]
+    pub fn served_by_project_store(&self) -> bool {
+        self.db_file == crate::config::DB_FILENAME
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +209,12 @@ impl BranchMeta {
             if entry.parent.as_deref() == Some(name.as_str()) {
                 return Err(format!("branch '{name}' must not be its own parent"));
             }
+            // The canonical main database is shared by every branch served
+            // from the single project store; only private legacy copies must
+            // be uniquely owned.
+            if entry.served_by_project_store() {
+                continue;
+            }
             if let Some(previous) = db_files.insert(entry.db_file.as_str(), name.as_str()) {
                 return Err(format!(
                     "branches '{previous}' and '{name}' reference the same database '{}'",
@@ -232,13 +253,15 @@ fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result
         ));
     }
     if !is_default
+        && !entry.served_by_project_store()
         && (!relative.starts_with("branches")
             || !relative
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("db")))
     {
         return Err(format!(
-            "non-default branch '{name}' database path '{}' must be under 'branches/' with a .db extension",
+            "non-default branch '{name}' database path '{}' must be the canonical main database \
+             or a legacy store under 'branches/' with a .db extension",
             entry.db_file
         ));
     }
@@ -469,13 +492,32 @@ mod tests {
             r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0"}}}"#,
             r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"}}}"#,
             r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0"}}}"#,
-            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"duplicate":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"}}}"#,
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"left":{"db_file":"branches/shared.db","created_at":"0","last_synced_at":"0"},"right":{"db_file":"branches/shared.db","created_at":"0","last_synced_at":"0"}}}"#,
         ] {
             assert!(
                 parse(content).is_err(),
                 "accepted invalid metadata: {content}"
             );
         }
+    }
+
+    #[test]
+    fn parse_accepts_branches_served_by_the_project_store() {
+        // The single-store tracking shape: every branch references the
+        // canonical main database while keeping its own lineage and
+        // graph-source provenance.
+        let content = r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"},"feature/two":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"}}}"#;
+
+        let meta = parse(content).expect("single-store tracking metadata must parse");
+
+        assert!(meta.branches["feature/one"].served_by_project_store());
+        assert!(meta.branches["feature/two"].served_by_project_store());
+        assert!(!meta.is_tracked("feature/three"));
+        let legacy = parse(
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"legacy":{"db_file":"branches/legacy.db","created_at":"0","last_synced_at":"0"}}}"#,
+        )
+        .expect("legacy private stores must keep parsing for collection");
+        assert!(!legacy.branches["legacy"].served_by_project_store());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{
     Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
-    DatabaseHealth, DatabaseWriteTransaction, Path, Result, TraceDecayError,
+    DatabaseHealth, DatabaseWriteTransaction, Result, TraceDecayError,
     database_checkpoint_probe, database_health,
 };
 
@@ -154,38 +154,6 @@ impl Database {
                 operation: "checkpoint".to_owned(),
             }),
         }
-    }
-
-    /// Writes a transactionally consistent copy of this database.
-    ///
-    /// The writer-owned online-backup command copies one consistent `SQLite`
-    /// snapshot in bounded steps. The destination must not already exist.
-    pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {
-        self.require_active_write_scope("snapshot_to")?;
-        let _writer = self.writer().await;
-        self.snapshot_to_unguarded(destination).await
-    }
-
-    pub(crate) async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
-        if destination.to_str().is_none() {
-            return Err(TraceDecayError::Database {
-                message: format!(
-                    "snapshot destination is not valid UTF-8: '{}'",
-                    destination.display()
-                ),
-                operation: "snapshot".to_string(),
-            });
-        }
-        let authority = self.write_authority()?;
-        self.inner
-            ._runtime
-            .snapshot_to(destination.to_path_buf(), authority)
-            .await
-            .map(|_| ())
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("registered online backup failed: {error:?}"),
-                operation: "snapshot".to_owned(),
-            })
     }
 
     /// Runs VACUUM and ANALYZE to reclaim space and update query planner statistics.

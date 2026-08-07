@@ -801,9 +801,11 @@ async fn track_pr(
         return Err("retained project graph is unavailable".to_string());
     };
 
+    // Tracked metadata is the PR-store state on the single project graph
+    // store; stale entries (including legacy private-copy leftovers) are
+    // reconciled through the coordinator below before a fresh track.
     let graph_ready = crate::branch_meta::load_branch_meta(data_root)
-        .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, &label, &meta))
-        .is_some_and(|path| path.is_file());
+        .is_some_and(|meta| meta.is_tracked(&label));
     let branch_ref = format!("refs/heads/{label}");
     let branch_ready = ref_points_to(
         repo_root,

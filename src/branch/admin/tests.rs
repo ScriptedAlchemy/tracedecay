@@ -258,8 +258,7 @@ fn failed_branch_sync_rollback_retires_only_metadata() {
     let (_temp, _project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");
 
-    rollback_published_branch_tracking(&tracedecay_dir, "feature", "branches/feature.db", &db)
-        .unwrap();
+    rollback_published_branch_tracking(&tracedecay_dir, "feature", "branches/feature.db").unwrap();
 
     assert!(db.exists());
     assert!(
@@ -267,4 +266,78 @@ fn failed_branch_sync_rollback_retires_only_metadata() {
             .unwrap()
             .is_tracked("feature")
     );
+}
+
+/// A branch tracked on the single project store retires metadata-only: no
+/// physical deletion candidate may reference the shared main database.
+#[test]
+fn removing_a_single_store_branch_never_deletes_the_project_store() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.add_branch("topic", crate::config::DB_FILENAME, "main");
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Remove {
+            branch: "topic".to_string(),
+        },
+        14,
+        7,
+    )
+    .unwrap();
+
+    assert!(
+        prepared.database_paths().is_empty(),
+        "single-store branch removal must not select any database for deletion"
+    );
+    // The daemon routes empty selections through the metadata-only commit.
+    let report = prepared.finish_without_database_deletion().unwrap();
+    assert_eq!(report.outcome, BranchAdminOutcome::Removed);
+    assert!(main_db.exists(), "the project store must survive removal");
+    assert!(
+        !crate::branch_meta::load_branch_meta(&tracedecay_dir)
+            .unwrap()
+            .is_tracked("topic")
+    );
+}
+
+/// GC of a dead single-store branch collects its metadata while the shared
+/// main database survives; a dead legacy private copy is still physically
+/// collected in the same pass (Plan 38 keep-list).
+#[test]
+fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_store() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let legacy_db = tracedecay_dir.join("branches/feature.db");
+    let main_db = tracedecay_dir.join(crate::config::DB_FILENAME);
+    let mut meta = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    meta.add_branch("topic", crate::config::DB_FILENAME, "main");
+    meta.branches.get_mut("topic").unwrap().last_synced_at = "0".to_string();
+    meta.branches.get_mut("feature").unwrap().last_synced_at = "0".to_string();
+    crate::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
+
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        0,
+        u64::MAX,
+    )
+    .unwrap();
+
+    assert_eq!(prepared.report().removed_branches, vec!["feature", "topic"]);
+    assert_eq!(
+        prepared.database_paths(),
+        std::slice::from_ref(&legacy_db),
+        "only the legacy private store may be a physical deletion candidate"
+    );
+    let report = prepared.commit().unwrap();
+    assert_eq!(report.outcome, BranchAdminOutcome::Removed);
+    assert!(!legacy_db.exists(), "legacy private store must be collected");
+    assert!(main_db.exists(), "the project store must survive GC");
+    let persisted = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
+    assert!(!persisted.is_tracked("topic"));
+    assert!(!persisted.is_tracked("feature"));
 }

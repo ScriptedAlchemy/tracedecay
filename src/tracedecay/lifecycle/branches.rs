@@ -29,11 +29,10 @@ impl TraceDecay {
         worktree_root: &Path,
         branch_name: &str,
     ) -> Result<branch::BranchAddOutcome> {
-        let prepared = branch::prepare_branch_tracking_from_database(
+        let prepared = branch::prepare_branch_tracking_in_layout(
             worktree_root,
             branch_name,
             &self.store_layout.data_root,
-            &self.db,
         )
         .await?;
         let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
@@ -305,11 +304,13 @@ impl TraceDecay {
         }
     }
 
-    /// Resolves which DB file to open for a given branch.
+    /// Resolves the serving-branch provenance for a given live branch.
     ///
-    /// Returns `(db_path, serving_branch, fallback_warning)`.
-    /// `serving_branch` is the branch whose DB is actually opened.
-    /// The warning is `Some` when falling back to an ancestor branch's DB.
+    /// Returns `(db_path, serving_branch, fallback_warning)`. Every branch is
+    /// served by the single project graph store, so `db_path` is always the
+    /// canonical main database; the branch argument only decides which
+    /// tracked branch's provenance the open is scoped to and whether the
+    /// caller must be warned about a fallback.
     pub(crate) fn resolve_db_for_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
@@ -323,7 +324,7 @@ impl TraceDecay {
         };
 
         let Some(branch) = branch else {
-            // Detached HEAD — use default branch DB
+            // Detached HEAD — serve the default branch's provenance
             return (
                 default_db,
                 Some(meta.default_branch.clone()),
@@ -332,19 +333,15 @@ impl TraceDecay {
         };
 
         // Exact match: branch is tracked
-        if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, branch, &meta)
-            && path.exists()
-        {
-            return (path, Some(branch.to_string()), None);
+        if meta.is_tracked(branch) {
+            return (default_db, Some(branch.to_string()), None);
         }
 
         // Fallback: find nearest tracked ancestor
         if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta)
-            && let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, &ancestor, &meta)
-            && path.exists()
         {
             return (
-                path,
+                default_db,
                 Some(ancestor.clone()),
                 Some(format!(
                     "branch '{branch}' is not tracked — serving from '{ancestor}'. \
@@ -353,7 +350,7 @@ impl TraceDecay {
             );
         }
 
-        // Last resort: default branch DB
+        // Last resort: default branch provenance
         let serving = meta.default_branch.clone();
         (
             default_db,
@@ -496,11 +493,11 @@ impl TraceDecay {
             }
         })?;
 
-        branch::resolve_branch_db_path(&store_layout.data_root, branch_name, &meta).ok_or_else(
-            || TraceDecayError::Config {
+        if !meta.is_tracked(branch_name) {
+            return Err(TraceDecayError::Config {
                 message: format!("branch '{branch_name}' is not tracked"),
-            },
-        )?;
+            });
+        }
         let db_path = store_layout.graph_db_path.clone();
         let active_graph_layout = active_graph_layout(&db_path);
 

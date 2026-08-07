@@ -143,60 +143,6 @@ mod default_branch_tests {
     }
 }
 
-/// Computes a unique, collision-free DB stem (filename without extension) for
-/// `branch_name` under `branches_dir`.
-///
-/// `sanitize_branch_name` is many-to-one: `feature/foo` and `feature_foo` both
-/// map to `feature_foo`. Returning the bare sanitized stem unconditionally let
-/// a second `branch add` `fs::copy`-overwrite the first branch's index (data
-/// loss). This returns the bare stem only when it is free; otherwise it appends
-/// a short deterministic hash of the *unsanitized* branch name so distinct
-/// branches get distinct files while a given branch always maps to the same
-/// stem. Returns `None` when the name sanitizes to empty (which would yield a
-/// hidden `branches/.db`).
-fn unique_branch_db_stem(
-    meta: &BranchMeta,
-    branches_dir: &Path,
-    branch_name: &str,
-) -> crate::errors::Result<Option<String>> {
-    let base = sanitize_branch_name(branch_name);
-    if base.is_empty() {
-        return Ok(None);
-    }
-    let conflicts = |stem: &str| -> crate::errors::Result<bool> {
-        let db_file = format!("branches/{stem}.db");
-        let meta_conflict = meta
-            .branches
-            .iter()
-            .any(|(name, entry)| name != branch_name && entry.db_file == db_file);
-        let database_path = branches_dir.join(format!("{stem}.db"));
-        let file_conflict = database_path.exists();
-        Ok(meta_conflict || file_conflict)
-    };
-    if !conflicts(&base)? {
-        return Ok(Some(base));
-    }
-    let hashed = format!("{base}-{}", short_branch_hash(branch_name));
-    if !conflicts(&hashed)? {
-        return Ok(Some(hashed));
-    }
-    for suffix in 1..10_000 {
-        let candidate = format!("{hashed}-{suffix}");
-        if !conflicts(&candidate)? {
-            return Ok(Some(candidate));
-        }
-    }
-    Ok(None)
-}
-
-/// Short, stable hex digest of a branch name for DB-stem disambiguation.
-fn short_branch_hash(branch_name: &str) -> String {
-    crate::sync::content_hash(branch_name)
-        .chars()
-        .take(10)
-        .collect()
-}
-
 /// Finds the nearest tracked ancestor branch using `git merge-base`.
 ///
 /// For each tracked branch in the metadata, computes the merge-base with
@@ -304,47 +250,28 @@ pub enum BranchTrackingPreparation {
 pub struct PreparedBranchTracking {
     branch_name: String,
     db_file: String,
-    new_db_path: PathBuf,
-    _branch_lock: std::fs::File,
 }
 
-/// Copies the nearest tracked ancestor snapshot and writes branch metadata.
+/// Publishes branch-tracking metadata for `branch_name` on the single project
+/// graph store.
 ///
-/// The returned [`PreparedBranchTracking`] owns the branch-add lock and must be
-/// kept alive until the caller either finalizes or rolls back the new branch.
+/// Tracking records the branch's lineage and its graph-publication slot; the
+/// branch is served by the canonical main database, and its content lands in
+/// the store's next branch-graph publication epoch when the caller syncs. No
+/// per-branch database is created.
+///
+/// The branch-add lock covers only this metadata publication; the caller's
+/// follow-up sync publishes the branch generation under its own fenced
+/// mutation window (which takes the lock for its own metadata writes), and
+/// finalize/rollback re-acquire it for theirs.
 pub async fn prepare_branch_tracking_in_layout(
     project_root: &Path,
     branch_name: &str,
     tracedecay_dir: &Path,
 ) -> crate::errors::Result<BranchTrackingPreparation> {
-    prepare_branch_tracking_in_layout_with_source(project_root, branch_name, tracedecay_dir, None)
-        .await
-}
-
-pub(crate) async fn prepare_branch_tracking_from_database(
-    project_root: &Path,
-    branch_name: &str,
-    tracedecay_dir: &Path,
-    source: &crate::db::Database,
-) -> crate::errors::Result<BranchTrackingPreparation> {
-    prepare_branch_tracking_in_layout_with_source(
-        project_root,
-        branch_name,
-        tracedecay_dir,
-        Some(source),
-    )
-    .await
-}
-
-async fn prepare_branch_tracking_in_layout_with_source(
-    project_root: &Path,
-    branch_name: &str,
-    tracedecay_dir: &Path,
-    source: Option<&crate::db::Database>,
-) -> crate::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
-    let branch_lock = {
+    let _branch_lock = {
         let mut attempts = 0;
         loop {
             match try_acquire_branch_add_lock(tracedecay_dir) {
@@ -398,79 +325,27 @@ async fn prepare_branch_tracking_in_layout_with_source(
         return Ok(BranchTrackingPreparation::AlreadyTracked);
     }
 
-    // Fail fast (before parent resolution) when the name sanitizes to empty —
-    // it would otherwise produce a hidden `branches/.db`.
+    // A name that sanitizes to empty (e.g. "..") can never be a real git
+    // branch; refuse it instead of publishing nonsense tracking metadata.
     if sanitize_branch_name(branch_name).is_empty() {
         return Err(crate::errors::TraceDecayError::Config {
-            message: format!(
-                "cannot track branch '{branch_name}': its name sanitizes to an empty filename"
-            ),
+            message: format!("cannot track branch '{branch_name}': not a valid branch name"),
         });
     }
 
     let parent = find_nearest_tracked_ancestor(project_root, branch_name, &meta)
         .unwrap_or_else(|| meta.default_branch.clone());
-    let parent_db = resolve_branch_db_path(tracedecay_dir, &parent, &meta).ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
-            message: format!("parent branch '{parent}' has no DB"),
-        }
-    })?;
-    if !parent_db.exists() {
-        return Err(crate::errors::TraceDecayError::Config {
-            message: format!("parent DB not found at '{}'", parent_db.display()),
-        });
-    }
 
-    let branches_dir = branch_meta::ensure_branches_dir(tracedecay_dir)?;
-    // Pick a collision-free stem so a branch whose sanitized name matches an
-    // already-tracked branch gets its own DB instead of overwriting it (#3).
-    let stem = unique_branch_db_stem(&meta, &branches_dir, branch_name)?.ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
-            message: format!(
-                "cannot track branch '{branch_name}': no unretired collision-free database filename is available"
-            ),
-        }
-    })?;
-    let new_db_path = branches_dir.join(format!("{stem}.db"));
-    // Copy through SQLite rather than cloning the live main file. The
-    // branch-add lock serializes metadata changes, but it does not stop other
-    // processes from writing or checkpointing the parent WAL.
-    if let Some(source) = source {
-        let parent_db = parent_db
-            .canonicalize()
-            .unwrap_or_else(|_| parent_db.clone());
-        if source.database_path() != parent_db {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: format!(
-                    "retained graph '{}' does not own selected parent branch database '{}'",
-                    source.database_path().display(),
-                    parent_db.display()
-                ),
-            });
-        }
-    }
-    let snapshot_result = create_consistent_branch_snapshot(&parent_db, &new_db_path, source).await;
-    snapshot_result?;
-
-    // Save metadata before the caller opens the new branch DB for sync.
-    let db_file = format!("branches/{stem}.db");
+    // The branch is served by the single project graph store; the metadata
+    // entry records lineage and the branch's graph-publication slot. Save
+    // before the caller syncs so the fenced publication finds the entry.
+    let db_file = crate::config::db_filename(tracedecay_dir).to_owned();
     meta.add_branch(branch_name, &db_file, &parent);
-    if let Err(e) = branch_meta::save_branch_meta(tracedecay_dir, &meta) {
-        return match admin::remove_branch_db_files_checked(&new_db_path) {
-            Ok(()) => Err(e.into()),
-            Err(cleanup_error) => Err(crate::errors::TraceDecayError::Config {
-                message: format!(
-                    "failed to publish branch metadata: {e}; unpublished snapshot cleanup also failed: {cleanup_error}"
-                ),
-            }),
-        };
-    }
+    branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
 
     Ok(BranchTrackingPreparation::Added(PreparedBranchTracking {
         branch_name: branch_name.to_string(),
         db_file,
-        new_db_path,
-        _branch_lock: branch_lock,
     }))
 }
 
@@ -566,7 +441,7 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
     std::fs::create_dir(data_dir.join("branch-meta.json.tmp")).unwrap();
 
-    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path)
+    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db")
         .expect_err("blocked metadata publication must fail rollback");
 
     assert!(db_path.exists());
@@ -598,7 +473,7 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
     meta.add_branch("feature", "branches/feature.db", "main");
     crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
 
-    rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path).unwrap();
+    rollback_branch_tracking(data_dir, "feature", "branches/feature.db").unwrap();
 
     assert!(db_path.exists());
     assert!(db_path.with_extension("db-wal").exists());
@@ -611,31 +486,24 @@ fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
-    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
-        meta.touch_synced(&prepared.branch_name);
-        let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
-    }
+    // Load-modify-save under the shared branch lock; the preparation no
+    // longer holds it across the sync.
+    crate::branch_meta::update_synced_timestamp(tracedecay_dir, &prepared.branch_name);
 }
 
 pub fn rollback_prepared_branch_tracking(
     tracedecay_dir: &Path,
     prepared: &PreparedBranchTracking,
 ) -> crate::errors::Result<()> {
-    rollback_branch_tracking(
-        tracedecay_dir,
-        &prepared.branch_name,
-        &prepared.db_file,
-        &prepared.new_db_path,
-    )
+    rollback_branch_tracking(tracedecay_dir, &prepared.branch_name, &prepared.db_file)
 }
 
 fn rollback_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,
     db_file: &str,
-    new_db_path: &Path,
 ) -> crate::errors::Result<()> {
-    admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file, new_db_path)
+    admin::rollback_published_branch_tracking(tracedecay_dir, branch_name, db_file)
 }
 
 fn prune_missing_branch_dbs(
@@ -658,57 +526,6 @@ fn prune_missing_branch_dbs(
         meta.remove_branch(&name);
     }
     changed
-}
-
-async fn create_consistent_branch_snapshot(
-    src: &Path,
-    dst: &Path,
-    retained_source: Option<&crate::db::Database>,
-) -> crate::errors::Result<()> {
-    let parent_dir = dst
-        .parent()
-        .ok_or_else(|| crate::errors::TraceDecayError::Config {
-            message: format!("branch snapshot path '{}' has no parent", dst.display()),
-        })?;
-    let stem = dst
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("branch");
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp = parent_dir.join(format!(
-        ".{stem}.snapshot-{}-{nonce}.db",
-        std::process::id()
-    ));
-    let result = async {
-        if let Some(source) = retained_source {
-            source.snapshot_to(&temp).await?;
-        } else {
-            crate::sqlite_read_snapshot::backup_live_sqlite_database(src, &temp)
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    message: format!("failed to back up live branch database: {error}"),
-                    operation: "create branch snapshot".to_owned(),
-                })?;
-        }
-        std::fs::hard_link(&temp, dst).map_err(|error| {
-            crate::errors::TraceDecayError::Config {
-                message: format!(
-                    "failed to publish branch snapshot '{}' without replacing an existing store: {error}",
-                    dst.display()
-                ),
-            }
-        })?;
-        Ok(())
-    }
-    .await;
-    let cleanup = admin::remove_branch_db_files_checked(&temp);
-    match result {
-        Err(error) => Err(error),
-        Ok(()) => cleanup,
-    }
 }
 
 /// Compatibility wrapper for the PR-autotrack lifecycle. Administrative CLI

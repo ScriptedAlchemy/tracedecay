@@ -183,8 +183,6 @@ pub(super) fn is_missing_index_error(err: &TraceDecayError) -> bool {
         TraceDecayError::Config { message }
             if message.contains("no TraceDecay index found")
                 || message.contains("no TraceDecay database found")
-                || message.contains("parent DB not found")
-                || (message.contains("parent branch '") && message.contains("' has no DB"))
     )
 }
 

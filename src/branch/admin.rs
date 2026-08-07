@@ -64,6 +64,9 @@ impl PreparedBranchAdminMutation {
         self.commit_with_hook(|_| Ok(()))
     }
 
+    /// CAS-publishes the prepared metadata mutation when no database file was
+    /// selected for deletion. Branches served by the single project store
+    /// retire this way: the metadata entry is the only state to remove.
     pub(crate) fn finish_without_database_deletion(
         self,
     ) -> crate::errors::Result<BranchAdminReport> {
@@ -73,7 +76,7 @@ impl PreparedBranchAdminMutation {
                     .to_string(),
             });
         }
-        Ok(self.report)
+        self.commit_with_hook(|_| Ok(()))
     }
 
     /// CAS-publishes the exact prepared branch metadata, then unlinks every
@@ -184,7 +187,11 @@ pub fn prepare_branch_admin_mutation(
                 });
             }
             if let Some(entry) = branch_meta.remove_branch(&branch) {
-                database_paths.push(tracedecay_dir.join(entry.db_file));
+                // Branches served by the single project store retire
+                // metadata-only; only a legacy private copy is deletable.
+                if !entry.served_by_project_store() {
+                    database_paths.push(tracedecay_dir.join(entry.db_file));
+                }
                 removed_branches.push(branch);
                 outcome = BranchAdminOutcome::Removed;
             } else {
@@ -214,7 +221,9 @@ pub fn prepare_branch_admin_mutation(
             removed.sort_by(|left, right| left.0.cmp(&right.0));
             for (branch, entry) in removed {
                 removed_branches.push(branch);
-                database_paths.push(tracedecay_dir.join(entry.db_file));
+                if !entry.served_by_project_store() {
+                    database_paths.push(tracedecay_dir.join(entry.db_file));
+                }
             }
             if !removed_branches.is_empty() {
                 outcome = BranchAdminOutcome::Removed;
@@ -234,14 +243,22 @@ pub fn prepare_branch_admin_mutation(
                             && now.saturating_sub(super::parse_unix_secs(&entry.last_synced_at))
                                 >= branch_grace
                     })
-                    .map(|(name, entry)| (name.clone(), entry.db_file.clone()))
+                    .map(|(name, entry)| {
+                        // Metadata is always collectable; only a legacy
+                        // private store is a physical deletion candidate.
+                        let private_store = (!entry.served_by_project_store())
+                            .then(|| tracedecay_dir.join(&entry.db_file));
+                        (name.clone(), private_store)
+                    })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.0.cmp(&right.0));
-                for (name, db_file) in candidates {
+                for (name, private_store) in candidates {
                     branch_meta.remove_branch(&name);
                     gc_branches.push(name.clone());
                     removed_branches.push(name);
-                    database_paths.push(tracedecay_dir.join(db_file));
+                    if let Some(path) = private_store {
+                        database_paths.push(path);
+                    }
                 }
             }
             let referenced = meta
@@ -256,7 +273,7 @@ pub fn prepare_branch_admin_mutation(
             removed_orphan_dbs =
                 select_orphan_dbs(tracedecay_dir, &referenced, orphan_db_gc_days, now);
             database_paths.extend(removed_orphan_dbs.iter().cloned());
-            if !database_paths.is_empty() {
+            if !removed_branches.is_empty() || !database_paths.is_empty() {
                 outcome = BranchAdminOutcome::Removed;
             } else if meta.is_none() {
                 outcome = BranchAdminOutcome::NoTracking;
@@ -295,21 +312,15 @@ pub fn prepare_branch_admin_mutation(
 }
 
 /// Retires branch metadata that branch-add published but could not sync.
-/// The unreferenced database is left for canonical orphan collection.
-/// The caller must still hold the branch-add lock.
+/// Metadata is the only mutation: the branch never owned a database of its
+/// own, and any legacy private store is left for canonical orphan collection.
+/// Takes the branch-add lock for its own load-verify-save window.
 pub(super) fn rollback_published_branch_tracking(
     tracedecay_dir: &Path,
     branch_name: &str,
     db_file: &str,
-    database_path: &Path,
 ) -> crate::errors::Result<()> {
-    if tracedecay_dir.join(db_file) != database_path {
-        return Err(crate::errors::TraceDecayError::Config {
-            message: format!(
-                "cannot roll back branch '{branch_name}': published database path changed"
-            ),
-        });
-    }
+    let _branch_lock = acquire_branch_add_lock_blocking(tracedecay_dir)?;
     let (meta, metadata_before) = load_branch_meta_exact(tracedecay_dir)?;
     let mut meta = meta.ok_or_else(|| crate::errors::TraceDecayError::Config {
         message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),

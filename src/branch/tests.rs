@@ -23,85 +23,39 @@ fn sanitize_dots_prevented() {
     assert_eq!(sanitize_branch_name("foo/../bar"), "foo_bar");
 }
 
-#[test]
-fn unique_stem_keeps_free_name() {
-    let meta = crate::branch_meta::BranchMeta::new("main");
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(
-        unique_branch_db_stem(&meta, dir.path(), "feature/new")
-            .unwrap()
-            .unwrap(),
-        "feature_new"
-    );
-}
+#[tokio::test]
+async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() {
+    let (_base, project_root, td) = setup_repo_with_meta();
+    run_git(&project_root, &["branch", "feature/topic"]);
 
-#[test]
-fn unique_stem_disambiguates_sanitization_collision() {
-    // "feature/foo" sanitizes to the same stem as the literal "feature_foo".
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = tempfile::tempdir().unwrap();
-    let stem = unique_branch_db_stem(&meta, dir.path(), "feature_foo")
-        .unwrap()
-        .unwrap();
-    assert_ne!(
-        stem, "feature_foo",
-        "second branch must not reuse the first branch's DB file"
-    );
-    assert!(stem.starts_with("feature_foo-"), "got: {stem}");
-}
-
-#[test]
-fn unique_stem_preserves_hashed_orphan_recovery_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let hashed = format!("feature_foo-{}", short_branch_hash("feature_foo"));
-    std::fs::write(dir.path().join(format!("{hashed}.db")), b"recovery").unwrap();
-
-    assert_eq!(
-        unique_branch_db_stem(&meta, dir.path(), "feature_foo")
-            .unwrap()
-            .unwrap(),
-        format!("{hashed}-1")
-    );
-}
-
-#[test]
-fn unique_stem_is_idempotent_for_same_branch() {
-    // Recomputing for a branch already in meta must not treat its own entry
-    // as a conflict.
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(
-        unique_branch_db_stem(&meta, dir.path(), "feature/foo")
-            .unwrap()
-            .unwrap(),
-        "feature_foo"
-    );
-}
-
-#[test]
-fn unique_stem_rejects_empty_sanitization() {
-    let meta = crate::branch_meta::BranchMeta::new("main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
-    assert!(unique_branch_db_stem(&meta, dir, "..").unwrap().is_none());
-    assert!(unique_branch_db_stem(&meta, dir, "///").unwrap().is_none());
-}
-
-#[test]
-fn unique_stem_reuses_an_unpublished_missing_database_path() {
-    let temp = tempfile::tempdir().unwrap();
-    let branches_dir = temp.path().join("branches");
-    std::fs::create_dir_all(&branches_dir).unwrap();
-
-    let meta = crate::branch_meta::BranchMeta::new("main");
-    let stem = unique_branch_db_stem(&meta, &branches_dir, "feature")
-        .unwrap()
+    let prepared = prepare_branch_tracking_in_layout(&project_root, "feature/topic", &td)
+        .await
         .unwrap();
 
-    assert_eq!(stem, "feature");
+    let BranchTrackingPreparation::Added(prepared) = prepared else {
+        panic!("new branch must prepare as Added");
+    };
+    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
+    let entry = meta.branches.get("feature/topic").unwrap();
+    assert_eq!(
+        entry.db_file,
+        crate::config::db_filename(&td),
+        "single-store tracking must reference the canonical main database"
+    );
+    assert!(entry.served_by_project_store());
+    assert_eq!(entry.parent.as_deref(), Some("main"));
+    assert!(
+        !td.join("branches").exists(),
+        "tracking must not create a per-branch database"
+    );
+
+    rollback_prepared_branch_tracking(&td, &prepared).unwrap();
+    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
+    assert!(!meta.is_tracked("feature/topic"));
+    assert!(
+        td.join("tracedecay.db").exists(),
+        "rollback must never touch the project store"
+    );
 }
 
 // --- git test harness (mirrors src/mcp/hook_events.rs tests) ------------
@@ -213,70 +167,6 @@ fn add_tracked_branch(
     meta.branches.get_mut(name).unwrap().last_synced_at = last_synced.to_string();
     crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).unwrap();
     db_path
-}
-
-#[tokio::test]
-async fn writer_owned_sqlite_snapshot_includes_committed_wal_data_and_readers_stay_read_only() {
-    // `publish_test_runtime` materialises a sidecar *profile* shard next to the
-    // fixture database, and the kernel initialises profile-scoped shards through
-    // a fail-closed port whose installer lives in `tracedecay-global-db`. Only
-    // the root crate can supply it; production reaches this through
-    // `DaemonSessionRuntimeRegistryV1::open`. Idempotent.
-    crate::daemon::store_runtime::register_registered_schema_installer();
-    let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("src.db");
-    let dst = dir.path().join("dst.db");
-    let authority =
-        crate::db::DatabaseAuthority::acquire_test(&src, "branch snapshot test").unwrap();
-    let (writer, _) = crate::db::Database::publish_test_runtime(
-        &src,
-        &authority,
-        crate::db::TestDatabaseRuntimeMode::Initialize,
-    )
-    .await
-    .unwrap();
-    writer
-        .execute_write_batch(
-            "seed branch snapshot fixture",
-            "CREATE TABLE snapshot_probe(value TEXT NOT NULL);
-             INSERT INTO snapshot_probe(value) VALUES ('committed-in-wal');",
-        )
-        .await
-        .unwrap();
-    writer.snapshot_to(&dst).await.unwrap();
-    writer.close();
-
-    let (source, _) = crate::db::Database::publish_test_runtime(
-        &src,
-        &authority,
-        crate::db::TestDatabaseRuntimeMode::ReadOnly,
-    )
-    .await
-    .unwrap();
-    assert!(
-        source
-            .conn()
-            .execute("CREATE TABLE forbidden_snapshot_write (id INTEGER)", ())
-            .await
-            .is_err()
-    );
-
-    let snapshot_authority =
-        crate::db::DatabaseAuthority::acquire_test(&dst, "branch snapshot verification").unwrap();
-    let (snapshot, _) = crate::db::Database::publish_test_runtime(
-        &dst,
-        &snapshot_authority,
-        crate::db::TestDatabaseRuntimeMode::ReadOnly,
-    )
-    .await
-    .unwrap();
-    let mut rows = snapshot
-        .conn()
-        .query("SELECT value FROM snapshot_probe", ())
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "committed-in-wal");
 }
 
 #[test]
