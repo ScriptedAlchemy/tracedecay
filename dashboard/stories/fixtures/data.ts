@@ -991,6 +991,42 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
   };
 }
 
+/**
+ * `/api/plugins/graph/path` (graph_api.rs::path). Consumed by `SymbolPath`.
+ *
+ * A found route, because the absent one is the trivial shape and the found one
+ * is where the panel can lie. Two things about it are deliberate:
+ *
+ * - the hops do NOT all run forwards. `find_path` walks bidirectionally, so a
+ *   real route regularly reaches a node through an edge pointing back at its
+ *   predecessor; a fixture of uniformly forward edges would let a panel that
+ *   ignores direction pass every audit.
+ * - the edge kinds are NOT all `calls`. This route searches every kind, which
+ *   is the entire difference between it and `/api/plugins/graph/call-chain`,
+ *   and a calls-only fixture would erase that difference in every shot.
+ *
+ * `max_depth` is the route's own default (`coerce_limit(params.max_depth, 6,
+ * 10)`), since the panel prints it verbatim in the negative case.
+ */
+function graphPathPayload(): Record<string, unknown> {
+  const nodes = [graphNode(3, 'match', 118), graphNode(11, 'match', 96), graphNode(24, 'match', 71)];
+  const ids = nodes.map((node) => node['id'] as string);
+  return {
+    from: ids[0],
+    to: ids[2],
+    found: true,
+    path: ids,
+    nodes,
+    edges: [
+      { kind: 'calls', line: 212, source: ids[0], target: ids[1], source_name: nodes[0]?.['name'] ?? null, target_name: nodes[1]?.['name'] ?? null },
+      // Reversed against the walk: the third symbol imports the second, and the
+      // route reaches it by traversing that edge backwards.
+      { kind: 'imports', line: null, source: ids[2], target: ids[1], source_name: nodes[2]?.['name'] ?? null, target_name: nodes[1]?.['name'] ?? null },
+    ],
+    max_depth: 6,
+  };
+}
+
 /* ==========================================================================
  * /api/plugins/savings/overview (savings_api.rs::overview). Consumed by
  * CostsPage (SavingsOverviewPayloadV1Schema).
@@ -2354,6 +2390,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/overview': envelope(graphOverviewPayload()),
   '/api/plugins/graph/search': envelope(graphSearchPayload()),
   '/api/plugins/graph/subgraph': envelope(subgraphPayload(null)),
+  '/api/plugins/graph/path': envelope(graphPathPayload()),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),
@@ -2395,6 +2432,10 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
  * to these when there is no exact-path match. */
 export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   ['/api/plugins/graph/search', FIXTURES['/api/plugins/graph/search']],
+  // Ahead of the generic `/api/plugins/graph` fallback below, which serves the
+  // OVERVIEW payload: a path request resolving to an overview body would reach
+  // the panel as `unsupported_schema` and be audited as a broken surface.
+  ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
   // Dynamic: `/session/{session_id}` — the Loom thread chain. One transcript
   // answers for every id, which is what a fixture can honestly be.

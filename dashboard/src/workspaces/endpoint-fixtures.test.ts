@@ -35,6 +35,7 @@ import {
   DashboardEnvelopeV1Schema,
   GraphOverviewPayloadV1Schema,
   GraphSearchPayloadV1Schema,
+  GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
@@ -540,6 +541,23 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.mode).toBe('seeded');
     expect(data.nodes.some((n) => n.id === 'sym-0')).toBe(true);
     expect(data.nodes.length).toBeLessThan(40);
+  });
+
+  it('GET /api/plugins/graph/path — code (GraphPathPayloadV1Schema)', () => {
+    const env = parse(DashboardEnvelopeV1Schema(GraphPathPayloadV1Schema), '/api/plugins/graph/path');
+    const data = env.payload;
+    expect(data.found).toBe(true);
+    // Every hop the producer reported must be hydratable, and the edge set must
+    // join consecutive path entries — in EITHER direction, because `find_path`
+    // walks bidirectionally. A fixture whose edges all point forward would let
+    // a panel that ignores edge direction pass this gate.
+    expect(data.path.length).toBe(data.edges.length + 1);
+    expect(data.nodes.map((n) => n.id).sort()).toEqual([...data.path].sort());
+    expect(
+      data.edges.some((e) => data.path.indexOf(e.source) > data.path.indexOf(e.target)),
+    ).toBe(true);
+    expect(new Set(data.edges.map((e) => e.kind)).size).toBeGreaterThan(1);
+    expect(data.max_depth).toBeGreaterThan(0);
   });
 
   it('GET /api/plugins/savings/overview — costs (SavingsOverviewPayloadV1Schema)', () => {

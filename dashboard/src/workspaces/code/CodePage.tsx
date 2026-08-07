@@ -24,6 +24,7 @@ import { ActivationField } from '../../viz/graph/activation.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
+import { SymbolPath } from './SymbolPath.tsx';
 import type { TraceFocus } from './TraceView.tsx';
 import { CoreSample } from './CoreSample.tsx';
 import { StructureLensRuler } from './StructureLensRuler.tsx';
@@ -261,6 +262,13 @@ export function CodePage() {
            * the index was sealed from: compile-grade truth beside the
            * structural readings above. */}
           <CodeDiagnostics />
+          {/* The readings above all describe the graph in aggregate. This one
+            * asks about exactly two symbols in it — whether anything at all
+            * connects them, over the whole index rather than the slice drawn
+            * on the field, and in either direction along any edge kind. It
+            * sits last because it is the only panel here driven by a question
+            * the reader has to pose. */}
+          <SymbolPath />
         </div>
       }
       list={
