@@ -643,6 +643,7 @@ mod tests {
                 ProvenanceId::new(proposal_id.to_owned()).unwrap(),
                 request,
                 Some(actor),
+                tracedecay_store::ProjectMemoryFactProposalEvidenceV1::default(),
             )
             .await
             .unwrap()

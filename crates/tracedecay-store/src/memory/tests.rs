@@ -555,8 +555,11 @@ fn proposal_record_projects_typed_automation_run_id() {
         request,
         None,
         None,
+        ProjectMemoryFactProposalEvidenceV1::default(),
         None,
         None,
+        UtcMicros(1),
+        UtcMicros(1),
     )
     .unwrap();
 

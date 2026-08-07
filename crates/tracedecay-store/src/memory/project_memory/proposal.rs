@@ -1,4 +1,6 @@
-use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 
 use super::super::queries::MAX_CURRENT_LIMIT;
 use super::super::{
@@ -175,6 +177,58 @@ impl ProjectMemoryFactProposalPromotionV1 {
     }
 }
 
+/// Durable automation evidence captured at proposal submission: the bounded
+/// evidence hash plus the raw model proposal/validation payloads. It is part
+/// of the authoritative proposal record — never a sidecar projection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMemoryFactProposalEvidenceV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposal: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation: Option<Value>,
+}
+
+impl ProjectMemoryFactProposalEvidenceV1 {
+    pub fn new(
+        evidence_hash: Option<String>,
+        proposal: Option<Value>,
+        validation: Option<Value>,
+    ) -> FactStoreResult<Self> {
+        let evidence = Self {
+            evidence_hash,
+            proposal,
+            validation,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> FactStoreResult<()> {
+        if self.evidence_hash.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 160 || value.chars().any(char::is_control)
+        }) {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "fact proposal evidence hash",
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn evidence_hash(&self) -> Option<&str> {
+        self.evidence_hash.as_deref()
+    }
+
+    pub fn proposal(&self) -> Option<&Value> {
+        self.proposal.as_ref()
+    }
+
+    pub fn validation(&self) -> Option<&Value> {
+        self.validation.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactProposalRecordV1 {
     proposal_id: ProvenanceId,
@@ -185,8 +239,11 @@ pub struct ProjectMemoryFactProposalRecordV1 {
     applied_fact_id: Option<FactId>,
     applied_mapping: Option<ProjectMemoryFactMappingV1>,
     automation_run_id: Option<String>,
+    evidence: ProjectMemoryFactProposalEvidenceV1,
     reviewer: Option<ActorId>,
     reason: Option<String>,
+    submitted_at: UtcMicros,
+    updated_at: UtcMicros,
 }
 
 impl ProjectMemoryFactProposalRecordV1 {
@@ -199,8 +256,11 @@ impl ProjectMemoryFactProposalRecordV1 {
         request: ProjectMemoryFactAddCommandV1,
         applied_fact_id: Option<FactId>,
         applied_mapping: Option<ProjectMemoryFactMappingV1>,
+        evidence: ProjectMemoryFactProposalEvidenceV1,
         reviewer: Option<ActorId>,
         reason: Option<String>,
+        submitted_at: UtcMicros,
+        updated_at: UtcMicros,
     ) -> FactStoreResult<Self> {
         proposal_id.validate()?;
         owner.validate()?;
@@ -221,11 +281,17 @@ impl ProjectMemoryFactProposalRecordV1 {
         if let Some(reviewer) = &reviewer {
             reviewer.validate()?;
         }
+        evidence.validate()?;
         if reason.as_ref().is_some_and(|value| {
             value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact proposal reason",
+            }));
+        }
+        if updated_at < submitted_at {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "fact proposal timestamps",
             }));
         }
         let automation_run_id = request.automation_run_id().map(ToOwned::to_owned);
@@ -238,8 +304,11 @@ impl ProjectMemoryFactProposalRecordV1 {
             applied_fact_id,
             applied_mapping,
             automation_run_id,
+            evidence,
             reviewer,
             reason,
+            submitted_at,
+            updated_at,
         })
     }
 
@@ -271,11 +340,22 @@ impl ProjectMemoryFactProposalRecordV1 {
     pub fn automation_run_id(&self) -> Option<&str> {
         self.automation_run_id.as_deref()
     }
+    /// Durable automation evidence recorded at submission. It is read back
+    /// from the authority row, never from a dashboard sidecar.
+    pub fn evidence(&self) -> &ProjectMemoryFactProposalEvidenceV1 {
+        &self.evidence
+    }
     pub fn reviewer(&self) -> Option<&ActorId> {
         self.reviewer.as_ref()
     }
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
+    }
+    pub fn submitted_at(&self) -> UtcMicros {
+        self.submitted_at
+    }
+    pub fn updated_at(&self) -> UtcMicros {
+        self.updated_at
     }
 }
 

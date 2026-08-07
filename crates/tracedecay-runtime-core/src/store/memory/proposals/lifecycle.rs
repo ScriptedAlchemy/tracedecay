@@ -22,8 +22,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryResult,
+    ProjectMemoryFactProposalEvidenceV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, ProjectMemoryResult,
 };
 fn project_memory_proposal_request_digest(
     request: &ProjectMemoryFactAddCommandV1,
@@ -139,7 +139,7 @@ async fn project_memory_insert_proposal_tx(
     request: &ProjectMemoryFactAddCommandV1,
     idempotency_key: &ProvenanceId,
     request_digest: &str,
-    evidence: &Value,
+    evidence: &ProjectMemoryFactProposalEvidenceV1,
     state: ProjectMemoryFactProposalStateV1,
     reviewer: Option<&ActorId>,
     reason: Option<&str>,
@@ -363,6 +363,7 @@ pub(in crate::store::memory) async fn submit_project_memory_fact_proposal_tx(
     proposal_id: ProvenanceId,
     request: &ProjectMemoryFactAddCommandV1,
     submitter: Option<&ActorId>,
+    evidence: &ProjectMemoryFactProposalEvidenceV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
     let request_digest = project_memory_proposal_request_digest(request)?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
@@ -450,7 +451,7 @@ pub(in crate::store::memory) async fn submit_project_memory_fact_proposal_tx(
         request,
         request.operation_id(),
         &request_digest,
-        &json!({ "kind": "compatibility-proposal-v1" }),
+        evidence,
         ProjectMemoryFactProposalStateV1::PendingApproval,
         submitter,
         None,

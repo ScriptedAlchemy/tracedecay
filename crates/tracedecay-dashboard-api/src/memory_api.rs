@@ -683,7 +683,6 @@ pub async fn fact_proposals(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::list_fact_proposals(
         &memory,
-        &state.dashboard_root,
         proposal_state,
         limit,
     )
@@ -720,7 +719,6 @@ pub async fn fact_proposal_apply(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::apply_fact_proposal_with_result(
         &memory,
-        &state.dashboard_root,
         &proposal_id,
         reviewer,
     )
@@ -761,7 +759,6 @@ pub async fn fact_proposal_reject(
     };
     match tracedecay_agent_hosts::automation::fact_proposals::reject_fact_proposal(
         &memory,
-        &state.dashboard_root,
         &proposal_id,
         body.reviewer,
         body.reason,

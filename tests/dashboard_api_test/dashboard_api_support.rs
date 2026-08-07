@@ -297,7 +297,12 @@ pub(crate) async fn apply_dashboard_automation_fact(
     )
     .unwrap_or_else(|error| panic!("derive outcome proposal identity: {error}"));
     let submitted = memory
-        .submit_project_memory_fact_proposal(context.operation_id().clone(), command, None)
+        .submit_project_memory_fact_proposal(
+            context.operation_id().clone(),
+            command,
+            None,
+            tracedecay_store::ProjectMemoryFactProposalEvidenceV1::default(),
+        )
         .await
         .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
     let promotion = ProjectMemoryFactProposalPromotionV1::new(

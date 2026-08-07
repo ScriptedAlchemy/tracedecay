@@ -13,7 +13,8 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
-    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactProposalEvidenceV1, ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
     ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
     ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
@@ -609,11 +610,12 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         proposal_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
         submitter: Option<ActorId>,
+        evidence: ProjectMemoryFactProposalEvidenceV1,
     ) -> Result<ProjectMemoryFactProposalRecordV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let proposal = self
             .authority
-            .submit_project_memory_fact_proposal(proposal_id.clone(), request, submitter)
+            .submit_project_memory_fact_proposal(proposal_id.clone(), request, submitter, evidence)
             .await?;
         validate_project_memory_proposal(&self.owner, &proposal_id, &proposal)?;
         Ok(proposal)

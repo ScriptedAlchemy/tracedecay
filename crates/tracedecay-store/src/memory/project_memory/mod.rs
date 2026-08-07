@@ -43,7 +43,8 @@ pub use dashboard::{
     ProjectMemoryDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    FactProposalPromotionStateV1, ProjectMemoryFactProposalPageV1,
+    FactProposalPromotionStateV1, ProjectMemoryFactProposalEvidenceV1,
+    ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
     ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
     ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, PromoteFactProposal,

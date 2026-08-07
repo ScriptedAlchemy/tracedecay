@@ -430,7 +430,6 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     .unwrap();
     let pending = list_fact_proposals(
         &memory,
-        &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
         10,
     )
@@ -439,7 +438,6 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     assert!(pending.is_empty());
     let proposals = list_fact_proposals(
         &memory,
-        &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
         10,
     )
@@ -649,7 +647,6 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     .unwrap();
     let pending = list_fact_proposals(
         &memory,
-        &cg.store_layout().dashboard_root,
         Some(FactProposalState::PendingApproval),
         10,
     )
@@ -658,7 +655,6 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     assert!(pending.is_empty());
     let applied = list_fact_proposals(
         &memory,
-        &cg.store_layout().dashboard_root,
         Some(FactProposalState::Applied),
         10,
     )
@@ -855,7 +851,6 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
 
     let first = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
@@ -865,7 +860,6 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     .unwrap();
     let second = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
@@ -1519,7 +1513,6 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
 
     let recorded = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-a",
         Some("evidence-a"),
         &batch,
@@ -1539,7 +1532,6 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
     )];
     let second = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-b",
         Some("evidence-b"),
         &restated,
@@ -1605,7 +1597,6 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     .unwrap();
     let applied = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-old",
         Some("evidence-old"),
         &[json!({
@@ -1674,7 +1665,6 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     });
     let recorded = record_session_fact_proposals(
         &memory,
-        &dashboard_root,
         "run-new",
         Some("evidence-new"),
         &[paraphrase],

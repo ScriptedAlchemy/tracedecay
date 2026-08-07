@@ -360,10 +360,6 @@ impl<'a> AgentRunFinalizer<'a> {
         self
     }
 
-    pub(crate) fn dashboard_root(&self) -> &Path {
-        self.dashboard_root
-    }
-
     pub(crate) fn run_id(&self) -> &str {
         self.run_id
     }

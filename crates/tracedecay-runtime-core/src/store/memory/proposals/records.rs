@@ -13,11 +13,12 @@ use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, FactOwnerV1, ProvenanceId,
-    SanitizationReceiptV1,
+    SanitizationReceiptV1, UtcMicros,
 };
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactMappingV1, ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactProposalEvidenceV1,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalRecordV1,
     ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, ProjectMemoryResult,
 };
 const PROJECT_MEMORY_PROPOSAL_PAGE_LIMIT: usize = 1_000;
@@ -267,7 +268,8 @@ pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
             "SELECT proposals.proposal_id, proposals.owner_json, proposals.request_json,
                     current_state.state, current_state.revision,
                     transition.reviewer_json, transition.validation_json,
-                    transition.promoted_fact_id
+                    transition.promoted_fact_id, proposals.evidence_json,
+                    proposals.submitted_at, current_state.updated_at
              FROM memory_v2_proposals AS proposals
              JOIN memory_v2_proposal_current AS current_state
                ON current_state.proposal_id = proposals.proposal_id
@@ -378,6 +380,12 @@ pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
             .into());
         }
     };
+    let evidence = from_json::<ProjectMemoryFactProposalEvidenceV1>(
+        &row_string(&row, 8, PROJECT_MEMORY_READ_OPERATION)?,
+        PROJECT_MEMORY_READ_OPERATION,
+    )?;
+    let submitted_at = UtcMicros(row_i64(&row, 9, PROJECT_MEMORY_READ_OPERATION)?);
+    let updated_at = UtcMicros(row_i64(&row, 10, PROJECT_MEMORY_READ_OPERATION)?);
     ProjectMemoryFactProposalRecordV1::new(
         stored_id,
         owner.clone(),
@@ -386,8 +394,11 @@ pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
         request,
         applied_fact_id,
         mapping,
+        evidence,
         reviewer,
         reason,
+        submitted_at,
+        updated_at,
     )
     .map(Some)
     .map_err(Into::into)

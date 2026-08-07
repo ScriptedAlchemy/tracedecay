@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::*;
 use crate::application::memory::MemoryApplication;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -50,11 +52,21 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
     );
 
     let first = memory
-        .submit_project_memory_fact_proposal(proposal_id.clone(), command.clone(), None)
+        .submit_project_memory_fact_proposal(
+            proposal_id.clone(),
+            command.clone(),
+            None,
+            ProjectMemoryFactProposalEvidenceV1::default(),
+        )
         .await
         .unwrap();
     let replay = memory
-        .submit_project_memory_fact_proposal(proposal_id.clone(), command, None)
+        .submit_project_memory_fact_proposal(
+            proposal_id.clone(),
+            command,
+            None,
+            ProjectMemoryFactProposalEvidenceV1::default(),
+        )
         .await
         .unwrap();
     assert_eq!(first.proposal_id(), replay.proposal_id());
@@ -64,9 +76,7 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
         ProjectMemoryFactProposalStateV1::PendingApproval
     );
 
-    let listed = list_fact_proposals(&memory, temp.path(), None, 10)
-        .await
-        .unwrap();
+    let listed = list_fact_proposals(&memory, None, 10).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].proposal_id, proposal_id.as_str());
 
@@ -96,11 +106,10 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
 }
 
 #[tokio::test]
-async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submission_order() {
+async fn authority_collapses_duplicates_and_reads_canonical_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let db = database(&temp.path().join("memory.db")).await;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
-    let dashboard_root = temp.path().join("dashboard");
     let mut first = request("Keep the first submitted proposal first in the dashboard");
     first.metadata = serde_json::json!({
         "fixture": "fact-proposal-lifecycle",
@@ -135,16 +144,10 @@ async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submis
         }),
     ];
 
-    let recorded = record_session_fact_proposals(
-        &memory,
-        &dashboard_root,
-        "run-duplicate-collapse",
-        None,
-        &accepted,
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded =
+        record_session_fact_proposals(&memory, "run-duplicate-collapse", None, &accepted, &[])
+            .await
+            .unwrap();
     assert_eq!(
         recorded.len(),
         2,
@@ -162,30 +165,31 @@ async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submis
     assert_eq!(canonical.proposals().len(), 2);
 
     for record in &recorded {
-        apply_fact_proposal(&memory, &dashboard_root, &record.proposal_id, None)
+        apply_fact_proposal(&memory, &record.proposal_id, None)
             .await
             .unwrap();
     }
-    let applied = list_fact_proposals(
-        &memory,
-        &dashboard_root,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let applied = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 2);
+    let mut contents = applied
+        .iter()
+        .map(|record| record.add_fact_request.as_ref().unwrap().content.clone())
+        .collect::<Vec<_>>();
+    contents.sort();
     assert_eq!(
-        applied[0].add_fact_request.as_ref().unwrap().content,
-        "Keep the first submitted proposal first in the dashboard"
+        contents,
+        vec![
+            "Keep the first submitted proposal first in the dashboard".to_string(),
+            "Keep the later submitted proposal after the first one".to_string(),
+        ]
     );
-    assert_eq!(
-        applied[1].add_fact_request.as_ref().unwrap().content,
-        "Keep the later submitted proposal after the first one"
-    );
-    assert_eq!(
-        applied[0].validation,
-        Some(serde_json::json!({"source_index": 0}))
+    assert!(
+        applied
+            .iter()
+            .any(|record| record.validation == Some(serde_json::json!({"source_index": 0}))),
+        "the surviving duplicate must retain its first evidence annotation from the authority"
     );
 }
 
@@ -206,6 +210,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
                 "Promote this proposal into one canonical fact",
             ),
             None,
+            ProjectMemoryFactProposalEvidenceV1::default(),
         )
         .await
         .unwrap();

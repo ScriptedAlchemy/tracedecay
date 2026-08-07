@@ -178,7 +178,6 @@ pub(super) async fn validate_session_fact_proposals<A: ProjectMemoryFactStore>(
 pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
-    dashboard_root: &std::path::Path,
     proposal_records: Vec<FactProposalRecord>,
 ) -> Result<(Vec<FactProposalRecord>, bool)> {
     let mut applied = Vec::with_capacity(proposal_records.len());
@@ -190,7 +189,6 @@ pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>
         }
         let result = match apply_fact_proposal_with_result(
             memory,
-            dashboard_root,
             &record.proposal_id,
             Some("session_reflector:auto_apply".to_string()),
         )
@@ -290,7 +288,6 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         proposed_ops,
         proposals,
     } = output;
-    let dashboard_root = finalizer.dashboard_root();
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
         validate_session_fact_proposals(memory, proposals, evidence).await?;
@@ -298,7 +295,6 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     let rejected_count = rejected_facts.len();
     let mut proposal_records = record_session_fact_proposals(
         memory,
-        dashboard_root,
         run_id,
         evidence_hash.as_deref(),
         &accepted_facts,
@@ -310,7 +306,6 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         let (records, _) = auto_apply_session_fact_proposals(
             memory,
             digest_root,
-            dashboard_root,
             std::mem::take(&mut proposal_records),
         )
         .await?;

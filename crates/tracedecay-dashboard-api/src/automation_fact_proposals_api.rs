@@ -47,7 +47,7 @@ pub async fn list(
             );
         }
     };
-    match list_fact_proposals(&memory, &state.dashboard_root, proposal_state, limit).await {
+    match list_fact_proposals(&memory, proposal_state, limit).await {
         Ok(proposals) => {
             let count = proposals.len();
             (
@@ -85,7 +85,7 @@ pub async fn view(
             );
         }
     };
-    match load_fact_proposal(&memory, &state.dashboard_root, &id).await {
+    match load_fact_proposal(&memory, &id).await {
         Ok(Some(proposal)) => (StatusCode::OK, Json(proposal_payload(&proposal))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -114,13 +114,7 @@ pub async fn apply(
             );
         }
     };
-    match apply_fact_proposal_with_result(
-        &memory,
-        &state.dashboard_root,
-        &id,
-        Some("dashboard".to_string()),
-    )
-    .await
+    match apply_fact_proposal_with_result(&memory, &id, Some("dashboard".to_string())).await
     {
         Ok(result) => {
             if result.newly_promoted {
@@ -159,14 +153,7 @@ pub async fn reject(
             );
         }
     };
-    match reject_fact_proposal(
-        &memory,
-        &state.dashboard_root,
-        &id,
-        Some("dashboard".to_string()),
-        reason,
-    )
-    .await
+    match reject_fact_proposal(&memory, &id, Some("dashboard".to_string()), reason).await
     {
         Ok(proposal) => (StatusCode::OK, Json(proposal_payload(&proposal))),
         Err(err) => (

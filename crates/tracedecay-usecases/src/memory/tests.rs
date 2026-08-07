@@ -12,7 +12,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
     FactLineageCursor, FactLineageResponseV1, FactProposalPromotionStateV1, FactQueryCoverageV1,
-    FactStoreResult,
+    FactStoreResult, ProjectMemoryFactProposalEvidenceV1,
 };
 
 use super::*;
@@ -456,6 +456,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _proposal_id: ProvenanceId,
         _request: ProjectMemoryFactAddCommandV1,
         _submitter: Option<ActorId>,
+        _evidence: ProjectMemoryFactProposalEvidenceV1,
     ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()

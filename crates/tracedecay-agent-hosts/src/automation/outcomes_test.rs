@@ -354,10 +354,7 @@ async fn seed_approved_skill(profile_root: &Path) {
         .unwrap();
 }
 
-async fn seed_applied_fact_database(
-    dashboard_root: &Path,
-    database_path: &Path,
-) -> crate::db::Database {
+async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database {
     use crate::application::memory::MemoryApplication;
     use crate::automation::fact_proposals::{apply_fact_proposal, record_session_fact_proposals};
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -378,7 +375,6 @@ async fn seed_applied_fact_database(
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let records = record_session_fact_proposals(
         &memory,
-        dashboard_root,
         "run-outcome-lock",
         None,
         &[json!({
@@ -396,7 +392,7 @@ async fn seed_applied_fact_database(
     )
     .await
     .unwrap();
-    apply_fact_proposal(&memory, dashboard_root, &records[0].proposal_id, None)
+    apply_fact_proposal(&memory, &records[0].proposal_id, None)
         .await
         .unwrap();
     database
@@ -414,7 +410,7 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     let dashboard_root = temp.path().join("dashboard");
     seed_approved_skill(&profile_root).await;
     let database =
-        seed_applied_fact_database(&dashboard_root, &temp.path().join("memory.db")).await;
+        seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let now = crate::tracedecay::current_timestamp();
@@ -445,7 +441,7 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     let dashboard_root = temp.path().join("dashboard");
     seed_approved_skill(&profile_root).await;
     let database =
-        seed_applied_fact_database(&dashboard_root, &temp.path().join("memory.db")).await;
+        seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let path = automation_outcomes_path(&dashboard_root);

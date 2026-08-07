@@ -18,7 +18,8 @@ use super::{
     ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
     ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
     ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
-    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactProposalEvidenceV1, ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
     ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
     ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
@@ -241,6 +242,7 @@ pub trait ProjectMemoryFactStore: FactProposalStore {
         proposal_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
         submitter: Option<ActorId>,
+        evidence: ProjectMemoryFactProposalEvidenceV1,
     ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>> + Send;
 
     fn get_project_memory_fact_proposal(

@@ -1673,10 +1673,8 @@ mod tests {
         let memory =
             MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
                 .unwrap();
-        let dashboard_root = temp.path().join("dashboard");
         let records = record_session_fact_proposals(
             &memory,
-            &dashboard_root,
             "run-digest-disposition",
             None,
             &[json!({
@@ -1698,7 +1696,6 @@ mod tests {
         let (applied, newly_promoted) = auto_apply_session_fact_proposals(
             &memory,
             Some(&project_root),
-            &dashboard_root,
             records.clone(),
         )
         .await
@@ -1713,7 +1710,6 @@ mod tests {
         let (replayed, newly_promoted) = auto_apply_session_fact_proposals(
             &memory,
             Some(&project_root),
-            &dashboard_root,
             records,
         )
         .await
@@ -1755,10 +1751,8 @@ mod tests {
         let owner = FactOwnerV1::Profile;
         let memory =
             MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
-        let dashboard_root = temp.path().join("dashboard");
         let records = record_session_fact_proposals(
             &memory,
-            &dashboard_root,
             "run-digest-partial",
             None,
             &[
@@ -1809,7 +1803,6 @@ mod tests {
         let error = auto_apply_session_fact_proposals(
             &memory,
             Some(&project_root),
-            &dashboard_root,
             records,
         )
         .await
