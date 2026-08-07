@@ -196,16 +196,34 @@ pub async fn seed_session_message_observation_for_test(
 }
 
 /// Materializes the pending session-temporal refresh so the seeded
-/// observations become readable through the daemon retrieval authority.
+/// observations become readable through the daemon retrieval authority, then
+/// re-applies the session relation projection for the newly-active
+/// generation — the step the daemon's LCM effects loop performs after every
+/// production refresh, without which summary lineage reads go relation-blind.
 pub async fn materialize_session_temporal_refresh_for_test(
     project_database: &RegisteredGlobalDb,
     session_id: &str,
 ) -> Result<()> {
+    let session_id =
+        SessionId::new(session_id).map_err(|error| fixture_error("session id", error))?;
     crate::store::GlobalDbSessionTemporalStore::new(project_database)
-        .materialize_pending_session_refresh_for_test(
-            &SessionId::new(session_id).map_err(|error| fixture_error("session id", error))?,
-        )
+        .materialize_pending_session_refresh_for_test(&session_id)
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;
+    project_database
+        .apply_active_session_relation_projection(
+            &session_id,
+            std::sync::Arc::new(DashboardFixtureGraphCancellation),
+        )
+        .await
+        .map_err(|error| fixture_error("apply session relation projection", error))?;
     Ok(())
+}
+
+struct DashboardFixtureGraphCancellation;
+
+impl tracedecay_graph_db::GraphCancellation for DashboardFixtureGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
 }
