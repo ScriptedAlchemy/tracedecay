@@ -447,7 +447,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
                     .map(|published| published.snapshot)
             },
         )?;
-        if &snapshot.verified_head().recovered_digest != &expected_recovered_digest {
+        if snapshot.verified_head().recovered_digest != expected_recovered_digest {
             return Err(GraphDbError::GenerationMismatch {
                 namespace: projection.namespace.to_string(),
                 projection: projection.projection.to_string(),

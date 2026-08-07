@@ -34,7 +34,7 @@ fn signal(index: usize, kind: StackSignalKindV1) -> StackSignalV1 {
         stack_revision_id: BranchStackRevisionId::new("revision.stack").unwrap(),
         stack_revision_digest: digest('a'),
         kind,
-        state_digest: digest(if index % 2 == 0 { 'b' } else { 'c' }),
+        state_digest: digest(if index.is_multiple_of(2) { 'b' } else { 'c' }),
         github_stack_digest: None,
         observed_at: UtcMicros(index as i64),
         watermark_id: StackDeliveryWatermarkId::new("watermark.stack").unwrap(),

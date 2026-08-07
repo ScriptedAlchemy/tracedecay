@@ -6,12 +6,12 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphRelationId, GraphTraversalDirection, TraversalRequest,
 };
 
-use super::super::super::{VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1};
+use super::super::super::VectorGenerationStoreErrorV1;
 use super::super::persistence::map_graph_error;
 use super::{
-    BASE_GENERATION, BUILD_CATALOG_KIND, BUILD_ID, CONTROL_ID, GENERATION_CATALOG_KIND,
-    GENERATION_ID, ROW_COUNT, VECTOR_BYTES, build_id, entity_id, generation_entity_id,
-    generation_id, optional_generation, relation, relation_kind, required_string, required_u64,
+    BASE_GENERATION, CONTROL_ID, GENERATION_CATALOG_KIND, GENERATION_ID, ROW_COUNT, VECTOR_BYTES,
+    entity_id, generation_entity_id, generation_id, optional_generation, relation, relation_kind,
+    required_string, required_u64,
 };
 
 const MAX_CATALOG_RECORDS: usize = 10_000;
@@ -22,12 +22,6 @@ pub(crate) struct NativeGenerationCatalogEntryV1 {
     pub base_generation: Option<VectorGenerationIdV1>,
     pub rows: u64,
     pub vector_bytes: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct NativeBuildCatalogEntryV1 {
-    pub build_id: VectorGenerationBuildIdV1,
-    pub base_generation: Option<VectorGenerationIdV1>,
 }
 
 pub(crate) fn read_generation_catalog(
@@ -83,30 +77,6 @@ pub(crate) fn read_generation_catalog_entry(
         ));
     }
     Ok(Some(entry))
-}
-
-pub(crate) fn read_build_catalog(
-    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<Vec<NativeBuildCatalogEntryV1>, VectorGenerationStoreErrorV1> {
-    let visits = catalog_visits(snapshot, BUILD_CATALOG_KIND, Arc::clone(&cancellation))?;
-    visits
-        .into_iter()
-        .map(|identity| {
-            let row = snapshot
-                .entity(
-                    &snapshot.projection().namespace,
-                    &identity,
-                    Arc::clone(&cancellation),
-                )
-                .map_err(map_graph_error)?
-                .ok_or_else(|| corrupt("semantic vector build catalog target is missing"))?;
-            Ok(NativeBuildCatalogEntryV1 {
-                build_id: build_id(required_string(&row, BUILD_ID)?)?,
-                base_generation: optional_generation(&row, BASE_GENERATION)?,
-            })
-        })
-        .collect()
 }
 
 pub(crate) fn generation_catalog_relation_id(

@@ -247,49 +247,6 @@ fn run_history_row(record: &AutomationRunLedgerRecord) -> Value {
     })
 }
 
-#[cfg(test)]
-mod run_list_tests {
-    use super::*;
-
-    #[test]
-    fn run_history_row_projects_identity_outcome_and_artifact_kinds() {
-        let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
-            "schema_version": 1,
-            "run_id": "run-1",
-            "trigger": "scheduler",
-            "task": "memory_curator",
-            "backend": "claude",
-            "status": "succeeded",
-            "reviewed_count": 4,
-            "accepted_count": 3,
-            "rejected_count": 1,
-            "error": "quota exhausted",
-            "artifacts": [{
-                "schema_version": 1,
-                "kind": "traces",
-                "path": "runs/run-1/traces.json",
-                "sha256": "ab",
-                "created_at": "1754000060"
-            }],
-            "started_at": "1754000000",
-            "completed_at": "1754000060"
-        }))
-        .expect("ledger record fixture parses");
-
-        let row = run_history_row(&record);
-        assert_eq!(row["run_id"], json!("run-1"));
-        assert_eq!(row["task"], json!("memory_curator"));
-        assert_eq!(row["status"], json!("succeeded"));
-        assert_eq!(row["accepted_count"], json!(3));
-        assert_eq!(row["error"], json!("quota exhausted"));
-        assert_eq!(row["artifact_kinds"], json!(["traces"]));
-        // The heavy per-run payloads stay behind the artifact routes: a list
-        // row must never carry proposed or applied operation bodies.
-        assert!(row.get("proposed_ops").is_none());
-        assert!(row.get("applied_ops").is_none());
-    }
-}
-
 pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
@@ -824,4 +781,47 @@ fn dashboard_run_id(task: AgentTaskKind) -> String {
         .map(|duration| duration.as_micros())
         .unwrap_or_default();
     format!("dashboard_{}_{}", task_key(task), micros)
+}
+
+#[cfg(test)]
+mod run_list_tests {
+    use super::*;
+
+    #[test]
+    fn run_history_row_projects_identity_outcome_and_artifact_kinds() {
+        let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "run_id": "run-1",
+            "trigger": "scheduler",
+            "task": "memory_curator",
+            "backend": "claude",
+            "status": "succeeded",
+            "reviewed_count": 4,
+            "accepted_count": 3,
+            "rejected_count": 1,
+            "error": "quota exhausted",
+            "artifacts": [{
+                "schema_version": 1,
+                "kind": "traces",
+                "path": "runs/run-1/traces.json",
+                "sha256": "ab",
+                "created_at": "1754000060"
+            }],
+            "started_at": "1754000000",
+            "completed_at": "1754000060"
+        }))
+        .expect("ledger record fixture parses");
+
+        let row = run_history_row(&record);
+        assert_eq!(row["run_id"], json!("run-1"));
+        assert_eq!(row["task"], json!("memory_curator"));
+        assert_eq!(row["status"], json!("succeeded"));
+        assert_eq!(row["accepted_count"], json!(3));
+        assert_eq!(row["error"], json!("quota exhausted"));
+        assert_eq!(row["artifact_kinds"], json!(["traces"]));
+        // The heavy per-run payloads stay behind the artifact routes: a list
+        // row must never carry proposed or applied operation bodies.
+        assert!(row.get("proposed_ops").is_none());
+        assert!(row.get("applied_ops").is_none());
+    }
 }

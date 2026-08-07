@@ -349,13 +349,13 @@ fn context_outcome_envelope(
     // A censored linkage is not a terminal outcome: it is a linkage the
     // retention policy refuses to keep. It stays unknown so the rollup counts
     // it as censored rather than as an observed non-use.
-    let terminal_result = Some(if observation.observation.censored {
-        ObservabilityTerminalResultV1::Unknown
-    } else if observation.observation.outcome == "unknown" {
-        ObservabilityTerminalResultV1::Unknown
-    } else {
-        ObservabilityTerminalResultV1::Succeeded
-    });
+    let terminal_result = Some(
+        if observation.observation.censored || observation.observation.outcome == "unknown" {
+            ObservabilityTerminalResultV1::Unknown
+        } else {
+            ObservabilityTerminalResultV1::Succeeded
+        },
+    );
     build_envelope(EnvelopeSpec {
         scope_ref: identity.scope_ref,
         boot_id: boot,

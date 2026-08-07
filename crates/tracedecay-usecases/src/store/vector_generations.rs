@@ -40,7 +40,6 @@ const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-re
 /// each sealed unit bounded no matter how large the collection is.
 const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
 /// Bounded optimistic-retry budget for watermark compare-and-swap loops.
-const MAX_STATE_CAS_RETRIES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
@@ -483,6 +482,7 @@ impl<'de> Deserialize<'de> for PreparedBatchesV1 {
     {
         #[derive(Deserialize)]
         #[serde(untagged)]
+        #[allow(clippy::large_enum_variant)]
         enum PersistedBatchV1 {
             Committed(CommittedVectorBatchV1),
             LegacyPrepared(PreparedVectorGenerationV1),
@@ -1447,23 +1447,6 @@ impl VectorGenerationStateMachineV1 {
     /// touches `physical_vectors` and `physical_vector_bindings`, so a deep
     /// copy of every published generation — the whole float corpus, once per
     /// load — bought nothing but the borrow.
-    /// In-memory stand-in for the payload table, used by restart tests that
-    /// round-trip the state document without a database behind it.
-    #[cfg(test)]
-    fn hydrate_from(&mut self, reference: &Self) {
-        let mut payloads = BTreeMap::new();
-        reference.visit_vectors(&mut |vector| {
-            payloads.insert(vector.output_digest.clone(), vector.values.clone());
-        });
-        self.visit_vectors_mut(&mut |vector| {
-            if vector.values.is_empty()
-                && let Some(values) = payloads.get(&vector.output_digest)
-            {
-                vector.values.clone_from(values);
-            }
-        });
-    }
-
     fn ensure_physical_reuse_index(&mut self) -> Result<(), VectorGenerationStoreErrorV1> {
         let generations = std::mem::take(&mut self.published.generations);
         let mut outcome = Ok(());
@@ -1547,79 +1530,32 @@ fn intern_generation_vectors(
     }
 }
 
+/// Seal a hand-built fixture so its document can be serialized.
+///
+/// The store's own writers seal inside their mutation path; fixtures that
+/// build state directly go through here instead.
 #[cfg(test)]
-fn validate_loaded_state(
-    state: &VectorGenerationStateMachineV1,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    for (generation_id, generation) in &state.published.generations {
-        if generation.generation_id() != generation_id {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "published generation map key does not match record id".to_string(),
-            ));
-        }
-        generation.validate_persisted()?;
-        let bindings = state
-            .published
-            .physical_vector_bindings
-            .get(generation_id)
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(
-                    "published generation has no physical vector bindings".to_string(),
-                )
-            })?;
-        if bindings.len() != generation.vectors.len() {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "published generation physical vector membership is incomplete".to_string(),
-            ));
-        }
-        for (chunk_id, vector) in generation.vectors.iter() {
-            let physical_id = bindings.get(chunk_id).ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(format!(
-                    "published vector {chunk_id} has no physical byte binding"
-                ))
-            })?;
-            let physical = state
-                .published
-                .physical_vectors
-                .get(physical_id)
-                .ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::Storage(format!(
-                        "published vector {chunk_id} has a dangling physical byte binding"
-                    ))
-                })?;
-            let (expected_id, expected_key) =
-                physical_vector_reuse_key(generation.embedding_key(), vector)?;
-            if physical_id != &expected_id
-                || physical.reuse_key != expected_key
-                || physical.values.0.as_ref() != vector.values.as_slice()
-            {
-                return Err(VectorGenerationStoreErrorV1::Storage(format!(
-                    "published vector {chunk_id} physical byte binding drifted"
-                )));
-            }
-        }
+fn seal_test_state(
+    state: &mut VectorGenerationStateMachineV1,
+) -> BTreeMap<ContentDigest, Vec<Vec<u8>>> {
+    seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
+}
+
+#[cfg(test)]
+type ExternalSlotVisitV1<'visit> =
+    dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
+
+#[cfg(test)]
+impl PublishedVectorGenerationV1 {
+    fn visit_external_slots(
+        &mut self,
+        visit: &mut ExternalSlotVisitV1<'_>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        visit(&mut self.vectors)?;
+        visit(&mut self.tombstones)?;
+        visit(&mut self.tombstone_digests)?;
+        visit(&mut self.receipts)
     }
-    for staged in state.staged.values() {
-        if let Some(embedding_key) = &staged.embedding_key {
-            for vector in staged.vectors.values() {
-                validate_vector_row(&staged.plan, embedding_key, vector)?;
-            }
-        }
-        let canonical = staged.tombstones.keys().cloned().collect::<BTreeSet<_>>();
-        if staged.tombstones.len() != canonical.len() {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "staged tombstones contain duplicate chunk ids".to_string(),
-            ));
-        }
-        for chunk_id in staged.tombstones.keys() {
-            if staged.vectors.contains_key(chunk_id) {
-                return Err(VectorGenerationStoreErrorV1::Storage(format!(
-                    "staged generation retains both vector and tombstone for {chunk_id}"
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_published_receipts(
@@ -1742,99 +1678,6 @@ fn validate_published_receipts(
         ));
     }
     Ok(())
-}
-
-impl VectorGenerationStateMachineV1 {
-    #[cfg(test)]
-    fn visit_vectors<'state>(&'state self, visit: &mut impl FnMut(&'state ProjectedChunkVectorV1)) {
-        for generation in self.published.generations.values() {
-            for vector in generation.vectors.values() {
-                visit(vector);
-            }
-        }
-        for staged in self.staged.values() {
-            for vector in staged.vectors.values() {
-                visit(vector);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    /// Refill the elided float payload of every vector row.
-    ///
-    /// Every write here goes through [`ExternalV1::elided_mut`]: the
-    /// externalized encoding does not carry floats, so restoring them leaves
-    /// the stored bytes — and therefore the collection address — unchanged.
-    fn visit_vectors_mut(&mut self, visit: &mut impl FnMut(&mut ProjectedChunkVectorV1)) {
-        for generation in self.published.generations.values_mut() {
-            for vector in generation.vectors.elided_mut().values_mut() {
-                visit(vector);
-            }
-        }
-        for staged in self.staged.values_mut() {
-            for vector in staged.vectors.elided_mut().values_mut() {
-                visit(vector);
-            }
-        }
-    }
-}
-
-/// Seal a hand-built fixture so its document can be serialized.
-///
-/// The store's own writers seal inside their mutation path; fixtures that
-/// build state directly go through here instead.
-#[cfg(test)]
-fn seal_test_state(
-    state: &mut VectorGenerationStateMachineV1,
-) -> BTreeMap<ContentDigest, Vec<Vec<u8>>> {
-    seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
-}
-
-/// Round-trip the state document the way a restart does, standing in for the
-/// slice and payload tables with the reference state still in memory.
-#[cfg(test)]
-fn restart_round_trip(
-    state: &mut VectorGenerationStateMachineV1,
-) -> VectorGenerationStateMachineV1 {
-    let sealed = seal_test_state(state);
-    let encoded = serde_json::to_string(&*state).expect("serialize vector state");
-    let mut restarted: VectorGenerationStateMachineV1 =
-        serde_json::from_str(&encoded).expect("deserialize vector state");
-    fill_from_sealed(&mut restarted, &sealed);
-    restarted.hydrate_from(state);
-    restarted
-}
-
-#[cfg(test)]
-fn fill_from_sealed(
-    state: &mut VectorGenerationStateMachineV1,
-    sealed: &BTreeMap<ContentDigest, Vec<Vec<u8>>>,
-) {
-    state
-        .visit_external_slots(&mut |slot| {
-            let Some(address) = slot.address().cloned() else {
-                return Ok(());
-            };
-            slot.fill(sealed.get(&address).expect("sealed collection"))
-        })
-        .expect("fill externalized collections");
-}
-
-#[cfg(test)]
-type ExternalSlotVisitV1<'visit> =
-    dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
-
-#[cfg(test)]
-impl PublishedVectorGenerationV1 {
-    fn visit_external_slots(
-        &mut self,
-        visit: &mut ExternalSlotVisitV1<'_>,
-    ) -> Result<(), VectorGenerationStoreErrorV1> {
-        visit(&mut self.vectors)?;
-        visit(&mut self.tombstones)?;
-        visit(&mut self.tombstone_digests)?;
-        visit(&mut self.receipts)
-    }
 }
 
 #[cfg(test)]

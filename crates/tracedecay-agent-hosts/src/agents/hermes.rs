@@ -173,32 +173,6 @@ fn hermes_registration_state(
     State::Current
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod registration_tests {
-    use super::*;
-
-    #[test]
-    fn registration_inventory_owns_existing_managed_skill_overlay_files() {
-        let home = tempfile::tempdir().unwrap();
-        let overlay = home
-            .path()
-            .join(".hermes/plugins/tracedecay/skills/agent-managed/example");
-        std::fs::create_dir_all(&overlay).unwrap();
-        let skill = overlay.join("SKILL.md");
-        std::fs::write(&skill, "managed").unwrap();
-
-        let paths = HermesIntegration
-            .host_component_registration_paths_checked(
-                &[super::super::host_bundle_v2::HostBundleComponentV1::Core],
-                home.path(),
-            )
-            .unwrap();
-
-        assert!(paths.contains(&skill));
-    }
-}
-
 fn hermes_home(home: &Path) -> PathBuf {
     home.join(".hermes")
 }
@@ -652,5 +626,31 @@ pub(super) fn remove_empty_dir(path: &Path) -> Result<bool> {
         Err(e) => Err(TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", path.display()),
         }),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn registration_inventory_owns_existing_managed_skill_overlay_files() {
+        let home = tempfile::tempdir().unwrap();
+        let overlay = home
+            .path()
+            .join(".hermes/plugins/tracedecay/skills/agent-managed/example");
+        std::fs::create_dir_all(&overlay).unwrap();
+        let skill = overlay.join("SKILL.md");
+        std::fs::write(&skill, "managed").unwrap();
+
+        let paths = HermesIntegration
+            .host_component_registration_paths_checked(
+                &[super::super::host_bundle_v2::HostBundleComponentV1::Core],
+                home.path(),
+            )
+            .unwrap();
+
+        assert!(paths.contains(&skill));
     }
 }

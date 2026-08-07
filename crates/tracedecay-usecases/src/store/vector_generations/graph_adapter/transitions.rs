@@ -30,7 +30,7 @@ use tracedecay_store::{
 
 use super::super::identity::generation_identity_digest;
 use super::super::{
-    MAX_STATE_CAS_RETRIES, PhysicalVectorBytePoolV1, PreparedVectorGenerationV1, PublishedStateV1,
+    PhysicalVectorBytePoolV1, PreparedVectorGenerationV1, PublishedStateV1,
     VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
     VectorGenerationPublicationV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
     VectorProjectionCheckpointV1, validate_plan,
@@ -128,7 +128,7 @@ impl GraphVectorGenerationStoreV1 {
             .verified_head(authority)
             .map_err(map_graph_error)?;
         let (source_scope, source_dependency) =
-            semantic_stage_source_identity(&source_scope, &binding, scope.source_dependency())?;
+            semantic_stage_source_identity(source_scope, binding, scope.source_dependency())?;
         SemanticVectorStagePlan::new(
             projection,
             SemanticVectorBuildId::new(build_id.0.as_str()).map_err(storage_error)?,
@@ -177,7 +177,7 @@ impl GraphVectorGenerationStoreV1 {
                 return Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id });
             }
         }
-        for _ in 0..MAX_STATE_CAS_RETRIES {
+        {
             authority.checkpoint().map_err(map_graph_error)?;
             self.refresh_snapshot(&authority)?;
             let snapshot = self.optional_snapshot()?;
@@ -391,9 +391,8 @@ impl GraphVectorGenerationStoreV1 {
                     publication: None,
                 },
             );
-            return Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id: result });
+            Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id: result })
         }
-        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
     }
 
     fn recover_published_generation(

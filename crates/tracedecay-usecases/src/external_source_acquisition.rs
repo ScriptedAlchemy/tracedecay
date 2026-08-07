@@ -200,6 +200,7 @@ impl SourceCanonicalRefetchPageV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum SourceCanonicalRefetchOutcomeV1 {
     Fetched(SourceCanonicalRefetchPageV1),
     Unavailable,

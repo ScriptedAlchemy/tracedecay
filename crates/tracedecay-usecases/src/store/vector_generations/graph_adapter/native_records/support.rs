@@ -141,12 +141,6 @@ pub(super) fn bytes_property<T: Serialize>(
         .map_err(storage_error)
 }
 
-pub(super) fn optional_bytes_property<T: Serialize>(
-    value: &Option<T>,
-) -> Result<GraphProperty, VectorGenerationStoreErrorV1> {
-    bytes_property(value)
-}
-
 pub(super) fn optional_digest_property(value: Option<&ManifestDigest>) -> GraphProperty {
     string_property(value.map(ManifestDigest::as_str).unwrap_or(""))
 }

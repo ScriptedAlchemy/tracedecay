@@ -9,10 +9,10 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphLabel, GraphProjectionTelemetryRequest,
     GraphProperty, GraphRelation, GraphVector, GraphWatermark,
     semantic_vector_native::{
-        BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_CATALOG_KIND, BUILD_ID,
-        BUILD_LABEL, BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_DIGEST, CHUNK_ID, CONTAINS_KIND,
-        CONTROL_ID, CONTROL_LABEL, EMBEDDING_KEY, EXPECTED_COUNT, GENERATION_CATALOG_KIND,
-        GENERATION_ID, GENERATION_LABEL, GENERATION_RECEIPT_LABEL, GENERATION_TOMBSTONE_LABEL,
+        BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
+        BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_DIGEST, CHUNK_ID, CONTAINS_KIND, CONTROL_ID,
+        CONTROL_LABEL, EMBEDDING_KEY, EXPECTED_COUNT, GENERATION_CATALOG_KIND, GENERATION_ID,
+        GENERATION_LABEL, GENERATION_RECEIPT_LABEL, GENERATION_TOMBSTONE_LABEL,
         GENERATION_VECTOR_LABEL, MANIFEST_DIGEST, ORDINAL, OUTPUT_DIGEST, PREPARED_DIGEST,
         PRIOR_DIGEST, RECEIPT, RECEIPT_COUNT, REQUEST_DIGEST, REVISION, ROW_COUNT,
         SOURCE_GENERATION, SOURCE_MANIFEST, STAGED_TOMBSTONE_LABEL, STAGED_VECTOR_LABEL,
@@ -22,9 +22,8 @@ use tracedecay_graph_db::{
 
 use super::super::identity::generation_identity_digest;
 use super::super::{
-    PreparedVectorGenerationV1, ProjectedChunkVectorV1, PublishedVectorGenerationV1,
-    VectorGenerationBuildIdV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
-    VectorProjectionCheckpointV1,
+    PreparedVectorGenerationV1, ProjectedChunkVectorV1, VectorGenerationBuildIdV1,
+    VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
 };
 use super::persistence::{generation_label, map_graph_error, storage_error, vector_metric};
 use super::snapshot::SemanticVectorVerifiedRead;
@@ -52,15 +51,10 @@ pub(super) fn generation_vector_entity_id(
 use support::{
     build_entity_id, build_id, bytes_property, content_digest, corrupt, digest, entity, entity_id,
     generation_entity_id, generation_id, graph_label, i64_property, insert_entity, insert_relation,
-    optional_bytes, optional_digest_property, optional_generation, parse_id, properties,
-    property_name, relation, relation_kind, require_labels, required_bytes, required_property,
-    required_string, required_u64, scoped_entity_id, string_property,
+    optional_bytes, optional_digest_property, optional_generation, parse_id, properties, relation,
+    relation_kind, require_labels, required_bytes, required_property, required_string,
+    required_u64, scoped_entity_id, string_property,
 };
-
-// Only the `#[cfg(test)]` legacy-state encoder still reads this helper, so the
-// import would be dead in the non-test build of the lib target.
-#[cfg(test)]
-use support::optional_bytes_property;
 
 pub(super) fn read_cataloged_generation_records(
     snapshot: &SemanticVectorVerifiedRead,
@@ -90,14 +84,7 @@ pub(super) fn read_cataloged_generation_records(
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct NativeGenerationMeasureV1 {
-    pub rows: u64,
-    pub vector_bytes: u64,
-}
-
-#[derive(Clone, Debug)]
 pub(super) struct NativeGraphStateV1 {
-    pub revision: u64,
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphRelation>,
 }
@@ -114,337 +101,6 @@ pub(super) struct NativeGenerationMetadataV1 {
     pub source_generation: CodeGenerationId,
     pub source_manifest_digest: ManifestDigest,
     pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
-}
-
-#[cfg(test)]
-fn encode_legacy_state_for_test(
-    state: &VectorGenerationStateMachineV1,
-    revision: u64,
-) -> Result<NativeGraphStateV1, VectorGenerationStoreErrorV1> {
-    let mut entities = BTreeMap::new();
-    let mut relations = BTreeMap::new();
-    insert_entity(
-        &mut entities,
-        entity(
-            CONTROL_ID,
-            [CONTROL_LABEL],
-            [(REVISION, i64_property(revision)?)],
-        )?,
-    )?;
-
-    for (build_id, build) in &state.staged {
-        let owner = build_entity_id(build_id)?;
-        insert_entity(
-            &mut entities,
-            entity(
-                owner.as_str(),
-                [BUILD_LABEL],
-                [
-                    (BUILD_ID, string_property(build_id.0.as_str())),
-                    (
-                        TARGET_PROJECTION,
-                        bytes_property(&build.plan.target_projection_key)?,
-                    ),
-                    (
-                        SOURCE_GENERATION,
-                        string_property(&build.plan.source_generation.to_string()),
-                    ),
-                    (
-                        SOURCE_MANIFEST,
-                        string_property(build.plan.source_manifest_digest.as_str()),
-                    ),
-                    (
-                        BASE_GENERATION,
-                        optional_digest_property(
-                            build.plan.base_generation.as_ref().map(|id| id.as_digest()),
-                        ),
-                    ),
-                    (
-                        EMBEDDING_KEY,
-                        optional_bytes_property(&build.embedding_key)?,
-                    ),
-                    (CHECKPOINT, bytes_property(&build.checkpoint)?),
-                    (
-                        EXPECTED_COUNT,
-                        i64_property(build.plan.expected_chunk_ids.len())?,
-                    ),
-                    (VECTOR_COUNT, i64_property(build.vectors.len())?),
-                    (TOMBSTONE_COUNT, i64_property(build.tombstones.len())?),
-                    (BATCH_COUNT, i64_property(build.batches.len())?),
-                ],
-            )?,
-        )?;
-        insert_relation(
-            &mut relations,
-            relation(
-                &entity_id(CONTROL_ID)?,
-                &owner,
-                BUILD_CATALOG_KIND,
-                "build-catalog",
-            )?,
-        )?;
-        if let Some(base) = &build.plan.base_generation {
-            insert_relation(
-                &mut relations,
-                relation(
-                    &owner,
-                    &generation_entity_id(base)?,
-                    BASE_KIND,
-                    "build-base",
-                )?,
-            )?;
-        }
-        for chunk_id in build.plan.expected_chunk_ids.iter() {
-            let child =
-                scoped_entity_id("build-member", build_id.0.as_str(), &chunk_id.to_string())?;
-            insert_entity(
-                &mut entities,
-                entity(
-                    child.as_str(),
-                    [BUILD_MEMBER_LABEL],
-                    [
-                        (BUILD_ID, string_property(build_id.0.as_str())),
-                        (CHUNK_ID, string_property(&chunk_id.to_string())),
-                    ],
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "member")?,
-            )?;
-        }
-        for vector in build.vectors.values() {
-            let child = scoped_entity_id(
-                "staged-vector",
-                build_id.0.as_str(),
-                &vector.chunk_id.to_string(),
-            )?;
-            insert_entity(
-                &mut entities,
-                vector_entity(
-                    child.as_str(),
-                    STAGED_VECTOR_LABEL,
-                    BUILD_ID,
-                    build_id.0.as_str(),
-                    vector,
-                    build
-                        .embedding_key
-                        .as_ref()
-                        .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?,
-                    None,
-                    None,
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "vector")?,
-            )?;
-        }
-        for (chunk_id, prior_digest) in build.tombstones.iter() {
-            let child = scoped_entity_id(
-                "staged-tombstone",
-                build_id.0.as_str(),
-                &chunk_id.to_string(),
-            )?;
-            insert_entity(
-                &mut entities,
-                entity(
-                    child.as_str(),
-                    [STAGED_TOMBSTONE_LABEL],
-                    [
-                        (BUILD_ID, string_property(build_id.0.as_str())),
-                        (CHUNK_ID, string_property(&chunk_id.to_string())),
-                        (PRIOR_DIGEST, string_property(prior_digest.as_str())),
-                    ],
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "tombstone")?,
-            )?;
-        }
-        for (ordinal, batch) in build.batches.iter().enumerate() {
-            let child = scoped_entity_id(
-                "build-batch",
-                build_id.0.as_str(),
-                batch.request_digest.as_str(),
-            )?;
-            insert_entity(
-                &mut entities,
-                entity(
-                    child.as_str(),
-                    [BUILD_BATCH_LABEL],
-                    [
-                        (BUILD_ID, string_property(build_id.0.as_str())),
-                        (
-                            REQUEST_DIGEST,
-                            string_property(batch.request_digest.as_str()),
-                        ),
-                        (
-                            PREPARED_DIGEST,
-                            string_property(batch.prepared_digest.as_str()),
-                        ),
-                        (RECEIPT, bytes_property(&batch.receipt)?),
-                        (ORDINAL, i64_property(ordinal)?),
-                    ],
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "batch")?,
-            )?;
-        }
-    }
-
-    for (generation_id, generation) in &state.published.generations {
-        let owner = generation_entity_id(generation_id)?;
-        let measure = generation_measure(generation)?;
-        insert_entity(
-            &mut entities,
-            entity(
-                owner.as_str(),
-                [GENERATION_LABEL],
-                [
-                    (
-                        GENERATION_ID,
-                        string_property(generation_id.as_digest().as_str()),
-                    ),
-                    (
-                        TARGET_PROJECTION,
-                        bytes_property(&generation.projection_key)?,
-                    ),
-                    (
-                        SOURCE_GENERATION,
-                        string_property(&generation.source_generation.to_string()),
-                    ),
-                    (
-                        SOURCE_MANIFEST,
-                        string_property(generation.source_manifest_digest.as_str()),
-                    ),
-                    (
-                        BASE_GENERATION,
-                        optional_digest_property(
-                            generation.base_generation.as_ref().map(|id| id.as_digest()),
-                        ),
-                    ),
-                    (EMBEDDING_KEY, bytes_property(&generation.embedding_key)?),
-                    (CHECKPOINT, bytes_property(&generation.checkpoint)?),
-                    (
-                        MANIFEST_DIGEST,
-                        string_property(generation.manifest_digest.as_str()),
-                    ),
-                    (ROW_COUNT, i64_property(measure.rows)?),
-                    (VECTOR_BYTES, i64_property(measure.vector_bytes)?),
-                    (
-                        TOMBSTONE_COUNT,
-                        i64_property(generation.tombstone_digests.len())?,
-                    ),
-                    (RECEIPT_COUNT, i64_property(generation.receipts.len())?),
-                ],
-            )?,
-        )?;
-        insert_relation(
-            &mut relations,
-            relation(
-                &entity_id(CONTROL_ID)?,
-                &owner,
-                GENERATION_CATALOG_KIND,
-                "generation-catalog",
-            )?,
-        )?;
-        if let Some(base) = &generation.base_generation {
-            insert_relation(
-                &mut relations,
-                relation(
-                    &owner,
-                    &generation_entity_id(base)?,
-                    BASE_KIND,
-                    "generation-base",
-                )?,
-            )?;
-        }
-        for vector in generation.vectors.values() {
-            let child = scoped_entity_id(
-                "generation-vector",
-                generation_id.as_digest().as_str(),
-                &vector.chunk_id.to_string(),
-            )?;
-            insert_entity(
-                &mut entities,
-                vector_entity(
-                    child.as_str(),
-                    GENERATION_VECTOR_LABEL,
-                    GENERATION_ID,
-                    generation_id.as_digest().as_str(),
-                    vector,
-                    &generation.embedding_key,
-                    Some(generation_label(generation_id)?),
-                    Some(generation_id),
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "vector")?,
-            )?;
-        }
-        for (chunk_id, prior_digest) in generation.tombstone_digests.iter() {
-            let child = scoped_entity_id(
-                "generation-tombstone",
-                generation_id.as_digest().as_str(),
-                &chunk_id.to_string(),
-            )?;
-            insert_entity(
-                &mut entities,
-                entity(
-                    child.as_str(),
-                    [GENERATION_TOMBSTONE_LABEL],
-                    [
-                        (
-                            GENERATION_ID,
-                            string_property(generation_id.as_digest().as_str()),
-                        ),
-                        (CHUNK_ID, string_property(&chunk_id.to_string())),
-                        (PRIOR_DIGEST, string_property(prior_digest.as_str())),
-                    ],
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "tombstone")?,
-            )?;
-        }
-        for (ordinal, receipt) in generation.receipts.iter().enumerate() {
-            let child = scoped_entity_id(
-                "generation-receipt",
-                generation_id.as_digest().as_str(),
-                &ordinal.to_string(),
-            )?;
-            insert_entity(
-                &mut entities,
-                entity(
-                    child.as_str(),
-                    [GENERATION_RECEIPT_LABEL],
-                    [
-                        (
-                            GENERATION_ID,
-                            string_property(generation_id.as_digest().as_str()),
-                        ),
-                        (ORDINAL, i64_property(ordinal)?),
-                        (RECEIPT, bytes_property(receipt)?),
-                    ],
-                )?,
-            )?;
-            insert_relation(
-                &mut relations,
-                relation(&owner, &child, CONTAINS_KIND, "receipt")?,
-            )?;
-        }
-    }
-    Ok(NativeGraphStateV1 {
-        revision,
-        entities: entities.into_values().collect(),
-        relations: relations.into_values().collect(),
-    })
 }
 
 /// Encode one bounded projector batch directly into its immutable semantic
@@ -638,7 +294,6 @@ pub(super) fn encode_generation_batch_delta(
     )?;
 
     Ok(NativeGraphStateV1 {
-        revision,
         entities: entities.into_values().collect(),
         relations: relations.into_values().collect(),
     })
@@ -718,31 +373,7 @@ pub(super) fn read_generation_metadata(
         .transpose()
 }
 
-pub(super) fn read_control_entity(
-    snapshot: &SemanticVectorVerifiedRead,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<GraphEntity, VectorGenerationStoreErrorV1> {
-    snapshot
-        .entity(
-            &snapshot.projection().namespace,
-            &entity_id(CONTROL_ID)?,
-            cancellation,
-        )
-        .map_err(map_graph_error)?
-        .ok_or_else(|| corrupt("semantic vector control entity is missing"))
-}
-
-pub(super) fn set_control_revision(
-    control: &mut GraphEntity,
-    revision: u64,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    require_labels(control, [CONTROL_LABEL])?;
-    control
-        .properties
-        .insert(property_name(REVISION)?, i64_property(revision)?);
-    Ok(())
-}
-
+#[allow(clippy::too_many_arguments)]
 fn vector_entity(
     identity: &str,
     label: &str,
@@ -822,23 +453,6 @@ fn decode_vector(
             output_digest: content_digest(required_string(row, OUTPUT_DIGEST)?)?,
         },
     ))
-}
-
-fn generation_measure(
-    generation: &PublishedVectorGenerationV1,
-) -> Result<NativeGenerationMeasureV1, VectorGenerationStoreErrorV1> {
-    let rows = u64::try_from(generation.vectors.len()).map_err(storage_error)?;
-    let vector_bytes = generation.vectors.values().try_fold(0_u64, |total, row| {
-        total
-            .checked_add(
-                u64::try_from(row.values.len())
-                    .map_err(storage_error)?
-                    .checked_mul(4)
-                    .ok_or_else(|| corrupt("semantic vector byte count overflowed"))?,
-            )
-            .ok_or_else(|| corrupt("semantic vector byte count overflowed"))
-    })?;
-    Ok(NativeGenerationMeasureV1 { rows, vector_bytes })
 }
 
 fn rows_with_label<'a>(

@@ -404,9 +404,7 @@ where
         &self,
         linked: &SemanticLinkedTransitionV1,
     ) -> Option<(ActivationObservationTicketV1, bool)> {
-        let Some(observer) = self.activation_observer.as_ref() else {
-            return None;
-        };
+        let observer = self.activation_observer.as_ref()?;
         let ticket = self.reserve_observation(
             linked.epoch,
             &linked.audit.result_revision,

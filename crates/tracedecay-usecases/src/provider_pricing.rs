@@ -286,9 +286,9 @@ mod tests {
         let table = load_table();
         assert!(table.available);
         assert!(table.revision.starts_with("sha256:"));
-        assert!(resolve_model_price(&table, "claude", "claude-sonnet-4-6-20260801").is_some());
-        assert!(resolve_model_price(&table, "codex", "gpt-5.3-codex").is_some());
-        assert!(resolve_model_price(&table, "claude", "openai/gpt-5.3-codex").is_none());
+        assert!(resolve_model_price(table, "claude", "claude-sonnet-4-6-20260801").is_some());
+        assert!(resolve_model_price(table, "codex", "gpt-5.3-codex").is_some());
+        assert!(resolve_model_price(table, "claude", "openai/gpt-5.3-codex").is_none());
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
         let table = load_table();
         assert_eq!(
             cost_of_usage(
-                &table,
+                table,
                 "unknown-provider",
                 "unknown-model",
                 1_000,

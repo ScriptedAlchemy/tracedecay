@@ -173,13 +173,11 @@ struct JoinedDiff {
 }
 
 struct RepositoryReadSnapshot {
-    canonical_common_dir: PathBuf,
     git_dir: PathBuf,
     object_format: GitObjectFormatV1,
     head: GitHeadStateV1,
     head_degradations: BTreeSet<GitDegradationV1>,
     degradations: BTreeSet<GitDegradationV1>,
-    operation: GitOperationStateV1,
     index_has_unmerged: bool,
 }
 
@@ -481,10 +479,6 @@ impl NativeGitIntelligence {
         repo: &gix::Repository,
     ) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
         let git_dir = repo.git_dir().to_path_buf();
-        let canonical_common_dir = repo
-            .common_dir()
-            .canonicalize()
-            .unwrap_or_else(|_| repo.common_dir().to_path_buf());
         let (head, head_degradations) = Self::head_state_from_repository(repo)?;
         let mut degradations = BTreeSet::new();
 
@@ -523,13 +517,11 @@ impl NativeGitIntelligence {
                 .any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
         });
         Ok(RepositoryReadSnapshot {
-            canonical_common_dir,
             git_dir,
             object_format: GitObjectFormatV1::Sha1,
             head,
             head_degradations,
             degradations,
-            operation,
             index_has_unmerged,
         })
     }
@@ -542,16 +534,6 @@ impl NativeGitIntelligence {
             self.stdout("rev-parse", &["rev-parse", "--absolute-git-dir"])?
                 .trim(),
         );
-        let common_dir_raw = PathBuf::from(
-            self.stdout("rev-parse", &["rev-parse", "--git-common-dir"])?
-                .trim(),
-        );
-        let common_dir = if common_dir_raw.is_absolute() {
-            common_dir_raw
-        } else {
-            self.repo_root.join(common_dir_raw)
-        };
-        let canonical_common_dir = common_dir.canonicalize().unwrap_or(common_dir);
         let object_format = match self
             .stdout("rev-parse", &["rev-parse", "--show-object-format"])?
             .trim()
@@ -598,13 +580,11 @@ impl NativeGitIntelligence {
             .stdout
             .is_empty();
         Ok(RepositoryReadSnapshot {
-            canonical_common_dir,
             git_dir,
             object_format,
             head,
             head_degradations,
             degradations,
-            operation,
             index_has_unmerged,
         })
     }

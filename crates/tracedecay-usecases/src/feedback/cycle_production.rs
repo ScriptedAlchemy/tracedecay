@@ -542,6 +542,7 @@ fn feedback_scope_for_project(
     Ok(feedback)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn managed_lsp_candidate(
     provider: &MountedLspProvider,
     availability: AnalyzerAvailabilityV1,

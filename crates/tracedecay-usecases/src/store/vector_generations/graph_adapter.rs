@@ -64,6 +64,7 @@ pub struct GraphVectorGenerationStoreV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum VectorGenerationBeginOutcomeV1 {
     ReplayFromStart {
         build_id: VectorGenerationBuildIdV1,

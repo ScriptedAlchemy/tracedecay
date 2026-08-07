@@ -1612,6 +1612,7 @@ pub struct PreparedSemanticEvaluationGenerationV1 {
 }
 
 impl PreparedSemanticEvaluationGenerationV1 {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         code: CodeIndexPublishedGenerationV1,
         prepared: PreparedSemanticEvaluationProjectionV1,

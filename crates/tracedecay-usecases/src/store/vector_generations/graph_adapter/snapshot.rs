@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
-    GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionPage,
-    GraphProjectionReadRequest, GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
-    GraphRelation, GraphRelationId, GraphRelationRef, TraversalRequest, TraversalResult,
-    TraversalVisit, VectorSearchRequest, VectorSearchResult, VerifiedGraphSnapshot,
+    GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionTelemetry,
+    GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
+    TraversalRequest, TraversalResult, TraversalVisit, VectorSearchRequest, VectorSearchResult,
+    VerifiedGraphSnapshot,
 };
 
 /// Exact verified read authority for one semantic-vector projection generation.
@@ -19,10 +19,6 @@ pub(super) type SemanticVectorVerifiedReadV1 = SemanticVectorVerifiedRead;
 impl SemanticVectorVerifiedRead {
     pub(super) fn new(inner: VerifiedGraphSnapshot) -> Self {
         Self { inner }
-    }
-
-    pub(super) fn verified(&self) -> &VerifiedGraphSnapshot {
-        &self.inner
     }
 
     pub(super) fn projection(&self) -> &tracedecay_graph_db::GraphProjectionIdentity {
@@ -55,14 +51,6 @@ impl SemanticVectorVerifiedRead {
                 cancellation,
             )
             .and_then(|relation| relation.map(storage_relation).transpose())
-    }
-
-    pub(super) fn read_projection(
-        &self,
-        request: GraphProjectionReadRequest,
-    ) -> Result<GraphProjectionPage, GraphDbError> {
-        self.require_projection(&request.namespace, &request.projection)?;
-        self.inner.read_projection(request)
     }
 
     pub(super) fn projection_telemetry(

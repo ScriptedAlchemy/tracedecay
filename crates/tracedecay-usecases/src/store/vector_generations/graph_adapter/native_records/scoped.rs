@@ -40,7 +40,6 @@ pub(crate) struct ScopedGenerationRecordsV1 {
     pub generation: PublishedVectorGenerationV1,
     pub vector_bytes: u64,
     pub entities: BTreeMap<GraphEntityId, GraphEntity>,
-    pub relations: BTreeMap<GraphRelationId, GraphRelation>,
 }
 
 pub(crate) fn read_build_records(
@@ -415,10 +414,10 @@ pub(crate) fn read_generation_records(
         generation: generation_record,
         vector_bytes: measured_vector_bytes,
         entities,
-        relations,
     }))
 }
 
+#[allow(clippy::type_complexity)]
 fn read_scope(
     snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     owner: GraphEntityId,

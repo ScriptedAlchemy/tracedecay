@@ -11,7 +11,7 @@ pub(crate) fn rendered_bundle_content_digest(
     files: &[(&str, String)],
 ) -> Result<([u8; 32], Vec<String>)> {
     let mut files = files.iter().collect::<Vec<_>>();
-    files.sort_by(|(left, _), (right, _)| left.cmp(right));
+    files.sort_by_key(|(left, _)| *left);
     let mut digest = Sha256::new();
     digest.update(DIGEST_DOMAIN);
     let mut relatives = Vec::with_capacity(files.len());

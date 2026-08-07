@@ -22,8 +22,7 @@ use super::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    ConfigurationSettlementAuthorityV1, DirectConfigurationMutation, ResolvedSetting,
-    SettingSummary, WriteOnlyCredentialMutation,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
 };
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
@@ -674,6 +673,7 @@ mod tests {
 
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
+    use crate::configuration::types::ConfigurationSettlementAuthorityV1;
     use tracedecay_domain::configuration::{
         AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
         ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,

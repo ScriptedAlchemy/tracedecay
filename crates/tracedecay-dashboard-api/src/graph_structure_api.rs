@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::DashboardState;
-use super::graph_service;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardVersionV1, scope_from_state,
@@ -27,12 +26,6 @@ use super::read_model::{
 use super::util::{JsonPath, JsonQuery, query_rows};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
-use tracedecay_application::{
-    DashboardGraphCallChainV1, DashboardGraphNodeV1 as ApplicationGraphNodeV1,
-    DashboardGraphReadErrorV1, DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1,
-    DashboardGraphStrataV1 as ApplicationGraphStrataV1,
-    DashboardGraphTestMapV1 as ApplicationGraphTestMapV1,
-};
 use tracedecay_domain::code_intelligence::{Edge, Node};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::memory::entities::normalize_entity;
@@ -92,60 +85,6 @@ impl From<&Node> for NodeRefV1 {
             start_line: node.start_line,
         }
     }
-}
-
-fn node_ref_from_application(node: &ApplicationGraphNodeV1) -> Result<NodeRefV1, String> {
-    let start_line = node
-        .start_line
-        .ok_or_else(|| "verified graph node has no start line".to_owned())
-        .and_then(|line| {
-            u32::try_from(line)
-                .map_err(|_| "verified graph node start line is out of range".to_owned())
-        })?;
-    Ok(NodeRefV1 {
-        id: node.id.clone(),
-        name: node
-            .name
-            .clone()
-            .ok_or_else(|| "verified graph node has no name".to_owned())?,
-        qualified_name: node
-            .qualified_name
-            .clone()
-            .ok_or_else(|| "verified graph node has no qualified name".to_owned())?,
-        kind: node.kind.clone(),
-        file_path: node
-            .file_path
-            .clone()
-            .ok_or_else(|| "verified graph node has no file path".to_owned())?,
-        start_line,
-    })
-}
-
-fn node_ref_from_wire(node: &graph_service::GraphNodeV1) -> Result<NodeRefV1, String> {
-    let start_line = node
-        .start_line()
-        .ok_or_else(|| "verified graph node has no start line".to_owned())
-        .and_then(|line| {
-            u32::try_from(line)
-                .map_err(|_| "verified graph node start line is out of range".to_owned())
-        })?;
-    Ok(NodeRefV1 {
-        id: node.id().to_owned(),
-        name: node
-            .name()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "verified graph node has no name".to_owned())?,
-        qualified_name: node
-            .qualified_name()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "verified graph node has no qualified name".to_owned())?,
-        kind: node.kind().to_owned(),
-        file_path: node
-            .file_path()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "verified graph node has no file path".to_owned())?,
-        start_line,
-    })
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

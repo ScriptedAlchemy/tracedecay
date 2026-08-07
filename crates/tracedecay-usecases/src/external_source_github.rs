@@ -269,16 +269,16 @@ where
         else {
             return SourceAcquisitionAuthorizationOutcomeV1::Unauthorized;
         };
-        if &snapshot.scope != &self.source_access.scope
-            || &snapshot.requester != &self.source_access.requester
-            || &snapshot.binding != &self.source_access.binding
-            || &snapshot.configuration_revision != &self.source_access.configuration_revision
-            || &snapshot.configuration_digest != &self.source_access.configuration_digest
-            || &snapshot.configuration_provenance_digest
-                != &self.source_access.configuration_provenance_digest
-            || &snapshot.effective_capabilities != &self.source_access.effective_capabilities
+        if snapshot.scope != self.source_access.scope
+            || snapshot.requester != self.source_access.requester
+            || snapshot.binding != self.source_access.binding
+            || snapshot.configuration_revision != self.source_access.configuration_revision
+            || snapshot.configuration_digest != self.source_access.configuration_digest
+            || snapshot.configuration_provenance_digest
+                != self.source_access.configuration_provenance_digest
+            || snapshot.effective_capabilities != self.source_access.effective_capabilities
             || self.context.grant().revision != self.grant.configuration_revision
-            || &self.context.grant().digest != &self.request_grant_digest
+            || self.context.grant().digest != self.request_grant_digest
         {
             return SourceAcquisitionAuthorizationOutcomeV1::Unauthorized;
         }

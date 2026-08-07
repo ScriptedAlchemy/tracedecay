@@ -103,15 +103,6 @@ pub fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// Escapes `%`/`_`/`\` for a `LIKE ? ESCAPE '\'` pattern.
-pub fn like_pattern(query: &str) -> String {
-    let escaped = query
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
-}
-
 /// JSON error body matching `FastAPI`'s `HTTPException` shape, which the UIs'
 /// error paths already understand.
 pub fn http_detail(detail: &str) -> Value {
@@ -163,11 +154,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn like_pattern_escapes_wildcards() {
-        assert_eq!(like_pattern("a%b_c"), "%a\\%b\\_c%");
-    }
 
     #[test]
     fn coerce_limit_clamps() {

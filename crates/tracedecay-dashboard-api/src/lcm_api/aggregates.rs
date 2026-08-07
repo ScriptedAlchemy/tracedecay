@@ -385,10 +385,7 @@ pub(super) fn timeline_view_coverage(
         .map(|timestamp| utc_bucket(timestamp, *bucket))
         .collect::<BTreeSet<_>>();
     let eligible = saturating_usize_to_u64(buckets.len());
-    let requested = match u64::try_from((*limit).max(0)) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    };
+    let requested = u64::try_from((*limit).max(0)).unwrap_or(u64::MAX);
     let examined = eligible.min(requested);
     Some((eligible, examined, eligible > examined))
 }
@@ -400,15 +397,13 @@ pub(super) fn returned_count(page: &DashboardLcmCanonicalPageV1) -> u64 {
             .len()
             .saturating_add(matches.summary_nodes.len())
     });
-    match u64::try_from(
+    u64::try_from(
         page.messages
             .len()
             .saturating_add(page.summary_nodes.len())
             .saturating_add(matches),
-    ) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn max_optional_timestamp(left: Option<i64>, right: Option<i64>) -> Option<i64> {
@@ -487,17 +482,11 @@ fn summary_json(summary: DashboardLcmCanonicalSummaryV1) -> serde_json::Value {
 }
 
 fn saturating_usize_to_i64(value: usize) -> i64 {
-    match i64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => i64::MAX,
-    }
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn saturating_usize_to_u64(value: usize) -> u64 {
-    match u64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 #[cfg(test)]
 mod tests {

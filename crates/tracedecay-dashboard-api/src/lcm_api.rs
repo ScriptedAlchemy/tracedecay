@@ -428,11 +428,7 @@ pub async fn search(
         &state,
         DashboardLcmReadRequestV1::Search {
             query: params.q,
-            limit: match params.limit {
-                Some(limit) => limit,
-                None => 50,
-            }
-            .clamp(1, 500),
+            limit: params.limit.unwrap_or(50).clamp(1, 500),
             cursor: params.cursor,
             role: trimmed_nonempty(params.role),
             source: trimmed_nonempty(params.source),
@@ -460,11 +456,7 @@ pub async fn session(
         &state,
         DashboardLcmReadRequestV1::Session {
             session_id,
-            limit: match params.limit {
-                Some(limit) => limit,
-                None => 100,
-            }
-            .clamp(1, 500),
+            limit: params.limit.unwrap_or(100).clamp(1, 500),
             cursor: params.cursor,
         },
     )

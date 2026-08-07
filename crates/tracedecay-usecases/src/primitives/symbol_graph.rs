@@ -60,6 +60,7 @@ pub trait SymbolGraphCursorPort: Send + Sync {
         observed_at: UtcMicros,
     ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim>;
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_page<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -700,6 +701,7 @@ async fn claim_generation(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_or_failed<T: Send>(
     cursors: &dyn SymbolGraphCursorPort,
     context: SymbolGraphPortContext<'_>,

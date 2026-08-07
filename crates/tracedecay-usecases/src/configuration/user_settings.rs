@@ -232,9 +232,9 @@ pub fn parse_duration_millis(value: &str) -> Option<u64> {
 }
 
 fn format_duration_millis(millis: u64) -> String {
-    if millis % 60_000 == 0 {
+    if millis.is_multiple_of(60_000) {
         format!("{}m", millis / 60_000)
-    } else if millis % 1_000 == 0 {
+    } else if millis.is_multiple_of(1_000) {
         format!("{}s", millis / 1_000)
     } else {
         format!("{millis}ms")

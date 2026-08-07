@@ -49,32 +49,6 @@ pub(super) struct GraphNodeV1 {
     edge_line: Option<i64>,
 }
 
-impl GraphNodeV1 {
-    pub(super) fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub(super) fn kind(&self) -> &str {
-        &self.kind
-    }
-
-    pub(super) fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    pub(super) fn qualified_name(&self) -> Option<&str> {
-        self.qualified_name.as_deref()
-    }
-
-    pub(super) fn file_path(&self) -> Option<&str> {
-        self.file_path.as_deref()
-    }
-
-    pub(super) fn start_line(&self) -> Option<i64> {
-        self.start_line
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct GraphEdgeV1 {
     source: String,
