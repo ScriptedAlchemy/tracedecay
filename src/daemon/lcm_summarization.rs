@@ -51,20 +51,6 @@ async fn generate_provider_summary(
                 ),
             })
         }
-        "cursor" => {
-            let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
-            config.timeout = config.timeout.min(timeout);
-            let text = tokio::task::spawn_blocking(move || {
-                crate::sessions::cursor_agent::summarize_with_cursor_agent(&request, &config)
-            })
-            .await
-            .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
-            .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?;
-            Ok(AuthoritativeSummary {
-                text,
-                route: "cursor_agent".to_string(),
-            })
-        }
         _ => Err(SummaryResolutionError::Unavailable(
             "authoritative_summarizer_unavailable",
         )),

@@ -637,6 +637,8 @@ pub enum LcmMaintenanceDebt {
 pub struct LcmPreflightRequest {
     pub provider: String,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<serde_json::Value>,
     pub current_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<i64>,

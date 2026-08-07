@@ -142,30 +142,21 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
         LcmExpandRequest {
             provider: "codex".to_string(),
             session_id: "session-a".to_string(),
-            target: LcmExpandTarget::SummaryNode {
-                node_id: "summary-parent".to_string(),
-            },
+            target: LcmExpandTarget::RawMessage { store_id: 12 },
             content_slice: None,
             source_offset: 0,
             source_limit: None,
         },
-        "canonical parent summary",
+        "",
+        &[],
     )
     .await
-    .expect("metadata-only summary expansion");
-    let raw_source = expansion
-        .summary_sources
-        .iter()
-        .find(|source| matches!(source.source_ref, LcmSourceRef::RawMessage { .. }))
-        .expect("raw summary source");
-    let raw_source = serde_json::to_value(raw_source).expect("serializable raw source");
+    .expect("metadata-only raw message expansion");
+    let rendered = serde_json::to_value(&expansion).expect("serializable expansion");
 
     assert!(
-        raw_source["raw_message"].is_null(),
-        "metadata-only read fabricated a full raw message: {raw_source}"
+        rendered["raw_message"].is_null(),
+        "metadata-only read fabricated a full raw message: {rendered}"
     );
-    assert_eq!(
-        raw_source["raw_message_metadata"]["message_id"],
-        "message-b"
-    );
+    assert_eq!(rendered["raw_message_metadata"]["message_id"], "message-b");
 }

@@ -336,12 +336,9 @@ fn lcm_doctor_exposes_diagnostics_only() {
     let properties = doctor.input_schema["properties"]
         .as_object()
         .expect("LCM Doctor properties");
-    let modes = properties["mode"]["enum"]
-        .as_array()
-        .expect("LCM Doctor modes");
 
-    assert_eq!(modes, &[json!("diagnose"), json!("retention")]);
     for removed in [
+        "mode",
         "apply",
         "doctor_clean_apply_enabled",
         "lcm_gc_apply_enabled",

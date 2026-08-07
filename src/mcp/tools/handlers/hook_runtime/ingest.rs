@@ -184,15 +184,7 @@ pub(super) async fn codex_compact(
     else {
         return Ok(compaction_authority_unavailable("codex_compact"));
     };
-    let reason = compaction_unavailable_reason(&response.outcome);
-    Ok(json!({
-        "action": "codex_compact",
-        "status": "unavailable",
-        "reason": reason,
-        "authority_outcome": response.outcome,
-        "committed_state": response.receipt.committed_state,
-        "messages_upserted": 0,
-    }))
+    Ok(compaction_response_json("codex_compact", &response))
 }
 
 pub(super) async fn claude_compact(
@@ -253,17 +245,7 @@ pub(super) async fn cursor_compact(
     else {
         return Ok(compaction_authority_unavailable("cursor_compact"));
     };
-    let reason = compaction_unavailable_reason(&response.outcome);
-    Ok(json!({
-        "action": "cursor_compact",
-        "status": "unavailable",
-        "reason": reason,
-        "authority_outcome": response.outcome,
-        "committed_state": response.receipt.committed_state,
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-        "messages_upserted": 0,
-    }))
+    Ok(compaction_response_json("cursor_compact", &response))
 }
 
 fn compaction_authority_unavailable(action: &str) -> Value {
@@ -273,6 +255,42 @@ fn compaction_authority_unavailable(action: &str) -> Value {
         "reason": "lcm_daemon_authority_unavailable",
         "summary_nodes_created": 0,
         "summary_node_ids": [],
+    })
+}
+
+fn compaction_response_json(
+    action: &str,
+    response: &tracedecay_usecases::session::lcm::LcmAuthorityResponse,
+) -> Value {
+    if let (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Compaction(compression))) =
+        (&response.outcome, &response.payload)
+    {
+        return json!({
+            "action": action,
+            "status": compression.status,
+            "reason": compression.reason,
+            "summary_nodes_created": compression.summary_nodes_created,
+            "summary_node_ids": compression
+                .summary_nodes
+                .iter()
+                .map(|node| node.node_id.clone())
+                .collect::<Vec<_>>(),
+            "relation_projection_status": compression.relation_projection_status,
+            "retry_status": compression.retry_status,
+            "authority_outcome": response.outcome,
+            "committed_state": response.receipt.committed_state,
+            "messages_upserted": 0,
+        });
+    }
+    json!({
+        "action": action,
+        "status": "unavailable",
+        "reason": compaction_unavailable_reason(&response.outcome),
+        "authority_outcome": response.outcome,
+        "committed_state": response.receipt.committed_state,
+        "summary_nodes_created": 0,
+        "summary_node_ids": [],
+        "messages_upserted": 0,
     })
 }
 
@@ -330,7 +348,6 @@ fn pressure_only_command(
             current_tokens,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
             threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -577,7 +594,6 @@ async fn ingest_hermes_callback_turn(
             current_tokens: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
             threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,

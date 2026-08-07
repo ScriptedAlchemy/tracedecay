@@ -11,7 +11,9 @@ use tracedecay_sessions::runtime::{
         LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
         LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
         LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
-        LcmSummaryExpansion, compression, dag, gc, payload, query, raw,
+        LcmSummaryExpansion, compression,
+        dag::{self, LcmSummaryPublicationPort},
+        gc, payload, query, raw,
         types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
     },
 };

@@ -50,6 +50,39 @@ impl LcmDaemonStore for FakeStore {
         })
     }
 
+    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(LcmAuthorityOperation::Compact);
+        }
+        Box::pin(async move {
+            Ok(LcmCompressionResponse {
+                status: "skipped".to_owned(),
+                reason: "below_threshold".to_owned(),
+                summary_nodes_created: 0,
+                summary_nodes: Vec::new(),
+                replay_messages: Vec::new(),
+                replay_token_estimate: 0,
+                replay_over_budget: false,
+                compression_attempts: 0,
+                fallback_used: false,
+                context_recovery_hint: None,
+                retry_status: None,
+                relation_projection_status:
+                    tracedecay_sessions::runtime::lcm::LcmRelationProjectionStatus::NotApplicable,
+                frontier: tracedecay_sessions::runtime::lcm::LcmLifecycleState {
+                    provider: request.provider,
+                    conversation_id: request.session_id.clone(),
+                    current_session_id: request.session_id,
+                    current_frontier_store_id: None,
+                    last_finalized_session_id: None,
+                    last_finalized_frontier_store_id: None,
+                    maintenance_debt: Vec::new(),
+                },
+                summary_request: None,
+            })
+        })
+    }
+
     fn status(&self, _query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(LcmAuthorityOperation::Status);

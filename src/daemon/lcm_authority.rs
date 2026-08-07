@@ -12,7 +12,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_sessions::runtime::lcm::{
-    LcmError, LcmGcConfig, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
+    LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmGcConfig, LcmPreflightRequest,
+    LcmPreflightResponse, LcmStatus, LcmSummarizerMode,
 };
 use tracedecay_usecases::context::{
     CancellationToken, RequestInterruption, application_observed_at,
@@ -36,6 +37,7 @@ type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, LcmError>> + Sen
 
 trait LcmDaemonStore: Send + Sync {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse>;
+    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse>;
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus>;
     fn doctor(&self, query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value>;
 }
@@ -53,6 +55,15 @@ impl RegisteredLcmDaemonStore {
 impl LcmDaemonStore for RegisteredLcmDaemonStore {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
         Box::pin(self.database.lcm_preflight(request))
+    }
+
+    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
+        let database = Arc::clone(&self.database);
+        Box::pin(async move {
+            super::lcm_effects::DaemonLcmEffectService::new(database, None, None)
+                .compress(request)
+                .await
+        })
     }
 
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
@@ -73,6 +84,38 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
             serde_json::to_value(self.database.session_temporal_doctor_health().await)
                 .map_err(|error| LcmError::Db(error.to_string()))
         })
+    }
+}
+
+/// Compression driven purely by host pressure evidence.
+///
+/// The daemon compresses already-ingested canonical content: host-supplied
+/// messages are never trusted for compaction, and the summary comes from the
+/// daemon's authoritative summarization route (native evidence or a provider
+/// auxiliary summarizer), never from caller-authored text.
+fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: preflight.provider,
+        session_id: preflight.session_id,
+        messages: Vec::new(),
+        current_tokens: preflight.current_tokens,
+        focus_topic: None,
+        ignore_session_patterns: preflight.ignore_session_patterns,
+        stateless_session_patterns: preflight.stateless_session_patterns,
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id: None,
+        threshold_tokens: preflight.threshold_tokens,
+        max_assembly_tokens: preflight.max_assembly_tokens,
+        leaf_chunk_tokens: preflight.leaf_chunk_tokens,
+        max_source_messages: preflight.max_source_messages,
+        summary_fan_in: preflight.summary_fan_in,
+        incremental_max_depth: preflight.incremental_max_depth,
+        fresh_tail_count: preflight.fresh_tail_count,
+        dynamic_leaf_chunk_enabled: preflight.dynamic_leaf_chunk_enabled,
+        dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
+        context_length: preflight.context_length,
+        reserve_tokens_floor: preflight.reserve_tokens_floor,
+        summarizer: LcmSummarizerMode::HermesAuxiliary,
     }
 }
 
@@ -346,11 +389,11 @@ impl DaemonLcmAuthority {
     async fn execute_compaction(
         &self,
         context: &RequestContext,
-        _cancellation: &CancellationToken,
+        cancellation: &CancellationToken,
         started_at: UtcMicros,
         command: LcmCompactionCommand,
     ) -> LcmAuthorityResponse {
-        if self.store.is_none() {
+        let Some(store) = self.store.as_ref() else {
             return unavailable(
                 context,
                 LcmAuthorityOperation::Compact,
@@ -366,12 +409,71 @@ impl DaemonLcmAuthority {
                 LcmAuthorityUnavailableReason::HostProtocolUnavailable,
             );
         }
-        unavailable(
+        let event_digest = command.evidence.protocol().event_digest().clone();
+        let request = pressure_compression_request(command.preflight);
+        let result = run_application_request_interruptible(
             context,
-            LcmAuthorityOperation::Compact,
-            started_at,
-            LcmAuthorityUnavailableReason::HostPayloadUnavailable,
+            cancellation,
+            store.compact(request),
+            || {},
         )
+        .await;
+        match result {
+            Ok(Ok(response)) => {
+                let Ok(state) = canonical_sha256(&(&event_digest, &response)) else {
+                    return terminal_failure(
+                        context,
+                        LcmAuthorityOperation::Compact,
+                        started_at,
+                        "compaction receipt could not be encoded",
+                    );
+                };
+                terminal(
+                    context,
+                    LcmAuthorityOperation::Compact,
+                    started_at,
+                    LcmAuthorityOutcome::Ready,
+                    OperationTermination::Completed,
+                    Some(state),
+                    Some(LcmAuthorityPayload::Compaction(response)),
+                    None,
+                )
+            }
+            Ok(Err(LcmError::Cancelled)) => terminal(
+                context,
+                LcmAuthorityOperation::Compact,
+                started_at,
+                LcmAuthorityOutcome::Cancelled,
+                OperationTermination::Cancelled,
+                None,
+                None,
+                None,
+            ),
+            Ok(Err(LcmError::DeadlineExceeded)) => terminal(
+                context,
+                LcmAuthorityOperation::Compact,
+                started_at,
+                LcmAuthorityOutcome::TimedOut,
+                OperationTermination::TimedOut,
+                None,
+                None,
+                None,
+            ),
+            Ok(Err(_)) => terminal_failure(
+                context,
+                LcmAuthorityOperation::Compact,
+                started_at,
+                "daemon compaction failed",
+            ),
+            Err(interruption) => terminal_interruption(
+                context,
+                LcmAuthorityOperation::Compact,
+                started_at,
+                interruption,
+                CancellationStage::EffectInFlight,
+                None,
+            ),
+        }
     }
 
     async fn execute_status(

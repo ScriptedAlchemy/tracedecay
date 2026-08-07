@@ -45,8 +45,8 @@ pub use schema_stages::ensure_registered_schema;
 /// The kernel opens a profile- or session-scoped shard through that port when a
 /// fixture calls `Database::publish_test_runtime`, but the real schema
 /// ([`ensure_registered_schema`]) lives here in `tracedecay-global-db`, above
-/// the kernel. Production wires the same installer through
-/// `tracedecay-migrate`/the daemon; this helper lets the root crate's
+/// the kernel. Production wires the same installer through the daemon
+/// (`register_registered_schema_installer`); this helper lets the root crate's
 /// integration suites (and this crate's own tests) register the identical real
 /// schema without reaching into daemon internals. Idempotent — the port keeps
 /// the first registration. Gated behind `test-helpers`, so no production build

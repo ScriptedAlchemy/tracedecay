@@ -16,7 +16,9 @@ use tracedecay_domain::ManifestDigest;
 
 use crate::context::CancellationToken;
 use crate::session::SessionRequestBinding;
-use tracedecay_sessions::runtime::lcm::{LcmPreflightRequest, LcmPreflightResponse, LcmStatus};
+use tracedecay_sessions::runtime::lcm::{
+    LcmCompressionResponse, LcmPreflightRequest, LcmPreflightResponse, LcmStatus,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 pub const LCM_DAEMON_COMMAND_CAPABILITY: &str = "capability.application.lcm-daemon-command";
@@ -201,6 +203,7 @@ pub struct LcmAuthorityInvocation {
 #[derive(Clone, Debug)]
 pub enum LcmAuthorityPayload {
     Ingest(LcmPreflightResponse),
+    Compaction(LcmCompressionResponse),
     Status(LcmStatus),
     Doctor(serde_json::Value),
 }

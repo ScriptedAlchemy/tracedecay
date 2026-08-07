@@ -470,11 +470,7 @@ impl RegisteredGlobalDb {
                 storage_root,
             );
 
-        let write_result: Result<
-            Vec<crate::session_temporal::relations::SessionRelationProjection>,
-            TranscriptPersistenceError,
-        > = async {
-            let mut relation_projections = Vec::new();
+        let write_result: Result<(), TranscriptPersistenceError> = async {
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
                 match require_expected_offset(&transaction, parse_offset_path, expected_offset)
                     .await
@@ -501,17 +497,12 @@ impl RegisteredGlobalDb {
                 for message in &batch.messages {
                     match policy {
                         TranscriptWritePolicy::Full { .. } => {
-                            if let Some(projection) = self
-                                .upsert_session_message_in_existing_tx(
-                                    &transaction,
-                                    message,
-                                    &mut payload_rollback,
-                                    Arc::clone(&cancellation),
-                                )
-                                .await?
-                            {
-                                relation_projections.push(projection);
-                            }
+                            self.upsert_session_message_in_existing_tx(
+                                &transaction,
+                                message,
+                                &mut payload_rollback,
+                            )
+                            .await?;
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text = tracedecay_sessions::compatibility::derived_text_for_index(
