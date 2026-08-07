@@ -152,11 +152,13 @@ impl DaemonInvocationService {
         project_root: &Path,
         scope_set_id: &ScopeSetId,
     ) -> Option<AuthorizedScopeSet> {
-        self.lsp_owner(Some(project_root))
-            .await?
-            .scope_set_storage?
-            .read(scope_set_id)
-            .ok()?
+        let owner = self.lsp_owner(Some(project_root)).await?;
+        let grant = owner.scope_grant?;
+        let scope_set = owner.scope_set_storage?.read(scope_set_id).ok().flatten()?;
+        // Persisted scope routes are actor-sealed: an admission on the active
+        // root authorizes reading only the scope sets its own actor persisted,
+        // never another actor's mounted routes.
+        (scope_set.actor_id() == &grant.issuer).then_some(scope_set)
     }
 
     pub(crate) async fn authorize_lsp_workspace(
@@ -222,14 +224,12 @@ impl DaemonInvocationService {
         let mut admissions = Vec::with_capacity(roots.len());
         let mut factories = Vec::with_capacity(roots.len());
         let mut admitted = Vec::with_capacity(roots.len());
-        let mut storages = Vec::with_capacity(roots.len());
         for (ordinal, (project_root, uri, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let grant = owner.scope_grant?;
             if grant.scope != *scope {
                 return None;
             }
-            let storage = owner.scope_set_storage?;
             let context = RequestContext::new(
                 grant.issuer.clone(),
                 scope.clone(),
@@ -247,40 +247,20 @@ impl DaemonInvocationService {
             let root = AdmittedRoot::authorized(uri.clone(), scope.scope_digest.clone());
             factories.push((root.clone(), owner.factory.clone()));
             admitted.push(root);
-            storages.push(storage);
         }
-        let expected_revision = storages
-            .first()?
-            .read(&scope_set_id)
-            .ok()?
-            .map(|current| current.revision());
-        let next_revision = match expected_revision {
-            Some(current) => ScopeSetRevision::new(current.get().checked_add(1)?).ok()?,
-            None => ScopeSetRevision::new(1).ok()?,
-        };
+        // Workspace-folder admission is an in-memory session boundary, not a
+        // saved scope-set mutation. Persisting the same synthetic selector in
+        // every participating project would create partial visibility outside
+        // the daemon-owned coordinator/recovery path.
         let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
             scope_set_id,
-            next_revision,
+            ScopeSetRevision::new(1).ok()?,
             admissions,
             &capability,
             &use_case,
             observed_at,
         )
         .ok()?;
-        for storage in &storages {
-            match storage
-                .compare_and_swap(expected_revision, &scope_set)
-                .ok()?
-            {
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
-                    let stored = storage.read(scope_set.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&scope_set) {
-                        return None;
-                    }
-                }
-            }
-        }
         let digest = scope_set.digest().clone();
         let workspace = AuthorizedLspWorkspace::new(Some(digest.clone()), admitted).ok()?;
         self.authorized_lsp_workspaces.lock().await.insert(

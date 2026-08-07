@@ -311,8 +311,8 @@ async fn run_authenticated_multi_root_journey() {
                 .service
                 .persisted_scope_set(root, &lsp_scope_set_id)
                 .await
-                .is_some(),
-            "federated admission must persist the scope set in every participating store"
+                .is_none(),
+            "federated LSP admission must retain its frozen scope only in daemon session state"
         );
     }
 
@@ -477,6 +477,44 @@ async fn run_authenticated_multi_root_journey() {
             response.outcome
         );
     }
+
+    // The portable route must authorize the active daemon scope before it
+    // resolves or mounts any selected root, then reach the same executor.
+    let observed_at = now();
+    let (deadline, cancellation) = controls("portable-execute", observed_at);
+    let portable_execute = execute_portable_daemon_invocation(
+        engine.lifecycle.clone(),
+        engine.store_administration.clone(),
+        Arc::clone(&engine.project_open_gates),
+        &first_handshake,
+        &engine.invocation,
+        engine.http_application_registry.clone(),
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.portable-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                MultiRootOperationV1::Query { request: json!({}) },
+                0,
+                None,
+            )
+            .expect("portable execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+        Some(Arc::clone(&engine.project_open_attempts)),
+    )
+    .await;
+    assert!(
+        matches!(
+            portable_execute.outcome,
+            DaemonInvocationOutcome::MultiRootQueryPage { .. }
+        ),
+        "the portable route must reach the multi-root executor: {:?}",
+        portable_execute.outcome
+    );
 
     engine.shutdown_all().await;
 }
