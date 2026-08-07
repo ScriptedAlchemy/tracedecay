@@ -510,7 +510,10 @@ async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
         panic!("expected a settled pass, got {settlement:?}");
     };
     assert_eq!(imported_events, 1);
-    assert!(import_errors.is_empty(), "no source may fail: {import_errors:?}");
+    assert!(
+        import_errors.is_empty(),
+        "no source may fail: {import_errors:?}"
+    );
     assert_eq!(
         stats,
         HintOutcomeStats {

@@ -201,9 +201,9 @@ pub(crate) use shutdown_coordination::ShutdownStatus;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
-mod native_integration;
 mod github_credential_lifecycle;
 mod graph_resolution;
+mod native_integration;
 use graph_resolution::retained_project_graph_resolver;
 mod http_application;
 mod http_application_router;

@@ -291,7 +291,10 @@ mod tests {
                 "ReleaseWorkPlacementCommand",
             ),
             ("work_placement", "WorkPlacementV1"),
-            ("work_placement_status_request", "WorkPlacementStatusRequestV1"),
+            (
+                "work_placement_status_request",
+                "WorkPlacementStatusRequestV1",
+            ),
             ("work_placement_reading", "WorkPlacementReadingV1"),
             ("work_topology_view_request", "WorkTopologyViewRequestV1"),
             ("work_topology_view", "ExecutionTopologyViewV1"),

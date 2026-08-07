@@ -79,8 +79,7 @@ pub async fn open_diagnostic_broker(
     // read or parsed. Falling back to the defaults there drops every
     // `custom_adapters` entry the user configured, and the broker has to say
     // so rather than report the fallback as the user's configuration.
-    let mut broker = match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await
-    {
+    let mut broker = match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await {
         Ok(settings) => diagnostic_broker(project_root, settings),
         Err(error) => {
             tracing::warn!(
