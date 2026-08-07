@@ -379,14 +379,14 @@ async fn indexing_and_cancellation_leave_only_the_compatible_prior_generation_qu
 }
 
 #[test]
-fn semantic_projection_key_is_complete_deterministic_and_maps_to_plan25() {
+fn semantic_projection_key_is_complete_deterministic_and_maps_to_projection_key() {
     let key = embedding_key();
     key.validate().expect("valid key");
     let first = key.canonical_digest().expect("key digest");
     let second = key.canonical_digest().expect("stable replay");
     assert_eq!(first, second);
 
-    let generic = key.projection_key().expect("generic Plan25 key");
+    let generic = key.projection_key().expect("generic projection key");
     assert_eq!(generic.kind, ProjectionKindV1::Embedding);
     assert_eq!(generic.profile_digest, first);
 
@@ -455,7 +455,7 @@ fn admitted_projection_key_is_the_projection_and_privacy_authority() {
 }
 
 #[test]
-fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
+fn fake_projection_uses_canonical_chunks_and_projection_receipts() {
     let (mut store, key, base_generation) = publish_initial_generation();
     let projection_key = key.projection_key().unwrap();
 
@@ -506,7 +506,7 @@ fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
     assert_eq!(prepared.vectors.len(), 2);
     assert_eq!(prepared.tombstones.len(), 1);
     assert_eq!(prepared.receipt.receipts.len(), 4);
-    verify_batch_receipt(&prepared.request, &prepared.receipt).expect("Plan25 receipt");
+    verify_batch_receipt(&prepared.request, &prepared.receipt).expect("projection receipt");
 
     let build_id = store
         .begin_generation(VectorGenerationPlanV1 {
@@ -1446,7 +1446,7 @@ fn projection_vectors_are_byte_identical_at_every_encoder_width() {
         );
         assert_eq!(
             narrow.receipt, wide.receipt,
-            "width {width} changed the Plan 25 receipt"
+            "width {width} changed the projection receipt"
         );
         assert_eq!(
             narrow_encoder.observed_groups(),

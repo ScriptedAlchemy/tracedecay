@@ -110,7 +110,7 @@ pub enum SemanticProjectionErrorV1 {
     VectorDigestMismatch { chunk_id: CodeSearchChunkId },
     #[error("background semantic projection worker did not complete")]
     WorkerTerminated,
-    #[error("Plan25 projection receipt rejected: {0}")]
+    #[error("semantic projection receipt rejected: {0}")]
     Receipt(#[from] ProjectionReceiptErrorV1),
 }
 
