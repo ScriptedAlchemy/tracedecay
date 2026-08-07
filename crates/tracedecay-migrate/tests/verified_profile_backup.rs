@@ -110,6 +110,7 @@ fn seed_graph_store(graph_path: &Path) {
             .unwrap(),
         )
         .unwrap();
+    drop(database);
     assert!(registry.close(&registration(graph_path)).unwrap());
 }
 
@@ -130,6 +131,7 @@ fn assert_graph_store_serves_seeded_entity(graph_path: &Path) {
         .unwrap();
     assert_eq!(result.visits.len(), 1);
     assert_eq!(result.visits[0].entity.as_str(), "historical-symbol");
+    drop(database);
     assert!(registry.close(&registration(graph_path)).unwrap());
 }
 
