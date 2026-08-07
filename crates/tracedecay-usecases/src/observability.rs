@@ -3,6 +3,7 @@
 mod emit;
 mod export;
 mod producer;
+mod retrieval_emit;
 
 pub use emit::{
     record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
@@ -13,6 +14,12 @@ pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
     ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
     ObservabilityProducerSummaryV1,
+};
+pub use retrieval_emit::{
+    AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
+    observe_stage_ablation, record_analytics_consent, record_context_outcome,
+    record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
+    record_retrieval_synthesis, record_retriever,
 };
 
 use tracedecay_application::{
