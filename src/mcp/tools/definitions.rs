@@ -27,6 +27,7 @@ mod graph;
 mod lcm;
 mod memory;
 mod multi_root;
+mod native_integration;
 mod session;
 mod skills;
 mod testing;
@@ -40,6 +41,7 @@ use graph::*;
 use lcm::*;
 use memory::*;
 use multi_root::*;
+use native_integration::*;
 use skills::*;
 use testing::*;
 
@@ -485,6 +487,11 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
+        def_stack_snapshot(),
+        def_preflight_native_integration(),
+        def_apply_native_integration(),
+        def_native_integration_status(),
+        def_cancel_native_integration(),
         def_multi_root_scope_set_read(),
         def_multi_root_scope_set_compare_and_swap(),
         def_multi_root_execute(),
@@ -747,6 +754,11 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // application surfaces
     "tracedecay_git_preview",
     "tracedecay_git_apply",
+    "tracedecay_stack_snapshot",
+    "tracedecay_preflight_native_integration",
+    "tracedecay_apply_native_integration",
+    "tracedecay_native_integration_status",
+    "tracedecay_cancel_native_integration",
     "tracedecay_feedback_diagnostics",
     "tracedecay_feedback_get",
     "tracedecay_feedback_expand",

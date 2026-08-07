@@ -61,6 +61,12 @@ pub use tracedecay_application::{
     ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
     ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
+pub use tracedecay_application::{
+    NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelSurfaceRequest,
+    NativeIntegrationPreflightSurfaceRequest, NativeIntegrationStackSnapshotSurfaceRequest,
+    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1,
+};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
@@ -126,7 +132,7 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 71] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -710,11 +716,38 @@ pub struct GitReadSurfaceRequest {
     pub max_bytes: u64,
 }
 
+/// The five Plan 36 native-integration journey requests.
+///
+/// Each variant carries exact typed identity. There is no variant that can
+/// express a path, a raw SHA, a commit message, a patch, a Git argument, or a
+/// remote, so no transport can widen this journey into generic Git execution.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NativeIntegrationSurfaceRequest {
+    StackSnapshot(NativeIntegrationStackSnapshotSurfaceRequest),
+    Preflight(Box<NativeIntegrationPreflightSurfaceRequest>),
+    Apply(NativeIntegrationApplySurfaceRequest),
+    Status(NativeIntegrationStatusSurfaceRequest),
+    Cancel(NativeIntegrationCancelSurfaceRequest),
+}
+
+impl NativeIntegrationSurfaceRequest {
+    pub(crate) const fn operation(&self) -> ApplicationSurfaceOperation {
+        match self {
+            Self::StackSnapshot(_) => ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
+            Self::Preflight(_) => ApplicationSurfaceOperation::NativeIntegrationPreflight,
+            Self::Apply(_) => ApplicationSurfaceOperation::NativeIntegrationApply,
+            Self::Status(_) => ApplicationSurfaceOperation::NativeIntegrationStatus,
+            Self::Cancel(_) => ApplicationSurfaceOperation::NativeIntegrationCancel,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ApplicationSurfaceRequest {
     GitRead(GitReadSurfaceRequest),
     GitPreview(GitPreviewSurfaceRequest),
     GitApply(GitApplySurfaceRequest),
+    NativeIntegration(NativeIntegrationSurfaceRequest),
     Feedback(FeedbackSurfaceRequest),
     FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequest),
     FeedbackImpact(FeedbackImpactSurfaceRequest),
@@ -2447,6 +2480,14 @@ impl ApplicationSurfaceRequest {
             ) | (Self::GitPreview(_), ApplicationSurfaceOperation::GitPreview)
                 | (Self::GitApply(_), ApplicationSurfaceOperation::GitApply)
                 | (
+                    Self::NativeIntegration(_),
+                    ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+                        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+                        | ApplicationSurfaceOperation::NativeIntegrationApply
+                        | ApplicationSurfaceOperation::NativeIntegrationStatus
+                        | ApplicationSurfaceOperation::NativeIntegrationCancel
+                )
+                | (
                     Self::Feedback(_),
                     ApplicationSurfaceOperation::FeedbackDiagnostics
                         | ApplicationSurfaceOperation::FeedbackGet
@@ -2803,6 +2844,37 @@ fn parse_git_read_surface_request(
     })
 }
 
+/// Parse one native-integration request into its exact typed shape.
+///
+/// `deny_unknown_fields` on every request type means an unexpected key is a
+/// rejection rather than a silently ignored hint.
+fn parse_native_integration_surface_request(
+    operation: ApplicationSurfaceOperation,
+    value: Value,
+) -> Result<NativeIntegrationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    let invalid = |_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest;
+    match operation {
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot => {
+            serde_json::from_value(value)
+                .map(NativeIntegrationSurfaceRequest::StackSnapshot)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationPreflight => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Preflight)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationApply => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Apply)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationStatus => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Status)
+            .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationCancel => serde_json::from_value(value)
+            .map(NativeIntegrationSurfaceRequest::Cancel)
+            .map_err(invalid),
+        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    }
+}
+
 pub fn parse_application_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
@@ -2821,6 +2893,14 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::GitApply => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::GitApply)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel => {
+            parse_native_integration_surface_request(operation, value)
+                .map(ApplicationSurfaceRequest::NativeIntegration)
+        }
         ApplicationSurfaceOperation::AffectedTests => {
             let request: AffectedTestsSurfaceRequest = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
@@ -3286,6 +3366,16 @@ pub async fn execute_application_surface(
                 cancellation_context,
             )
         }
+        ApplicationSurfaceRequest::NativeIntegration(request) => {
+            crate::daemon_contract::DaemonInvocationRequest::native_integration(
+                request_id.as_str(),
+                operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
         ApplicationSurfaceRequest::Feedback(request) => {
             crate::daemon_contract::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
@@ -3410,6 +3500,8 @@ pub async fn execute_application_surface(
         || matches!(
             operation,
             ApplicationSurfaceOperation::GitApply
+                | ApplicationSurfaceOperation::NativeIntegrationApply
+                | ApplicationSurfaceOperation::NativeIntegrationCancel
                 | ApplicationSurfaceOperation::ContextScoutPause
                 | ApplicationSurfaceOperation::ContextScoutResume
                 | ApplicationSurfaceOperation::ContextScoutCancel
@@ -3539,7 +3631,8 @@ pub async fn execute_application_surface(
                 ))
             }
         }
-        crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
+        crate::daemon_contract::DaemonInvocationOutcome::NativeIntegration { scope, outcome }
+        | crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
             Ok(ApplicationEnvelope {
                 contract: result_contract.clone(),
                 request_id: request_id.clone(),
@@ -3603,6 +3696,11 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::GitHunks
         | ApplicationSurfaceOperation::GitPreview
         | ApplicationSurfaceOperation::GitApply
+        | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
         | ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch
         | ApplicationSurfaceOperation::CodeSymbolSearch

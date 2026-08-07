@@ -171,7 +171,7 @@ pub use git::{
     git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
     git_surface_catalog_contribution, git_surface_handler_descriptors,
     is_canonical_repository_relative_path, native_integration_surface_catalog_contribution,
-    native_integration_surface_handler_descriptors,
+    native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,

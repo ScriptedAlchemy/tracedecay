@@ -83,7 +83,12 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::GitBlame
         | DaemonInvocationOperation::GitHunks
         | DaemonInvocationOperation::GitPreview
-        | DaemonInvocationOperation::GitApply => FeedbackOperationV1::FeedbackCycle,
+        | DaemonInvocationOperation::GitApply
+        | DaemonInvocationOperation::NativeIntegrationStackSnapshot
+        | DaemonInvocationOperation::NativeIntegrationPreflight
+        | DaemonInvocationOperation::NativeIntegrationApply
+        | DaemonInvocationOperation::NativeIntegrationStatus
+        | DaemonInvocationOperation::NativeIntegrationCancel => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -103,6 +108,7 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackO
         DaemonInvocationOutcome::GitRead { .. }
         | DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
+        | DaemonInvocationOutcome::NativeIntegration { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }

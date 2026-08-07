@@ -34,10 +34,11 @@ use tracedecay_application::{
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
     WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
     WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -149,6 +150,11 @@ pub(crate) enum DaemonInvocationOperation {
     GitHunks,
     GitPreview,
     GitApply,
+    NativeIntegrationStackSnapshot,
+    NativeIntegrationPreflight,
+    NativeIntegrationApply,
+    NativeIntegrationStatus,
+    NativeIntegrationCancel,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
@@ -197,6 +203,11 @@ impl DaemonInvocationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
+            Self::NativeIntegrationStackSnapshot => "stack_snapshot",
+            Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApply => "apply_native_integration",
+            Self::NativeIntegrationStatus => "native_integration_status",
+            Self::NativeIntegrationCancel => "cancel_native_integration",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
@@ -322,6 +333,9 @@ impl WorkApplicationInvocationV1 {
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationInvocation {
     RegisterDefinition(WorkflowDefinitionRegisterRequest),
+    ActivateDefinition(WorkflowDefinitionActivateRequest),
+    RetireDefinition(WorkflowDefinitionRetireRequest),
+    RejectDefinition(WorkflowDefinitionRejectRequest),
     ValidateDefinition(WorkflowDefinitionValidateRequest),
     GetDefinition(WorkflowDefinitionGetRequest),
     ListDefinitions(WorkflowDefinitionListRequest),
@@ -335,6 +349,9 @@ impl WorkflowApplicationInvocation {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
+            Self::ActivateDefinition(_) => "activate_definition",
+            Self::RetireDefinition(_) => "retire_definition",
+            Self::RejectDefinition(_) => "reject_definition",
             Self::ValidateDefinition(_) => "validate_definition",
             Self::GetDefinition(_) => "get_definition",
             Self::ListDefinitions(_) => "list_definitions",
@@ -393,6 +410,13 @@ pub(crate) enum DaemonInvocationPayload {
     },
     GitApply {
         request: GitApplySurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    NativeIntegration {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::NativeIntegrationSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -646,6 +670,33 @@ impl DaemonInvocationRequest {
         }
     }
 
+    /// One typed constructor for the whole Plan 36 native-integration journey.
+    ///
+    /// The transport carries exact typed identity only; it contains no Git
+    /// logic and no fallback mutation path.
+    pub(crate) fn native_integration(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: crate::application_surface::NativeIntegrationSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::NativeIntegration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn feedback(
         request_id: impl Into<String>,
         operation: crate::application_surface::ApplicationSurfaceOperation,
@@ -745,6 +796,13 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::GitPreview
             | crate::application_surface::ApplicationSurfaceOperation::GitApply => {
                 unreachable!("Git operations use their typed constructors")
+            }
+            crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
+                unreachable!("native-integration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ConfigurationList
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationExplain
@@ -1375,6 +1433,28 @@ impl DaemonInvocationRequest {
             },
             DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
             DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
+            DaemonInvocationPayload::NativeIntegration {
+                surface_operation, ..
+            } => match surface_operation {
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStackSnapshot => {
+                    DaemonInvocationOperation::NativeIntegrationStackSnapshot
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight => {
+                    DaemonInvocationOperation::NativeIntegrationPreflight
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply => {
+                    DaemonInvocationOperation::NativeIntegrationApply
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus => {
+                    DaemonInvocationOperation::NativeIntegrationStatus
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
+                    DaemonInvocationOperation::NativeIntegrationCancel
+                }
+                _ => unreachable!(
+                    "native integration payloads use a native integration surface operation"
+                ),
+            },
             DaemonInvocationPayload::FeedbackDiagnostics { .. } => {
                 DaemonInvocationOperation::FeedbackDiagnostics
             }
@@ -1492,6 +1572,11 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::GitHunks
                 | DaemonInvocationOperation::GitPreview
                 | DaemonInvocationOperation::GitApply
+                | DaemonInvocationOperation::NativeIntegrationStackSnapshot
+                | DaemonInvocationOperation::NativeIntegrationPreflight
+                | DaemonInvocationOperation::NativeIntegrationApply
+                | DaemonInvocationOperation::NativeIntegrationStatus
+                | DaemonInvocationOperation::NativeIntegrationCancel
                 | DaemonInvocationOperation::FeedbackDiagnostics
                 | DaemonInvocationOperation::FeedbackGet
                 | DaemonInvocationOperation::FeedbackExpand
@@ -1599,6 +1684,12 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::GitApply {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::NativeIntegration {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2239,6 +2330,10 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         effect: DaemonGitEffectResult,
     },
+    NativeIntegration {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
     Feedback {
         scope: ResolvedScope,
         result: DaemonFeedbackResult,
@@ -2349,6 +2444,9 @@ pub(crate) enum WorkApplicationOutcomeV1 {
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationOutcome {
     RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ActivateDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
+    RetireDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
+    RejectDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
     ValidateDefinition(ApplicationOutcome<WorkflowDefinitionValidation>),
     GetDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
     ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),

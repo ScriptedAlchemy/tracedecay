@@ -153,6 +153,24 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
+            DaemonInvocationPayload::NativeIntegration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                Box::pin(execute_native_integration(
+                    request_id,
+                    configuration_runtime.clone(),
+                    surface_operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                ))
+                .await
+            }
             DaemonInvocationPayload::FeedbackDiagnostics {
                 request_handle,
                 observed_at,
