@@ -697,7 +697,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic configuration operation requires a registered Plan 20 runtime"
+                message: "semantic configuration operation requires a registered configuration runtime"
                     .to_owned(),
             })?
     }

@@ -672,7 +672,7 @@ where
         contributions: AdvisoryContributionsV1,
     ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
         let observation_input = request.input.clone();
-        let advisory = contributions.as_plan09()?;
+        let advisory = contributions.as_feedback_cycle_advisory()?;
         self.observe_provider_states(&observation_input, &contributions);
         let cycle = self
             .feedback_cycle

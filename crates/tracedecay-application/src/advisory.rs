@@ -59,7 +59,7 @@ impl AdvisoryFindingContributionBatchV1 {
         for finding in &self.findings {
             finding
                 .validate()
-                .map_err(|_| inconsistent("advisory Plan 09 finding"))?;
+                .map_err(|_| inconsistent("advisory finding"))?;
             if finding.provider_state != self.provider_state {
                 return Err(inconsistent("advisory finding provider state"));
             }

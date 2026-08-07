@@ -367,7 +367,7 @@ impl CodeIndexCapabilityValidator for BaseCapabilityValidator {
             // Plan 31's semantic manifest augments this base; the base
             // manifest alone never authorizes embedding projections.
             return Err(CapabilityEmissionErrorV1::Contract(
-                "embedding projections require the Plan 31 semantic capability manifest".to_owned(),
+                "embedding projections require the semantic capability manifest".to_owned(),
             ));
         }
         // Structural and digest validation (including the recomputed

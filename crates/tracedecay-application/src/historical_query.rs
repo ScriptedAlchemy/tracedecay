@@ -164,11 +164,11 @@ pub enum HistoricalQueryError {
     UnauthorizedCommit(GitOidV1),
     #[error("historical query path is outside the authorized scope: {0}")]
     UnauthorizedPath(String),
-    #[error("Plan 36 Git read failed: {0}")]
+    #[error("historical Git read failed: {0}")]
     Git(#[from] GitIntelligenceError),
-    #[error("Plan 36 Git provider returned evidence for a different scope")]
+    #[error("historical Git provider returned evidence for a different scope")]
     ProviderScopeMismatch,
-    #[error("Plan 36 Git provider returned a mismatched commit or path")]
+    #[error("historical Git provider returned a mismatched commit or path")]
     ProviderAnchorMismatch,
 }
 

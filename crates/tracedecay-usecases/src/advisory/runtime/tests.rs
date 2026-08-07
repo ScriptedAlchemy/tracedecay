@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn absent_provider_states_remain_explicit() {
     let advisory = AdvisoryContributionsV1::absent()
-        .as_plan09()
+        .as_feedback_cycle_advisory()
         .expect("canonical advisory");
     assert_eq!(
         advisory.provider_states,

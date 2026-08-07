@@ -76,7 +76,7 @@ impl AdvisoryContributionsV1 {
         }
     }
 
-    pub fn as_plan09(&self) -> Result<FeedbackCycleAdvisoryV1, ApplicationContractError> {
+    pub fn as_feedback_cycle_advisory(&self) -> Result<FeedbackCycleAdvisoryV1, ApplicationContractError> {
         self.validate()?;
         let mut findings = self.findings.clone();
         findings.sort_by(|left, right| left.finding_id.as_str().cmp(right.finding_id.as_str()));

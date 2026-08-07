@@ -224,7 +224,7 @@ impl SourceAcquisitionContractV1 {
         capabilities: &SourceAcquisitionCapabilitiesV1,
     ) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&(
-            "tracedecay.plan27.source-acquisition-contract.v1",
+            "tracedecay.source-acquisition-contract.v1",
             provider,
             capabilities,
         ))

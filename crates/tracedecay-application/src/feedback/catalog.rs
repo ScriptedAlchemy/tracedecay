@@ -115,7 +115,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         result_schema: "schema.application.feedback.list.result",
         operation: "feedback_list",
         summary: "List feedback findings",
-        description: "List authorized feedback findings with Plan 05 cursors.",
+        description: "List authorized feedback findings with stable cursors.",
         example: "List feedback findings for this branch",
         paginated: true,
         surfaces: &FEEDBACK_READ_SURFACES,
