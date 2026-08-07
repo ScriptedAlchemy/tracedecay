@@ -6,6 +6,7 @@
 //! canonical repository read operation.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -118,6 +119,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
                     .min(deadline_remaining),
             ),
             decision: Mutex::new(None),
+            commit_started: AtomicBool::new(false),
         };
         let outcome = target
             .dispatch_read(request.clone(), &probe)
@@ -381,6 +383,7 @@ struct QueryProbe {
     started: Instant,
     maximum_elapsed: Duration,
     decision: Mutex<Option<RuntimeInterruptionV1>>,
+    commit_started: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for QueryProbe {
@@ -400,5 +403,13 @@ impl RuntimeRequestProbeV1 for QueryProbe {
             *decision = Some(RuntimeInterruptionV1::DeadlineExceeded);
         }
         *decision
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }
