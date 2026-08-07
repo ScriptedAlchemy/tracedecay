@@ -448,6 +448,11 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
     _run_checked(["git", "config", "user.email", "catalog-sweep@example.invalid"], root, "fixture git config")
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
+    # One uncommitted modification on top of the committed baseline: the
+    # git_hunks producer mints its expiring preview input from real
+    # working-tree hunks, and a clean tree would leave nothing to stage.
+    with (root / "docs/large.md").open("a") as hunk_source:
+        hunk_source.write("catalog sweep uncommitted hunk line\n")
     _run_checked([str(binary), "init"], root, "fixture tracedecay init", timeout_s=180)
     session_id = f"tool-sweep-session-{os.getpid()}-{time.monotonic_ns()}"
     _run_checked(
@@ -554,19 +559,166 @@ def prime_fixture_values(
         raise SweepError("retrieve consumer did not return the producer's exact large response")
     fixture.update({"node_id": node_id, "qualified_name": qualified_name, "node_kind": node_kind, "handle": handle})
 
+    # The callable code-query surface serves only complete immutable index
+    # generations, and a cold fixture publishes its first generation
+    # asynchronously after admission. Resolve the fixture symbol through the
+    # live symbol-search producer so navigation consumers receive a real
+    # code-query node identity instead of racing the first build.
+    ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
+    code_node_id: str | None = None
+    while code_node_id is None:
+        searched, _ = client.call_tool(
+            "tracedecay_code_symbol_search",
+            {
+                "query": fixture["symbol"],
+                "lazy_index_ignored_dependencies": False,
+                "scope": {},
+                "meta": {"projection": "summary", "order": "relevance"},
+                "format": "json",
+            },
+            deadline("tracedecay_code_symbol_search"),
+        )
+        candidate = first_value(searched, {"node_id"})
+        code_node_id = candidate if isinstance(candidate, str) and candidate else None
+        if code_node_id is None:
+            if time.monotonic() >= ends_at:
+                raise SweepError(
+                    "code symbol-search producer did not publish a complete generation identity"
+                )
+            time.sleep(0.5)
+    fixture["code_node_id"] = code_node_id
+
+    hunks = _producer_call(
+        client,
+        "tracedecay_git_hunks",
+        {"scope": "working_tree", "format": "json"},
+        deadline("tracedecay_git_hunks"),
+    )
+    preview_input_id = first_value(hunks, {"preview_input_id"})
+    hunk_digests = sorted(
+        {
+            value["digest"]
+            for value in _objects(hunks)
+            if isinstance(value.get("digest"), str) and isinstance(value.get("hunk"), dict)
+        }
+    )
+    if not isinstance(preview_input_id, str) or not preview_input_id or not hunk_digests:
+        raise SweepError("git hunks producer did not mint a preview input for the seeded hunk")
+    fixture["preview_input_id"] = preview_input_id
+    fixture["selected_hunk_digests"] = json.dumps(hunk_digests)
+
 
 OPAQUE_FIELDS = frozenset(
     {
         "handle", "request_handle", "write_handle", "preview_id", "receipt_id", "effect_id",
         "operation_id", "transaction_id", "plan_id", "snapshot_digest", "expected_revision",
+        "preview_input_id",
     }
 )
+
+# Bounded wait for the fixture's first complete code-index generation. The
+# code-query surface deliberately serves only complete immutable generations,
+# so a cold fixture answers typed-stale until its first build publishes.
+CODE_INDEX_READY_TIMEOUT_S = 120
+
+# Navigation consumers whose `node_id` is a code-query identity minted by the
+# symbol-search producer, not the graph node identity used everywhere else.
+CODE_QUERY_NODE_CONSUMERS = frozenset(
+    {
+        "tracedecay_code_callees",
+        "tracedecay_code_callers",
+        "tracedecay_code_declaration",
+        "tracedecay_code_definition",
+        "tracedecay_code_references",
+        "tracedecay_code_type_definition",
+        "tracedecay_code_type_hierarchy",
+    }
+)
+
+# Expected hermetic typed-denial verdicts. Each entry asserts the EXACT
+# (kind, code) problem a tool must return inside the hermetic fixture because
+# its success path consumes state no hermetic producer can mint:
+# - context_scout_* reads consume an opaque scout address minted only by a
+#   real host-agent claim journey, and context_scout_claim itself is declared
+#   unavailable (effect_journey_unverified), so the concealment denial is the
+#   complete hermetic contract.
+# - feedback_* reads and affected_tests consume daemon-minted request handles
+#   produced only by live LSP context projections or durable advisory cycles
+#   with findings; clients cannot reconstruct them by design.
+# - automation_run_artifact_view and skill_view read durable artifacts that
+#   only real automation runs / skill installs create; the isolated profile
+#   has none, so an unknown identity must stay a typed not-found.
+# - test_results reads daemon-retained managed test results whose only
+#   producer (run_affected_tests) is declared unavailable.
+# An entry is falsifiable in both directions: a different problem stays FAIL,
+# and a hermetic success FAILs with expected_denial_superseded until the entry
+# is removed.
+EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
+    "tracedecay_context_scout_budget": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_capability": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_explain": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_recent": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_status": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_affected_tests": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_feedback_diagnostics": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_feedback_expand": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_feedback_get": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_feedback_impact": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_feedback_list": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
+    "tracedecay_skill_view": ("failed", "not_found"),
+    "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
+}
+
+# Opaque probe inputs are permitted ONLY for tools carrying an expected
+# hermetic denial: the probe proves the deny path is typed and exact; it never
+# fakes a producible success input. Every other opaque field still requires an
+# authentic producer.
+_UNKNOWN_REQUEST_HANDLE_PROBE = {
+    "request_handle": "tool-sweep-unknown-request-handle.v1",
+    "format": "json",
+}
+HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
+    "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_feedback_expand": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_feedback_get": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_feedback_impact": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
+}
+
+
+def git_preview_arguments(fixture: dict[str, str]) -> dict[str, Any]:
+    """Build one real stage preview from the git_hunks producer's minted input."""
+    preview_input_id = fixture.get("preview_input_id")
+    digests = json.loads(fixture.get("selected_hunk_digests", "[]"))
+    if not preview_input_id or not digests:
+        raise SweepError("git preview consumer has no minted hunk preview input")
+    return {
+        "operation": "stage_hunks",
+        "preview_input_id": preview_input_id,
+        "selected_hunk_digests": digests,
+        "format": "json",
+    }
 
 
 def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, str]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
-    if definition.get("name") == "tracedecay_api_migration_plan":
+    name = definition.get("name")
+    if name == "tracedecay_api_migration_plan":
         return api_migration_plan_arguments(fixture)
+    if name == "tracedecay_git_preview":
+        return git_preview_arguments(fixture)
+    probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None
+    if probe is not None:
+        if name not in EXPECTED_HERMETIC_DENIALS:
+            raise SweepError(f"{name}: denial probe exists without an expected hermetic denial")
+        return dict(probe)
+    if isinstance(name, str) and name in CODE_QUERY_NODE_CONSUMERS:
+        code_node_id = fixture.get("code_node_id")
+        if not code_node_id:
+            raise SweepError(f"{name}: code symbol-search producer minted no code node identity")
+        fixture = {**fixture, "node_id": code_node_id}
     schema = definition.get("inputSchema")
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise SweepError(f"{definition.get('name', '<unnamed>')}: inputSchema is not an object")
@@ -894,7 +1046,29 @@ def _read_tool_row(client: McpClient, definition: dict[str, Any], policy: ToolPo
         response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
-    return response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+    row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+    expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
+    if expected is None:
+        return row
+    problem = response_problem_code(response)
+    if row["verdict"] == "FAIL" and problem == expected:
+        row.update(
+            {
+                "verdict": "PASS",
+                "note": f"expected hermetic typed denial confirmed: {problem[0]}",
+                "problem_code": problem[1],
+                "expected_denial": True,
+            }
+        )
+    elif row["verdict"] == "PASS":
+        row.update(
+            {
+                "verdict": "FAIL",
+                "problem_code": "tool_sweep.expected_denial_superseded",
+                "note": "tool succeeded hermetically; remove its expected hermetic denial entry",
+            }
+        )
+    return row
 
 
 def _write_phase_report(out: Path, report: dict[str, Any]) -> None:

@@ -78,6 +78,31 @@ def _require_snapshot(fixture: dict[str, str], expected: dict[str, str], stage: 
         raise JourneyError(f"{stage} did not restore the exact source preimage")
 
 
+def _rename_identity(
+    call: Call, deadline: Deadline, node_id: str, new_name: str,
+) -> dict[str, str]:
+    """Mint the exact rename identity from the read-only preview producer."""
+    preview = call(
+        "tracedecay_rename_preview",
+        {"node_id": node_id, "new_name": new_name, "format": "json"},
+        deadline("tracedecay_rename_preview"),
+    )
+    for value in objects(preview):
+        node = value.get("node")
+        if isinstance(node, dict) and all(
+            isinstance(node.get(key), str) and node.get(key)
+            for key in ("id", "qualified_name", "kind", "file", "name")
+        ):
+            return {
+                "node_id": node["id"],
+                "qualified_name": node["qualified_name"],
+                "kind": node["kind"],
+                "file": node["file"],
+                "old_name": node["name"],
+            }
+    raise JourneyError("rename preview did not publish the exact symbol identity")
+
+
 def _source_edit(
     name: str, fixture: dict[str, str], call: Call, deadline: Deadline,
 ) -> PreparedJourney | None:
@@ -152,6 +177,18 @@ def _source_edit(
             "update_references": False,
             "format": "json",
         }
+    elif name == "tracedecay_rename_symbol":
+        renamed = f"{fixture['symbol']}_renamed"
+        # The apply contract consumes the exact identity minted by the
+        # read-only rename-preview producer, never a bare spelling.
+        forward = {
+            **_rename_identity(call, deadline, fixture["node_id"], renamed),
+            "new_name": renamed,
+        }
+        inverse_tool = "tracedecay_rename_symbol"
+        # The rename changes the symbol's identity; the rollback identity is
+        # re-minted from the preview producer after the apply (see cleanup).
+        inverse = {"new_name": fixture["symbol"]}
     elif name == "tracedecay_api_migration_apply":
         return _api_migration(fixture, call, deadline, original)
     else:
@@ -185,6 +222,21 @@ def _source_edit(
             if not isinstance(moved_symbol, str) or not moved_symbol:
                 raise JourneyError("move consumer did not publish the moved symbol identity")
             rollback_arguments = {**inverse, "symbol": moved_symbol}
+        elif name == "tracedecay_rename_symbol":
+            # Renaming re-keys the node, so resolve the post-rename identity
+            # from the live graph producer before renaming back.
+            renamed_node = call(
+                "tracedecay_by_qualified_name",
+                {"qualified_name": f"{fixture['symbol']}_renamed"},
+                deadline("tracedecay_by_qualified_name"),
+            )
+            renamed_id = first_value(renamed_node, {"node_id"})
+            if not isinstance(renamed_id, str) or not renamed_id:
+                raise JourneyError("rename consumer did not publish the renamed symbol identity")
+            rollback_arguments = {
+                **_rename_identity(call, deadline, renamed_id, fixture["symbol"]),
+                "new_name": fixture["symbol"],
+            }
         _source_rollback(call, inverse_tool, rollback_arguments, deadline)
         _require_snapshot(fixture, original, f"{name} rollback")
         return "preview/apply/consumer/rollback verified"

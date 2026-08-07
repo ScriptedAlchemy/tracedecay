@@ -168,6 +168,114 @@ class ProblemCodeTests(unittest.TestCase):
             runner._journey_call(Client(), "tracedecay_node", {}, 1_000)
 
 
+class ExpectedHermeticDenialTests(unittest.TestCase):
+    @staticmethod
+    def policy(runner, name):
+        return runner.ToolPolicy(name=name, availability="available", effect="read", deadline_ms=1_000)
+
+    @staticmethod
+    def client(text):
+        class Client:
+            def call_tool(self, _name, _arguments, _deadline_ms):
+                return {"result": {"isError": True, "content": [{"type": "text", "text": text}]}}, 3
+
+        return Client()
+
+    @staticmethod
+    def definition(name):
+        return {"name": name, "inputSchema": {"type": "object", "properties": {}, "required": []}}
+
+    def test_exact_expected_denial_is_the_passing_hermetic_verdict(self) -> None:
+        """A declared non-producible surface passes only on its exact typed denial."""
+        runner = load_runner()
+        name = "tracedecay_test_results"
+        self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+
+        row = runner._read_tool_row(
+            self.client(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}'),
+            self.definition(name),
+            self.policy(runner, name),
+            fixture={},
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertTrue(row["expected_denial"])
+        self.assertEqual(row["problem_code"], code)
+
+    def test_a_different_typed_problem_stays_a_failure(self) -> None:
+        """The expected-denial verdict is exact; it is not a blanket allowlist."""
+        runner = load_runner()
+        name = "tracedecay_test_results"
+
+        row = runner._read_tool_row(
+            self.client('{"problem":{"kind":"unavailable","code":"store.offline"}}'),
+            self.definition(name),
+            self.policy(runner, name),
+            fixture={},
+        )
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "store.offline")
+
+    def test_hermetic_success_supersedes_a_stale_denial_entry(self) -> None:
+        """A tool that gains a hermetic success path fails until its entry is removed."""
+        runner = load_runner()
+        name = "tracedecay_test_results"
+
+        class Client:
+            def call_tool(self, _name, _arguments, _deadline_ms):
+                return {"result": {"content": [{"type": "text", "text": '{"results":[]}'}]}}, 3
+
+        row = runner._read_tool_row(
+            Client(), self.definition(name), self.policy(runner, name), fixture={}
+        )
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "tool_sweep.expected_denial_superseded")
+
+    def test_denial_probes_exist_only_for_declared_denial_verdicts(self) -> None:
+        """A probe may prove a deny path; it may never stand in for a producible input."""
+        runner = load_runner()
+
+        for name in runner.HERMETIC_DENIAL_PROBE_ARGUMENTS:
+            self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+
+    def test_git_preview_consumes_only_minted_hunk_preview_input(self) -> None:
+        """The stage preview rides the git_hunks producer instead of invented state."""
+        runner = load_runner()
+
+        arguments = runner.git_preview_arguments(
+            {
+                "preview_input_id": "preview.fixture",
+                "selected_hunk_digests": '["sha256:' + "a" * 64 + '"]',
+            }
+        )
+        self.assertEqual(arguments["operation"], "stage_hunks")
+        self.assertEqual(arguments["preview_input_id"], "preview.fixture")
+        with self.assertRaises(runner.SweepError):
+            runner.git_preview_arguments({})
+
+    def test_code_navigation_consumes_the_code_query_node_identity(self) -> None:
+        """Code navigation must consume the symbol-search producer's identity, not the graph node."""
+        runner = load_runner()
+        definition = {
+            "name": "tracedecay_code_declaration",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"node_id": {"type": "string"}},
+                "required": ["node_id"],
+            },
+        }
+
+        arguments = runner.materialize_tool_arguments(
+            definition, {"node_id": "function:graph", "code_node_id": "sym:code"}
+        )
+        self.assertEqual(arguments["node_id"], "sym:code")
+        with self.assertRaises(runner.SweepError):
+            runner.materialize_tool_arguments(definition, {"node_id": "function:graph"})
+
+
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_initialize_capabilities_control_optional_surface_discovery(self) -> None:
         """Only server-negotiated resource/prompt endpoints are requested."""
