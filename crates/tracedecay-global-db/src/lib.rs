@@ -74,6 +74,7 @@ pub use project_registry::{
 pub use registered::{
     ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
 };
+pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use remote_deletion::{
     RemoteDeletionCleanupState, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
