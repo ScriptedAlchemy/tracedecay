@@ -152,7 +152,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     /// Mounts the project-wide mutable graph. The checkout path is exact route
-    /// provenance; the canonical database locator is supplied by StoreLayout.
+    /// provenance; the canonical database locator is supplied by `StoreLayout`.
     pub(crate) async fn project_graph(
         &self,
         _project_root: &Path,

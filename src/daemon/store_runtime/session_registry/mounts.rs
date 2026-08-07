@@ -462,6 +462,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Arc::clone(&self.remote_replay_transaction)
     }
 
+    #[cfg(test)]
     pub(crate) async fn remote_recovery_authority(
         &self,
         node_id: &BrainNodeId,

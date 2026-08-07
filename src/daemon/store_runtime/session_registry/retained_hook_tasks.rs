@@ -62,15 +62,14 @@ impl RetainedHookTasks {
                 operation(task_cancellation).await;
                 finish_retained_hook_task(weak_state, &task_key, generation);
             });
-            let previous = state.tasks.insert(
+            state.tasks.insert(
                 key,
                 RetainedHookTask {
                     generation,
                     cancellation,
                     handle: task,
                 },
-            );
-            previous
+            )
         };
         if let Some(previous) = previous {
             previous.cancellation.cancel();
