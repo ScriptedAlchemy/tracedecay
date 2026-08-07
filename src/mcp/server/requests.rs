@@ -895,6 +895,10 @@ impl McpServer {
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 dashboard_lcm_retrieval_service: self.project_session_retrieval_service.clone(),
+                daemon_user_profile_id: self
+                    .profile_identity
+                    .as_ref()
+                    .map(|identity| identity.profile_id().clone()),
                 profile_root: self.profile_root.as_deref(),
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),

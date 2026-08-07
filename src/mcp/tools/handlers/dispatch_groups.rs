@@ -750,6 +750,7 @@ pub(super) async fn dispatch_session_workflow_tools(
                 args,
                 options.retained_project_graph_resolver.clone(),
                 options.registered_project_session_db.clone(),
+                options.daemon_user_profile_id.clone(),
                 options.dashboard_lcm_retrieval_service.clone(),
                 options.registered_savings_db.clone(),
                 options.automation_scheduler_reconciler.clone(),

@@ -65,6 +65,24 @@ pub(super) fn build_configuration_wire_schema_registry(
     ApplicationWireSchemaRegistryV1::new(schemas).map_err(Into::into)
 }
 
+/// The application invocation payload for a configuration operation is the
+/// operation's own request body — the same shape
+/// `parse_application_surface_request` accepts from every caller surface — not
+/// the `operation`/`request` envelope `ConfigurationWireRequestV1` uses to
+/// carry it across the daemon contract. Sending the envelope made the executor
+/// re-parse a tagged wrapper against a `deny_unknown_fields` request struct,
+/// so every configuration read and write routed through the daemon invocation
+/// executor failed admission as `InvalidRequest`.
+pub(super) fn configuration_invocation_payload(
+    request: &tracedecay_application::ConfigurationWireRequestV1,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    let mut wire = serde_json::to_value(request)
+        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+    wire.get_mut("request")
+        .map(Value::take)
+        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+}
+
 fn payload_decodes<T: DeserializeOwned>(payload: Option<&Value>) -> bool {
     payload.is_none_or(|value| serde_json::from_value::<T>(value.clone()).is_ok())
 }
