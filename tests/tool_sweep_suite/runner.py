@@ -642,14 +642,19 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 #   real host-agent claim journey, and context_scout_claim itself is declared
 #   unavailable (effect_journey_unverified), so the concealment denial is the
 #   complete hermetic contract.
+# - context_scout_pause/resume persist scout state through the configuration
+#   authority for one exact daemon-minted scout address; without a real
+#   host-agent claim the address cannot exist, so the control mutation must
+#   deny before admission and therefore needs no rollback.
 # - feedback_* reads and affected_tests consume daemon-minted request handles
 #   produced only by live LSP context projections or durable advisory cycles
 #   with findings; clients cannot reconstruct them by design.
 # - automation_run_artifact_view and skill_view read durable artifacts that
 #   only real automation runs / skill installs create; the isolated profile
 #   has none, so an unknown identity must stay a typed not-found.
-# - test_results reads daemon-retained managed test results whose only
-#   producer (run_affected_tests) is declared unavailable.
+# - test_results reads daemon-retained managed test results that only a
+#   covered run_affected_tests execution retains; the fixture has no covered
+#   tests, and its zero-coverage journey verifies nothing is retained.
 # An entry is falsifiable in both directions: a different problem stays FAIL,
 # and a hermetic success FAILs with expected_denial_superseded until the entry
 # is removed.
@@ -657,6 +662,8 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_context_scout_budget": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_context_scout_capability": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_context_scout_explain": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_pause": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
+    "tracedecay_context_scout_resume": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_context_scout_recent": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_context_scout_status": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
     "tracedecay_affected_tests": ("not_found_or_not_authorized", "not_found_or_not_authorized"),
@@ -678,6 +685,22 @@ _UNKNOWN_REQUEST_HANDLE_PROBE = {
     "request_handle": "tool-sweep-unknown-request-handle.v1",
     "format": "json",
 }
+# A structurally valid scout address that no host-agent claim has ever minted.
+_UNCLAIMED_SCOUT_ADDRESS = {
+    "profile_id": [0] * 16,
+    "provider_id": [0] * 16,
+    "protected_session_id": [0] * 32,
+    "thread_id": [0] * 16,
+    "turn_id": [0] * 16,
+    "agent_id": [0] * 16,
+    "logical_message_id": [0] * 16,
+    "project_id": [0] * 16,
+}
+_SCOUT_CONTROL_PROBE = {
+    "address": _UNCLAIMED_SCOUT_ADDRESS,
+    "expected_revision": "tool-sweep-unknown-revision.v1",
+    "idempotency_key": "tool-sweep-denial-probe.v1",
+}
 HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
@@ -685,6 +708,8 @@ HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_feedback_get": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_impact": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
+    "tracedecay_context_scout_pause": _SCOUT_CONTROL_PROBE,
+    "tracedecay_context_scout_resume": _SCOUT_CONTROL_PROBE,
 }
 
 
@@ -971,12 +996,62 @@ def _reconcile_effect(
     return row
 
 
+def _expected_denial_row(row: dict[str, Any], name: str, response: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite one row against the tool's cataloged exact hermetic denial."""
+    expected = EXPECTED_HERMETIC_DENIALS.get(name)
+    if expected is None:
+        return row
+    problem = response_problem_code(response)
+    if row["verdict"] == "FAIL" and problem == expected:
+        row.update(
+            {
+                "verdict": "PASS",
+                "note": f"expected hermetic typed denial confirmed: {problem[0]}",
+                "problem_code": problem[1],
+                "expected_denial": True,
+            }
+        )
+    elif row["verdict"] == "PASS":
+        row.update(
+            {
+                "verdict": "FAIL",
+                "problem_code": "tool_sweep.expected_denial_superseded",
+                "note": "tool succeeded hermetically; remove its expected hermetic denial entry",
+            }
+        )
+    return row
+
+
+def _effect_denial_row(
+    client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str],
+) -> dict[str, Any]:
+    """Prove a mutation with no hermetic success path denies with its exact typed error."""
+    try:
+        arguments = materialize_tool_arguments(definition, fixture)
+    except Exception as error:
+        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.arguments_unmaterialized", str(error))
+    try:
+        response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
+    except Exception as error:
+        return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
+    row = _expected_denial_row(
+        response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms), policy.name, response,
+    )
+    if row.get("expected_denial"):
+        row["rollback"] = "not_required"
+        row["rollback_note"] = "typed denial produced no effect to roll back"
+    return row
+
+
 def execute_effect(
-    client: McpClient, policy: ToolPolicy, fixture: dict[str, str], policies: dict[str, ToolPolicy],
+    client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str],
+    policies: dict[str, ToolPolicy],
 ) -> dict[str, Any]:
     """Exercise a real effect and its inverse inside this phase's disposable profile."""
     if policy.name == "tracedecay_source_edit_reconcile":
         return _reconcile_effect(client, policy, fixture, policies)
+    if policy.name in EXPECTED_HERMETIC_DENIALS:
+        return _effect_denial_row(client, definition, policy, fixture)
     try:
         def deadline(tool: str) -> int:
             candidate = policies.get(tool)
@@ -1046,29 +1121,9 @@ def _read_tool_row(client: McpClient, definition: dict[str, Any], policy: ToolPo
         response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
-    row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
-    expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
-    if expected is None:
-        return row
-    problem = response_problem_code(response)
-    if row["verdict"] == "FAIL" and problem == expected:
-        row.update(
-            {
-                "verdict": "PASS",
-                "note": f"expected hermetic typed denial confirmed: {problem[0]}",
-                "problem_code": problem[1],
-                "expected_denial": True,
-            }
-        )
-    elif row["verdict"] == "PASS":
-        row.update(
-            {
-                "verdict": "FAIL",
-                "problem_code": "tool_sweep.expected_denial_superseded",
-                "note": "tool succeeded hermetically; remove its expected hermetic denial entry",
-            }
-        )
-    return row
+    return _expected_denial_row(
+        response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms), policy.name, response,
+    )
 
 
 def _write_phase_report(out: Path, report: dict[str, Any]) -> None:
@@ -1146,11 +1201,15 @@ def run_phase(args: argparse.Namespace) -> int:
                 )
             )
         elif args.phase == "effect":
-            selected = [policy for _, policy in policies if policy.name == args.effect and policy.availability == "available" and policy.effect not in READ_EFFECTS]
+            selected = [
+                (definition, policy)
+                for definition, policy in policies
+                if policy.name == args.effect and policy.availability == "available" and policy.effect not in READ_EFFECTS
+            ]
             if len(selected) != 1:
                 raise SweepError(f"selected mutation is not uniquely available: {args.effect}")
             report["entries"].append(
-                execute_effect(client, selected[0], fixture, {policy.name: policy for _, policy in policies})
+                execute_effect(client, *selected[0], fixture, {policy.name: policy for _, policy in policies})
             )
     except Exception as error:
         report["fatal"] = str(error)

@@ -37,6 +37,47 @@ def _completed_session_end(response: dict[str, Any]) -> bool:
     return first_value(response, {"before_watermark", "signal_before"}) is not None
 
 
+def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
+    """Read the exact fact's trust score from a fact_store get response."""
+    for value in objects(response):
+        if value.get("fact_id") != fact_id:
+            continue
+        trust = value.get("trust_score")
+        if isinstance(trust, (int, float)) and not isinstance(trust, bool):
+            return float(trust)
+    return None
+
+
+def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
+    """Produce one real isolated fact and return its structured identity."""
+    added = call(
+        "tracedecay_fact_store",
+        {
+            "action": "add",
+            "content": content,
+            "category": "tool",
+            "trust": 0.5,
+            "source": "catalog_sweep",
+            "format": "json",
+        },
+        deadline("tracedecay_fact_store"),
+    )
+    fact_id = fact_id_with_content(added, content)
+    if fact_id is None:
+        raise JourneyError("fact producer omitted its structured fact identity")
+    return fact_id
+
+
+def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: int) -> None:
+    removed = call(
+        "tracedecay_fact_store",
+        {"action": "remove", "fact_id": fact_id, "format": "json"},
+        deadline("tracedecay_fact_store"),
+    )
+    if not has_true(removed, "removed"):
+        raise JourneyError("fact rollback did not confirm removal")
+
+
 def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: Deadline) -> dict[str, Any]:
     preview_arguments = {**arguments, "dry_run": True, "format": "json"}
     preview = call(tool, preview_arguments, deadline(tool))
@@ -388,6 +429,130 @@ def prepare(
             },
             cleanup,
         )
+    if name == "tracedecay_fact_feedback":
+        content = "catalog sweep temporary feedback fact"
+        fact_id = _seeded_fact(call, deadline, content)
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if not has_status(response, "recorded"):
+                raise JourneyError("fact feedback did not confirm a recorded receipt")
+            fetched = call(
+                "tracedecay_fact_store",
+                {"action": "get", "fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store"),
+            )
+            trust = _fact_trust(fetched, fact_id)
+            if trust is None or trust <= 0.5:
+                raise JourneyError(
+                    f"helpful feedback did not raise trust above its 0.5 baseline (observed {trust})"
+                )
+            _remove_seeded_fact(call, deadline, fact_id)
+            return "helpful feedback raised the seeded fact's trust; producer fact removed"
+
+        return PreparedJourney(
+            {"fact_id": fact_id, "action": "helpful", "source": "catalog_sweep", "format": "json"},
+            cleanup,
+        )
+    if name == "tracedecay_memory_status":
+        content = "catalog sweep temporary status fact"
+        fact_id = _seeded_fact(call, deadline, content)
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if not has_status(response, "ok"):
+                raise JourneyError("memory status did not report its repaired ok status")
+            counted = first_value(response, {"fact_count"})
+            if not isinstance(counted, int) or counted < 1:
+                raise JourneyError(
+                    f"memory status did not count the seeded fact (observed {counted!r})"
+                )
+            _remove_seeded_fact(call, deadline, fact_id)
+            return "memory status counted the seeded fact; producer fact removed"
+
+        return PreparedJourney({"format": "json"}, cleanup)
+    if name == "tracedecay_run_affected_tests":
+        changed = fixture.get("file")
+        if not changed:
+            raise JourneyError("fixture did not record its seeded source file")
+
+        def cleanup(response: dict[str, Any]) -> str:
+            note = first_value(response, {"note"})
+            if not isinstance(note, str) or "no tests cover" not in note:
+                raise JourneyError(
+                    "affected-test run did not report its truthful zero-coverage outcome"
+                )
+            # The journey call helper raises on any typed problem, so the
+            # exact retained-result unavailability arrives as that raise.
+            try:
+                call(
+                    "tracedecay_test_results",
+                    {"format": "json"},
+                    deadline("tracedecay_test_results"),
+                )
+            except Exception as error:
+                if "application.retrieval.unavailable" not in str(error):
+                    raise JourneyError(
+                        f"zero-coverage retention check failed atypically: {error}"
+                    ) from error
+            else:
+                raise JourneyError("zero-coverage run must retain no managed test result")
+            return "zero-coverage run completed truthfully; no managed result retained"
+
+        return PreparedJourney(
+            {"changed_paths": [changed], "timeout_secs": 60, "max_tests": 5, "format": "json"},
+            cleanup,
+        )
+    if name == "tracedecay_session_refresh":
+        # Selectors bind the durable refresh to a sweep-scoped session inside
+        # the disposable profile; the daemon mints the opaque handle.
+        selectors = {
+            "scope": "profile",
+            "profile": {"id": "profile.tool-sweep"},
+            "session": {
+                "id": "session.tool-sweep-refresh",
+                "store_id": "store.tool-sweep-refresh",
+                "root_id": "root.tool-sweep-refresh",
+            },
+            "source": {"scope": "codex"},
+            "target": {
+                "temporal_mode": {"kind": "current"},
+                "grain": "session",
+                "frontier": {"observed_through": 0, "committed_through": 0},
+            },
+            "format": "json",
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            outcome = first_value(response, {"outcome"})
+            if outcome not in {"started", "joined"}:
+                raise JourneyError(
+                    f"session refresh begin did not report started or joined (observed {outcome!r})"
+                )
+            handle = response_handle(response)
+            operation_id = first_value(response, {"operation_id"})
+            if not handle or not isinstance(operation_id, str) or not operation_id:
+                raise JourneyError("session refresh begin omitted its opaque handle or operation identity")
+            cancelled = call(
+                name, {"action": "cancel", "handle": handle, **selectors}, deadline(name)
+            )
+            terminal_state = first_value(cancelled, {"state"})
+            if first_value(cancelled, {"operation_id"}) != operation_id or terminal_state not in {
+                "cancelled",
+                "complete",
+            }:
+                raise JourneyError(
+                    f"durable cancel did not return the operation's terminal receipt (state {terminal_state!r})"
+                )
+            settled = call(
+                name, {"action": "status", "handle": handle, **selectors}, deadline(name)
+            )
+            if (
+                first_value(settled, {"operation_id"}) != operation_id
+                or first_value(settled, {"state"}) != terminal_state
+            ):
+                raise JourneyError("terminal refresh receipt did not stay durable after cancellation")
+            return "durable refresh start/cancel receipt verified terminal"
+
+        return PreparedJourney({"action": "start", **selectors}, cleanup)
     if name == "tracedecay_session_start":
         def cleanup(response: dict[str, Any]) -> str:
             if not has_status(response, "baseline_saved"):

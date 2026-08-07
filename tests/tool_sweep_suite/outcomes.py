@@ -50,6 +50,12 @@ def response_problem_code(response: dict[str, Any]) -> tuple[str | None, str | N
         kind, code = value.get("kind"), value.get("code")
         if isinstance(kind, str) and isinstance(code, str) and code:
             return kind, code
+        # Session tools render `{"outcome": <state>, "error": {"code": ...}}`.
+        outcome, error = value.get("outcome"), value.get("error")
+        if isinstance(outcome, str) and isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code:
+                return outcome, code
         state = value.get("status", value.get("state"))
         code = value.get("reason_code", value.get("problem_code"))
         if isinstance(state, str) and isinstance(code, str) and code:

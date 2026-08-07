@@ -241,6 +241,67 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         for name in runner.HERMETIC_DENIAL_PROBE_ARGUMENTS:
             self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
 
+    def test_mutation_denial_probe_passes_exactly_and_needs_no_rollback(self) -> None:
+        """A control mutation denied before admission proves its typed deny path."""
+        runner = load_runner()
+        name = "tracedecay_context_scout_pause"
+        self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+        policy = runner.ToolPolicy(
+            name=name, availability="available", effect="administrative", deadline_ms=1_000
+        )
+
+        row = runner.execute_effect(
+            self.client(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}'),
+            self.definition(name),
+            policy,
+            fixture={},
+            policies={},
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertTrue(row["expected_denial"])
+        self.assertEqual(row["rollback"], "not_required")
+
+    def test_mutation_denial_with_a_different_problem_stays_a_failure(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_context_scout_pause"
+        policy = runner.ToolPolicy(
+            name=name, availability="available", effect="administrative", deadline_ms=1_000
+        )
+
+        row = runner.execute_effect(
+            self.client('{"problem":{"kind":"conflict","code":"revision_mismatch"}}'),
+            self.definition(name),
+            policy,
+            fixture={},
+            policies={},
+        )
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertNotIn("rollback", row)
+
+    def test_session_outcome_error_framing_is_a_typed_problem(self) -> None:
+        """The session-tool `outcome`/`error.code` framing is consumable as a typed problem."""
+        runner = load_runner()
+        response = {
+            "result": {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        '{"outcome":"unavailable","error":{"code":"refresh_service_unavailable",'
+                        '"message":"no session-temporal refresh authority"}}'
+                    ),
+                }],
+            }
+        }
+
+        kind, code = runner.response_problem_code(response)
+
+        self.assertEqual(kind, "unavailable")
+        self.assertEqual(code, "refresh_service_unavailable")
+
     def test_git_preview_consumes_only_minted_hunk_preview_input(self) -> None:
         """The stage preview rides the git_hunks producer instead of invented state."""
         runner = load_runner()
@@ -422,6 +483,131 @@ class MutationJourneyTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_unavailable")
+
+    @staticmethod
+    def response(payload: str):
+        return {"result": {"content": [{"type": "text", "text": payload}]}}
+
+    def test_fact_feedback_journey_requires_a_real_trust_change(self) -> None:
+        """Helpful feedback must move the seeded fact's trust, then remove the fact."""
+        runner = load_runner()
+        state = {"trust": 0.5, "removed": False}
+
+        def call(tool, arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_fact_store")
+            action = arguments["action"]
+            if action == "add":
+                return self.response(
+                    '{"fact":{"fact_id":7,"content":"' + arguments["content"] + '"}}'
+                )
+            if action == "get":
+                return self.response(
+                    '{"fact":{"fact_id":7,"trust_score":' + str(state["trust"]) + "}}"
+                )
+            if action == "remove":
+                state["removed"] = True
+                return self.response('{"removed":true}')
+            raise AssertionError(action)
+
+        prepared = runner.prepare_journey(
+            "tracedecay_fact_feedback", object(), {}, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments["fact_id"], 7)
+        self.assertEqual(prepared.arguments["action"], "helpful")
+
+        with self.assertRaises(Exception):
+            prepared.cleanup(self.response('{"status":"recorded"}'))
+        self.assertFalse(state["removed"])
+
+        state["trust"] = 0.55
+        note = prepared.cleanup(self.response('{"status":"recorded"}'))
+        self.assertIn("trust", note)
+        self.assertTrue(state["removed"])
+
+    def test_memory_status_journey_counts_the_seeded_fact(self) -> None:
+        """The repaired status must truthfully count the seeded fact before rollback."""
+        runner = load_runner()
+
+        def call(tool, arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_fact_store")
+            if arguments["action"] == "add":
+                return self.response(
+                    '{"fact":{"fact_id":3,"content":"' + arguments["content"] + '"}}'
+                )
+            return self.response('{"removed":true}')
+
+        prepared = runner.prepare_journey(
+            "tracedecay_memory_status", object(), {}, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments, {"format": "json"})
+
+        with self.assertRaises(Exception):
+            prepared.cleanup(self.response('{"status":"ok","memory":{"fact_count":0}}'))
+        note = prepared.cleanup(self.response('{"status":"ok","memory":{"fact_count":1}}'))
+        self.assertIn("counted", note)
+
+    def test_run_affected_tests_journey_proves_zero_coverage_retains_nothing(self) -> None:
+        """A truthful zero-coverage run passes only while test_results stays unavailable."""
+        runner = load_runner()
+        retained = {"unavailable": True}
+
+        def call(tool, _arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_test_results")
+            if retained["unavailable"]:
+                raise RuntimeError(
+                    "tracedecay_test_results journey call failed: application.retrieval.unavailable"
+                )
+            return self.response('{"results":[{"test":"phantom","passed":true}]}')
+
+        prepared = runner.prepare_journey(
+            "tracedecay_run_affected_tests",
+            object(),
+            {"file": "src/lib.rs"},
+            lambda _tool: 1_000,
+            call,
+        )
+        self.assertEqual(prepared.arguments["changed_paths"], ["src/lib.rs"])
+
+        zero = '{"passed":0,"failed":0,"results":[],"note":"no tests cover the changed paths (1 file(s))"}'
+        note = prepared.cleanup(self.response(zero))
+        self.assertIn("no managed result retained", note)
+
+        retained["unavailable"] = False
+        with self.assertRaises(Exception):
+            prepared.cleanup(self.response(zero))
+
+    def test_session_refresh_journey_requires_a_durable_terminal_receipt(self) -> None:
+        """The refresh rollback is a receipt-backed durable cancel, verified terminal."""
+        runner = load_runner()
+        state = {"terminal": False}
+
+        def call(_tool, arguments, _deadline_ms):
+            if arguments["action"] == "cancel":
+                state["terminal"] = True
+                return self.response(
+                    '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+                )
+            self.assertEqual(arguments["action"], "status")
+            if not state["terminal"]:
+                return self.response('{"outcome":"running","progress":{"operation_id":"refresh.op"}}')
+            return self.response(
+                '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+            )
+
+        prepared = runner.prepare_journey(
+            "tracedecay_session_refresh", object(), {}, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments["action"], "start")
+
+        with self.assertRaises(Exception):
+            prepared.cleanup(self.response('{"outcome":"running"}'))
+
+        note = prepared.cleanup(
+            self.response(
+                '{"outcome":"started","handle":"srh_fixture","operation_id":"refresh.op"}'
+            )
+        )
+        self.assertIn("terminal", note)
 
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()
