@@ -864,7 +864,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_plan_36_journey_operation_is_bound_to_cli_and_mcp() {
+    fn every_native_integration_journey_operation_is_bound_to_cli_and_mcp() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
         for operation in [
             NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
