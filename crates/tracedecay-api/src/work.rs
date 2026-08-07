@@ -16,6 +16,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, State};
@@ -215,11 +216,37 @@ impl WorkOperation {
         }
     }
 
-    fn parse(segment: &str) -> Option<Self> {
+    /// Resolve an operation from the final path segment that names it.
+    ///
+    /// The route segment is the one public name a Work operation has, so every
+    /// adapter that accepts an operation by name — the router, the CLI, the
+    /// catalog — resolves it here rather than keeping a second name table.
+    pub fn from_route_segment(segment: &str) -> Option<Self> {
         Self::ALL
             .iter()
             .copied()
             .find(|operation| operation.route_segment() == segment)
+    }
+
+    fn parse(segment: &str) -> Option<Self> {
+        Self::from_route_segment(segment)
+    }
+}
+
+impl FromStr for WorkOperation {
+    type Err = String;
+
+    fn from_str(segment: &str) -> Result<Self, Self::Err> {
+        Self::from_route_segment(segment).ok_or_else(|| {
+            format!(
+                "unknown Work operation route segment: {segment} (valid operations: {})",
+                Self::ALL
+                    .iter()
+                    .map(|operation| operation.route_segment())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
     }
 }
 

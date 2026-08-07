@@ -5,6 +5,7 @@ pub mod dispatch;
 mod help;
 pub(crate) mod output;
 mod package_hook;
+mod work;
 mod workflow;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
@@ -13,6 +14,7 @@ pub use automation::{
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
+pub use work::WorkInvocationArgs;
 pub use workflow::WorkflowInvocationArgs;
 
 fn agent_value_parser() -> PossibleValuesParser {
@@ -222,6 +224,11 @@ pub enum Commands {
         /// `@` is read from that file (handy for multi-line replacement bodies).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Invoke one typed daemon-owned Work application operation.
+    Work {
+        #[command(flatten)]
+        invocation: WorkInvocationArgs,
     },
     /// Invoke one typed daemon-owned Workflow application operation.
     Workflow {

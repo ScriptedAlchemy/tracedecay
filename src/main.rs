@@ -21,6 +21,7 @@ mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 mod update_cmd;
+mod work_command;
 mod workflow_command;
 
 pub use tracedecay::serve;
@@ -570,6 +571,7 @@ impl CommandFamily {
             | Commands::Wipe { .. }
             | Commands::List { .. } => Self::Project,
             Commands::Tool { .. }
+            | Commands::Work { .. }
             | Commands::Workflow { .. }
             | Commands::Lsp { .. }
             | Commands::ExtractWorker
@@ -822,6 +824,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
         } => {
             tool_command::run(project, name, args).await?;
         }
+        Commands::Work { invocation } => work_command::run(invocation).await?,
         Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;
@@ -1334,9 +1337,10 @@ impl CommandStartupPolicy {
             // Tool calls are the documented MCP fallback and must remain a local,
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
-            Commands::Tool { .. } | Commands::Workflow { .. } | Commands::Git { .. } => {
-                Self::SkipAll
-            }
+            Commands::Tool { .. }
+            | Commands::Work { .. }
+            | Commands::Workflow { .. }
+            | Commands::Git { .. } => Self::SkipAll,
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.
