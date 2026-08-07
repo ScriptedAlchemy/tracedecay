@@ -661,9 +661,10 @@ impl DaemonInvocationService {
         &self,
         session: &DaemonLspSessionAccess,
     ) -> Option<tracedecay_lsp::WorkspaceFolderMutation> {
+        let access = session.clone().into_access().ok()?;
         let sessions = self.lsp_sessions.lock().await;
         sessions
-            .get(session.session_id())?
+            .get(access.session_id())?
             .actor
             .pending_workspace_folder_mutation()
     }
@@ -677,8 +678,11 @@ impl DaemonInvocationService {
         mutation: &tracedecay_lsp::WorkspaceFolderMutation,
         workspace: Option<AuthorizedLspWorkspace>,
     ) {
+        let Ok(access) = session.clone().into_access() else {
+            return;
+        };
         let mut sessions = self.lsp_sessions.lock().await;
-        let Some(state) = sessions.get_mut(session.session_id()) else {
+        let Some(state) = sessions.get_mut(access.session_id()) else {
             return;
         };
         let _ = match workspace {
