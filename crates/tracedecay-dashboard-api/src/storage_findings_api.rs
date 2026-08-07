@@ -191,6 +191,9 @@ const fn unavailable_reason(reason: DoctorFamilyUnavailableReasonV1) -> &'static
         DoctorFamilyUnavailableReasonV1::Absent => "absent",
         DoctorFamilyUnavailableReasonV1::Denied => "denied",
         DoctorFamilyUnavailableReasonV1::Unknown => "unknown",
+        DoctorFamilyUnavailableReasonV1::Unavailable => "unavailable",
+        DoctorFamilyUnavailableReasonV1::ResetRequired => "reset_required",
+        DoctorFamilyUnavailableReasonV1::Corrupt => "corrupt",
     }
 }
 
