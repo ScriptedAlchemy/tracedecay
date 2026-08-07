@@ -249,17 +249,13 @@ async fn transport_injected_request_id_is_stripped_before_typed_parsing() {
         accepted_at: 123,
     });
     let mut args = refresh_args("profile", "start");
-    args.as_object_mut().unwrap().insert(
-        "__mcp_request_id".to_string(),
-        json!("request.mcp.fixture"),
-    );
+    args.as_object_mut()
+        .unwrap()
+        .insert("__mcp_request_id".to_string(), json!("request.mcp.fixture"));
 
-    let result = handle_session_refresh(
-        args,
-        SessionRefreshServices::new(None, Some(&profile)),
-    )
-    .await
-    .unwrap();
+    let result = handle_session_refresh(args, SessionRefreshServices::new(None, Some(&profile)))
+        .await
+        .unwrap();
     let payload: Value = serde_json::from_str(response_text(&result.value)).unwrap();
 
     assert_eq!(payload["outcome"], "started");
