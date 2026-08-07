@@ -391,7 +391,7 @@ jobs:
             --binaries binaries \
             --mcpbs mcpbs
           for bundle in mcpbs/*.mcpb; do
-            platform="${bundle#mcpbs/tracedecay-beta-${RELEASE_TAG}-}"
+            platform="${bundle#mcpbs/tracedecay-beta-"${RELEASE_TAG}"-}"
             platform="${platform%.mcpb}"
             python3 scripts/build-mcpb.py verify \
               --bundle "$bundle" \
@@ -422,7 +422,7 @@ jobs:
           )
           (
             cd mcpbs
-            sha256sum *.mcpb
+            sha256sum -- *.mcpb
           ) >> SHA256SUMS
           mapfile -t archives < <(find binaries -maxdepth 1 -type f -name 'tracedecay-beta-*' -print | sort)
           test "${#archives[@]}" -gt 0

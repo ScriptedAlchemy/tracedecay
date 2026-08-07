@@ -82,11 +82,13 @@ jobs:
               exit 1
             fi
           fi
-          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
-          echo "source_epoch=${source_epoch}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "source_sha=${source_sha}"
+            echo "source_epoch=${source_epoch}"
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "prerelease=false"
+          } >> "$GITHUB_OUTPUT"
           gh api "repos/${{ github.repository }}/releases/tags/${tag}" \
             --jq '.assets[].name' > remote-asset-names
           python3 scripts/plan-release-recovery.py \
@@ -539,7 +541,7 @@ jobs:
             --binaries binaries \
             --mcpbs mcpbs
           for bundle in mcpbs/*.mcpb; do
-            platform="${bundle#mcpbs/tracedecay-${TAG}-}"
+            platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
             python3 .release-automation/scripts/build-mcpb.py verify \
               --bundle "$bundle" \
@@ -574,7 +576,7 @@ jobs:
           ) > SHA256SUMS
           (
             cd mcpbs
-            sha256sum *.mcpb
+            sha256sum -- *.mcpb
           ) >> SHA256SUMS
           assets+=(SHA256SUMS install.sh)
           TAG="${{ steps.release.outputs.tag }}"
@@ -683,7 +685,7 @@ jobs:
           bundles=(assets/tracedecay-"${TAG}"-*.mcpb)
           test "${#bundles[@]}" -gt 0
           for bundle in "${bundles[@]}"; do
-            platform="${bundle#*tracedecay-${TAG}-}"
+            platform="${bundle#*tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
             python3 scripts/build-mcpb.py verify \
               --bundle "$bundle" \
@@ -694,7 +696,7 @@ jobs:
           printf '[' > sha-map.json
           sep=""
           for bundle in "${bundles[@]}"; do
-            platform="${bundle#*tracedecay-${TAG}-}"
+            platform="${bundle#*tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
             sha=$(sha256sum "$bundle" | cut -d' ' -f1)
             printf '%s{"platform":"%s","sha":"%s"}' "$sep" "$platform" "$sha" >> sha-map.json
