@@ -5,7 +5,7 @@ use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, PolicyRevisionId,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
     RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
 };
@@ -96,7 +96,7 @@ fn file(occurrence: &str, path: &str) -> SanitizedCodeFileV1 {
     SanitizedCodeFileV1 {
         file_occurrence_id: id(occurrence),
         logical_path: path.to_owned(),
-        language: None,
+        language: Some(LanguageId::new("rust").expect("valid language id")),
         content_digest: digest::<ContentDigest>('f'),
         disposition: SnapshotFileDispositionV1::Present,
     }
