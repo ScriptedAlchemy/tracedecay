@@ -671,6 +671,27 @@
       ],
       "type": "object"
     },
+    "AuthorizedWorkProductScopeV1": {
+      "additionalProperties": false,
+      "description": "Owner identity resolved by the registered profile authority. It is never\naccepted from a Work request.",
+      "properties": {
+        "owner_brain_id": {
+          "$ref": "#/$defs/BrainId"
+        },
+        "owner_profile_id": {
+          "$ref": "#/$defs/UserProfileId"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "owner_brain_id",
+        "owner_profile_id",
+        "selection"
+      ],
+      "type": "object"
+    },
     "AutomationPendingReviewCountV1": {
       "description": "One human-review queue: a count, or the reason there is no count.\n\nKept as a tagged reading rather than a bare number because these two queues\nare the entire human-approval step of the automation pipeline. A queue whose\nauthority is unmounted must not report `0`, which reads as \"checked, nothing\nwaiting\" — the precise false zero this shape exists to prevent.",
       "oneOf": [
@@ -900,6 +921,10 @@
         "last_scheduler_run"
       ],
       "type": "object"
+    },
+    "BrainId": {
+      "description": "Strongly typed canonical identity: `BrainId`.",
+      "type": "string"
     },
     "CallChainMeasurementV1": {
       "properties": {
@@ -9667,6 +9692,10 @@
       ],
       "type": "object"
     },
+    "RetrievalAnchorId": {
+      "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
+      "type": "string"
+    },
     "ReviewProposalCommand": {
       "additionalProperties": false,
       "properties": {
@@ -12046,6 +12075,40 @@
       ],
       "type": "object"
     },
+    "TaskEvidenceLinkV1": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor_id": {
+          "$ref": "#/$defs/RetrievalAnchorId"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "link_id": {
+          "type": "string"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "link_id",
+        "revision",
+        "task_id",
+        "anchor_id",
+        "evidence_digest",
+        "observed_at"
+      ],
+      "type": "object"
+    },
     "TaskId": {
       "description": "Strongly typed canonical identity: `TaskId`.",
       "type": "string"
@@ -12270,6 +12333,40 @@
       "format": "int64",
       "type": "integer"
     },
+    "VerifiedWorkGraphVersionV1": {
+      "additionalProperties": false,
+      "description": "One exact verified graph snapshot identity.",
+      "properties": {
+        "event_sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recovered_graph_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "source_watermark": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "graph_version",
+        "event_sequence",
+        "source_watermark",
+        "recovered_graph_digest"
+      ],
+      "type": "object"
+    },
     "VersionSettingsPayloadV1": {
       "properties": {
         "cached_latest_version": {
@@ -12289,6 +12386,26 @@
         "version",
         "channel",
         "cached_latest_version"
+      ],
+      "type": "object"
+    },
+    "WorkAcceptanceCriterionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "evidence_required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "description",
+        "evidence_required"
       ],
       "type": "object"
     },
@@ -12844,9 +12961,101 @@
         }
       ]
     },
+    "WorkCausalProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_edges": {
+          "items": {
+            "$ref": "#/$defs/WorkDagEdgeV1"
+          },
+          "type": "array"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_version",
+        "candidate_edges"
+      ],
+      "type": "object"
+    },
     "WorkCommandId": {
       "description": "Strongly typed canonical identity: `WorkCommandId`.",
       "type": "string"
+    },
+    "WorkCriticalPathProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_ids": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        },
+        "total_effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_version",
+        "task_ids",
+        "total_effort"
+      ],
+      "type": "object"
+    },
+    "WorkDagEdgeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "dependency": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "dependent": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "dependency",
+        "dependent"
+      ],
+      "type": "object"
+    },
+    "WorkDagProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "gating_edges": {
+          "items": {
+            "$ref": "#/$defs/WorkDagEdgeV1"
+          },
+          "type": "array"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_ids": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "graph_version",
+        "task_ids",
+        "gating_edges"
+      ],
+      "type": "object"
     },
     "WorkEffectStateV1": {
       "description": "Effect semantics admitted for one provider attempt.",
@@ -13164,6 +13373,596 @@
       ],
       "type": "string"
     },
+    "WorkGraphReadModeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "current",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "as_of",
+              "type": "string"
+            },
+            "valid_at": {
+              "$ref": "#/$defs/UtcMicros"
+            }
+          },
+          "required": [
+            "mode",
+            "valid_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "from_valid_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "mode": {
+              "const": "evolution",
+              "type": "string"
+            },
+            "through_valid_at": {
+              "$ref": "#/$defs/UtcMicros"
+            }
+          },
+          "required": [
+            "mode",
+            "from_valid_at",
+            "through_valid_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "from_observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "mode": {
+              "const": "forensic",
+              "type": "string"
+            },
+            "through_observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            }
+          },
+          "required": [
+            "mode",
+            "from_observed_at",
+            "through_observed_at"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkGraphReadRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "continuation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/WorkGraphReadModeV1"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "mode",
+        "continuation",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "WorkGraphReadV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "authorized_scope": {
+              "$ref": "#/$defs/AuthorizedWorkProductScopeV1"
+            },
+            "mode": {
+              "const": "current",
+              "type": "string"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/WorkGraphVersionEntryV1"
+            }
+          },
+          "required": [
+            "mode",
+            "authorized_scope",
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "authorized_scope": {
+              "$ref": "#/$defs/AuthorizedWorkProductScopeV1"
+            },
+            "mode": {
+              "const": "as_of",
+              "type": "string"
+            },
+            "snapshot": {
+              "$ref": "#/$defs/WorkGraphVersionEntryV1"
+            }
+          },
+          "required": [
+            "mode",
+            "authorized_scope",
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "authorized_scope": {
+              "$ref": "#/$defs/AuthorizedWorkProductScopeV1"
+            },
+            "mode": {
+              "const": "evolution",
+              "type": "string"
+            },
+            "timeline": {
+              "$ref": "#/$defs/WorkGraphTimelineV1"
+            }
+          },
+          "required": [
+            "mode",
+            "authorized_scope",
+            "timeline"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "authorized_scope": {
+              "$ref": "#/$defs/AuthorizedWorkProductScopeV1"
+            },
+            "mode": {
+              "const": "forensic",
+              "type": "string"
+            },
+            "timeline": {
+              "$ref": "#/$defs/WorkGraphTimelineV1"
+            }
+          },
+          "required": [
+            "mode",
+            "authorized_scope",
+            "timeline"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkGraphTimelineCoverageV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "coverage": {
+              "const": "complete",
+              "type": "string"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "returned"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "continuation": {
+              "type": "string"
+            },
+            "coverage": {
+              "const": "partial",
+              "type": "string"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "returned",
+            "continuation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkGraphTimelineV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/WorkGraphTimelineCoverageV1"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/WorkGraphVersionEntryV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "WorkGraphVersionEntryV1": {
+      "additionalProperties": false,
+      "description": "One immutable graph version and every Work projection derived from that\nsame version at the caller's explicit observation time.",
+      "properties": {
+        "graph": {
+          "$ref": "#/$defs/WorkProductGraphV1"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "projected_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "projections": {
+          "$ref": "#/$defs/WorkProductProjectionBundleV1"
+        },
+        "runtime": {
+          "$ref": "#/$defs/WorkRuntimeProjectionV1"
+        },
+        "valid_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "verified_version": {
+          "$ref": "#/$defs/VerifiedWorkGraphVersionV1"
+        }
+      },
+      "required": [
+        "valid_at",
+        "observed_at",
+        "projected_at",
+        "verified_version",
+        "graph",
+        "runtime",
+        "projections"
+      ],
+      "type": "object"
+    },
+    "WorkHandoffV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_frontier": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "from_actor": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "handed_off_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "handoff_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "to_actor": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "handoff_id",
+        "task_id",
+        "from_actor",
+        "to_actor",
+        "evidence_frontier",
+        "unknowns",
+        "handed_off_at"
+      ],
+      "type": "object"
+    },
+    "WorkHierarchyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "initiative_id": {
+          "type": "string"
+        },
+        "milestone_id": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "initiative_id",
+        "plan_id",
+        "milestone_id"
+      ],
+      "type": "object"
+    },
+    "WorkInitiativeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "WorkItemInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "$ref": "#/$defs/WorkAcceptanceCriterionV1"
+          },
+          "type": "array"
+        },
+        "causal_candidates": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "created_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hierarchy": {
+          "$ref": "#/$defs/WorkHierarchyV1"
+        },
+        "informational_relations": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scheduled_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "task_id",
+        "hierarchy",
+        "title",
+        "dependencies",
+        "informational_relations",
+        "causal_candidates",
+        "acceptance_criteria",
+        "effort",
+        "scheduled_at",
+        "deadline",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "WorkItemV1": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accepted_attempts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "accepted_criteria": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "accepted_proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "accepted_route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkRouteDecisionV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archived_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_links": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "handoffs": {
+          "items": {
+            "$ref": "#/$defs/WorkHandoffV1"
+          },
+          "type": "array"
+        },
+        "input": {
+          "$ref": "#/$defs/WorkItemInputV1"
+        }
+      },
+      "required": [
+        "input",
+        "accepted_proposal",
+        "accepted_route",
+        "evidence_links",
+        "accepted_criteria",
+        "accepted_attempts",
+        "handoffs",
+        "accepted_at",
+        "archived_at"
+      ],
+      "type": "object"
+    },
+    "WorkKanbanCardV1": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lane": {
+          "$ref": "#/$defs/WorkTimelineLaneV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/WorkLegalActionV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "lane",
+        "effort",
+        "legal_actions"
+      ],
+      "type": "object"
+    },
+    "WorkKanbanProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cards": {
+          "items": {
+            "$ref": "#/$defs/WorkKanbanCardV1"
+          },
+          "type": "array"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_version",
+        "cards"
+      ],
+      "type": "object"
+    },
     "WorkLeaseFenceV1": {
       "additionalProperties": false,
       "properties": {
@@ -13183,6 +13982,250 @@
     "WorkLeaseId": {
       "description": "Strongly typed canonical identity: `WorkLeaseId`.",
       "type": "string"
+    },
+    "WorkLegalActionV1": {
+      "enum": [
+        "view_evidence",
+        "generate_proposal",
+        "accept_proposal",
+        "link_accepted_attempt",
+        "accept_task",
+        "handoff",
+        "archive"
+      ],
+      "type": "string"
+    },
+    "WorkMilestoneV1": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "id": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "plan_id",
+        "title",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "WorkPlanV1": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "id": {
+          "type": "string"
+        },
+        "initiative_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "initiative_id",
+        "title",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "WorkProductAuthorizedRelationScopeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "project_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "repository",
+              "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            },
+            "repository_id": {
+              "$ref": "#/$defs/RepositoryId"
+            }
+          },
+          "required": [
+            "kind",
+            "project_id",
+            "repository_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkProductGraphV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/TaskEvidenceLinkV1"
+          },
+          "type": "array"
+        },
+        "initiatives": {
+          "items": {
+            "$ref": "#/$defs/WorkInitiativeV1"
+          },
+          "type": "array"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/WorkItemV1"
+          },
+          "type": "array"
+        },
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/WorkMilestoneV1"
+          },
+          "type": "array"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/WorkPlanV1"
+          },
+          "type": "array"
+        },
+        "proposal_decisions": {
+          "items": {
+            "$ref": "#/$defs/WorkProposalDecisionV12"
+          },
+          "type": "array"
+        },
+        "relation_replan_decisions": {
+          "items": {
+            "$ref": "#/$defs/WorkRelationReplanDecisionV1"
+          },
+          "type": "array"
+        },
+        "version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "initiatives",
+        "plans",
+        "milestones",
+        "items",
+        "proposal_decisions",
+        "relation_replan_decisions",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "WorkProductProjectionBundleV1": {
+      "additionalProperties": false,
+      "properties": {
+        "causal": {
+          "$ref": "#/$defs/WorkCausalProjectionV1"
+        },
+        "critical_path": {
+          "$ref": "#/$defs/WorkCriticalPathProjectionV1"
+        },
+        "dag": {
+          "$ref": "#/$defs/WorkDagProjectionV1"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kanban": {
+          "$ref": "#/$defs/WorkKanbanProjectionV1"
+        },
+        "runtime": {
+          "$ref": "#/$defs/WorkRuntimeProjectionV1"
+        },
+        "timeline": {
+          "$ref": "#/$defs/WorkTimelineProjectionV1"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkWorkloadProjectionV1"
+        }
+      },
+      "required": [
+        "graph_version",
+        "runtime",
+        "kanban",
+        "dag",
+        "timeline",
+        "causal",
+        "critical_path",
+        "workload"
+      ],
+      "type": "object"
+    },
+    "WorkProductSelectionScopeV1": {
+      "description": "The relation subset selected for one request. `ProfileOwnedNoGit` is an\nexplicit no-Git selection, not an empty set that bypasses authorization.",
+      "oneOf": [
+        {
+          "properties": {
+            "selection": {
+              "const": "profile_owned_no_git",
+              "type": "string"
+            }
+          },
+          "required": [
+            "selection"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "relation_scopes": {
+              "items": {
+                "$ref": "#/$defs/WorkProductAuthorizedRelationScopeV1"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "selection": {
+              "const": "relations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "selection",
+            "relation_scopes"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkProjection": {
       "additionalProperties": false,
@@ -13592,6 +14635,26 @@
       ],
       "type": "object"
     },
+    "WorkProposalDecisionV12": {
+      "additionalProperties": false,
+      "properties": {
+        "decided_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "disposition": {
+          "$ref": "#/$defs/WorkProposalDispositionV12"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        }
+      },
+      "required": [
+        "proposal",
+        "disposition",
+        "decided_at"
+      ],
+      "type": "object"
+    },
     "WorkProposalDispositionV1": {
       "description": "Exactly one disposition per decision.",
       "enum": [
@@ -13599,6 +14662,14 @@
         "deny",
         "abstain",
         "indeterminate"
+      ],
+      "type": "string"
+    },
+    "WorkProposalDispositionV12": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "superseded"
       ],
       "type": "string"
     },
@@ -13618,6 +14689,85 @@
         "ready"
       ],
       "type": "string"
+    },
+    "WorkProposalV1": {
+      "additionalProperties": false,
+      "properties": {
+        "based_on_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/WorkProposedChildV1"
+          },
+          "type": "array"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "route": {
+          "$ref": "#/$defs/WorkRouteDecisionV1"
+        },
+        "shape": {
+          "$ref": "#/$defs/WorkShapeAssessmentV1"
+        },
+        "sizing": {
+          "$ref": "#/$defs/WorkSizingV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "task_id",
+        "based_on_version",
+        "shape",
+        "sizing",
+        "children",
+        "route",
+        "explanation",
+        "evidence_digest"
+      ],
+      "type": "object"
+    },
+    "WorkProposedChildV1": {
+      "additionalProperties": false,
+      "properties": {
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "title",
+        "effort",
+        "dependencies"
+      ],
+      "type": "object"
     },
     "WorkProviderBackendV1": {
       "description": "Provider protocol selected by the pinned Work configuration snapshot.",
@@ -13748,6 +14898,76 @@
         }
       ]
     },
+    "WorkRelationReplanDecisionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "decided_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "disposition": {
+          "$ref": "#/$defs/WorkProposalDispositionV12"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkRelationReplanProposalV1"
+        }
+      },
+      "required": [
+        "proposal",
+        "disposition",
+        "decided_at"
+      ],
+      "type": "object"
+    },
+    "WorkRelationReplanProposalV1": {
+      "additionalProperties": false,
+      "properties": {
+        "based_on_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "causal_candidates": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "informational_relations": {
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "task_id",
+        "based_on_version",
+        "dependencies",
+        "informational_relations",
+        "causal_candidates",
+        "payload_digest"
+      ],
+      "type": "object"
+    },
     "WorkRestartReasonV1": {
       "enum": [
         "lease_lost",
@@ -13757,11 +14977,252 @@
       ],
       "type": "string"
     },
+    "WorkRouteDecisionV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "alternatives": {
+              "items": {
+                "$ref": "#/$defs/WorkProviderRouteV1"
+              },
+              "type": "array"
+            },
+            "decision": {
+              "const": "selected",
+              "type": "string"
+            },
+            "exclusions": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "fallback": {
+              "type": "string"
+            },
+            "recommended": {
+              "$ref": "#/$defs/WorkProviderRouteV1"
+            }
+          },
+          "required": [
+            "decision",
+            "recommended",
+            "alternatives",
+            "exclusions",
+            "fallback"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "decision": {
+              "const": "abstained",
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRuntimeAttemptProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkAttemptStateV1"
+        }
+      },
+      "required": [
+        "identity",
+        "state"
+      ],
+      "type": "object"
+    },
+    "WorkRuntimeProjectionCoverageV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "coverage"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "const": "partial",
+              "type": "string"
+            },
+            "unavailable_attempts": {
+              "items": {
+                "$ref": "#/$defs/WorkAttemptIdentityV1"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "coverage",
+            "unavailable_attempts"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "coverage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRuntimeProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/WorkRuntimeAttemptProjectionV1"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/$defs/WorkRuntimeProjectionCoverageV1"
+        },
+        "generation_id": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "sequence": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        }
+      },
+      "required": [
+        "graph_version",
+        "generation_id",
+        "sequence",
+        "observed_at",
+        "attempts",
+        "coverage"
+      ],
+      "type": "object"
+    },
     "WorkSandboxPolicy": {
       "enum": [
         "required"
       ],
       "type": "string"
+    },
+    "WorkScoreKindV1": {
+      "enum": [
+        "ordinal",
+        "heuristic",
+        "calibrated_range"
+      ],
+      "type": "string"
+    },
+    "WorkShapeAssessmentV1": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blast_radius": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "complexity": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "integration_overhead": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "score_kind": {
+          "$ref": "#/$defs/WorkScoreKindV1"
+        }
+      },
+      "required": [
+        "score_kind",
+        "complexity",
+        "ambiguity",
+        "blast_radius",
+        "integration_overhead"
+      ],
+      "type": "object"
+    },
+    "WorkSizingV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "type": "string"
+        },
+        "high": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "likely": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "low": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "score_kind": {
+          "$ref": "#/$defs/WorkScoreKindV1"
+        }
+      },
+      "required": [
+        "score_kind",
+        "low",
+        "likely",
+        "high",
+        "coverage"
+      ],
+      "type": "object"
     },
     "WorkTerminalEvidenceV1": {
       "oneOf": [
@@ -13846,6 +15307,150 @@
           "type": "object"
         }
       ]
+    },
+    "WorkTimelineEntryV1": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduled_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "task_id",
+        "created_at",
+        "updated_at",
+        "scheduled_at",
+        "deadline"
+      ],
+      "type": "object"
+    },
+    "WorkTimelineLaneV1": {
+      "enum": [
+        "triage",
+        "todo",
+        "scheduled",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "done",
+        "archived",
+        "cancelled",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "WorkTimelineProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/WorkTimelineEntryV1"
+          },
+          "type": "array"
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_version",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "WorkWorkloadProjectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "actual_concurrency": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "blocked_effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ready_effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requested_concurrency": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "running_effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_effort": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "graph_version",
+        "total_effort",
+        "ready_effort",
+        "running_effort",
+        "blocked_effort",
+        "requested_concurrency",
+        "actual_concurrency"
+      ],
+      "type": "object"
     },
     "WorkflowOperationRef": {
       "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
@@ -14061,6 +15666,12 @@
     "work_generated_proposal": {
       "$ref": "#/$defs/GeneratedWorkProposal"
     },
+    "work_graph_read": {
+      "$ref": "#/$defs/WorkGraphReadV1"
+    },
+    "work_graph_read_request": {
+      "$ref": "#/$defs/WorkGraphReadRequestV1"
+    },
     "work_projection": {
       "$ref": "#/$defs/WorkProjection"
     },
@@ -14160,6 +15771,8 @@
     "work_attempt_recovery_report",
     "work_attempt_list_request",
     "work_attempt_list",
+    "work_graph_read_request",
+    "work_graph_read",
     "multi_root_capability",
     "multi_root_scope_set_read_request",
     "multi_root_scope_set",
