@@ -1,4 +1,3 @@
-use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -7,8 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::common::{
     apply_tracedecay_home_env, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };
-
-const LIFECYCLE_GUARDED_STDIN_HOOKS: &[&str] = &["hook-user-session-review"];
 
 fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
     let claude_stop =
@@ -84,22 +81,6 @@ fn fixture_request(document: &str, identity: &str) -> Vec<u8> {
         .find(|event| event["identity"] == identity)
         .unwrap();
     serde_json::to_vec(&event["request"]).unwrap()
-}
-
-fn hold_external_exclusive_lease(home: &Path) -> File {
-    let profile = home.join(".tracedecay");
-    std::fs::create_dir_all(&profile).unwrap();
-    let mut lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(profile.join("lifecycle.lock"))
-        .unwrap();
-    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
-    writeln!(lock, "external-token\tmigration\t999").unwrap();
-    lock.flush().unwrap();
-    lock
 }
 
 fn run_hook(home: &Path, hook: &str, input: Option<&[u8]>) -> Output {
@@ -295,30 +276,12 @@ fn native_hook_captures_only_bound_transport_spool_records() {
     }
 }
 
-#[test]
-fn exclusive_lifecycle_owner_quiesces_every_hook_before_startup_or_dispatch() {
-    assert_eq!(LIFECYCLE_GUARDED_STDIN_HOOKS.len(), 1);
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path();
-    let profile = home.join(".tracedecay");
-    std::fs::create_dir_all(&profile).unwrap();
-    let config = profile.join("config.toml");
-    let config_bytes = b"upload_enabled = false\npending_upload = 41\n";
-    std::fs::write(&config, config_bytes).unwrap();
-    let _exclusive = hold_external_exclusive_lease(home);
-
-    for hook in LIFECYCLE_GUARDED_STDIN_HOOKS {
-        let payload = b"{}".to_vec();
-        let output = run_hook(home, hook, Some(&payload));
-        assert!(output.status.success(), "{hook}: {output:?}");
-        assert!(output.stdout.is_empty(), "{hook} wrote stdout");
-        assert!(output.stderr.is_empty(), "{hook} wrote stderr");
-    }
-
-    assert_eq!(std::fs::read(&config).unwrap(), config_bytes);
-    assert!(!profile.join("global.db").exists());
-    assert!(!profile.join("projects").exists());
-}
+// The lifecycle-guarded stdin hook surface is retired: `hook-user-session-review`
+// was the only stdin hook that acquired the lifecycle lease, and the native
+// daemon cutover (58717f2ac2) deleted the subcommand — session review now runs
+// as a bounded in-process daemon action. No stdin hook engages the lifecycle
+// lock anymore, so the external-exclusive-lease quiesce and lifecycle-path
+// drain journeys have no remaining production surface.
 
 #[test]
 fn bound_claude_hook_returns_only_the_transport_response() {
@@ -370,22 +333,4 @@ fn bound_claude_hook_returns_only_the_transport_response() {
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(output.stdout, b"{}\n");
-}
-
-#[test]
-fn lifecycle_path_error_silently_drains_and_quiesces_the_hook() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile_file = temp.path().join(".tracedecay");
-    std::fs::write(&profile_file, b"not a profile directory").unwrap();
-    let payload = vec![b' '; 256 * 1024];
-
-    let output = run_hook(temp.path(), "hook-user-session-review", Some(&payload));
-
-    assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
-    assert_eq!(
-        std::fs::read(profile_file).unwrap(),
-        b"not a profile directory"
-    );
 }
