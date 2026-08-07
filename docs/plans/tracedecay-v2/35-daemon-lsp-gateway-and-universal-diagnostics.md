@@ -39,6 +39,22 @@ for a top-level `src/lsp/` module, global `--no-lsp`, `TRACEDECAY_LSP`,
 `TRACEDECAY_LSP_TIMEOUT`, or a generic `[lsp]` configuration block did not
 ship and is not a missing requirement of this plan.
 
+(Update 2026-08-07: the cited path is stale. `src/lsp_bridge.rs` no longer
+exists — it was removed by `chore: delete orphaned root modules` (0bc74fde09)
+after the gateway and transport bridge moved into the dedicated
+`crates/tracedecay-lsp/` crate. The clarification's substance is unchanged,
+only relocated: the request boundary is
+`crates/tracedecay-lsp/src/gateway.rs` (one already-admitted root, delegating
+post-edit work to the feedback-cycle application boundary; it opens no store,
+supervises no analyzer, and implements no host-specific transport); the
+transport-only stdio bridge is `crates/tracedecay-lsp/src/bridge.rs`; and the
+bounded custom projections carried beside standard LSP methods are
+`crates/tracedecay-lsp/src/context.rs`, a read-only port for one
+already-authorized single-root session. The analyzer broker/adapters under
+`src/diagnostics/lsp/` and the explicit `tracedecay lsp servers|bridge`
+commands are still present as described. No claim is made here about protocol
+or provider acceptance.)
+
 ## Host feedback user outcome
 
 A user editing in an LSP-capable host receives current analyzer and TraceDecay

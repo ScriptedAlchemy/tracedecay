@@ -41,6 +41,19 @@ next direct user journeys. Numbered plans own the detailed semantics.
 - Semantic search is unavailable because the active configuration snapshot is
   invalid. Plan 20 owns snapshot repair and Plan 31 owns semantic activation;
   exact, lexical, and graph retrieval must remain available.
+  (Update 2026-08-07: the snapshot-invalidity cause is repaired at tip. The
+  semantic retrieval state, pending-transition, accepted-profile, and
+  receipt-key tables are now provisioned by the canonical configuration
+  schema and the shadow `ensure_schema` paths that made an admitted store
+  fail exact-final-shape validation are deleted — `fix(config): own semantic
+  retrieval tables in configuration schema` (863e6a0a87). Recovery from a
+  verified model-lifecycle event is owned by
+  `src/daemon/semantic_activation_reconciler.rs`, mounted per project by
+  `feat(daemon): mount graph publication and staged evaluation lanes`
+  (36cd35b19c). Semantic search remaining inactive is therefore no longer a
+  snapshot defect: activation is still gated *by design* on the Plan 15 Linux
+  evaluation, which this docs lane does not close. Whether a live profile now
+  admits a valid snapshot is unverified here.)
 - Incremental indexing has shown unacceptable refresh staleness. Plan 25 owns
   cadence and freshness while preserving serve-during-refresh behavior.
 - The repository still has unresolved test and CI failures. Focused local

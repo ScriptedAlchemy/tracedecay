@@ -27,6 +27,21 @@ Until both occur, fallback-allowed requests preserve exact/lexical/graph
 results and strict-semantic requests return typed unavailable. This is truthful
 degraded behavior, not semantic-retrieval acceptance.
 
+(Update 2026-08-07: the "admitted configuration snapshot is invalid" cause is
+repaired at tip and is no longer the reason semantic search is off. The
+semantic retrieval state, pending-transition, accepted-profile, and
+receipt-key tables are now owned by the canonical configuration schema and the
+shadow `ensure_schema` provisioning that forced `ResetRequired` on admission is
+deleted — `fix(config): own semantic retrieval tables in configuration schema`
+(863e6a0a87). Event-driven activation recovery is mounted per project through
+`src/daemon/semantic_activation_reconciler.rs`
+(36cd35b19c, `feat(daemon): mount graph publication and staged evaluation
+lanes`), which rereads the canonical committed configuration tuple on every
+verified-ready wake rather than trusting the event. What remains is the
+*designed* gate, not a defect: activation stays false until the Plan 15 Linux
+evaluation admits it. This note does not assert that a live profile is serving
+semantic results.)
+
 Plan 31 owns the semantic adapter, projection/runtime, and direct
 testing. Plan 15 owns quality evaluation, while Plan 25 owns the code
 generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later
@@ -545,6 +560,14 @@ fail, and restoring the source makes it pass.
   normal cross-platform CI, and rollback drill are still incomplete.
   `result-pending.json` therefore keeps activation false and truthfully reports
   `pending`.
+  (Update 2026-08-07: the named artifact is stale — no `result-pending.json`
+  exists in-tree (`git ls-files` returns zero hits). The behavior it stood for
+  is intact and is now asserted by the evaluation harness itself:
+  `tests/search_eval_cli_test.rs:53`
+  (`compare_reports_unmeasured_semantic_and_rerank_stages_as_pending`) requires
+  the `compare` CLI to exit non-zero and report unmeasured semantic/rerank
+  stages as `pending`. The gate is unchanged; only the file reference is
+  obsolete.)
 
 ## Planned behavioral delivery and direct verification
 

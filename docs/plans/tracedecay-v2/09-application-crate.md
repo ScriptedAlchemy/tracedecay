@@ -21,6 +21,24 @@ cannot satisfy this plan's scope contract. Convergence on the scope-carrying
 application context remains application/surface work, not a frontend
 `ResolvedScope` invention or a dashboard-only gap.
 
+(Update 2026-08-07: converged. The legacy root model is gone —
+`src/application/context.rs` no longer exists, removed with the rest of
+`src/application` by `refactor(usecases): move src/application into
+tracedecay-usecases` (8946d412f5). Exactly one `RequestContext` remains, the
+scope-carrying one at `crates/tracedecay-application/src/context.rs:429`,
+whose `scope: ResolvedScope` is a required field. Scope resolution is
+fail-closed on profile identity:
+`crates/tracedecay-usecases/src/context/mod.rs:182` (`application_scope`)
+returns `ApplicationScopeError::ProfileIdentityWithoutProject` rather than
+fabricating project/repository/worktree fields from a path or the CWD, and
+`:217` (`session_request_scope`) resolves profile-owned session requests only
+from identifiers the identity already carries, under a reserved prefix that
+cannot compare equal to a real project scope. Direct regressions at `:664`
+(`application_scope_maps_project_identity_and_git_route`) and `:684`
+(`application_scope_fails_closed_for_profile_identity`) cover both directions.
+The two-model correction this paragraph describes is therefore no longer a
+live condition.)
+
 **Source-access correction (2026-07-26).** Temporal snapshot composition no
 longer hard-codes a participant as `Authorized`. Authorization is a separate,
 fail-closed field derived from the authenticated `TemporalAuthorizedRoot` and

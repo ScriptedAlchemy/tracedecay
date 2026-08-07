@@ -36,6 +36,26 @@ reconciliation was checked. The Plan 25 owner must diagnose hint/reconcile
 cadence and complete the event-to-ready measurements; serving an old complete
 generation truthfully is not permission to leave it stale indefinitely.
 
+(Update 2026-08-07: both assignments in that paragraph have code repairs at
+tip. The hint/reconcile cadence diagnosis produced a three-tier freshness
+ladder run at query admission rather than trusting a hint to arrive —
+`fix(daemon): close code-index freshness cadence` (cbac4ae64e); tier-1 is the
+cheap `.git`-metadata fingerprint
+(`src/daemon/code_index_scheduler/identity.rs:150`) and tier-2 is the bounded
+staleness reconcile, with direct regressions covering the no-watcher and
+HEAD-moved paths at `src/daemon/code_index_scheduler/tests.rs:4446-4588`
+(`threshold_expiry_reconciles_out_of_band_write_without_watcher`,
+`identity_move_reconciles_and_never_mixes_identity`). The event-to-ready
+measurements are implemented as receipts in
+`src/daemon/code_index_scheduler/cadence.rs` —
+`feat(code-index): measure event-to-ready arrival, wait, and service`
+(325ea665e4) — which records arrival, dequeue, and terminal instants
+separately so queue wait and service time are distinct, and withholds latency
+as `CodeIndexArrivalV1::Unavailable` rather than emitting a false zero sample.
+What is NOT closed: the 237-minute observation was an operational measurement
+on a live profile, and no equivalent re-observation has been taken since these
+landed. The mechanism to prove cadence now exists; the proof does not.)
+
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
 semantics. Plan 15 owns quality evaluation. Plan 31 consumes the tested
 consumer of tested chunks and lexical/graph fallback behavior; application,
