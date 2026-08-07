@@ -33,120 +33,8 @@ pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationRe
     )
 }
 
-/// Dispatches one Work application invocation and, when that invocation
-/// committed a Work mutation, publishes the Task-family activity pulse that
-/// backs the dashboard's `task_activity` stream.
-///
-/// The pulse is raised here rather than inside [`complete_work_effect`] because
-/// effect completion is synchronous while publication awaits the registered
-/// observation store. Keeping the synchronous dispatch in
-/// [`dispatch_work_application`] also keeps that call's service handles out of
-/// this future.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_work_application(
-    registered: RegisteredWorkRuntime,
-    attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    project_root: Option<PathBuf>,
-    request_id: String,
-    request: WorkApplicationInvocationV1,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
-    let activity_database = Arc::clone(&registered.database);
-    let activity_root = project_root.clone();
-    let mutates = work_invocation_mutates(&request);
-    let response = dispatch_work_application(
-        registered,
-        attempt_processes,
-        project_root,
-        request_id,
-        request,
-        observed_at,
-        deadline,
-        cancellation,
-    );
-    // Only a mutation that reached a Work outcome committed: an application
-    // problem or a daemon problem leaves the graph exactly as it was, and a
-    // pulse with no project root has no coalescing bucket to land in.
-    if mutates
-        && matches!(
-            response.outcome,
-            DaemonInvocationOutcome::WorkApplication { .. }
-        )
-        && let Some(project_root) = activity_root.as_deref()
-    {
-        crate::application::event_lane::publish(
-            &activity_database,
-            crate::application::event_lane::ActivityFamilyV1::Task,
-            project_root,
-            None,
-            1,
-            work_activity_detail(&response.outcome),
-        )
-        .await;
-    }
-    response
-}
-
-/// Exactly the invocations the dispatcher completes through
-/// [`complete_work_effect`]. The match is exhaustive, so a new invocation has to
-/// declare whether it mutates Work state before this compiles, and the read
-/// arms can never fall through into the mutation pulse.
-const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool {
-    match request {
-        WorkApplicationInvocationV1::Snapshot(_)
-        | WorkApplicationInvocationV1::Delta(_)
-        | WorkApplicationInvocationV1::GenerateProposal(_)
-        | WorkApplicationInvocationV1::AttemptStatus(_)
-        | WorkApplicationInvocationV1::ListAttempts(_)
-        | WorkApplicationInvocationV1::Views(_) => false,
-        WorkApplicationInvocationV1::Create(_)
-        | WorkApplicationInvocationV1::ReplanDependencies(_)
-        | WorkApplicationInvocationV1::ReviewProposal(_)
-        | WorkApplicationInvocationV1::AcceptProposal(_)
-        | WorkApplicationInvocationV1::AdmitExecution(_)
-        | WorkApplicationInvocationV1::AttachRuntimeEvidence(_)
-        | WorkApplicationInvocationV1::AcceptTask(_)
-        | WorkApplicationInvocationV1::StartAttempt(_)
-        | WorkApplicationInvocationV1::CancelAttempt(_)
-        | WorkApplicationInvocationV1::ResumeAttempts(_) => true,
-    }
-}
-
-/// Attempt state carried by a committed attempt mutation. Attempt states are
-/// the only detail vocabulary the canonical `task` activity payload admits, so
-/// every other Work mutation publishes an undetailed pulse rather than a label
-/// the observation store would strip.
-fn work_activity_detail(outcome: &DaemonInvocationOutcome) -> Option<&'static str> {
-    let DaemonInvocationOutcome::WorkApplication { outcome, .. } = outcome else {
-        return None;
-    };
-    let attempt = match outcome {
-        WorkApplicationOutcomeV1::StartAttempt(ApplicationOutcome::Effect(effect))
-        | WorkApplicationOutcomeV1::CancelAttempt(ApplicationOutcome::Effect(effect)) => {
-            effect.payload.as_ref()?
-        }
-        _ => return None,
-    };
-    Some(match attempt.state() {
-        tracedecay_domain::WorkAttemptStateV1::Leased => "leased",
-        tracedecay_domain::WorkAttemptStateV1::Running => "running",
-        tracedecay_domain::WorkAttemptStateV1::CancellationRequested => "cancellation_requested",
-        tracedecay_domain::WorkAttemptStateV1::CancellationAcknowledged => {
-            "cancellation_acknowledged"
-        }
-        tracedecay_domain::WorkAttemptStateV1::CancellationEscalated => "cancellation_escalated",
-        tracedecay_domain::WorkAttemptStateV1::RecoveryRequired => "recovery_required",
-        tracedecay_domain::WorkAttemptStateV1::Succeeded => "succeeded",
-        tracedecay_domain::WorkAttemptStateV1::Failed => "failed",
-        tracedecay_domain::WorkAttemptStateV1::TimedOut => "timed_out",
-        tracedecay_domain::WorkAttemptStateV1::Cancelled => "cancelled",
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn dispatch_work_application(
+pub(super) fn execute_work_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: Option<PathBuf>,
@@ -553,6 +441,7 @@ fn work_product_read_problem(
     }
 }
 
+
 /// Mints the daemon-owned request context under which background attempt
 /// execution persists transitions. The authority and scope are exactly the
 /// registered runtime's; only the deadline is the runtime's own, because the
@@ -649,81 +538,6 @@ pub(super) async fn execute_workflow_application(
                         workflow_effect_problem(workflow_coordination_problem(error)),
                     ),
                 };
-            execute_journaled_workflow_effect(
-                &registered,
-                services.effects(),
-                request_id,
-                &context,
-                canonical_request_id,
-                operation_key,
-                use_case,
-                input_digest,
-                prepared,
-                observed_at,
-                deadline,
-            )
-        }
-        WorkflowApplicationInvocation::ActivateDefinition(request) => {
-            let prepared = WorkflowEffectPreparedV1::activate_definition(
-                input_digest.clone(),
-                WorkflowDefinitionLifecycleCommand {
-                    definition_id: request.definition_id,
-                    definition_version: request.definition_version,
-                    operation: WorkflowLifecycleOperation::Activate,
-                    expected_revision: request.expected_revision,
-                    transitioned_at: observed_at,
-                },
-            );
-            execute_journaled_workflow_effect(
-                &registered,
-                services.effects(),
-                request_id,
-                &context,
-                canonical_request_id,
-                operation_key,
-                use_case,
-                input_digest,
-                prepared,
-                observed_at,
-                deadline,
-            )
-        }
-        WorkflowApplicationInvocation::RetireDefinition(request) => {
-            let prepared = WorkflowEffectPreparedV1::retire_definition(
-                input_digest.clone(),
-                WorkflowDefinitionLifecycleCommand {
-                    definition_id: request.definition_id,
-                    definition_version: request.definition_version,
-                    operation: WorkflowLifecycleOperation::Retire,
-                    expected_revision: request.expected_revision,
-                    transitioned_at: observed_at,
-                },
-            );
-            execute_journaled_workflow_effect(
-                &registered,
-                services.effects(),
-                request_id,
-                &context,
-                canonical_request_id,
-                operation_key,
-                use_case,
-                input_digest,
-                prepared,
-                observed_at,
-                deadline,
-            )
-        }
-        WorkflowApplicationInvocation::RejectDefinition(request) => {
-            let prepared = WorkflowEffectPreparedV1::reject_definition(
-                input_digest.clone(),
-                WorkflowDefinitionLifecycleCommand {
-                    definition_id: request.definition_id,
-                    definition_version: request.definition_version,
-                    operation: WorkflowLifecycleOperation::Reject,
-                    expected_revision: request.expected_revision,
-                    transitioned_at: observed_at,
-                },
-            );
             execute_journaled_workflow_effect(
                 &registered,
                 services.effects(),
@@ -1129,9 +943,6 @@ fn workflow_effect_receipt_context(
 fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperationV1> {
     match operation_key {
         "register_definition" => Some(WorkflowEffectOperationV1::RegisterDefinition),
-        "activate_definition" => Some(WorkflowEffectOperationV1::ActivateDefinition),
-        "retire_definition" => Some(WorkflowEffectOperationV1::RetireDefinition),
-        "reject_definition" => Some(WorkflowEffectOperationV1::RejectDefinition),
         "handoff_issue" => Some(WorkflowEffectOperationV1::HandoffIssue),
         "handoff_redeem" => Some(WorkflowEffectOperationV1::HandoffRedeem),
         _ => None,
@@ -1186,21 +997,6 @@ fn workflow_effect_outcome(
                 )
                 .map(WorkflowApplicationOutcome::RegisterDefinition)
                 .map_err(|_| DaemonInvocationProblem::Unavailable),
-                WorkflowEffectOperationV1::ActivateDefinition => {
-                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
-                        .map(WorkflowApplicationOutcome::ActivateDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
-                }
-                WorkflowEffectOperationV1::RetireDefinition => {
-                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
-                        .map(WorkflowApplicationOutcome::RetireDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
-                }
-                WorkflowEffectOperationV1::RejectDefinition => {
-                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
-                        .map(WorkflowApplicationOutcome::RejectDefinition)
-                        .map_err(|_| DaemonInvocationProblem::Unavailable)
-                }
                 WorkflowEffectOperationV1::HandoffIssue => {
                     work_effect::<TaskHandoffGrant>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::HandoffIssue)
@@ -1221,33 +1017,6 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::RegisterDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
-        }
-        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionActivated(result)) => {
-            work_effect(
-                terminal,
-                Some((**result).clone()),
-                EffectTermination::Completed,
-            )
-            .map(WorkflowApplicationOutcome::ActivateDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
-        }
-        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRetired(result)) => {
-            work_effect(
-                terminal,
-                Some((**result).clone()),
-                EffectTermination::Completed,
-            )
-            .map(WorkflowApplicationOutcome::RetireDefinition)
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
-        }
-        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRejected(result)) => {
-            work_effect(
-                terminal,
-                Some((**result).clone()),
-                EffectTermination::Completed,
-            )
-            .map(WorkflowApplicationOutcome::RejectDefinition)
             .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
@@ -1281,9 +1050,7 @@ fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvo
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
         WorkflowCoordinationError::InvalidDefinition
-        | WorkflowCoordinationError::ImmutableDefinitionConflict
-        | WorkflowCoordinationError::IllegalLifecycleTransition
-        | WorkflowCoordinationError::LifecycleRevisionConflict => {
+        | WorkflowCoordinationError::ImmutableDefinitionConflict => {
             DaemonInvocationProblem::InvalidRequest
         }
     }
