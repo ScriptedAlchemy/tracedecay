@@ -1,5 +1,5 @@
 use tracedecay_store::{
-    GraphProjectionIdentityV1, GraphPublicationOperationContextV1, RuntimeInterruptionV1,
+    GraphProjectionIdentityV1, GraphPublicationOperationContextV1,
     SemanticVectorChunkManifestAccumulator, SemanticVectorChunkManifestMember,
     SemanticVectorOutboxSequence, SemanticVectorStageBatchReceipt,
     SemanticVectorStageChunkOperation, SemanticVectorStageEffectState,
