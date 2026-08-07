@@ -172,7 +172,8 @@ pub(super) struct CodeIndexDisplayPathIndexV1 {
 impl CodeIndexDisplayPathIndexV1 {
     pub(super) fn for_generation(
         generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
-    ) -> std::result::Result<Self, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {
+    ) -> std::result::Result<Self, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1>
+    {
         use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
 
         let snapshot = generation.snapshot();
@@ -230,10 +231,7 @@ pub(super) fn code_index_search_display_binding(
                 .iter()
                 .find(|symbol| symbol.occurrence.as_str() == occurrence)
                 .ok_or(HydrationUnavailableV1::Invalid)?;
-            (
-                code_index_symbol_display(symbol, display_paths)?,
-                None,
-            )
+            (code_index_symbol_display(symbol, display_paths)?, None)
         } else if let Some(chunk_id) = anchor.strip_prefix("code-chunk:") {
             let chunk_id = tracedecay_domain::CodeSearchChunkId::new(chunk_id.to_owned())
                 .map_err(|_| HydrationUnavailableV1::Invalid)?;
@@ -798,18 +796,17 @@ pub(super) fn code_index_search_executor(
                 Ok(latest) => latest,
                 Err(outcome) => return outcome,
             };
-            let display_paths = match CodeIndexDisplayPathIndexV1::for_generation(
-                latest.generation(),
-            ) {
-                Ok(display_paths) => display_paths,
-                Err(_) => {
-                    return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
-                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                        "display_path_index_unavailable",
-                    );
-                }
-            };
+            let display_paths =
+                match CodeIndexDisplayPathIndexV1::for_generation(latest.generation()) {
+                    Ok(display_paths) => display_paths,
+                    Err(_) => {
+                        return code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "display_path_index_unavailable",
+                        );
+                    }
+                };
             let mut hydration_request = executed.query.sanitized.request().clone();
             let hydration_budget = code_index_search_hydration_budget(
                 accepted_semantic_budget,

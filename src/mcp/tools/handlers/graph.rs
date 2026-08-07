@@ -316,9 +316,13 @@ pub(super) async fn handle_search(
                 output["ignored_dependency_hint"] = hint;
             }
             let output = output;
-            Ok(rendered_tool_result(cg, &args, &output, touched_files, || {
-                render_search_md(&output)
-            }))
+            Ok(rendered_tool_result(
+                cg,
+                &args,
+                &output,
+                touched_files,
+                || render_search_md(&output),
+            ))
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
