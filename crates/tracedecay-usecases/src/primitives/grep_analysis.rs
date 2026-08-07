@@ -1,9 +1,9 @@
 //! Production adapters for the existing single-root grep and analysis
 //! authorities.
 //!
-//! Lexical grep and redundancy remain injected because their current owners
-//! also own filesystem matching, fingerprint caching, and compatibility
-//! rendering. This module intentionally does not duplicate those algorithms.
+//! Lexical grep and redundancy remain injected because their callers own
+//! request composition and result rendering. Filesystem search is delegated
+//! to the canonical code-index implementation.
 
 use std::sync::Arc;
 
@@ -46,9 +46,9 @@ pub type ProductionGrepAnalysisOperationsV1<L, R> = GrepAnalysisOperationsV1<
 >;
 
 /// Compose the canonical application owner with the current production
-/// authorities. The caller supplies the legacy lexical and redundancy
-/// authorities so their regex, ignore-walk, fingerprint, cache, and structural
-/// matching behavior remains singular during compatibility migration.
+/// authorities. The caller supplies the lexical and redundancy authorities;
+/// their production adapters retain the canonical search and fingerprint
+/// boundaries.
 pub fn production_grep_analysis_operations<L, R>(
     graph: Arc<TraceDecay>,
     lexical: L,
@@ -79,19 +79,47 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
             if request.window.cursor.is_some() {
                 return unsupported_compatibility_cursor();
             }
-            let search = match search_tree_scoped_with_cancel(
-                self.graph.project_root(),
-                &request.pattern,
-                request.lang.as_deref(),
-                request.path_glob.as_deref(),
-                request.window.limit as usize,
-                context.scope_prefix,
-                || context.request.cancellation().is_cancelled(),
-            ) {
-                Ok(search) => search,
-                Err(error) => {
+            let project_root = self.graph.project_root().to_path_buf();
+            let pattern = request.pattern.clone();
+            let lang = request.lang.clone();
+            let path_glob = request.path_glob.clone();
+            let max_results = request.window.limit as usize;
+            let scope_prefix = context.scope_prefix.map(str::to_owned);
+            let search = match super::support::run_bounded_source_search(
+                context.request.deadline(),
+                context.request.cancellation(),
+                move |cancelled| {
+                    search_tree_scoped_with_cancel(
+                        &project_root,
+                        &pattern,
+                        lang.as_deref(),
+                        path_glob.as_deref(),
+                        max_results,
+                        scope_prefix.as_deref(),
+                        || cancelled.load(std::sync::atomic::Ordering::Acquire),
+                    )
+                },
+            )
+            .await
+            {
+                super::support::BoundedSourceSearch::Completed(Ok(search)) if !search.cancelled => {
+                    search
+                }
+                super::support::BoundedSourceSearch::Completed(Ok(_))
+                | super::support::BoundedSourceSearch::Cancelled => {
+                    return PrimitiveOutcomeV1::Cancelled;
+                }
+                super::support::BoundedSourceSearch::Completed(Err(error)) => {
                     return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                         error.to_string(),
+                    ));
+                }
+                super::support::BoundedSourceSearch::TimedOut => {
+                    return PrimitiveOutcomeV1::TimedOut;
+                }
+                super::support::BoundedSourceSearch::WorkerFailed => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        "AST grep worker failed".to_owned(),
                     ));
                 }
             };

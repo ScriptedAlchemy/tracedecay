@@ -348,6 +348,97 @@ async fn test_grep_path_glob_filters_files() {
 }
 
 #[tokio::test]
+async fn test_grep_prunes_generated_trees_unless_path_glob_selects_one() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::create_dir_all(root.join("dist")).unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("src/tracked.rs"), "GENERATED_SCOPE_TOKEN\n").unwrap();
+    fs::write(root.join("dist/generated.js"), "GENERATED_SCOPE_TOKEN\n").unwrap();
+    fs::write(
+        root.join("node_modules/pkg/unrelated.js"),
+        "GENERATED_SCOPE_TOKEN\n",
+    )
+    .unwrap();
+
+    let default = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({"pattern": "GENERATED_SCOPE_TOKEN", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let default_payload = extract_json(&default.value);
+    let default_files = default_payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(default_files, vec!["src/tracked.rs"], "{default_payload}");
+
+    let selected = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({
+            "pattern": "GENERATED_SCOPE_TOKEN",
+            "path_glob": "dist/**",
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let selected_payload = extract_json(&selected.value);
+    let selected_files = selected_payload["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["file"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected_files,
+        vec!["dist/generated.js"],
+        "{selected_payload}"
+    );
+}
+
+#[tokio::test]
+async fn test_grep_basename_glob_reaches_nested_generated_file() {
+    let (cg, _dir) = setup_project().await;
+    let root = cg.project_root().to_path_buf();
+    fs::create_dir_all(root.join("dist/nested")).unwrap();
+    fs::write(
+        root.join("dist/nested/generated.js"),
+        "GENERATED_BASENAME_TOKEN\n",
+    )
+    .unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_grep",
+        json!({
+            "pattern": "GENERATED_BASENAME_TOKEN",
+            "path_glob": "generated.js",
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1, "{payload}");
+    assert_eq!(
+        payload["results"][0]["file"], "dist/nested/generated.js",
+        "{payload}"
+    );
+}
+
+#[tokio::test]
 async fn test_ast_grep_search_respects_scope_prefix() {
     let (cg, _dir) = setup_project().await;
     let root = cg.project_root().to_path_buf();

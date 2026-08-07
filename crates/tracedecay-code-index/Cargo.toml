@@ -61,6 +61,7 @@ ast-grep-core = "0.44"
 hex = "0.4"
 ignore = "0.4"
 rayon = "1"
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -83,5 +84,10 @@ test = false
 
 [[bench]]
 name = "retained_parse"
+harness = false
+test = false
+
+[[bench]]
+name = "source_search"
 harness = false
 test = false

@@ -1,130 +1,114 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ignore::WalkBuilder;
-use ignore::overrides::Override;
-use regex::{Regex, RegexBuilder};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tokio::sync::Semaphore;
+use tracedecay_application::{CancellationContext, Deadline};
+use tracedecay_runtime_core::errors::Result;
 
 use crate::tracedecay::TraceDecay;
 
-pub(crate) struct GrepHit {
-    pub(crate) file: String,
-    pub(crate) line: u32,
-    pub(crate) text: String,
-    pub(crate) before: Vec<String>,
-    pub(crate) after: Vec<String>,
+const SOURCE_SEARCH_CEILING: Duration = Duration::from_secs(10);
+static SOURCE_SEARCH_CAPACITY: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(2)));
+
+pub(crate) enum BoundedSourceSearch<T, E> {
+    Completed(std::result::Result<T, E>),
+    Cancelled,
+    TimedOut,
+    WorkerFailed,
 }
 
-pub(crate) fn build_matcher(
-    pattern: &str,
-    fixed_strings: bool,
-    case_sensitive: bool,
-) -> Result<Regex> {
-    let source = if fixed_strings {
-        regex::escape(pattern)
-    } else {
-        pattern.to_owned()
+struct CancelSourceSearchOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelSourceSearchOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+pub(crate) async fn run_bounded_source_search<T, E, F>(
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+    worker: F,
+) -> BoundedSourceSearch<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: FnOnce(Arc<AtomicBool>) -> std::result::Result<T, E> + Send + 'static,
+{
+    if cancellation.is_cancelled() {
+        return BoundedSourceSearch::Cancelled;
+    }
+    let Some(budget) = remaining_budget(deadline) else {
+        return BoundedSourceSearch::TimedOut;
     };
-    RegexBuilder::new(&source)
-        .case_insensitive(!case_sensitive)
-        .build()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid regex pattern '{pattern}': {error}"),
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_on_drop = CancelSourceSearchOnDrop(Arc::clone(&cancelled));
+    let capacity = Arc::clone(&SOURCE_SEARCH_CAPACITY);
+    let outcome = tokio::time::timeout(budget, async move {
+        let Ok(permit) = capacity.acquire_owned().await else {
+            return BoundedSourceSearch::WorkerFailed;
+        };
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            worker(cancelled)
         })
+        .await
+        {
+            Ok(result) => BoundedSourceSearch::Completed(result),
+            Err(_) => BoundedSourceSearch::WorkerFailed,
+        }
+    })
+    .await;
+    drop(cancel_on_drop);
+    outcome.unwrap_or(BoundedSourceSearch::TimedOut)
 }
 
-pub(crate) struct ScanResult {
-    pub(crate) hits: Vec<GrepHit>,
-    pub(crate) files_scanned: usize,
-    pub(crate) truncated: bool,
+fn remaining_budget(deadline: &Deadline) -> Option<Duration> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_micros()
+        .min(i64::MAX as u128) as i64;
+    let remaining = deadline.expires_at.0.checked_sub(now)?;
+    if remaining <= 0 {
+        return None;
+    }
+    Some(Duration::from_micros(remaining as u64).min(SOURCE_SEARCH_CEILING))
 }
 
-pub(crate) fn scan_tree(
-    project_root: &Path,
-    matcher: &Regex,
-    overrides: Option<Override>,
-    context_lines: usize,
-    max_results: usize,
-) -> ScanResult {
-    let mut builder = WalkBuilder::new(project_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .add_custom_ignore_filename(".gitignore");
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
-    let mut hits = Vec::new();
-    let mut files_scanned = 0;
-    let mut truncated = false;
-    for entry in builder.build().flatten() {
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Ok(relative) = path.strip_prefix(project_root) else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        if bytes[..bytes.len().min(8_192)].contains(&0) {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(bytes) else {
-            continue;
-        };
-        files_scanned += 1;
-        let lines = content.lines().collect::<Vec<_>>();
-        let mut file_hits = 0;
-        for (index, line) in lines.iter().enumerate() {
-            if line.len() > 4_096 || !matcher.is_match(line) {
-                continue;
-            }
-            if file_hits >= 20 {
-                truncated = true;
-                break;
-            }
-            file_hits += 1;
-            hits.push(GrepHit {
-                file: relative.to_string_lossy().replace('\\', "/"),
-                line: index as u32 + 1,
-                text: (*line).to_owned(),
-                before: context_slice(&lines, index.saturating_sub(context_lines), index),
-                after: context_slice(
-                    &lines,
-                    index + 1,
-                    (index + 1 + context_lines).min(lines.len()),
-                ),
-            });
-            if hits.len() > max_results {
-                truncated = true;
-                return ScanResult {
-                    hits,
-                    files_scanned,
-                    truncated,
-                };
-            }
-        }
-    }
-    ScanResult {
-        hits,
-        files_scanned,
-        truncated,
-    }
-}
+#[cfg(test)]
+mod bounded_source_search_tests {
+    use super::*;
+    use tracedecay_domain::UtcMicros;
 
-fn context_slice(lines: &[&str], start: usize, end: usize) -> Vec<String> {
-    lines
-        .get(start..end)
-        .unwrap_or_default()
-        .iter()
-        .map(|line| (*line).to_owned())
-        .collect()
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn elapsed_deadline_cancels_the_off_thread_worker() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
+        let deadline = Deadline::new(UtcMicros(now + 20_000)).unwrap();
+        let cancellation = CancellationContext::active("cancel.grep-deadline-test").unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+
+        let outcome = run_bounded_source_search(&deadline, &cancellation, move |cancelled| {
+            started_tx.send(()).unwrap();
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            cancelled_tx.send(()).unwrap();
+            Ok::<_, String>(())
+        })
+        .await;
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(outcome, BoundedSourceSearch::TimedOut));
+        cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

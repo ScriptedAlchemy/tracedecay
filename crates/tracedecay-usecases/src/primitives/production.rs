@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
-use ignore::overrides::OverrideBuilder;
 use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
     GrepAnalysisProblemV1, GrepHitV1, GrepRequestV1, GrepResultV1, LexicalGrepAuthorityV1,
@@ -48,8 +47,8 @@ use super::runtime::{
     StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult, open_primitive_project_runtime,
 };
 use super::support::{
-    ScanResult, affected_test_proximity, build_matcher, collect_affected_test_files,
-    rank_affected_tests, scan_tree,
+    BoundedSourceSearch, affected_test_proximity, collect_affected_test_files, rank_affected_tests,
+    run_bounded_source_search,
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
@@ -60,6 +59,9 @@ use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use crate::tracedecay::TraceDecay;
+use tracedecay_code_index::grep_search::{
+    GrepSearchQuery, search_tree_with_cancel as lexical_search_tree_with_cancel,
+};
 use tracedecay_code_index::provider::{
     GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
 };
@@ -410,59 +412,51 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     "compatibility cursor unsupported".to_owned(),
                 ));
             }
-            let matcher = match build_matcher(
-                &request.pattern,
-                request.fixed_strings,
-                request.case_sensitive,
-            ) {
-                Ok(matcher) => matcher,
-                Err(error) => {
+            let project_root = self.graph.project_root().to_path_buf();
+            let query = GrepSearchQuery {
+                pattern: request.pattern.clone(),
+                fixed_strings: request.fixed_strings,
+                case_sensitive: request.case_sensitive,
+                path_glob: request.path_glob.clone(),
+                context_lines: request.context_lines as usize,
+                max_results: request.window.limit as usize,
+            };
+            let scan = match run_bounded_source_search(
+                context.request.deadline(),
+                context.request.cancellation(),
+                move |cancelled| {
+                    lexical_search_tree_with_cancel(&project_root, &query, || {
+                        cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    })
+                },
+            )
+            .await
+            {
+                BoundedSourceSearch::Completed(Ok(scan)) if !scan.cancelled => scan,
+                BoundedSourceSearch::Completed(Ok(_)) | BoundedSourceSearch::Cancelled => {
+                    return PrimitiveOutcomeV1::Cancelled;
+                }
+                BoundedSourceSearch::TimedOut => return PrimitiveOutcomeV1::TimedOut,
+                BoundedSourceSearch::Completed(Err(error)) => {
                     return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                         error.to_string(),
                     ));
                 }
-            };
-            let project_root = self.graph.project_root();
-            let overrides = match request.path_glob.as_deref() {
-                Some(raw) if !raw.trim().is_empty() => {
-                    let mut builder = OverrideBuilder::new(project_root);
-                    if let Err(error) = builder.add(raw) {
-                        return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                            error.to_string(),
-                        ));
-                    }
-                    match builder.build() {
-                        Ok(overrides) => Some(overrides),
-                        Err(error) => {
-                            return PrimitiveOutcomeV1::Failed(
-                                GrepAnalysisProblemV1::AuthorityFailed(error.to_string()),
-                            );
-                        }
-                    }
+                BoundedSourceSearch::WorkerFailed => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        "lexical grep worker failed".to_owned(),
+                    ));
                 }
-                _ => None,
             };
-            let ScanResult {
-                hits,
-                files_scanned,
-                truncated,
-            } = scan_tree(
-                project_root,
-                &matcher,
-                overrides,
-                request.context_lines as usize,
-                request.window.limit as usize,
-            );
-            if context.request.cancellation().is_cancelled() {
-                return PrimitiveOutcomeV1::Cancelled;
-            }
-            let mut matches = Vec::with_capacity(hits.len());
+            let files_scanned = scan.files_scanned;
+            let truncated = scan.truncated;
+            let mut matches = Vec::with_capacity(scan.hits.len());
             // A graph read that fails cannot distinguish "this line is in no
             // symbol" from "the enclosing symbol could not be read", so the
             // page reports itself incomplete rather than attributing the hit
             // to nothing.
             let mut unread_enclosing_symbols = false;
-            for hit in hits {
+            for hit in scan.hits {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
