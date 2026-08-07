@@ -61,7 +61,6 @@ pub use tracedecay_application::{
     ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
     ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
-pub use tracedecay_application::git::NativeIntegrationApproveSurfaceRequest;
 pub use tracedecay_application::{
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationPreflightSurfaceRequest, NativeIntegrationStackSnapshotSurfaceRequest,
@@ -133,7 +132,7 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 72] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 71] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -726,7 +725,6 @@ pub struct GitReadSurfaceRequest {
 pub enum NativeIntegrationSurfaceRequest {
     StackSnapshot(Box<NativeIntegrationStackSnapshotSurfaceRequest>),
     Preflight(Box<NativeIntegrationPreflightSurfaceRequest>),
-    Approve(NativeIntegrationApproveSurfaceRequest),
     Apply(NativeIntegrationApplySurfaceRequest),
     Status(NativeIntegrationStatusSurfaceRequest),
     Cancel(NativeIntegrationCancelSurfaceRequest),
@@ -737,7 +735,6 @@ impl NativeIntegrationSurfaceRequest {
         match self {
             Self::StackSnapshot(_) => ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
             Self::Preflight(_) => ApplicationSurfaceOperation::NativeIntegrationPreflight,
-            Self::Approve(_) => ApplicationSurfaceOperation::NativeIntegrationApprove,
             Self::Apply(_) => ApplicationSurfaceOperation::NativeIntegrationApply,
             Self::Status(_) => ApplicationSurfaceOperation::NativeIntegrationStatus,
             Self::Cancel(_) => ApplicationSurfaceOperation::NativeIntegrationCancel,
@@ -2550,7 +2547,6 @@ impl ApplicationSurfaceRequest {
                     Self::NativeIntegration(_),
                     ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
                         | ApplicationSurfaceOperation::NativeIntegrationPreflight
-                        | ApplicationSurfaceOperation::NativeIntegrationApprove
                         | ApplicationSurfaceOperation::NativeIntegrationApply
                         | ApplicationSurfaceOperation::NativeIntegrationStatus
                         | ApplicationSurfaceOperation::NativeIntegrationCancel
@@ -2930,9 +2926,6 @@ fn parse_native_integration_surface_request(
         ApplicationSurfaceOperation::NativeIntegrationPreflight => serde_json::from_value(value)
             .map(NativeIntegrationSurfaceRequest::Preflight)
             .map_err(invalid),
-        ApplicationSurfaceOperation::NativeIntegrationApprove => serde_json::from_value(value)
-            .map(NativeIntegrationSurfaceRequest::Approve)
-            .map_err(invalid),
         ApplicationSurfaceOperation::NativeIntegrationApply => serde_json::from_value(value)
             .map(NativeIntegrationSurfaceRequest::Apply)
             .map_err(invalid),
@@ -2966,7 +2959,6 @@ pub fn parse_application_surface_request(
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
         | ApplicationSurfaceOperation::NativeIntegrationPreflight
-        | ApplicationSurfaceOperation::NativeIntegrationApprove
         | ApplicationSurfaceOperation::NativeIntegrationApply
         | ApplicationSurfaceOperation::NativeIntegrationStatus
         | ApplicationSurfaceOperation::NativeIntegrationCancel => {
@@ -3569,7 +3561,6 @@ pub async fn execute_application_surface(
         || matches!(
             operation,
             ApplicationSurfaceOperation::GitApply
-                | ApplicationSurfaceOperation::NativeIntegrationApprove
                 | ApplicationSurfaceOperation::NativeIntegrationApply
                 | ApplicationSurfaceOperation::NativeIntegrationCancel
                 | ApplicationSurfaceOperation::ContextScoutPause
@@ -3768,7 +3759,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::GitApply
         | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
         | ApplicationSurfaceOperation::NativeIntegrationPreflight
-        | ApplicationSurfaceOperation::NativeIntegrationApprove
         | ApplicationSurfaceOperation::NativeIntegrationApply
         | ApplicationSurfaceOperation::NativeIntegrationStatus
         | ApplicationSurfaceOperation::NativeIntegrationCancel

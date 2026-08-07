@@ -1117,7 +1117,6 @@ pub(super) async fn execute_workflow_application(
                     request.scope,
                     &token,
                     observed_at,
-                    request.frontier,
                 )
             }) {
                 Ok(grant) => WorkflowEffectPreparedV1::handoff_issue(input_digest.clone(), grant),
@@ -1940,7 +1939,6 @@ fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
         }
         TaskHandoffError::InvalidToken
         | TaskHandoffError::InvalidScope
-        | TaskHandoffError::InvalidFrontier
         | TaskHandoffError::Unauthorized
         | TaskHandoffError::InvalidExpiry
         | TaskHandoffError::Conflict
