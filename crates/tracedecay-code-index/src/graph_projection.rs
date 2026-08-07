@@ -3,9 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::Arc;
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,11 +25,18 @@ use tracedecay_graph_db::{
 use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 
 mod builder;
+mod interactive;
 mod reader;
 mod traversal;
 
 pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
+use self::interactive::SymbolCatalog;
+pub use self::interactive::{
+    CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
+    CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+};
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -177,6 +182,11 @@ pub struct CodeGraphProjectionStore {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection: GraphProjectionIdentity,
     generation: CodeGenerationId,
+    /// Generation-pinned name/kind catalog, built lazily on first interactive
+    /// read and shared by every reader cloned from this store. The catalog is
+    /// derived from the verified snapshot and dies with it, so it is a cache
+    /// of the projection authority rather than a parallel authority.
+    interactive_catalog: Arc<RwLock<Option<Arc<SymbolCatalog>>>>,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -204,6 +214,7 @@ impl CodeGraphProjectionStore {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
+            interactive_catalog: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -251,6 +262,44 @@ impl CodeGraphProjectionStore {
             projection_node_count: current.projection_node_count,
             cancellation,
         })
+    }
+
+    pub fn interactive_reader(
+        &self,
+        generation: &CodeGenerationId,
+        cancellation: &CancellationSignal,
+    ) -> Result<CodeGraphInteractiveReader, CodeGraphProjectionError> {
+        self.interactive_reader_with_cancellation(
+            generation,
+            application_cancellation(cancellation),
+        )
+    }
+
+    pub fn interactive_reader_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphInteractiveReader, CodeGraphProjectionError> {
+        if generation != &self.generation {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
+        generation
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        let snapshot = Arc::clone(&self.snapshot);
+        let current =
+            read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;
+        if current.generation != *generation {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
+        Ok(CodeGraphInteractiveReader::assemble(
+            generation.clone(),
+            self.projection.clone(),
+            snapshot,
+            current.projection_node_count,
+            cancellation,
+            Arc::clone(&self.interactive_catalog),
+        ))
     }
 }
 
@@ -833,6 +882,48 @@ fn compare_edges(left: &CanonicalRelationEdgeV1, right: &CanonicalRelationEdgeV1
             right.evidence_span.start_byte,
             right.evidence_span.end_byte,
         ))
+}
+
+/// Loads and revalidates one symbol record by occurrence. `Ok(None)` means the
+/// occurrence has no entity in this generation; every payload mismatch is a
+/// typed corruption, never a silent miss.
+fn load_symbol_record(
+    snapshot: &VerifiedGraphSnapshot,
+    projection: &GraphProjectionIdentity,
+    occurrence: &SymbolOccurrenceId,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
+    let identity = symbol_entity_id(occurrence)?;
+    let reference = GraphEntityRef::new(projection.clone(), identity.clone());
+    let Some(entity) = snapshot.entity(&reference, cancellation)? else {
+        return Ok(None);
+    };
+    if !has_label(&entity, SYMBOL_LABEL) {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph symbol identity has the wrong label".to_owned(),
+        ));
+    }
+    let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
+    validate_symbol_record(&record)?;
+    if record.occurrence != *occurrence || symbol_entity_id(&record.occurrence)? != identity {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph symbol identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(Some(record))
+}
+
+/// A read is cancelled when either the store lifecycle or the individual
+/// request asks for it.
+struct CodeGraphReadCancellation {
+    lifecycle: Arc<dyn GraphCancellation>,
+    request: Arc<dyn GraphCancellation>,
+}
+
+impl GraphCancellation for CodeGraphReadCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.lifecycle.is_cancelled() || self.request.is_cancelled()
+    }
 }
 
 #[derive(Clone, Debug)]

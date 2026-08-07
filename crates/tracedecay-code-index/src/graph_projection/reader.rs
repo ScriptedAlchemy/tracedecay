@@ -315,34 +315,6 @@ impl CodeGraphEvidenceReader {
         occurrence: &SymbolOccurrenceId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
-        let identity = symbol_entity_id(occurrence)?;
-        let reference = GraphEntityRef::new(self.projection.clone(), identity.clone());
-        let Some(entity) = self.snapshot.entity(&reference, cancellation)? else {
-            return Ok(None);
-        };
-        if !has_label(&entity, SYMBOL_LABEL) {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph symbol identity has the wrong label".to_owned(),
-            ));
-        }
-        let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
-        validate_symbol_record(&record)?;
-        if record.occurrence != *occurrence || symbol_entity_id(&record.occurrence)? != identity {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph symbol identity does not match its payload".to_owned(),
-            ));
-        }
-        Ok(Some(record))
-    }
-}
-
-struct CodeGraphReadCancellation {
-    lifecycle: Arc<dyn GraphCancellation>,
-    request: Arc<dyn GraphCancellation>,
-}
-
-impl GraphCancellation for CodeGraphReadCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.lifecycle.is_cancelled() || self.request.is_cancelled()
+        load_symbol_record(&self.snapshot, &self.projection, occurrence, cancellation)
     }
 }
