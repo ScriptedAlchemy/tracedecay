@@ -993,6 +993,9 @@ export const FactMatchesMeasurementV1Schema = z.object({
 });
 export type FactMatchesMeasurementV1 = z.infer<typeof FactMatchesMeasurementV1Schema>;
 
+export const FeedbackCoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
+export type FeedbackCoverageV1 = z.infer<typeof FeedbackCoverageV1Schema>;
+
 export const FeedbackObservationDenominatorsV1Schema = z.object({
   delayed: z.number().int(),
   dropped: z.number().int(),
@@ -1005,7 +1008,7 @@ export const FeedbackObservationDenominatorsV1Schema = z.object({
 export type FeedbackObservationDenominatorsV1 = z.infer<typeof FeedbackObservationDenominatorsV1Schema>;
 
 export const FeedbackObservationReadModelV1Schema = z.object({
-  coverage: z.lazy(() => Plan26CoverageV1Schema),
+  coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominators: z.lazy(() => FeedbackObservationDenominatorsV1Schema),
   event_counts: z.record(z.number().int()),
   first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -1037,7 +1040,7 @@ export const FeedbackSystemMetricUnitV1Schema = z.enum(["microseconds", "ratio",
 export type FeedbackSystemMetricUnitV1 = z.infer<typeof FeedbackSystemMetricUnitV1Schema>;
 
 export const FeedbackSystemMetricV1Schema = z.object({
-  coverage: z.lazy(() => Plan26CoverageV1Schema),
+  coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominator: z.number().int().nullable(),
   denominator_population: z.lazy(() => FeedbackSystemMetricDenominatorV1Schema),
   metric: z.lazy(() => FeedbackSystemMetricKindV1Schema),
@@ -1951,9 +1954,6 @@ export const ObservatoryReadModelV1Schema = z.object({
   watermark: z.string(),
 });
 export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema>;
-
-export const Plan26CoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
-export type Plan26CoverageV1 = z.infer<typeof Plan26CoverageV1Schema>;
 
 /** A bounded, canonical identifier owned by the policy input schema.
 
