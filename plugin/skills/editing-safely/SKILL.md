@@ -73,7 +73,13 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
    are auto-inserted at the destination (`applied_imports`); caller references
    are reported, never auto-edited. Preview first, then re-run with
    `dry_run: false` to apply.
-7. **Reconcile a committed source-edit operation →
+7. **Roll back a completed move → `tracedecay_source_edit_rollback`**. Supply
+   the completed move's effect id, its original idempotency key and input
+   digest, a fresh idempotency key, and the committed state you expect to find
+   on disk. Rollback restores that operation's retained preimages exactly; it
+   is not a second semantic move, and it refuses outright if the workspace no
+   longer matches the state the original edit committed.
+8. **Reconcile a committed source-edit operation →
    `tracedecay_source_edit_reconcile`**. Use the operation identity returned by
    the edit path; never reconstruct it from a path, label, or current CWD.
 

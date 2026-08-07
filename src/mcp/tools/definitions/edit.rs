@@ -139,6 +139,61 @@ pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_source_edit_rollback() -> ToolDefinition {
+    def_rw(
+        "tracedecay_source_edit_rollback",
+        "Roll Back Source Edit",
+        "Restore the exact private preimages retained for one completed move_symbol effect. This is a journaled inverse effect, not a second semantic move. It refuses stale or foreign workspace bytes and requires the original effect receipt identity.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "effect_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Exact effect ID from the completed move_symbol receipt."
+                },
+                "original_idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "Original caller-provided move_symbol idempotency key."
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "description": "A fresh key for this rollback effect. Exact retries replay its durable receipt."
+                },
+                "original_input_digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "description": "Exact input digest from the completed move_symbol receipt."
+                },
+                "expected_state": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "description": "Exact committed-state digest from the completed move_symbol receipt. Rollback is refused unless the workspace still matches it."
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "const": true,
+                    "description": "Explicit acknowledgement that this restores the retained preimages."
+                }
+            },
+            "required": [
+                "effect_id",
+                "original_idempotency_key",
+                "idempotency_key",
+                "original_input_digest",
+                "expected_state",
+                "confirm"
+            ]
+        }),
+    )
+}
+
 pub(super) fn def_str_replace() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_str_replace".to_string(),
@@ -661,6 +716,32 @@ mod tests {
         assert_eq!(
             schema["allOf"][0]["else"]["not"]["required"],
             json!(["committed_state"])
+        );
+    }
+
+    #[test]
+    fn source_edit_rollback_requires_original_and_fresh_effect_identity() {
+        let schema = def_source_edit_rollback().input_schema;
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(
+            schema["required"],
+            json!([
+                "effect_id",
+                "original_idempotency_key",
+                "idempotency_key",
+                "original_input_digest",
+                "expected_state",
+                "confirm"
+            ])
+        );
+        assert_eq!(schema["properties"]["confirm"]["const"], json!(true));
+        assert_eq!(
+            schema["properties"]["original_input_digest"]["pattern"],
+            "^sha256:[0-9a-f]{64}$"
+        );
+        assert_eq!(
+            schema["properties"]["expected_state"]["pattern"],
+            "^sha256:[0-9a-f]{64}$"
         );
     }
 }

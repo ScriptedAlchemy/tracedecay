@@ -11,7 +11,8 @@ use tracedecay_domain::ManifestDigest;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::server::{
     SourceEditExecutor, SourceEditInvocationV1, SourceEditReconciliationExecutor,
-    SourceEditReconciliationInvocationV1,
+    SourceEditReconciliationInvocationV1, SourceEditRollbackExecutor,
+    SourceEditRollbackInvocationV1,
 };
 use crate::tracedecay::TraceDecay;
 
@@ -114,9 +115,72 @@ async fn source_edit_tool_result(
 pub(super) struct SourceEditInvocationContext {
     pub(super) executor: Option<SourceEditExecutor>,
     pub(super) reconciliation_executor: Option<SourceEditReconciliationExecutor>,
+    pub(super) rollback_executor: Option<SourceEditRollbackExecutor>,
     pub(super) request_id: Option<RequestId>,
     pub(super) deadline: Option<Deadline>,
     pub(super) cancellation: Option<CancellationSignal>,
+}
+
+pub(super) async fn handle_source_edit_rollback(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
+    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err(TraceDecayError::Config {
+            message: "source edit rollback requires confirm=true".to_owned(),
+        });
+    }
+    let effect_id =
+        EffectId::new(required_str(&args, "effect_id")?).map_err(source_edit_identity_error)?;
+    let original_idempotency_key =
+        IdempotencyKey::new(required_str(&args, "original_idempotency_key")?)
+            .map_err(source_edit_identity_error)?;
+    let idempotency_key = IdempotencyKey::new(required_str(&args, "idempotency_key")?)
+        .map_err(source_edit_identity_error)?;
+    if idempotency_key == original_idempotency_key {
+        return Err(TraceDecayError::Config {
+            message: "rollback idempotency key must differ from the original edit key".to_owned(),
+        });
+    }
+    let original_input_digest = ManifestDigest::new(required_str(&args, "original_input_digest")?)
+        .map_err(source_edit_identity_error)?;
+    let expected_state = ManifestDigest::new(required_str(&args, "expected_state")?)
+        .map_err(source_edit_identity_error)?;
+    let SourceEditInvocationContext {
+        rollback_executor,
+        request_id,
+        deadline,
+        cancellation,
+        ..
+    } = invocation;
+    let (Some(executor), Some(request_id), Some(deadline), Some(cancellation)) =
+        (rollback_executor, request_id, deadline, cancellation)
+    else {
+        return Err(TraceDecayError::Config {
+            message: "daemon-owned source edit rollback authority is unavailable".to_owned(),
+        });
+    };
+    let result = executor(SourceEditRollbackInvocationV1 {
+        effect_id,
+        original_idempotency_key,
+        idempotency_key,
+        original_input_digest,
+        expected_state,
+        request_id,
+        deadline,
+        cancellation,
+    })
+    .await?;
+    let value = result.value();
+    let success = result.outcome.success();
+    let tool_result = generic_tool_result(Some(cg.project_root()), &args, &value, Vec::new())
+        .with_semantic_error(!success);
+    if success {
+        Ok(tool_result)
+    } else {
+        Ok(tool_result.with_failure_message(result.outcome.message()))
+    }
 }
 
 pub(super) async fn handle_source_edit_reconcile(
@@ -209,7 +273,7 @@ pub(super) async fn handle_source_edit_reconcile(
 
 fn source_edit_identity_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
-        message: format!("invalid source edit reconciliation identity: {error}"),
+        message: format!("invalid source edit effect identity: {error}"),
     }
 }
 
@@ -630,6 +694,7 @@ mod tests {
         SourceEditInvocationContext {
             executor,
             reconciliation_executor: None,
+            rollback_executor: None,
             request_id: Some(RequestId::new("request.mcp.source-edit.fixture").unwrap()),
             deadline: Some(Deadline::new(UtcMicros(i64::MAX)).unwrap()),
             cancellation: Some(

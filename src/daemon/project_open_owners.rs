@@ -114,8 +114,13 @@ use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 mod advisory_upgrade;
 mod lsp_registration;
 mod query_authority_upgrade;
+mod source_edit_owner;
 
 use lsp_registration::production_lsp_registration;
+use source_edit_owner::{
+    install_project_open_source_edit_rollback_owner, source_edit_authority_error,
+    source_edit_contract_error, source_edit_request_context,
+};
 
 #[cfg(test)]
 use crate::graph_semantic_capabilities;
@@ -716,6 +721,7 @@ fn install_project_open_source_edit_owners(
 ) -> Result<()> {
     let source_edit_graph = Arc::clone(&graph);
     let source_edit_reconciliation_authorization = authorization.clone();
+    let source_edit_rollback_authorization = authorization.clone();
     let source_edit_mutation = Arc::clone(&mutation);
     server
         .install_source_edit_executor(Arc::new(move |request| {
@@ -732,6 +738,12 @@ fn install_project_open_source_edit_owners(
         .map_err(|_| TraceDecayError::Config {
             message: "project-open source edit authority was already installed".to_owned(),
         })?;
+    install_project_open_source_edit_rollback_owner(
+        server,
+        Arc::clone(&graph),
+        source_edit_rollback_authorization,
+        Arc::clone(&mutation),
+    )?;
     server
         .install_source_edit_reconciliation_executor(Arc::new(move |request| {
             let graph = Arc::clone(&graph);
@@ -3073,6 +3085,7 @@ fn production_owner_capabilities()
         "capability.application.source-edit.rename-symbol",
         "capability.application.source-edit.replace-symbol",
         "capability.application.source-edit.reconcile",
+        "capability.application.source-edit.rollback",
         "capability.application.source-edit.str-replace",
         "capability.git.stage-hunks",
         "capability.git.unstage-hunks",

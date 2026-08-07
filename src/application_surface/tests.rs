@@ -629,6 +629,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "session_start",
             "sessions_for",
             "source_edit_reconcile",
+            "source_edit_rollback",
             "str_replace",
             "workflows",
         ]
