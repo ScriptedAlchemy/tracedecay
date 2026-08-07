@@ -4,4 +4,4 @@
 //! it so every existing `crate::migrate::*` and `tracedecay::migrate::*` caller
 //! path keeps resolving after the one-shot crate split.
 
-pub use tracedecay_migrate::{durability, final_v2, inventory, profile_backup, registry};
+pub use tracedecay_migrate::{durability, final_v2, inventory, profile_backup};

@@ -18,5 +18,5 @@ pub use tracedecay_global_db::{
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
     TranscriptBatch, WorkflowScopeFilter, configuration, env_flag, env_value_truthy,
     global_accounting_enabled, global_accounting_mode, global_db_path,
-    global_db_path_is_overridden,
+    global_db_path_is_overridden, registry_maintenance,
 };

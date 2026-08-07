@@ -976,7 +976,10 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
     upsert_test_store(&db, "proj_retained", "store_retained").await;
     close_profile_runtime(db).await;
 
-    let runtime = tracedecay::migrate::registry::MigrationRegistryRuntime::open(profile.path())
+    let runtime =
+        tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::open(
+            profile.path(),
+        )
         .await
         .unwrap();
     let preview = runtime

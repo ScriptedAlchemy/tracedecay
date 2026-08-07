@@ -217,12 +217,14 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn apply_registry_reconstruction_report(
+    pub async fn apply_registry_orphan_relink_report(
         &self,
-        report: &crate::migrate::registry::RegistryReconstructionReport,
-    ) -> std::result::Result<crate::migrate::registry::RegistryReconstructionApplyReport, Vec<String>>
-    {
-        crate::migrate::registry::apply_registry_reconstruction_report(
+        report: &crate::global_db::registry_maintenance::RegistryOrphanRelinkReport,
+    ) -> std::result::Result<
+        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
+        Vec<String>,
+    > {
+        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(
             self.profile_database.as_ref(),
             report,
         )
@@ -230,12 +232,14 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn apply_single_registry_reconstruction_report(
+    pub async fn apply_single_registry_orphan_relink_report(
         &self,
-        report: &crate::migrate::registry::RegistryReconstructionReport,
-    ) -> std::result::Result<crate::migrate::registry::RegistryReconstructionApplyReport, Vec<String>>
-    {
-        crate::migrate::registry::apply_single_registry_reconstruction_report(
+        report: &crate::global_db::registry_maintenance::RegistryOrphanRelinkReport,
+    ) -> std::result::Result<
+        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
+        Vec<String>,
+    > {
+        crate::global_db::registry_maintenance::apply_single_registry_orphan_relink_report(
             self.profile_database.as_ref(),
             report,
         )

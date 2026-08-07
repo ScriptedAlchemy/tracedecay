@@ -26,7 +26,7 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
 
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
 /// that must NOT be classified as "ephemeral" by
-/// `migrate::registry::classify_project_root` (which rejects project roots
+/// `global_db::registry_maintenance`'s `classify_project_root` (which rejects project roots
 /// under the OS temp directory). `env!("CARGO_MANIFEST_DIR")).parent()` used
 /// to serve this purpose, but that only holds when the checkout itself lives
 /// outside the temp directory; a repo cloned under `/tmp` (as some sandboxed
@@ -1593,14 +1593,14 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     .unwrap();
     std::fs::create_dir_all(profile_root(home.path())).unwrap();
 
-    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+    let report = tracedecay::global_db::registry_maintenance::inspect_profile_store_orphans(
         &profile_root(home.path()),
         tracedecay::tracedecay::current_timestamp(),
     );
     assert_eq!(report.plans.len(), 1, "{report:#?}");
     assert_eq!(
         report.plans[0].status,
-        tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible,
+        tracedecay::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible,
         "{report:#?}"
     );
 

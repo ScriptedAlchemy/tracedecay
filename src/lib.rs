@@ -105,6 +105,7 @@ mod os_str_bytes;
 mod path_scope;
 mod path_tree;
 pub mod privacy;
+pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod redundancy;
 mod repository_provenance;

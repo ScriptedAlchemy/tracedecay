@@ -346,10 +346,19 @@ async fn dispatch_admin_cli(
         AdminCliAction::RegistryGc { prefix, apply } => {
             let profile_root = context.require_profile_root()?;
             let report = if apply {
-                crate::migrate::registry::apply_registry_gc(global_db, profile_root, prefix).await?
+                crate::global_db::registry_maintenance::apply_registry_gc(
+                    global_db,
+                    profile_root,
+                    prefix,
+                )
+                .await?
             } else {
-                crate::migrate::registry::registry_gc_report(global_db, profile_root, prefix)
-                    .await?
+                crate::global_db::registry_maintenance::registry_gc_report(
+                    global_db,
+                    profile_root,
+                    prefix,
+                )
+                .await?
             };
             serde_json::to_value(report)?
         }

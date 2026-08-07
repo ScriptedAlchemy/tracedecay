@@ -10,7 +10,7 @@ pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLoc
 
 pub(crate) async fn classify_project_storage_with_registry(
     project_root: &Path,
-    registry: Option<&tracedecay::migrate::registry::MigrationRegistryRuntime>,
+    registry: Option<&tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime>,
     profile_root: Option<&Path>,
 ) -> tracedecay::errors::Result<ProjectStorageLocation> {
     let location = classify_project_storage(project_root);

@@ -33,6 +33,7 @@ mod registered_legacy_relations;
 mod registered_session_sync;
 mod registered_sessions;
 mod remote_deletion;
+pub mod registry_maintenance;
 pub mod schema_contract;
 pub mod schema_stages;
 pub use schema_stages::ensure_registered_schema;
