@@ -433,7 +433,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run dashboard integration tests
-        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
+        run: cargo nextest run --test dashboard_api_test --features test-transport --no-fail-fast --locked
 
   # WCAG 2.2 AA is an acceptance criterion, so the accessibility scans run in
   # CI rather than only on a developer's machine. Both harnesses exit nonzero
