@@ -74,7 +74,7 @@ use tracedecay_semantic::{
     SemanticRuntimeScheduleStatusV1, SemanticRuntimeStatusProjectionV1,
     measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
-use vector_projection_support::{BatchCommitStateV1, graph_vector_store, projection_input_bytes};
+use vector_projection_support::{BatchCommitStateV1, projection_input_bytes};
 
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,

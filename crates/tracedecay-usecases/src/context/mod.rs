@@ -8,7 +8,6 @@ mod registered_scope;
 pub mod source_read;
 
 use std::fmt;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};

@@ -33,10 +33,7 @@ mod catalog;
 mod scoped;
 mod support;
 
-pub(super) use catalog::{
-    generation_catalog_relation_id, read_build_catalog, read_generation_catalog,
-    read_generation_catalog_entry,
-};
+pub(super) use catalog::{read_generation_catalog, read_generation_catalog_entry};
 pub(super) use scoped::{
     ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records, read_generation_records,
 };

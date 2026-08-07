@@ -6,9 +6,7 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
     ManifestDigest, ProjectionKeyV1, VectorGenerationIdV1,
 };
-use tracedecay_graph_db::{
-    GraphCancellation, GraphProjectionTelemetryRequest, GraphProperty, GraphWatermark,
-};
+use tracedecay_graph_db::{GraphCancellation, GraphProperty, GraphWatermark};
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
     SemanticVectorChunkId, SemanticVectorChunkManifestMember, SemanticVectorPublishedGenerationKey,

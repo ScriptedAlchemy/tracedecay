@@ -73,7 +73,6 @@ pub use ports::{
 };
 #[cfg(feature = "semantic-fastembed")]
 pub use production::current_query_factory;
-pub(crate) use production::project_semantic_generation_pointer;
 pub use production::{
     ApplicationSemanticSearchParametersV1, AuthorizedProjectSemanticSearchParametersV1,
     ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,

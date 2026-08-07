@@ -2,12 +2,12 @@ use std::mem::size_of;
 
 use tracedecay_domain::{EmbeddingMetricV1, VectorGenerationIdV1};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphEntity, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPropertyName, VectorMetric,
+    GraphCancellation, GraphDbError, GraphEntity, GraphLabel, GraphProperty, GraphPropertyName,
+    VectorMetric,
 };
 
 use super::super::VectorGenerationStoreErrorV1;
-use super::{ResidentVectorRowV1, SEMANTIC_VECTOR_GRAPH_PROJECTION};
+use super::ResidentVectorRowV1;
 
 pub(super) fn measured_resident_bytes(
     rows: &[ResidentVectorRowV1],
