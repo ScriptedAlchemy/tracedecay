@@ -14,7 +14,10 @@ use tracedecay_runtime_core::git_repository::{
 };
 use tracedecay_store::NativeIntegrationRecordV1;
 
-use super::{NativeApplyEffectV1, NativeIntegrationMechanics, NativeIntegrationProbeV1};
+use super::{
+    NativeApplyEffectV1, NativeIntegrationMechanics, NativeIntegrationProbeV1, domain_error,
+    native_error,
+};
 
 const ADAPTER_REVISION: &str = "gix-native-integration-v1";
 
@@ -407,14 +410,6 @@ const fn native_mode(mode: MechanicalIntegrationModeV1) -> GitNativeIntegrationM
             GitNativeIntegrationMode::CherryPickExactCommits
         }
     }
-}
-
-fn native_error(error: impl std::fmt::Display) -> NativeIntegrationPortError {
-    NativeIntegrationPortError::Native(error.to_string())
-}
-
-fn domain_error(error: tracedecay_domain::DomainError) -> NativeIntegrationPortError {
-    NativeIntegrationPortError::Native(error.to_string())
 }
 
 fn placeholder_digest() -> Result<ManifestDigest, NativeIntegrationPortError> {
