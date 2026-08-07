@@ -26,6 +26,10 @@ pub struct NodeMetrics {
 /// scan. Stays under the `SQLite` runtime's per-query materialization admission.
 const ADJACENCY_SCAN_PAGE_ROWS: i64 = 2_000;
 
+/// `ADJACENCY_SCAN_PAGE_ROWS` as a `usize`, for clamping a remaining budget to
+/// one page.
+const ADJACENCY_SCAN_PAGE_ROWS_USIZE: usize = 2_000;
+
 /// Bounded whole-graph file adjacency plus the rows examined to build it.
 #[derive(Debug)]
 pub struct FileAdjacencyScan {
@@ -479,6 +483,67 @@ impl<'a> GraphQueryManager<'a> {
         Ok(cycles)
     }
 
+    /// Reads one keyset page of distinct cross-file `calls`/`uses` dependency
+    /// pairs, ordered by `(src_file, tgt_file)` and strictly greater than
+    /// `cursor`.
+    ///
+    /// The whole three-way join exceeds what the `SQLite` runtime will
+    /// materialize for a single statement on a real project — it refuses the
+    /// query before returning any row — so every caller must page. Because the
+    /// keyset predicate is strict and the ordering total, pairs are globally
+    /// distinct across pages without a client-side dedupe set.
+    async fn dependency_pair_page(
+        &self,
+        cursor: &(String, String),
+        page_rows: i64,
+        operation: &'static str,
+    ) -> Result<Vec<(String, String)>> {
+        const SQL: &str = "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file \
+                           FROM edges e \
+                           JOIN nodes n1 ON e.source = n1.id \
+                           JOIN nodes n2 ON e.target = n2.id \
+                           WHERE e.kind IN ('calls', 'uses') \
+                           AND n1.file_path != n2.file_path \
+                           AND (n1.file_path > ?1 OR (n1.file_path = ?1 AND n2.file_path > ?2)) \
+                           ORDER BY src_file, tgt_file \
+                           LIMIT ?3";
+
+        let mut rows = self
+            .db
+            .conn()
+            .query(SQL, (cursor.0.clone(), cursor.1.clone(), page_rows))
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query file adjacency: {error}"),
+                operation: operation.to_string(),
+            })?;
+
+        let mut page = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read adjacency row: {error}"),
+                operation: operation.to_string(),
+            })?
+        {
+            let source = row
+                .get::<String>(0)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("invalid adjacency source: {error}"),
+                    operation: operation.to_string(),
+                })?;
+            let target = row
+                .get::<String>(1)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("invalid adjacency target: {error}"),
+                    operation: operation.to_string(),
+                })?;
+            page.push((source, target));
+        }
+        Ok(page)
+    }
+
     /// Builds a file-level directed adjacency map from the code graph.
     ///
     /// For each file, collects the files it depends on via `calls` and
@@ -496,20 +561,6 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<HashMap<String, HashSet<String>>> {
-        // Read the distinct pairs through keyset pages: the whole join exceeds
-        // what the SQLite runtime will materialize for a single query on a real
-        // project. Every page is aggregated into the same adjacency map, so the
-        // result stays a complete measurement.
-        let sql = "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file \
-                   FROM edges e \
-                   JOIN nodes n1 ON e.source = n1.id \
-                   JOIN nodes n2 ON e.target = n2.id \
-                   WHERE e.kind IN ('calls', 'uses') \
-                   AND n1.file_path != n2.file_path \
-                   AND (n1.file_path > ?1 OR (n1.file_path = ?1 AND n2.file_path > ?2)) \
-                   ORDER BY src_file, tgt_file \
-                   LIMIT ?3";
-
         // Normalise the prefix once: ensure it ends with '/'.
         let prefix: Option<String> = path_prefix.map(|p| {
             if p.ends_with('/') {
@@ -522,28 +573,12 @@ impl<'a> GraphQueryManager<'a> {
         let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
         let mut cursor = (String::new(), String::new());
         loop {
-            let mut rows = self
-                .db
-                .conn()
-                .query(
-                    sql,
-                    (cursor.0.clone(), cursor.1.clone(), ADJACENCY_SCAN_PAGE_ROWS),
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query file adjacency: {e}"),
-                    operation: "build_file_adjacency".to_string(),
-                })?;
-
-            let mut page_rows = 0_i64;
-            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read adjacency row: {e}"),
-                operation: "build_file_adjacency".to_string(),
-            })? {
-                let src: String = row.get(0).unwrap_or_default();
-                let tgt: String = row.get(1).unwrap_or_default();
+            let page = self
+                .dependency_pair_page(&cursor, ADJACENCY_SCAN_PAGE_ROWS, "build_file_adjacency")
+                .await?;
+            let page_rows = i64::try_from(page.len()).unwrap_or(i64::MAX);
+            for (src, tgt) in page {
                 cursor = (src.clone(), tgt.clone());
-                page_rows += 1;
 
                 if let Some(ref pfx) = prefix
                     && (!src.starts_with(pfx.as_str()) || !tgt.starts_with(pfx.as_str()))
@@ -553,7 +588,6 @@ impl<'a> GraphQueryManager<'a> {
 
                 adj.entry(src).or_default().insert(tgt);
             }
-            drop(rows);
             if page_rows < ADJACENCY_SCAN_PAGE_ROWS {
                 break;
             }
@@ -582,35 +616,56 @@ impl<'a> GraphQueryManager<'a> {
         max_files: usize,
         max_dependency_edges: usize,
     ) -> Result<FileAdjacencyScan> {
-        let file_limit = i64::try_from(max_files.saturating_add(1)).unwrap_or(i64::MAX);
-        let mut file_rows = self
-            .db
-            .conn()
-            .query(
-                "SELECT path FROM files ORDER BY path LIMIT ?1",
-                [file_limit],
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to query bounded file set: {error}"),
-                operation: "build_file_adjacency_bounded".to_string(),
-            })?;
-        let mut files = Vec::new();
-        while let Some(row) = file_rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to read bounded file row: {error}"),
-                operation: "build_file_adjacency_bounded".to_string(),
-            })?
-        {
-            files.push(
-                row.get::<String>(0)
+        // `max_files + 1` is itself far past what one statement may materialize
+        // (the dashboard budget is 50 000 files), so the file census pages by
+        // path keyset for the same reason the dependency scan below does. The
+        // `+1` overflow probe is preserved: the loop stops the moment it holds
+        // one path more than the budget allows.
+        let file_probe = max_files.saturating_add(1);
+        let mut files: Vec<String> = Vec::new();
+        let mut file_cursor = String::new();
+        loop {
+            let remaining = file_probe.saturating_sub(files.len());
+            if remaining == 0 {
+                break;
+            }
+            let page_limit = i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE))
+                .unwrap_or(i64::MAX);
+            let mut file_rows = self
+                .db
+                .conn()
+                .query(
+                    "SELECT path FROM files WHERE path > ?1 ORDER BY path LIMIT ?2",
+                    (file_cursor.clone(), page_limit),
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to query bounded file set: {error}"),
+                    operation: "build_file_adjacency_bounded".to_string(),
+                })?;
+            let mut page_rows = 0_i64;
+            while let Some(row) = file_rows
+                .next()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to read bounded file row: {error}"),
+                    operation: "build_file_adjacency_bounded".to_string(),
+                })?
+            {
+                let path = row
+                    .get::<String>(0)
                     .map_err(|error| TraceDecayError::Database {
                         message: format!("invalid bounded file row: {error}"),
                         operation: "build_file_adjacency_bounded".to_string(),
-                    })?,
-            );
+                    })?;
+                file_cursor.clone_from(&path);
+                files.push(path);
+                page_rows += 1;
+            }
+            drop(file_rows);
+            if page_rows < page_limit {
+                break;
+            }
         }
         if files.len() > max_files {
             return Err(TraceDecayError::Config {
@@ -620,47 +675,35 @@ impl<'a> GraphQueryManager<'a> {
             });
         }
 
-        let edge_limit = i64::try_from(max_dependency_edges.saturating_add(1)).unwrap_or(i64::MAX);
-        let mut edge_rows = self
-            .db
-            .conn()
-            .query(
-                "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file
-                 FROM edges e
-                 JOIN nodes n1 ON e.source = n1.id
-                 JOIN nodes n2 ON e.target = n2.id
-                 WHERE e.kind IN ('calls', 'uses')
-                   AND n1.file_path != n2.file_path
-                 LIMIT ?1",
-                [edge_limit],
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to query bounded file adjacency: {error}"),
-                operation: "build_file_adjacency_bounded".to_string(),
-            })?;
+        // The budget is reached through keyset pages, never through one
+        // statement: a single `LIMIT max_dependency_edges + 1` join is refused
+        // by the SQLite runtime's materialization admission before it returns a
+        // row, so on a real project the over-budget check below was unreachable
+        // and the caller saw a materialization failure instead of its own
+        // budget error. Paging keeps the budget *and* the `+1` overflow probe:
+        // reading exactly one pair past the budget proves the scan is over it,
+        // and the scan stops there rather than materializing the whole join.
+        let overflow_probe = max_dependency_edges.saturating_add(1);
         let mut dependencies = Vec::new();
-        while let Some(row) = edge_rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to read bounded adjacency row: {error}"),
-                operation: "build_file_adjacency_bounded".to_string(),
-            })?
-        {
-            let source = row
-                .get::<String>(0)
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("invalid bounded adjacency source: {error}"),
-                    operation: "build_file_adjacency_bounded".to_string(),
-                })?;
-            let target = row
-                .get::<String>(1)
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("invalid bounded adjacency target: {error}"),
-                    operation: "build_file_adjacency_bounded".to_string(),
-                })?;
-            dependencies.push((source, target));
+        let mut cursor = (String::new(), String::new());
+        loop {
+            let remaining = overflow_probe.saturating_sub(dependencies.len());
+            if remaining == 0 {
+                break;
+            }
+            let page_limit = i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE))
+                .unwrap_or(i64::MAX);
+            let page = self
+                .dependency_pair_page(&cursor, page_limit, "build_file_adjacency_bounded")
+                .await?;
+            let page_rows = i64::try_from(page.len()).unwrap_or(i64::MAX);
+            if let Some(last) = page.last() {
+                cursor = last.clone();
+            }
+            dependencies.extend(page);
+            if page_rows < page_limit {
+                break;
+            }
         }
         if dependencies.len() > max_dependency_edges {
             return Err(TraceDecayError::Config {
@@ -722,5 +765,231 @@ impl<'a> GraphQueryManager<'a> {
         }
 
         Ok(depth)
+    }
+}
+
+#[cfg(test)]
+mod bounded_adjacency_tests {
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_runtime_core::errors::TraceDecayError;
+
+    use super::GraphQueryManager;
+
+    /// The `SQLite` runtime refuses a single query that materializes more than
+    /// this many rows.
+    const RUNTIME_QUERY_ROW_LIMIT: usize = 10_000;
+
+    /// Distinct cross-file dependency pairs seeded. One past the runtime limit
+    /// is the smallest fixture that separates a refused statement from a paged
+    /// one — and it is the scale at which the dashboard strata endpoint failed
+    /// with "exact SQL query materialization exceeded its limit" instead of
+    /// reporting its own budget.
+    const PAIRS: usize = RUNTIME_QUERY_ROW_LIMIT + 1;
+
+    /// The single sink every seeded function calls, so all `PAIRS` distinct
+    /// file pairs share one target file.
+    const HUB_FILE: &str = "src/hub.rs";
+
+    /// Seeds `PAIRS` caller files, each holding one function that calls the hub,
+    /// plus the hub file itself.
+    async fn seed_oversized_project(directory: &tempfile::TempDir) -> Database {
+        let path = directory.path().join("strata.db");
+        crate::register_test_schema_installer();
+        let authority = DatabaseAuthority::acquire_test(&path, "bounded file adjacency fixture")
+            .expect("fixture database authority");
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .expect("fixture database");
+
+        let fixture = format!(
+            "WITH RECURSIVE fixture(value) AS (
+                 SELECT 0 UNION ALL SELECT value + 1 FROM fixture WHERE value < {}
+             )",
+            PAIRS - 1
+        );
+        let transaction = database
+            .begin_bulk_write_transaction("seed bounded adjacency fixture")
+            .await
+            .expect("fixture write transaction");
+        transaction
+            .execute(
+                &format!(
+                    "{fixture}
+                     INSERT INTO nodes (id, kind, name, qualified_name, file_path,
+                                        start_line, end_line, start_column, end_column,
+                                        visibility, updated_at)
+                     SELECT printf('fn::%05d', value), 'function', printf('f%05d', value),
+                            printf('crate::f%05d', value), printf('src/m%05d.rs', value),
+                            1, 3, 0, 1, 'pub', 1
+                     FROM fixture"
+                ),
+                (),
+            )
+            .await
+            .expect("seed caller nodes");
+        transaction
+            .execute(
+                &format!(
+                    "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
+                                        start_line, end_line, start_column, end_column,
+                                        visibility, updated_at)
+                     VALUES ('hub::sink', 'function', 'sink', 'crate::sink', '{HUB_FILE}',
+                             1, 3, 0, 1, 'pub', 1)"
+                ),
+                (),
+            )
+            .await
+            .expect("seed hub node");
+        transaction
+            .execute(
+                &format!(
+                    "{fixture}
+                     INSERT INTO edges (source, target, kind, line)
+                     SELECT printf('fn::%05d', value), 'hub::sink', 'calls', 1
+                     FROM fixture"
+                ),
+                (),
+            )
+            .await
+            .expect("seed calls edges");
+        transaction
+            .execute(
+                &format!(
+                    "{fixture}
+                     INSERT INTO files (path, content_hash, size, modified_at, indexed_at,
+                                        node_count)
+                     SELECT printf('src/m%05d.rs', value), printf('hash%05d', value), 1, 1, 1, 1
+                     FROM fixture"
+                ),
+                (),
+            )
+            .await
+            .expect("seed caller files");
+        transaction
+            .execute(
+                &format!(
+                    "INSERT INTO files (path, content_hash, size, modified_at, indexed_at,
+                                        node_count)
+                     VALUES ('{HUB_FILE}', 'hashhub', 1, 1, 1, 1)"
+                ),
+                (),
+            )
+            .await
+            .expect("seed hub file");
+        transaction.commit().await.expect("commit fixture");
+        database
+    }
+
+    /// The pre-fix statement: one unpaged `LIMIT budget + 1` three-way join.
+    ///
+    /// It must stay refused, or this fixture no longer reproduces the
+    /// materialization failure that made the budget check unreachable.
+    #[tokio::test]
+    async fn the_unpaged_bounded_join_is_still_refused_at_this_scale() {
+        let directory = tempfile::tempdir().expect("fixture tempdir");
+        let database = seed_oversized_project(&directory).await;
+
+        let refused = database
+            .conn()
+            .query(
+                "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file
+                 FROM edges e
+                 JOIN nodes n1 ON e.source = n1.id
+                 JOIN nodes n2 ON e.target = n2.id
+                 WHERE e.kind IN ('calls', 'uses')
+                   AND n1.file_path != n2.file_path
+                 LIMIT ?1",
+                [i64::try_from(250_000_usize + 1).expect("edge probe")],
+            )
+            .await;
+
+        assert!(
+            refused.is_err(),
+            "the unpaged statement must still be refused, or the paging fix is \
+             no longer falsifiable by this fixture"
+        );
+        database.close();
+    }
+
+    /// The strata defect: at 10 001 distinct pairs the bounded scan must
+    /// complete through keyset pages and report the whole measurement.
+    #[tokio::test]
+    async fn bounded_file_adjacency_pages_past_the_runtime_query_limit() {
+        let directory = tempfile::tempdir().expect("fixture tempdir");
+        let database = seed_oversized_project(&directory).await;
+
+        let scan = GraphQueryManager::new(&database)
+            .build_file_adjacency_bounded(50_000, 250_000)
+            .await
+            .expect("a paged bounded scan must not exceed the runtime materialization limit");
+
+        assert_eq!(
+            scan.dependency_edges_examined, PAIRS,
+            "every distinct cross-file pair must survive paging exactly once"
+        );
+        assert_eq!(
+            scan.files_examined,
+            PAIRS + 1,
+            "the file census must page too — its budget probe is 50 001 rows"
+        );
+        assert_eq!(
+            scan.adjacency
+                .get("src/m00000.rs")
+                .map(std::collections::HashSet::len),
+            Some(1),
+            "a caller file depends on the hub file"
+        );
+        assert_eq!(
+            scan.adjacency.get(HUB_FILE).map(std::collections::HashSet::len),
+            Some(0),
+            "the hub file is a leaf with no outgoing dependency"
+        );
+        database.close();
+    }
+
+    /// Over-budget must stay a typed refusal. The paging fix must not turn the
+    /// budget into a silent truncation: a partial graph is mistakable for a
+    /// complete measurement, which is exactly what the budget exists to prevent.
+    #[tokio::test]
+    async fn an_over_budget_dependency_scan_is_refused_not_truncated() {
+        let directory = tempfile::tempdir().expect("fixture tempdir");
+        let database = seed_oversized_project(&directory).await;
+
+        let error = GraphQueryManager::new(&database)
+            .build_file_adjacency_bounded(50_000, PAIRS - 1)
+            .await
+            .expect_err("a scan one pair over its edge budget must fail");
+
+        match error {
+            TraceDecayError::Config { message } => assert!(
+                message.contains("edge dashboard scan budget"),
+                "unexpected over-budget message: {message}"
+            ),
+            other => panic!("over-budget must be a typed Config refusal, got {other:?}"),
+        }
+        database.close();
+    }
+
+    /// The file census carries the same budget, and it too is now reached by
+    /// paging rather than by one 50 001-row statement.
+    #[tokio::test]
+    async fn an_over_budget_file_census_is_refused_not_truncated() {
+        let directory = tempfile::tempdir().expect("fixture tempdir");
+        let database = seed_oversized_project(&directory).await;
+
+        let error = GraphQueryManager::new(&database)
+            .build_file_adjacency_bounded(PAIRS, 250_000)
+            .await
+            .expect_err("a census one file over its budget must fail");
+
+        match error {
+            TraceDecayError::Config { message } => assert!(
+                message.contains("file dashboard scan budget"),
+                "unexpected over-budget message: {message}"
+            ),
+            other => panic!("over-budget must be a typed Config refusal, got {other:?}"),
+        }
+        database.close();
     }
 }
