@@ -39,11 +39,14 @@ pub trait ProjectGraphRuntimePortV1: Send + Sync {
         cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
 
+    /// Recovers the projection's verified head, answering `Ok(None)` when the
+    /// projection has never published one. "Nothing published yet" is a typed
+    /// empty start, not an unavailability error.
     fn verified_snapshot(
         &self,
         projection: &tracedecay_graph_db::GraphProjectionIdentity,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
+    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>;
 }
 
 #[derive(Clone)]

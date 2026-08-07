@@ -2,9 +2,9 @@
 //!
 //! Publishes each manifest into an in-memory verified snapshot
 //! (`VerifiedGraphSnapshot::memory`) and serves it back, standing in for the
-//! registered project graph runtime. Absent publication reports the same
-//! missing-verified-head unavailability as the production registry so
-//! recovery paths exercise their real fallback.
+//! registered project graph runtime. Absent publication answers the same
+//! typed `Ok(None)` empty start as the production registry so recovery paths
+//! exercise their real fallback.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -37,13 +37,7 @@ impl GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
         &self,
         _projection: &GraphProjectionIdentity,
         _cancelled: Arc<AtomicBool>,
-    ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.snapshot
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| GraphDbError::Unavailable {
-                message: super::MISSING_VERIFIED_HEAD.to_owned(),
-            })
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        Ok(self.snapshot.lock().unwrap().clone())
     }
 }

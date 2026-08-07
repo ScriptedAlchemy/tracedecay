@@ -466,7 +466,14 @@ impl GitReadAuthorityV1 {
         ));
         let snapshot = runtime
             .verified_snapshot(&identity, cancelled_at_call)
-            .map_err(map_graph_runtime_error)?;
+            .map_err(map_graph_runtime_error)?
+            .ok_or_else(|| {
+                // The Git topology join needs a projected history; a topology
+                // that has never published is unavailable, not empty.
+                GitQueryError::TopologyUnavailable(
+                    "git topology projection has not published a verified head".to_owned(),
+                )
+            })?;
         bounds.check()?;
         let topology = GitTopologyProjectionStore::from_verified_snapshot_verified(
             snapshot,

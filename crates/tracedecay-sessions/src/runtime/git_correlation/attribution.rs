@@ -12,12 +12,6 @@ use super::{
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
-/// Exact unavailability message the graph registry emits when a projection
-/// has no installed verified head (see graph-db `publication_support`).
-/// Callers that treat "nothing published yet" as an empty start match on
-/// this sentinel; keep every copy pointed at this one constant.
-pub const MISSING_VERIFIED_HEAD: &str =
-    "graph projection is not recovered into an installed verified head";
 
 /// A `(branch, worktree)` pair a session was observed on, with the widest span
 /// window recorded for it. Commit scans run once per pair.
@@ -205,16 +199,14 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
+    // A never-published projection is the typed empty start.
     let (mut spans, mut commits) =
-        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled)) {
-            Ok(store) => (
+        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))? {
+            Some(store) => (
                 store.projection().spans().to_vec(),
                 store.projection().commit_sessions().to_vec(),
             ),
-            Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
-                (Vec::new(), Vec::new())
-            }
-            Err(error) => return Err(error),
+            None => (Vec::new(), Vec::new()),
         };
     let mut spans_changed = 0;
     for incoming in new_spans {
@@ -321,13 +313,12 @@ where
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
-    let projection = match recover_git_evidence_projection(runtime, &identity, cancelled) {
-        Ok(store) => store.projection().clone(),
-        Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
-            return Ok(0);
-        }
-        Err(error) => return Err(error),
+    // A never-published projection has no spans to attribute: the sweep is
+    // truthfully a no-op, not a retryable failure.
+    let Some(store) = recover_git_evidence_projection(runtime, &identity, cancelled)? else {
+        return Ok(0);
     };
+    let projection = store.projection().clone();
     let targets = scan_targets(projection.spans());
     let mut records = Vec::new();
     for target in &targets {

@@ -293,7 +293,7 @@ impl RetainedProjectGraphRuntimeV1 {
         &self,
         projection: &GraphProjectionIdentity,
         request_cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+    ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let cancellation_identity = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!(
@@ -347,12 +347,19 @@ impl RetainedProjectGraphRuntimeV1 {
             .project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        self.graph_registry.recover_verified_snapshot(
-            registration,
-            &mut storage,
-            &context,
-            &relational_projection,
-        )
+        // A projection that has never published a verified head is a typed
+        // empty start, not an unavailability error (same pre-check as
+        // `recover_semantic_vector_projection`).
+        if storage
+            .verified_head(&relational_projection, &context)
+            .map_err(map_publication_error)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.graph_registry
+            .recover_verified_snapshot(registration, &mut storage, &context, &relational_projection)
+            .map(Some)
     }
 }
 
@@ -375,7 +382,7 @@ impl crate::global_db::ProjectGraphRuntimePortV1 for RetainedProjectGraphRuntime
         &self,
         projection: &GraphProjectionIdentity,
         cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+    ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
         RetainedProjectGraphRuntimeV1::verified_snapshot(self, projection, cancelled)
     }
 }

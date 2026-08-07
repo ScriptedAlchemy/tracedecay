@@ -731,7 +731,8 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     assert_eq!(replayed.generation(), &manifest.generation);
     let recovered = runtime
         .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
-        .expect("recover verified head");
+        .expect("recover verified head")
+        .expect("published verified head");
     assert_eq!(recovered.generation(), &manifest.generation);
 
     let successor = GraphGenerationManifest::new(
@@ -769,9 +770,10 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         projection.namespace.clone(),
         GraphProjectionId::new("projection.generic-test.missing").expect("missing projection"),
     );
+    // Never published: the typed empty start, not an unavailability error.
     assert!(matches!(
         runtime.verified_snapshot(&missing, Arc::new(AtomicBool::new(false))),
-        Err(GraphDbError::Unavailable { .. })
+        Ok(None)
     ));
 }
 

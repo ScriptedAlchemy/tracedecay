@@ -150,7 +150,7 @@ fn publish_through_trait(
 fn snapshot_through_trait(
     port: &dyn ProjectGraphRuntimePortV1,
     projection: &GraphProjectionIdentity,
-) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
     port.verified_snapshot(projection, cancellation(false))
 }
 
@@ -249,8 +249,11 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
     ));
 }
 
+/// A projection that has never published a verified head is a typed empty
+/// start (`Ok(None)`), not an unavailability error. Treating it as retryable
+/// unavailability wedged fresh projects in an endless ingest retry loop.
 #[tokio::test]
-async fn missing_projection_is_a_typed_unavailable_result() {
+async fn never_published_projection_is_a_typed_empty_snapshot() {
     let fixture = ContractFixture::new("missing-projection").await;
     let project_id = project_id("missing-projection");
     let (_, sessions, _) = fixture.bind(&project_id).await;
@@ -261,7 +264,7 @@ async fn missing_projection_is_a_typed_unavailable_result() {
 
     assert!(matches!(
         snapshot_through_trait(port, &projection("never-published")),
-        Err(GraphDbError::Unavailable { .. })
+        Ok(None)
     ));
 }
 
@@ -286,6 +289,8 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
     )
     .expect("first project publication");
 
+    // The second shard never published this projection, so it must observe
+    // the typed empty start — never the first shard's head.
     assert!(matches!(
         snapshot_through_trait(
             second_sessions
@@ -294,7 +299,7 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
                 .as_ref(),
             &projection,
         ),
-        Err(GraphDbError::Unavailable { .. })
+        Ok(None)
     ));
 }
 
@@ -323,7 +328,8 @@ async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
     )
     .expect("primary worktree publication");
     let linked_snapshot = snapshot_through_trait(linked_runtime.as_ref(), &projection)
-        .expect("linked worktree reads shared project graph");
+        .expect("linked worktree reads shared project graph")
+        .expect("published verified head");
 
     assert_eq!(linked_snapshot.generation(), &manifest.generation);
 }
@@ -422,8 +428,9 @@ async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
     let published = publish_through_trait(port, &manifest, key("resume-journaled"), false)
         .expect("journaled publication must resume to a verified snapshot");
     assert_eq!(published.generation(), &manifest.generation);
-    let snapshot =
-        snapshot_through_trait(port, &projection).expect("verified snapshot after the resume");
+    let snapshot = snapshot_through_trait(port, &projection)
+        .expect("verified snapshot after the resume")
+        .expect("published verified head");
     assert_eq!(snapshot.generation(), &manifest.generation);
 }
 

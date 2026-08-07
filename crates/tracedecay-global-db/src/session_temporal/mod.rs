@@ -91,7 +91,8 @@ impl GitEvidenceGraphRuntimePort for RegisteredGitEvidenceGraphRuntime<'_> {
         &self,
         projection: &tracedecay_graph_db::GraphProjectionIdentity,
         cancelled: Arc<AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>
+    {
         self.0.verified_snapshot(projection, cancelled)
     }
 }
@@ -115,11 +116,15 @@ impl RegisteredGlobalDb {
             )
         })?;
         let identity = git_evidence_projection_identity(GraphNamespace::new("project")?)?;
-        let projection = recover_git_evidence_projection(
+        // A never-published projection authoritatively matches no session.
+        let Some(projection) = recover_git_evidence_projection(
             &RegisteredGitEvidenceGraphRuntime(runtime.as_ref()),
             &identity,
             Arc::new(AtomicBool::new(false)),
-        )?;
+        )?
+        else {
+            return Ok(Some(Vec::new()));
+        };
         let session_ids = projection.session_ids_for_scope(filter).ok_or_else(|| {
             GitCorrelationError::Contract(
                 "Git scope resolution requires a non-empty filter".to_owned(),

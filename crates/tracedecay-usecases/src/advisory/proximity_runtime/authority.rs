@@ -165,11 +165,14 @@ impl ProductionProximityEvidenceAuthorityV1 {
         // saved-generation content is rechecked before publication.
         let projection =
             git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
+        // A never-published projection carries no session evidence; fall back
+        // to the same "no evidence" path as an unreadable one.
         let snapshot = self
             .sessions
             .project_graph_runtime()?
             .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
-            .ok()?;
+            .ok()
+            .flatten()?;
         let store =
             GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
                 .ok()?;

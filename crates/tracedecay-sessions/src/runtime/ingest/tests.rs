@@ -412,7 +412,8 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         &identity,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
-    .unwrap();
+    .unwrap()
+    .expect("attribution published the evidence projection");
     let hits = evidence.sessions_for_with_relation(
         &git_correlation::SessionsForQuery {
             git_ref: git_correlation::GitRefFilter::parse("commit", &sha).unwrap(),
@@ -440,6 +441,30 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     .await
     .unwrap();
     assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
+}
+
+/// A fresh project has never published a Git evidence projection. The
+/// attribution sweep must complete as a typed no-op — not report a retryable
+/// unavailability, which put the ingest pass into an endless retry loop on
+/// every fresh project (the hermes stock journey surfaced it as a
+/// "graph projection has no relational verified head" warning storm).
+#[tokio::test]
+async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph: MemoryEvidenceGraphRuntime::default(),
+    };
+
+    let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
+    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
+        panic!("a never-published projection has no span targets to scan")
+    })
+    .await
+    .expect("the empty start is not an error");
+    assert_eq!(inserted, 0, "nothing to attribute on the empty start");
 }
 
 #[test]

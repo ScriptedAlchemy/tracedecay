@@ -21,11 +21,11 @@ use crate::sessions::git_correlation::{
     BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
     CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
     GitCorrelationSessionStore, GitEvidenceGraphRuntimePort, GitEvidenceProjectionStore,
-    GitReflogSource, MISSING_VERIFIED_HEAD, SessionGitCorrelationHit, SessionGitSpan,
-    SessionsForQuery, SpanObservation, git_evidence_projection_identity,
-    graph_evidence_publication_key, normalize_worktree, observation_extends_span,
-    providers_compatible, publish_graph_evidence, read_meta_value, recover_git_evidence_projection,
-    run_backfill, run_bounded_history_index_page, run_incremental_backfill,
+    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    git_evidence_projection_identity, graph_evidence_publication_key, normalize_worktree,
+    observation_extends_span, providers_compatible, publish_graph_evidence, read_meta_value,
+    recover_git_evidence_projection, run_backfill, run_bounded_history_index_page,
+    run_incremental_backfill,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
@@ -47,7 +47,8 @@ impl GitEvidenceGraphRuntimePort for RegisteredProjectGraphRuntime {
         &self,
         projection: &tracedecay_graph_db::GraphProjectionIdentity,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>
+    {
         self.0.verified_snapshot(projection, cancelled)
     }
 }
@@ -149,12 +150,10 @@ where
         observations: &[SpanObservation],
         merge_gap_secs: i64,
     ) -> Result<Vec<SessionGitSpan>, GitCorrelationError> {
-        let current = match self.git_evidence_projection() {
-            Ok(store) => store.projection().spans().to_vec(),
-            Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
-                Vec::new()
-            }
-            Err(error) => return Err(error),
+        // A never-published projection is the typed empty start.
+        let current = match self.git_evidence_projection()? {
+            Some(store) => store.projection().spans().to_vec(),
+            None => Vec::new(),
         };
         let mut candidates: Vec<SessionGitSpan> = Vec::new();
         for observation in observations {
@@ -212,7 +211,11 @@ where
         Ok(candidates)
     }
 
-    fn git_evidence_projection(&self) -> Result<GitEvidenceProjectionStore, GitCorrelationError> {
+    /// `Ok(None)` means the projection has never published a verified head:
+    /// the project has no recorded Git evidence yet.
+    fn git_evidence_projection(
+        &self,
+    ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
         let identity =
             git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
         recover_git_evidence_projection(
@@ -256,7 +259,19 @@ where
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
         let snapshot = self.read_snapshot().await?;
         let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
-        Ok(self.git_evidence_projection()?.health(backfill_watermark))
+        Ok(match self.git_evidence_projection()? {
+            Some(store) => store.health(backfill_watermark),
+            // Never published: truthfully report the projection as absent
+            // instead of failing the health read.
+            None => CorrelationIndexHealth {
+                projection_available: false,
+                generation: None,
+                source_watermark: None,
+                span_count: 0,
+                commit_count: 0,
+                backfill_watermark,
+            },
+        })
     }
 
     pub(crate) async fn sessions_for_with_relation(
@@ -264,16 +279,22 @@ where
         query: &SessionsForQuery,
         relation: CommitRelationFilter,
     ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
-        Ok(self
-            .git_evidence_projection()?
-            .sessions_for_with_relation(query, relation))
+        Ok(match self.git_evidence_projection()? {
+            Some(store) => store.sessions_for_with_relation(query, relation),
+            // No evidence has ever been recorded, so no session correlates.
+            None => Vec::new(),
+        })
     }
 
     pub(crate) fn session_ids_for_scope(
         &self,
         filter: &crate::sessions::git_correlation::GitScopeFilter,
     ) -> Result<std::collections::BTreeSet<(String, String)>, GitCorrelationError> {
-        self.git_evidence_projection()?
+        // No published evidence: a valid scope truthfully matches no session.
+        let Some(store) = self.git_evidence_projection()? else {
+            return Ok(std::collections::BTreeSet::new());
+        };
+        store
             .session_ids_for_scope(filter)
             .map(|ids| ids.into_iter().collect())
             .ok_or_else(|| {

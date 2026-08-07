@@ -137,11 +137,14 @@ pub trait GitEvidenceGraphRuntimePort: Send + Sync {
         cancelled: Arc<AtomicBool>,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError>;
 
+    /// Recovers the projection's verified head, answering `Ok(None)` when the
+    /// projection has never published one. "Nothing published yet" is a typed
+    /// empty start, not an unavailability error.
     fn verified_snapshot(
         &self,
         projection: &GraphProjectionIdentity,
         cancelled: Arc<AtomicBool>,
-    ) -> Result<VerifiedGraphSnapshot, GraphDbError>;
+    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError>;
 }
 
 /// The already-open project sessions authority plus its bound graph runtime.
@@ -317,16 +320,22 @@ pub fn publish_git_evidence_projection(
     GitEvidenceProjectionStore::from_verified_snapshot(snapshot, cancellation)
 }
 
+/// Recovers the published Git evidence projection, answering `Ok(None)` when
+/// the projection has never published a verified head — the typed empty start
+/// of a project without any recorded Git evidence.
 pub fn recover_git_evidence_projection(
     runtime: &dyn GitEvidenceGraphRuntimePort,
     identity: &GraphProjectionIdentity,
     cancelled: Arc<AtomicBool>,
-) -> Result<GitEvidenceProjectionStore, GitCorrelationError> {
-    let snapshot = runtime.verified_snapshot(identity, Arc::clone(&cancelled))?;
+) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
+    let Some(snapshot) = runtime.verified_snapshot(identity, Arc::clone(&cancelled))? else {
+        return Ok(None);
+    };
     GitEvidenceProjectionStore::from_verified_snapshot(
         snapshot,
         Arc::new(AtomicGraphCancellation(cancelled)),
     )
+    .map(Some)
 }
 
 fn projection_entity(source_watermark: &str) -> Result<GraphEntity, GitCorrelationError> {
