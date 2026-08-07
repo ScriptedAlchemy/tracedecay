@@ -283,6 +283,92 @@ fn parse_git_log_commits_empty_is_empty() {
     assert!(parse_git_log_commits("").is_empty());
 }
 
+/// Hermetic Git-evidence graph runtime: publishes each manifest into an
+/// in-memory verified snapshot and serves it back, standing in for the
+/// registered project graph runtime.
+struct MemoryEvidenceGraphRuntime {
+    snapshot: std::sync::Mutex<Option<tracedecay_graph_db::VerifiedGraphSnapshot>>,
+}
+
+impl git_correlation::GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
+    fn publish_verified_manifest(
+        &self,
+        manifest: &tracedecay_graph_db::GraphGenerationManifest,
+        _idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
+        _cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+        let snapshot = tracedecay_graph_db::VerifiedGraphSnapshot::memory(
+            manifest.clone(),
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )?;
+        *self.snapshot.lock().unwrap() = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn verified_snapshot(
+        &self,
+        _projection: &tracedecay_graph_db::GraphProjectionIdentity,
+        _cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+        self.snapshot.lock().unwrap().clone().ok_or_else(|| {
+            tracedecay_graph_db::GraphDbError::Unavailable {
+                message: "graph projection is not recovered into an installed verified head"
+                    .to_owned(),
+            }
+        })
+    }
+}
+
+struct GraphBackedTestStore {
+    connection: tracedecay_runtime_core::db::engine::TestConnection,
+    graph: MemoryEvidenceGraphRuntime,
+}
+
+impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
+    type WriteTxn<'txn> = tracedecay_runtime_core::db::engine::Transaction;
+
+    fn require_project_sessions_authority(
+        &self,
+    ) -> Result<(), git_correlation::GitCorrelationError> {
+        Ok(())
+    }
+
+    async fn read_snapshot(
+        &self,
+    ) -> Result<
+        tracedecay_runtime_core::db::engine::ReadSnapshot,
+        git_correlation::GitCorrelationError,
+    > {
+        self.connection
+            .read_snapshot()
+            .await
+            .map_err(git_correlation::GitCorrelationError::from)
+    }
+
+    async fn open_write_transaction(
+        &self,
+    ) -> Result<
+        tracedecay_runtime_core::db::engine::Transaction,
+        git_correlation::GitCorrelationError,
+    > {
+        self.connection
+            .transaction_with_behavior(
+                tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate,
+            )
+            .await
+            .map_err(git_correlation::GitCorrelationError::from)
+    }
+
+    fn graph_runtime(
+        &self,
+    ) -> Result<
+        &dyn git_correlation::GitEvidenceGraphRuntimePort,
+        git_correlation::GitCorrelationError,
+    > {
+        Ok(&self.graph)
+    }
+}
+
 /// End-to-end over the real scanner: a commit made *while a session is still
 /// recording* must be attributed on the next sweep. This exercises the actual
 /// `git log` invocation and window arithmetic, not a stubbed scan, because the
@@ -314,39 +400,36 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         .trim()
         .to_string();
 
-    let store = tempfile::tempdir().unwrap();
-    let handle = tracedecay_runtime_core::db::engine::TestConnection::open(
-        &store.path().join("sessions.db"),
-    );
-    let conn: &tracedecay_runtime_core::db::engine::Connection = &handle;
-    git_correlation::ensure_git_correlation_schema_in_transaction(conn)
-        .await
-        .unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph: MemoryEvidenceGraphRuntime {
+            snapshot: std::sync::Mutex::new(None),
+        },
+    };
 
     // A session recording "now" — the commit lands inside its span, exactly as
     // it does when an agent commits mid-session.
     let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let worktree = git_correlation::normalize_worktree(&repo.path().to_string_lossy());
-    for ts in [now - 60, now] {
-        git_correlation::record_span_observation_in_transaction(
-            conn,
-            &git_correlation::SpanObservation {
-                provider: "claude".to_string(),
-                session_id: "live".to_string(),
-                thread_id: None,
-                branch: Some("main".to_string()),
-                worktree: worktree.clone(),
-                ts,
-                source: git_correlation::SpanSource::HookRoute,
-            },
-            git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-        )
-        .await
-        .unwrap();
-    }
+    let live_span = git_correlation::SessionGitSpan {
+        span_id: "span-live".to_string(),
+        provider: "claude".to_string(),
+        session_id: "live".to_string(),
+        thread_id: None,
+        branch: Some("main".to_string()),
+        worktree,
+        first_ts: now - 60,
+        last_ts: now,
+        event_count: 2,
+        source: git_correlation::SpanSource::HookRoute,
+    };
+    git_correlation::publish_graph_evidence(&store, "live-ingest", &[live_span], &[]).unwrap();
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await
@@ -356,8 +439,17 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         "a commit made during a live session must be attributed"
     );
 
-    let hits = git_correlation::sessions_for_with_relation(
-        conn,
+    let identity = git_correlation::git_evidence_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
+    )
+    .unwrap();
+    let evidence = git_correlation::recover_git_evidence_projection(
+        git_correlation::GitCorrelationSessionStore::graph_runtime(&store).unwrap(),
+        &identity,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .unwrap();
+    let hits = evidence.sessions_for_with_relation(
         &git_correlation::SessionsForQuery {
             git_ref: git_correlation::GitRefFilter::parse("commit", &sha).unwrap(),
             since: None,
@@ -365,9 +457,7 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
             limit: 10,
         },
         git_correlation::CommitRelationFilter::All,
-    )
-    .await
-    .unwrap();
+    );
     assert_eq!(
         hits.len(),
         1,
@@ -380,7 +470,7 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     );
 
     // Replaying the sweep must not double-attribute.
-    let again = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+    let again = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await

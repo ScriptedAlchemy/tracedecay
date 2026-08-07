@@ -267,7 +267,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
     };
     use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_store::CompatibilityFactProposalPromotionV1;
+    use tracedecay_store::ProjectMemoryFactProposalPromotionV1;
 
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
@@ -300,7 +300,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
         .submit_compatibility_fact_proposal(context.operation_id().clone(), command, None)
         .await
         .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
-    let promotion = CompatibilityFactProposalPromotionV1::new(
+    let promotion = ProjectMemoryFactProposalPromotionV1::new(
         owner,
         submitted.proposal_id().clone(),
         submitted.revision(),

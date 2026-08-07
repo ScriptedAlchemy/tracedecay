@@ -47,3 +47,6 @@ filetime = "0.2"
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+# The live git-attribution test publishes evidence through the hermetic
+# in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }

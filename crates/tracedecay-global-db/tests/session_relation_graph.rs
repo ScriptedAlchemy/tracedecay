@@ -412,7 +412,9 @@ fn profile_relation_projection_survives_a_persistent_graph_restart() {
     }
     assert!(registry.close(&request).expect("close persistent graph"));
 
-    let reopened: Arc<GraphDb> = registry.reopen(request).expect("reopen persistent graph");
+    let reopened: Arc<GraphDb> = registry
+        .reopen_raw_for_harness(request)
+        .expect("reopen persistent graph");
     let visits = SessionRelationGraphStore::new(reopened)
         .summary_sources(
             &relation_projection.scope,

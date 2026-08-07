@@ -7,7 +7,9 @@ use tracedecay_runtime_core::db::engine::{
 
 use super::*;
 use crate::observation::ObservationCancellation;
-use crate::runtime::git_correlation::ensure_git_correlation_schema;
+use crate::runtime::git_correlation::{
+    GitEvidenceGraphRuntimePort, ensure_git_correlation_receipt_schema_in_transaction,
+};
 
 struct TestStore {
     connection: TestConnection,
@@ -42,9 +44,7 @@ impl GitCorrelationSessionStore for TestStore {
             .map_err(GitCorrelationError::from)
     }
 
-    fn graph_runtime(
-        &self,
-    ) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
+    fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
         Err(GitCorrelationError::Unavailable(
             "failure receipt tests do not mount graph evidence".to_owned(),
         ))
@@ -82,7 +82,9 @@ async fn stored_activity(conn: &TestConnection) -> Option<i64> {
 async fn receipt_upsert_never_regresses_or_downgrades_a_seal() {
     let directory = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&directory.path().join("sessions.db"));
-    ensure_git_correlation_schema(&conn).await.unwrap();
+    ensure_git_correlation_receipt_schema_in_transaction(&conn)
+        .await
+        .unwrap();
 
     let mut sealed = failure(300);
     sealed.source_generation = Some("generation-300".to_string());
@@ -110,7 +112,7 @@ async fn receipt_upsert_never_regresses_or_downgrades_a_seal() {
 async fn stale_failure_cannot_resurrect_after_newer_success_frontier() {
     let directory = tempfile::tempdir().unwrap();
     let store = TestStore::open(&directory.path().join("sessions.db"));
-    ensure_git_correlation_schema(&store.connection)
+    ensure_git_correlation_receipt_schema_in_transaction(&store.connection)
         .await
         .unwrap();
     let stale = failure(200);

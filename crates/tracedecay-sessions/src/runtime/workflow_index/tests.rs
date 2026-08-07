@@ -1,8 +1,4 @@
 use super::*;
-use crate::runtime::git_correlation::{
-    SpanObservation, SpanSource, ensure_git_correlation_schema_in_transaction,
-    record_span_observation_in_transaction,
-};
 
 fn test_conn() -> (
     tempfile::TempDir,
@@ -30,27 +26,6 @@ impl QueryExecutor for FailingQueryExecutor {
             "injected workflow read failure".to_string(),
         ))
     }
-}
-
-async fn ensure_git_scope_fixture(conn: &impl Executor, session_id: &str, branch: &str) {
-    ensure_git_correlation_schema_in_transaction(conn)
-        .await
-        .unwrap();
-    record_span_observation_in_transaction(
-        conn,
-        &SpanObservation {
-            provider: "claude".to_string(),
-            session_id: session_id.to_string(),
-            thread_id: None,
-            branch: Some(branch.to_string()),
-            worktree: "/repo".to_string(),
-            ts: 1_700_000_100,
-            source: SpanSource::Ingest,
-        },
-        super::super::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-    )
-    .await
-    .unwrap();
 }
 
 fn sample_run(run_id: &str, parent: &str) -> WorkflowRun {
@@ -109,8 +84,8 @@ async fn schema_read_failures_are_not_reported_as_empty_or_absent() {
     assert!(runs_for_session(&conn, "sess", 10).await.is_err());
     assert!(run_for_id(&conn, "wf_x").await.is_err());
     assert!(agents_for_run(&conn, "wf_x", 10).await.is_err());
-    let filter = GitScopeFilter::from_args(Some("main"), None, None).unwrap();
-    assert!(runs_for_git_scope(&conn, &filter, 10).await.is_err());
+    let scope = vec![("claude".to_owned(), "sess".to_owned())];
+    assert!(runs_for_git_scope(&conn, Some(&scope), 10).await.is_err());
 }
 
 #[tokio::test]
@@ -241,7 +216,7 @@ fn workflow_scope_exists_predicate_includes_run_and_optional_label() {
 }
 
 #[tokio::test]
-async fn runs_for_git_scope_joins_through_parent_session_spans() {
+async fn runs_for_git_scope_filters_by_resolved_parent_sessions() {
     let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
 
@@ -258,28 +233,33 @@ async fn runs_for_git_scope_joins_through_parent_session_spans() {
         .await
         .unwrap();
 
-    // Record a span placing sess-branch on branch `feat/x`.
-    ensure_git_scope_fixture(&conn, "sess-branch", "feat/x").await;
-
-    let filter = GitScopeFilter::from_args(Some("feat/x"), None, None).unwrap();
-    let hits = runs_for_git_scope(&conn, &filter, 10).await.unwrap();
+    // The Git evidence graph resolved the scope to sess-branch.
+    let scope = vec![("claude".to_owned(), "sess-branch".to_owned())];
+    let hits = runs_for_git_scope(&conn, Some(&scope), 10).await.unwrap();
     let ids: Vec<&str> = hits.iter().map(|r| r.run_id.as_str()).collect();
     assert_eq!(ids, vec!["wf_on_branch"]);
 
-    // A branch with no span yields nothing.
-    let none = GitScopeFilter::from_args(Some("feat/absent"), None, None).unwrap();
+    // An authoritative empty scope yields nothing.
     assert!(
-        runs_for_git_scope(&conn, &none, 10)
+        runs_for_git_scope(&conn, Some(&[]), 10)
             .await
             .unwrap()
             .is_empty()
     );
 
-    // Empty filter is a caller error.
-    let empty = GitScopeFilter::default();
+    // A resolved session with an empty id must not match the orphan run.
+    let empty_parent = vec![("claude".to_owned(), String::new())];
+    assert!(
+        runs_for_git_scope(&conn, Some(&empty_parent), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // An unavailable graph authority is an error, not an empty result.
     assert!(matches!(
-        runs_for_git_scope(&conn, &empty, 10).await,
-        Err(WorkflowIndexError::InvalidArgument(_))
+        runs_for_git_scope(&conn, None, 10).await,
+        Err(WorkflowIndexError::AuthorityUnavailable { .. })
     ));
 }
 
@@ -314,8 +294,6 @@ async fn registered_snapshot_preserves_workflow_query_semantics() {
     )
     .await
     .unwrap();
-    ensure_git_scope_fixture(&conn, "sess-branch", "feat/registered").await;
-
     let reader = RegisteredWorkflowIndexSnapshot {
         snapshot: conn.read_snapshot().await.unwrap(),
     };
@@ -335,8 +313,8 @@ async fn registered_snapshot_preserves_workflow_query_semantics() {
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].agent_label, "implement");
 
-    let filter = GitScopeFilter::from_args(Some("feat/registered"), None, None).unwrap();
-    let scoped = reader.runs_for_git_scope(&filter, 10).await.unwrap();
+    let scope = vec![("claude".to_owned(), "sess-branch".to_owned())];
+    let scoped = reader.runs_for_git_scope(Some(&scope), 10).await.unwrap();
     assert_eq!(
         scoped
             .iter()

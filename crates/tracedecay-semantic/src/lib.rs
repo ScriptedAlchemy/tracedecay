@@ -1498,7 +1498,9 @@ mod scheduling_tests {
         let prior = pointer('a', 'a');
         handle.scheduling.restore_current(prior.clone());
         handle
-            .bind_query_runtime_for_current(super::session_pool::test_support::authority())
+            .bind_query_runtime_for_current(
+                Arc::new(super::session_pool::test_support::authority()),
+            )
             .expect("bind prior query runtime");
         assert!(
             handle

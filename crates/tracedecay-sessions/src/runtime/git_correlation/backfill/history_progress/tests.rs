@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior};
 
 use super::*;
-use crate::runtime::git_correlation::ensure_git_correlation_schema;
+use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction;
 
 fn progress(key: GitHistoryProgressKey) -> GitHistoryProgressRow {
     GitHistoryProgressRow {
@@ -87,7 +87,7 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     let initial = progress(key);
     {
         let conn = TestConnection::open(&path);
-        ensure_git_correlation_schema(&conn)
+        ensure_git_correlation_receipt_schema_in_transaction(&conn)
             .await
             .expect("fresh schema");
         let mut invalid = initial.clone();
@@ -97,7 +97,7 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     }
 
     let conn = TestConnection::open(&path);
-    ensure_git_correlation_schema(&conn)
+    ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .expect("idempotent reopen");
     assert_eq!(
@@ -234,7 +234,7 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
 async fn stable_source_key_preserves_the_older_active_candidate() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
     let conn = TestConnection::open(&directory.path().join("sessions.db"));
-    ensure_git_correlation_schema(&conn)
+    ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .expect("fresh schema");
     let key = GitHistoryProgressKey { source_rowid: 7 };
@@ -257,7 +257,7 @@ async fn stable_source_key_preserves_the_older_active_candidate() {
 async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
     let conn = TestConnection::open(&directory.path().join("sessions.db"));
-    ensure_git_correlation_schema(&conn)
+    ensure_git_correlation_receipt_schema_in_transaction(&conn)
         .await
         .expect("fresh schema");
     let key = GitHistoryProgressKey { source_rowid: 7 };
