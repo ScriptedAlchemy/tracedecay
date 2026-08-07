@@ -89,8 +89,10 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
         let previous = std::env::var_os(key);
-        // This binary hosts a single test, so no other thread reads the
-        // environment while it is being pinned.
+        // Every test in this binary pins the environment through
+        // `ProductionDaemon::start`, which holds the shared env lock for the
+        // fixture's whole life, so no other thread reads the environment while
+        // it is being pinned.
         unsafe { std::env::set_var(key, value) };
         Self { key, previous }
     }
@@ -116,12 +118,17 @@ struct ProductionDaemon {
     base_url: String,
     origin: String,
     authorization: String,
-    _home: TempDir,
+    home: TempDir,
+    profile: PathBuf,
     _guards: Vec<EnvVarGuard>,
+    // Held for the fixture's whole life: starting a daemon pins process-wide
+    // environment variables, and this binary now hosts more than one test.
+    _env_lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl ProductionDaemon {
     fn start() -> Self {
+        let env_lock = common::lock_global_db_env();
         let home = tempfile::tempdir().expect("isolated home");
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
@@ -199,8 +206,10 @@ impl ProductionDaemon {
             base_url: format!("http://{endpoint}"),
             origin: format!("http://{endpoint}"),
             authorization: format!("Bearer {token}"),
-            _home: home,
+            home,
+            profile,
             _guards: guards,
+            _env_lock: env_lock,
         }
     }
 
@@ -219,6 +228,72 @@ impl Drop for ProductionDaemon {
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
+}
+
+/// A `tracedecay dashboard` process bound to the live daemon above.
+///
+/// The dashboard mounts `/api/work` only when it can resolve that daemon's
+/// authority record; an in-process test server has none and degrades to serving
+/// the core dashboard without the application surface. Running the real binary
+/// against the real daemon is therefore the only place the browser-facing mount
+/// exists to be tested.
+struct DashboardProcess {
+    process: Child,
+    base_url: String,
+}
+
+impl DashboardProcess {
+    fn start(fixture: &ProductionDaemon) -> Self {
+        // Port 0 makes the server pick a free port and print it, which avoids
+        // the bind race a pre-picked port would leave open.
+        let mut process = isolated(fixture.home.path(), &fixture.profile)
+            .args(["dashboard", "--host", "127.0.0.1", "--port", "0"])
+            .current_dir(&fixture.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("dashboard should start");
+        let stdout = process.stdout.take().expect("dashboard stdout");
+        let base_url = read_listening_url(stdout, &mut process);
+        Self { process, base_url }
+    }
+}
+
+impl Drop for DashboardProcess {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+/// Reads the dashboard's announced listen URL off its stdout.
+fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) -> String {
+    use std::io::{BufRead, BufReader};
+
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                seen.push_str(&line);
+                if let Some(rest) = line.split_once("listening on ")
+                    && let Some(url) = rest.1.split_whitespace().next()
+                {
+                    return url.trim_end_matches('/').to_owned();
+                }
+            }
+            Err(error) => panic!("dashboard stdout failed: {error}\nseen:\n{seen}"),
+        }
+    }
+    let mut stderr = String::new();
+    if let Some(mut piped) = process.stderr.take() {
+        let _ = piped.read_to_string(&mut stderr);
+    }
+    panic!("dashboard never announced a listen URL\nstdout:\n{seen}\nstderr:\n{stderr}");
 }
 
 fn isolated(home: &Path, profile: &Path) -> Command {
@@ -326,8 +401,241 @@ impl RouteObservation {
     }
 }
 
-/// Every public route path the canonical executable catalog advertises must be
-/// reachable on the live daemon's published HTTP application endpoint.
+/// A cursor that no live topology generation ever matches, used to prove the
+/// stale-cursor refusal on both mounts. The identity fields are well-formed so
+/// the request decodes and the staleness verdict is the handler's, not serde's.
+fn superseded_cursor_request() -> Value {
+    serde_json::json!({
+        "page_size": 25,
+        "cursor": {
+            "generation": "work-topology/route-exposure-superseded",
+            "start_after": {
+                "task_id": "task.work-surface-conformance",
+                "run_id": "run.work-surface-conformance",
+                "attempt_id": "attempt.work-surface-conformance.1",
+            },
+        },
+    })
+}
+
+/// Grades one answer against the canonical envelope the clients decode.
+///
+/// Both arms are named because the point is that the surface never leaves the
+/// contract: a served operation carries a binding, a contract, and one of the
+/// three outcome families; a refused one carries the safe problem record and a
+/// status that says so. Anything else — a bare `405`, an empty body, an
+/// untagged object — is the failure this gate exists to catch.
+fn assert_canonical_envelope(label: &str, status: u16, body: &Value) {
+    assert_ne!(status, 404, "{label} must be mounted: {body}");
+    assert_ne!(status, 405, "{label} must accept POST: {body}");
+    let kind = body["kind"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must answer the canonical envelope: {body}"));
+    match kind {
+        "success" => {
+            assert_eq!(status, 200, "{label} success must be 200: {body}");
+            let outcome = body["value"]["outcome"]["outcome"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{label} success must name an outcome family: {body}"));
+            assert!(
+                matches!(outcome, "evidence" | "preview" | "effect"),
+                "{label} answered an unknown outcome family `{outcome}`: {body}"
+            );
+            assert!(
+                body["value"]["binding_id"].is_string(),
+                "{label} success must name its catalog binding: {body}"
+            );
+            assert!(
+                body["value"]["contract"]["schema_id"].is_string(),
+                "{label} success must carry its result contract: {body}"
+            );
+            assert!(
+                body["value"]["scope"]["project_id"].is_string(),
+                "{label} success must carry the resolved scope: {body}"
+            );
+        }
+        "problem" => {
+            assert!(
+                status >= 400,
+                "{label} problem must not be reported as success: {body}"
+            );
+            assert!(
+                body["value"]["problem"]["kind"].is_string(),
+                "{label} problem must carry the safe problem record: {body}"
+            );
+            assert!(
+                body["value"]["problem"]["retry"].is_string(),
+                "{label} problem must state a retry directive: {body}"
+            );
+        }
+        other => panic!("{label} answered an unknown envelope kind `{other}`: {body}"),
+    }
+}
+
+fn post_envelope(
+    agent: &ureq::Agent,
+    url: &str,
+    fixture: &ProductionDaemon,
+    body: &Value,
+) -> (u16, Value) {
+    let mut response = agent
+        .post(url)
+        .header("authorization", &fixture.authorization)
+        .header("origin", &fixture.origin)
+        .content_type("application/json")
+        .send(body.to_string())
+        .unwrap_or_else(|error| panic!("POST {url} failed: {error}"));
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|error| panic!("POST {url} body failed: {error}"));
+    let parsed = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("POST {url} answered non-JSON `{text}`: {error}"));
+    (status, parsed)
+}
+
+/// Posts to the dashboard's public mount, which needs no daemon credentials of
+/// its own: it resolves the active project and forwards through the same owner.
+fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
+    let mut response = agent
+        .post(url)
+        .content_type("application/json")
+        .send(body.to_string())
+        .unwrap_or_else(|error| panic!("POST {url} failed: {error}"));
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|error| panic!("POST {url} body failed: {error}"));
+    let parsed = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("POST {url} answered non-JSON `{text}`: {error}"));
+    (status, parsed)
+}
+
+/// The Work surface answers real requests, on both surfaces that publish it.
+///
+/// The dashboard Work workspace binds `/api/work/*`; the SDKs and hosts call the
+/// daemon's `/application/work/*`. `work_api.rs` states that these are the same
+/// handler, owner, and dispatch "one segment of path apart", and nothing proved
+/// it: every previous test of the surface either stubbed the owner, mocked the
+/// fetch, or graded route registration without looking at the answer. This runs
+/// both surfaces of one live daemon and holds each answer to the canonical
+/// envelope, so a drift on either side is a failure with a named side.
+#[test]
+fn the_work_surface_answers_real_requests_on_both_published_mounts() {
+    let fixture = ProductionDaemon::start();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+
+    let mut daemon_answers = BTreeMap::new();
+    for (segment, request) in bound_work_requests() {
+        let url = fixture.external_url(&format!("/application/work/{segment}"));
+        let (status, body) = post_envelope(&agent, &url, &fixture, &request);
+        assert_canonical_envelope(&format!("daemon work/{segment}"), status, &body);
+        daemon_answers.insert(segment, (status, body));
+    }
+
+    // `create` is an authoritative effect: it must come back reconciled, with a
+    // receipt, and carrying the task it just wrote — not merely "not an error".
+    let (_, created) = &daemon_answers["create"];
+    let effect = &created["value"]["outcome"]["value"];
+    assert_eq!(
+        created["value"]["outcome"]["outcome"], "effect",
+        "{created}"
+    );
+    assert_eq!(effect["reconciliation"], "reconciled", "{created}");
+    assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
+    assert_eq!(
+        effect["payload"]["task_id"], "task.work-surface-conformance",
+        "{created}"
+    );
+
+    // `snapshot` is the read the Work workspace opens with, so the write above
+    // has to be visible in it. This is the leg that proves the two operations
+    // share one store through the daemon rather than each answering plausibly.
+    let (_, snapshot) = &daemon_answers["snapshot"];
+    let evidence = &snapshot["value"]["outcome"]["value"];
+    assert_eq!(
+        snapshot["value"]["outcome"]["outcome"], "evidence",
+        "{snapshot}"
+    );
+    assert_eq!(
+        evidence["payload"]["coverage"]["state"], "complete",
+        "{snapshot}"
+    );
+    let projections = evidence["payload"]["projections"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the snapshot must carry projections: {snapshot}"));
+    assert!(
+        projections
+            .iter()
+            .any(|projection| projection["task_id"] == "task.work-surface-conformance"),
+        "the created task must be readable through the snapshot: {snapshot}"
+    );
+
+    // `list-attempts` has no verified topology in a project that has never run
+    // one, and says so as a retryable unavailable rather than an empty success.
+    // An empty list here would be a falsified reading, which is exactly what the
+    // typed absence exists to prevent.
+    let (status, attempts) = &daemon_answers["list-attempts"];
+    assert_eq!(*status, 503, "{attempts}");
+    assert_eq!(
+        attempts["value"]["problem"]["kind"], "unavailable",
+        "{attempts}"
+    );
+    assert_eq!(
+        attempts["value"]["problem"]["retryable"], true,
+        "{attempts}"
+    );
+
+    // A body the typed request contract rejects is a refusal, not a crash and
+    // not a success: the decode happens before dispatch, so the operation must
+    // never observe it.
+    let (status, body) = post_envelope(
+        &agent,
+        &fixture.external_url("/application/work/snapshot"),
+        &fixture,
+        &serde_json::json!({ "page_size": "not-a-number" }),
+    );
+    assert_eq!(
+        body["kind"], "problem",
+        "a malformed body is refused: {body}"
+    );
+    assert!(
+        (400..500).contains(&status),
+        "a malformed body is a client refusal, not a server fault: {status} {body}"
+    );
+
+    // An operation this build does not mount is concealed exactly like an
+    // unauthorised one, so probing a path cannot reveal what exists.
+    let (status, body) = post_envelope(
+        &agent,
+        &fixture.external_url("/application/work/not-an-operation"),
+        &fixture,
+        &serde_json::json!({}),
+    );
+    assert_eq!(status, 404, "an unmounted Work segment is refused: {body}");
+
+    let dashboard = DashboardProcess::start(&fixture);
+    for (segment, request) in bound_work_requests() {
+        let url = format!("{}/api/work/{segment}", dashboard.base_url);
+        let (status, body) = post_dashboard_envelope(&agent, &url, &request);
+        assert_canonical_envelope(&format!("dashboard api/work/{segment}"), status, &body);
+
+        // Same handler, same owner, same dispatch: the two mounts may not
+        // disagree about whether the operation is served.
+        let (_, daemon_body) = &daemon_answers[segment];
+        assert_eq!(
+            body["kind"], daemon_body["kind"],
+            "the dashboard and daemon mounts of work/{segment} disagree:\n  dashboard: {body}\n  daemon: {daemon_body}"
+        );
+    }
+}
+
 #[test]
 fn public_executable_routes_are_served_by_the_production_daemon() {
     let fixture = ProductionDaemon::start();
