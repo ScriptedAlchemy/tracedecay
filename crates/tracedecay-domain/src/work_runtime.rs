@@ -374,6 +374,37 @@ impl WorkExecutionEnvelopeV1 {
         &self.projection_binding
     }
 
+    /// Whether two envelopes carry the same *caller-supplied* admission
+    /// content: identity, operation, pinned execution snapshot, scope,
+    /// worktree/reference/commit, instructions, cancellation generation, and
+    /// effect state.
+    ///
+    /// The projection binding is deliberately excluded. It is server-derived
+    /// state pinned when the attempt was admitted, and its generation,
+    /// sequence, and work version necessarily advance as *any* Work event
+    /// lands on the authority — including the attempt's own terminal runtime
+    /// evidence. Comparing it against a freshly recomputed binding would
+    /// therefore classify a byte-identical replay of the same admission as a
+    /// content conflict as soon as the attempt reported its own outcome, so
+    /// idempotent replay would be unreachable in practice. The proposal the
+    /// attempt was admitted against is the part of the binding that is real
+    /// admission authority, and callers check it separately through
+    /// [`WorkAttemptProjectionBindingV1::accepted_proposal`].
+    pub fn same_admission_content(&self, other: &Self) -> bool {
+        self.attempt_identity == other.attempt_identity
+            && self.operation == other.operation
+            && self.execution_snapshot == other.execution_snapshot
+            && self.project_id == other.project_id
+            && self.repository_id == other.repository_id
+            && self.worktree_id == other.worktree_id
+            && self.worktree_root == other.worktree_root
+            && self.reference == other.reference
+            && self.commit == other.commit
+            && self.instructions == other.instructions
+            && self.cancellation_generation == other.cancellation_generation
+            && self.effect_state == other.effect_state
+    }
+
     pub fn operation(&self) -> &WorkflowOperationRef {
         &self.operation
     }
