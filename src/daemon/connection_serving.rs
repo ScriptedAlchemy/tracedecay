@@ -238,12 +238,22 @@ async fn serve_broker_socket_client(
         drop(setup_activity);
         return Ok(());
     }
+    let git_watcher_health = if doctor_runtime_request(&first_request_line).is_some() {
+        Some(
+            engine
+                .git_watcher_health(handshake.project_path.as_deref())
+                .await,
+        )
+    } else {
+        None
+    };
     let Some(setup_activity) = serve_core_doctor_runtime_request(
         &mut transport,
         &handshake,
         &engine.store_administration,
         setup_activity,
         &first_request_line,
+        git_watcher_health,
         || async {
             Ok(engine
                 .cached_project_server(&handshake)
@@ -641,6 +651,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         &store_administration,
         setup_activity,
         &first_request_line,
+        None,
         || async {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
             Ok(portable_cached_project_server(

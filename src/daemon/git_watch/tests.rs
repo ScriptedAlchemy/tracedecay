@@ -1,4 +1,7 @@
 use super::super::maintenance::retention_window_secs;
+use super::identity::{
+    IdentityDiscoveryDisposition, WatchIdentityResolution, identity_discovery_disposition,
+};
 use super::*;
 
 use notify::event::EventAttributes;
@@ -50,6 +53,95 @@ fn soft_budget_alone_never_enables_destructive_maintenance() {
 #[test]
 fn retention_window_conversion_never_wraps_negative() {
     assert_eq!(retention_window_secs(u64::MAX), i64::MAX);
+}
+
+fn overflow_identity(name: &str) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentity {
+    tracedecay_runtime_core::git_discovery::GitRepositoryIdentity {
+        worktree_root: PathBuf::from(format!("/repos/{name}")),
+        git_dir: PathBuf::from(format!("/repos/{name}/.git")),
+        common_dir: PathBuf::from(format!("/repos/{name}/.git")),
+    }
+}
+
+/// Capacity refusals must land on the bounded overflow roster (typed
+/// coverage), and roster saturation must be a typed refusal rather than
+/// silent loss.
+#[test]
+fn overflow_roster_bounds_capacity_coverage() {
+    use super::overflow::{OverflowAdmission, OverflowRoster};
+
+    let mut roster = OverflowRoster::default();
+    let now = tokio::time::Instant::now();
+    let config = crate::config::SyncConfig::default();
+    assert_eq!(
+        roster.admit_bounded(overflow_identity("a"), config.clone(), now, 2),
+        OverflowAdmission::Covered
+    );
+    assert_eq!(
+        roster.admit_bounded(overflow_identity("a"), config.clone(), now, 2),
+        OverflowAdmission::AlreadyCovered
+    );
+    assert_eq!(
+        roster.admit_bounded(overflow_identity("b"), config.clone(), now, 2),
+        OverflowAdmission::Covered
+    );
+    assert_eq!(
+        roster.admit_bounded(overflow_identity("c"), config.clone(), now, 2),
+        OverflowAdmission::RosterFull
+    );
+    assert_eq!(roster.len(), 2);
+    roster.remove(Path::new("/repos/a"));
+    assert!(!roster.contains(Path::new("/repos/a")));
+    assert_eq!(
+        roster.admit_bounded(overflow_identity("c"), config, now, 2),
+        OverflowAdmission::Covered
+    );
+}
+
+/// Overflow coverage runs on the per-root backstop cadence: nothing is due
+/// before its interval elapses, and a taken entry reschedules itself instead
+/// of firing on every pass.
+#[test]
+fn overflow_roster_respects_backstop_cadence() {
+    use super::overflow::OverflowRoster;
+
+    let mut roster = OverflowRoster::default();
+    let now = tokio::time::Instant::now();
+    let config = crate::config::SyncConfig::default();
+    let interval =
+        std::time::Duration::from_secs(config.backstop_interval_mins.max(1).saturating_mul(60));
+    roster.admit(overflow_identity("a"), config, now);
+    assert!(
+        roster.take_due(now).is_empty(),
+        "nothing is due before one backstop interval elapses"
+    );
+    let later = now + interval + std::time::Duration::from_secs(1);
+    let due = roster.take_due(later);
+    assert_eq!(due.len(), 1, "the elapsed entry is due exactly once");
+    assert!(
+        roster.take_due(later).is_empty(),
+        "a taken entry reschedules itself instead of firing every pass"
+    );
+}
+
+/// A bounded git timeout at admission time is uncertainty, not absence: it
+/// must arm the daemon-owned backoff retry instead of leaving the repository
+/// unwatched until the next handshake. Only a definitive `NotRepository`
+/// refuses without retry.
+#[test]
+fn timed_out_identity_discovery_retries_instead_of_degrading_forever() {
+    assert!(matches!(
+        identity_discovery_disposition(WatchIdentityResolution::Unknown),
+        IdentityDiscoveryDisposition::Retry
+    ));
+    assert!(matches!(
+        identity_discovery_disposition(WatchIdentityResolution::NotRepository),
+        IdentityDiscoveryDisposition::NotRepository
+    ));
+    assert!(matches!(
+        identity_discovery_disposition(WatchIdentityResolution::Cancelled),
+        IdentityDiscoveryDisposition::ShutDown
+    ));
 }
 
 /// The ordinary retention cadence must sweep the same scoped code-index root the

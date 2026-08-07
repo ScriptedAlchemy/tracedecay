@@ -99,6 +99,7 @@ impl LifecycleLinearizationReceipts {
 pub(in crate::daemon) enum GitWatcherTaskOwner {
     Backstop,
     Repository(PathBuf),
+    IdentityDiscovery(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +190,23 @@ pub(super) async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatche
         join_before(
             &mut outcome,
             GitWatcherTaskOwner::Backstop,
+            handle,
+            deadline,
+        )
+        .await;
+    }
+
+    let identity_retries: Vec<(std::path::PathBuf, tokio::task::JoinHandle<()>)> = {
+        let mut retries = inner
+            .identity_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retries.drain().collect()
+    };
+    for (root, handle) in identity_retries {
+        join_before(
+            &mut outcome,
+            GitWatcherTaskOwner::IdentityDiscovery(root),
             handle,
             deadline,
         )

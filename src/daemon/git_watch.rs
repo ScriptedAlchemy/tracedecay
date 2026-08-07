@@ -24,8 +24,11 @@
 //!   first — no busy polling.
 //! * Debounce drains submit exact-frontier freshness requests to the canonical
 //!   code-index scheduler. The watcher never opens or mutates a legacy graph.
-//! * The [`backstop`] timer retries repositories whose watcher heartbeat is
-//!   stale/absent through the same scheduler ingress.
+//! * The [`backstop`] timer is the freshness floor for every registered
+//!   repository: each due root submits a freshness request through the same
+//!   scheduler ingress. A live heartbeat proves only watcher-task liveness —
+//!   the watcher reacts to git metadata alone — so liveness never vetoes
+//!   coverage.
 
 #![cfg(unix)]
 
@@ -60,6 +63,7 @@ mod admission;
 mod backstop;
 mod health;
 mod identity;
+mod overflow;
 mod ownership;
 mod state;
 mod watch_plan;
@@ -68,7 +72,7 @@ use health::HEARTBEAT_STALE_MILLIS;
 #[cfg(test)]
 use health::ProjectHealthSnapshot;
 use health::ProjectWatchStatus;
-use identity::{WatchIdentityResolution, resolve_watch_identity};
+use identity::resolve_watch_identity;
 use ownership::{GitWatcherShutdownOutcome, join_watcher_tasks};
 #[cfg(test)]
 use ownership::{GitWatcherTaskFailure, GitWatcherTaskFailureKind, GitWatcherTaskOwner};
@@ -162,6 +166,14 @@ pub(super) struct GitWatcherInner {
     admission: std::sync::Mutex<()>,
     /// Canonical git common directory → repository-scoped watch state.
     projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
+    /// Single-flight retry owners for roots whose identity discovery timed
+    /// out: a bounded git timeout is uncertainty, not absence, so admission
+    /// arms a backoff retry instead of leaving the repository unwatched until
+    /// the next handshake. Keyed by requested project root.
+    identity_retries: std::sync::Mutex<HashMap<PathBuf, JoinHandle<()>>>,
+    /// Bounded roster of capacity-refused repositories kept on the backstop's
+    /// scheduler-ingress freshness floor until a watch slot frees.
+    overflow: std::sync::Mutex<overflow::OverflowRoster>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
     backstop_task: Mutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
@@ -210,6 +222,8 @@ impl GitWatcher {
                 enabled,
                 admission: std::sync::Mutex::new(()),
                 projects: Mutex::new(HashMap::new()),
+                identity_retries: std::sync::Mutex::new(HashMap::new()),
+                overflow: std::sync::Mutex::new(overflow::OverflowRoster::default()),
                 backstop_task: Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
                 shutdown_completion: Mutex::new(None),
@@ -343,6 +357,77 @@ impl GitWatcher {
         completion.await
     }
 
+    /// A doctor-facing health value for one project's watch coverage.
+    /// Read-only: registered state, overflow-roster membership, and the typed
+    /// watch status — no git IO and no store opens.
+    pub(super) async fn health_value(&self, project_root: Option<&Path>) -> serde_json::Value {
+        if !self.inner.enabled {
+            return serde_json::json!({
+                "status": "disabled",
+                "coverage": serde_json::Value::Null,
+                "reason": "auto_watch_disabled",
+            });
+        }
+        let Some(project_root) = project_root else {
+            return serde_json::json!({
+                "status": "unavailable",
+                "coverage": serde_json::Value::Null,
+                "reason": "project_path_missing",
+            });
+        };
+        let canonical = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let state = {
+            let projects = self.inner.projects.lock().await;
+            projects
+                .values()
+                .find(|state| state.worktree_roots().contains(&canonical))
+                .cloned()
+        };
+        let Some(state) = state else {
+            let overflowed = self
+                .inner
+                .overflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&canonical);
+            if overflowed {
+                return serde_json::json!({
+                    "status": "degraded",
+                    "coverage": "backstop_overflow",
+                    "reason": "watch_capacity_reached",
+                    "project_root": canonical,
+                });
+            }
+            return serde_json::json!({
+                "status": "unavailable",
+                "coverage": serde_json::Value::Null,
+                "reason": "project_not_registered",
+                "project_root": canonical,
+            });
+        };
+        let snapshot = state.health.snapshot();
+        let heartbeat_pending = snapshot.last_heartbeat == 0;
+        let heartbeat_stale = snapshot.heartbeat_stale();
+        let degraded = snapshot.status.is_degraded();
+        serde_json::json!({
+            "status": if degraded || (heartbeat_stale && !heartbeat_pending) {
+                "degraded"
+            } else if heartbeat_pending {
+                "starting"
+            } else {
+                "healthy"
+            },
+            "coverage": if degraded { "degraded_poll" } else { "metadata_watch" },
+            "reason": watch_status_reason(snapshot.status, heartbeat_pending, heartbeat_stale),
+            "git_common_dir": state.common_dir,
+            "project_root": canonical,
+            "watched_roots": state.worktree_roots(),
+            "heartbeat_stale": heartbeat_stale,
+        })
+    }
+
     /// A doctor-facing snapshot of every registered project's watch health.
     #[cfg(test)]
     async fn health_report(&self) -> Vec<(PathBuf, ProjectHealthSnapshot)> {
@@ -358,6 +443,34 @@ impl GitWatcher {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+}
+
+/// The typed reason string behind one project's doctor-facing watch health,
+/// or `Null` for a healthy active watch.
+fn watch_status_reason(
+    status: ProjectWatchStatus,
+    heartbeat_pending: bool,
+    heartbeat_stale: bool,
+) -> serde_json::Value {
+    let reason = match status {
+        ProjectWatchStatus::WatchPlanCapacity => Some("watch_plan_capacity"),
+        ProjectWatchStatus::WatchPlanUnavailable => Some("watch_plan_unavailable"),
+        ProjectWatchStatus::NotifyCapacity => Some("notify_capacity"),
+        ProjectWatchStatus::NotifyBackend => Some("notify_backend"),
+        ProjectWatchStatus::Initializing | ProjectWatchStatus::Active => {
+            if heartbeat_pending {
+                Some("heartbeat_pending")
+            } else if heartbeat_stale {
+                Some("heartbeat_stale")
+            } else {
+                None
+            }
+        }
+    };
+    match reason {
+        Some(reason) => serde_json::Value::String(reason.to_string()),
+        None => serde_json::Value::Null,
     }
 }
 

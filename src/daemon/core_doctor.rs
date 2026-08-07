@@ -202,8 +202,19 @@ async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
     startup_health_only: bool,
+    git_watcher_health: Option<serde_json::Value>,
 ) -> serde_json::Value {
-    doctor_runtime_value_inner(handshake, Some(store_administration), startup_health_only).await
+    let mut value =
+        doctor_runtime_value_inner(handshake, Some(store_administration), startup_health_only)
+            .await;
+    value["git_watcher"] = git_watcher_health.unwrap_or_else(|| {
+        json!({
+            "status": "unavailable",
+            "coverage": null,
+            "reason": "watcher_runtime_unavailable",
+        })
+    });
+    value
 }
 
 async fn doctor_runtime_value_inner(
@@ -485,9 +496,15 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     handshake: &DaemonHandshake,
     store_administration: &super::StoreAdministration,
     request: DoctorRuntimeRequest,
+    git_watcher_health: Option<serde_json::Value>,
 ) -> Result<()> {
-    let mut value =
-        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await;
+    let mut value = doctor_runtime_value(
+        handshake,
+        store_administration,
+        request.startup_health_only,
+        git_watcher_health,
+    )
+    .await;
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
         value["doctor_report"] = json!({
             "kind": "unknown",
@@ -511,6 +528,7 @@ pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     store_administration: &super::StoreAdministration,
     setup_activity: DaemonActivity,
     first_request_line: &str,
+    git_watcher_health: Option<serde_json::Value>,
     doctor_report_ready: Probe,
 ) -> Result<Option<DaemonActivity>>
 where
@@ -530,7 +548,14 @@ where
         return Ok(Some(setup_activity));
     }
     drop(setup_activity);
-    write_doctor_runtime_response(transport, handshake, store_administration, request).await?;
+    write_doctor_runtime_response(
+        transport,
+        handshake,
+        store_administration,
+        request,
+        git_watcher_health,
+    )
+    .await?;
     Ok(None)
 }
 
@@ -805,6 +830,11 @@ mod doctor_runtime_route_tests {
             &store_administration,
             setup_activity,
             &doctor_report_request_line(),
+            Some(serde_json::json!({
+                "status": "degraded",
+                "coverage": "degraded_poll",
+                "reason": "watch_capacity_reached",
+            })),
             || async { Ok(false) },
         )
         .await
@@ -818,6 +848,10 @@ mod doctor_runtime_route_tests {
             transport
                 .output
                 .contains(r#""reason":"doctor_report_owner_warming""#)
+        );
+        assert!(
+            transport.output.contains("git_watcher") && transport.output.contains("degraded_poll"),
+            "the production core Doctor response must expose watcher health"
         );
     }
 
@@ -845,6 +879,7 @@ mod doctor_runtime_route_tests {
             &store_administration,
             setup_activity,
             &doctor_report_request_line(),
+            None,
             || async { Ok(true) },
         )
         .await

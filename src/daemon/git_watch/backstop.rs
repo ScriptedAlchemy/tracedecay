@@ -46,6 +46,7 @@ pub(super) async fn run(watcher: GitWatcher) {
 
 async fn tick(watcher: &GitWatcher, due_by_root: &mut HashMap<PathBuf, (Duration, Instant)>) {
     retire_missing_repository_owners(&watcher.inner).await;
+    super::overflow::cover_overflowed_repositories(watcher).await;
     let entries: Vec<(PathBuf, Arc<WatchState>)> = {
         let projects = watcher.inner.projects.lock().await;
         projects

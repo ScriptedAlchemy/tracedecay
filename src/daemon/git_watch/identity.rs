@@ -16,6 +16,29 @@ pub(super) enum WatchIdentityResolution {
     Unknown,
 }
 
+/// How admission responds to one identity resolution.
+///
+/// A bounded git timeout (`Unknown`) is uncertainty, not absence: it must
+/// retry with backoff instead of leaving the repository unwatched forever.
+/// Only a definitive `NotRepository` refuses without retry.
+pub(super) enum IdentityDiscoveryDisposition {
+    Watch(GitRepositoryIdentity),
+    ShutDown,
+    NotRepository,
+    Retry,
+}
+
+pub(super) fn identity_discovery_disposition(
+    resolution: WatchIdentityResolution,
+) -> IdentityDiscoveryDisposition {
+    match resolution {
+        WatchIdentityResolution::Ready(identity) => IdentityDiscoveryDisposition::Watch(identity),
+        WatchIdentityResolution::Cancelled => IdentityDiscoveryDisposition::ShutDown,
+        WatchIdentityResolution::NotRepository => IdentityDiscoveryDisposition::NotRepository,
+        WatchIdentityResolution::Unknown => IdentityDiscoveryDisposition::Retry,
+    }
+}
+
 pub(super) async fn resolve_watch_identity(
     project_root: PathBuf,
     cancellation: crate::application::context::CancellationToken,
