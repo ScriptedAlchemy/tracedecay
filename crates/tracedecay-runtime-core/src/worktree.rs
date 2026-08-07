@@ -32,6 +32,106 @@ pub struct WorktreeIndexMismatch {
     pub index_root: PathBuf,
 }
 
+/// Paired git identity used by hot paths that need both the per-worktree root
+/// and repository-wide common directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRepoIdentity {
+    pub worktree_root: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// Tri-state repository identity used by session ingest.
+///
+/// `Unknown` is reserved for bounded git timeouts. Callers that decide whether
+/// to persist a transcript cursor must retry later rather than treating it as
+/// the definitive absence of a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRepoIdentityOutcome {
+    Resolved(GitRepoIdentity),
+    NotFound,
+    Unknown,
+}
+
+/// Resolve both halves of a repository identity with one cheap git subprocess.
+///
+/// In-process discovery can open and scan every pack index in a large
+/// repository. Session ingestion only needs these two paths, which `rev-parse`
+/// returns without opening the object database. If git is unavailable or
+/// rejects the path, one authority discovery preserves the previous fail-open
+/// behavior.
+pub fn git_repo_identity(dir: &Path) -> Option<GitRepoIdentity> {
+    match git_repo_identity_outcome(dir) {
+        GitRepoIdentityOutcome::Resolved(identity) => Some(identity),
+        GitRepoIdentityOutcome::NotFound | GitRepoIdentityOutcome::Unknown => None,
+    }
+}
+
+pub fn git_repo_identity_outcome(dir: &Path) -> GitRepoIdentityOutcome {
+    if !git_may_resolve_repo(dir) {
+        return GitRepoIdentityOutcome::NotFound;
+    }
+    resolve_git_identity_outcome_with(
+        dir,
+        || crate::git::git_capture_at(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"]),
+        || git_repo_identity_from_authority(dir),
+    )
+}
+
+fn resolve_git_identity_outcome_with(
+    dir: &Path,
+    cli_output: impl FnOnce() -> crate::git::GitCaptureAtResult,
+    authority_fallback: impl FnOnce() -> Option<GitRepoIdentity>,
+) -> GitRepoIdentityOutcome {
+    let fallback = || {
+        authority_fallback().map_or(
+            GitRepoIdentityOutcome::NotFound,
+            GitRepoIdentityOutcome::Resolved,
+        )
+    };
+    match cli_output() {
+        crate::git::GitCaptureAtResult::Captured(output) => {
+            git_repo_identity_from_cli_output(dir, &output)
+                .map_or_else(fallback, GitRepoIdentityOutcome::Resolved)
+        }
+        crate::git::GitCaptureAtResult::Failed => fallback(),
+        crate::git::GitCaptureAtResult::TimedOut => GitRepoIdentityOutcome::Unknown,
+    }
+}
+
+fn git_repo_identity_from_cli_output(dir: &Path, output: &str) -> Option<GitRepoIdentity> {
+    let mut lines = output.lines();
+    let worktree_root = PathBuf::from(lines.next()?.trim());
+    let common_dir = PathBuf::from(lines.next()?.trim());
+    if worktree_root.as_os_str().is_empty() || common_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let worktree_root = if worktree_root.is_absolute() {
+        worktree_root
+    } else {
+        dir.join(worktree_root)
+    };
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        dir.join(common_dir)
+    };
+    Some(GitRepoIdentity {
+        worktree_root: realpath(&worktree_root)?,
+        common_dir: common_dir.canonicalize().unwrap_or(common_dir),
+    })
+}
+
+fn git_repo_identity_from_authority(dir: &Path) -> Option<GitRepoIdentity> {
+    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
+    // A discovered bare repository (no workdir) matches `--show-toplevel`
+    // failing: the path has no worktree identity.
+    let worktree_root = repository.worktree_root()?.to_path_buf();
+    Some(GitRepoIdentity {
+        worktree_root,
+        common_dir: repository.common_dir().to_path_buf(),
+    })
+}
+
 /// Absolute, symlink-resolved toplevel of the git working tree that `dir`
 /// belongs to, or `None` when `dir` isn't inside a git repo (or `git` is
 /// missing on PATH).
@@ -269,6 +369,86 @@ mod tests {
         let sub = project.join("src");
         fs::create_dir_all(&sub).unwrap();
         assert!(detect_worktree_index_mismatch(&sub, &project).is_none());
+    }
+
+    #[test]
+    fn paired_cli_identity_resolves_relative_common_dir_without_discovery() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let nested = worktree.join("src/deep");
+        let common_dir = tmp.path().join("main/.git");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&common_dir).unwrap();
+        let output = format!("{}\n../../../main/.git", worktree.display());
+
+        let outcome = resolve_git_identity_outcome_with(
+            &nested,
+            || crate::git::GitCaptureAtResult::Captured(output),
+            || panic!("valid CLI identity must short-circuit in-process discovery"),
+        );
+        let GitRepoIdentityOutcome::Resolved(identity) = outcome else {
+            panic!("paired CLI identity should resolve");
+        };
+
+        assert_eq!(
+            identity.worktree_root,
+            std::fs::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(
+            identity.common_dir,
+            std::fs::canonicalize(&common_dir).unwrap()
+        );
+    }
+
+    #[test]
+    fn timed_out_cli_identity_does_not_fallback_to_discovery() {
+        let tmp = tempdir().unwrap();
+        let outcome = resolve_git_identity_outcome_with(
+            tmp.path(),
+            || crate::git::GitCaptureAtResult::TimedOut,
+            || panic!("timed-out CLI identity must not fall through to in-process discovery"),
+        );
+        assert_eq!(outcome, GitRepoIdentityOutcome::Unknown);
+    }
+
+    #[test]
+    fn paired_identity_resolves_nested_linked_worktree() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = tmp.path().join("wt");
+        run_git(
+            &main,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+        let nested = worktree.join("src/deep");
+        fs::create_dir_all(&nested).unwrap();
+
+        let identity = git_repo_identity(&nested).expect("linked worktree identity");
+        assert_eq!(
+            identity.worktree_root,
+            std::fs::canonicalize(&worktree).unwrap()
+        );
+        assert_eq!(
+            identity.common_dir,
+            std::fs::canonicalize(main.join(".git")).unwrap()
+        );
     }
 
     #[test]
