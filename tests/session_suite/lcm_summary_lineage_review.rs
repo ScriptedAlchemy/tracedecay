@@ -896,7 +896,8 @@ async fn concurrent_publications_leave_one_active_generation() {
         receipt_generations.push(row.get::<i64>(0).expect("receipt generation"));
         assert_eq!(row.get::<String>(1).expect("receipt state"), "applied");
         assert_eq!(
-            row.get::<Option<String>>(3).expect("acknowledged watermark"),
+            row.get::<Option<String>>(3)
+                .expect("acknowledged watermark"),
             Some(row.get::<String>(2).expect("expected watermark")),
         );
     }

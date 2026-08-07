@@ -112,12 +112,8 @@ impl RegisteredGlobalDb {
             // mismatch re-surfaces as soon as the state stops moving.
             let refreshed = self.active_relation_generation(session_id).await?;
             if refreshed == generation
-                && !super::relation_receipts::relation_receipt_applied(
-                    self,
-                    session_id,
-                    generation,
-                )
-                .await?
+                && !super::relation_receipts::relation_receipt_applied(self, session_id, generation)
+                    .await?
             {
                 return Err(error);
             }

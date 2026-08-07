@@ -34,7 +34,9 @@ pub(super) fn check_resource_ceiling(
     Ok(())
 }
 
-pub(super) fn quarantine_reason_for_import_error(error: &ArtifactImportErrorV1) -> QuarantineReasonV1 {
+pub(super) fn quarantine_reason_for_import_error(
+    error: &ArtifactImportErrorV1,
+) -> QuarantineReasonV1 {
     match error {
         ArtifactImportErrorV1::SizeExpansionBeyondDeclared => QuarantineReasonV1::SizeExpansion,
         ArtifactImportErrorV1::LengthMismatch => QuarantineReasonV1::MemberLengthMismatch,
@@ -141,7 +143,9 @@ pub(super) fn stream_local_member(
     Ok(())
 }
 
-pub(super) fn sha256_open_file(mut file: impl Read) -> Result<Sha256DigestHex, ArtifactImportErrorV1> {
+pub(super) fn sha256_open_file(
+    mut file: impl Read,
+) -> Result<Sha256DigestHex, ArtifactImportErrorV1> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -222,7 +226,10 @@ pub(super) fn open_cap_file(
         })
 }
 
-pub(super) fn read_optional_cap_file(dir: &Dir, name: &str) -> Result<Option<Vec<u8>>, ArtifactImportErrorV1> {
+pub(super) fn read_optional_cap_file(
+    dir: &Dir,
+    name: &str,
+) -> Result<Option<Vec<u8>>, ArtifactImportErrorV1> {
     match open_cap_file(dir, name, true, false, false, false, false) {
         Ok(mut file) => {
             let mut bytes = Vec::new();
@@ -279,7 +286,10 @@ pub(super) fn replace_cap_file(
         .map_err(|_| ArtifactImportErrorV1::StorageFailure)
 }
 
-pub(super) fn remove_cap_file_if_exists(dir: &Dir, name: &str) -> Result<(), ArtifactImportErrorV1> {
+pub(super) fn remove_cap_file_if_exists(
+    dir: &Dir,
+    name: &str,
+) -> Result<(), ArtifactImportErrorV1> {
     match dir.symlink_metadata(name) {
         Ok(metadata) if metadata.is_file() => dir
             .remove_file(name)
@@ -328,7 +338,10 @@ pub(super) fn open_root_from_trusted_parent(root: &Path) -> Result<Dir, Artifact
     open_or_create_component_dir(&parent, root_name)
 }
 
-pub(super) fn open_or_create_component_dir(parent: &Dir, name: &str) -> Result<Dir, ArtifactImportErrorV1> {
+pub(super) fn open_or_create_component_dir(
+    parent: &Dir,
+    name: &str,
+) -> Result<Dir, ArtifactImportErrorV1> {
     if !is_component(name) {
         return Err(ArtifactImportErrorV1::UnsafeStorePath);
     }

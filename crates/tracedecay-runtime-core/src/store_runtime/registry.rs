@@ -9,7 +9,6 @@
 // The typed failure stays by-value at this boundary; `resolver.rs` documents
 // the boxed alternative if the variant set grows further.
 #![allow(clippy::result_large_err)]
-
 #![allow(unused_imports)] // Re-exports remain the registry's crate-visible API surface.
 
 mod attachment;

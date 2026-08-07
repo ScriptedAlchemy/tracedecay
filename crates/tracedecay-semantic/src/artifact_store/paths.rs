@@ -52,7 +52,10 @@ impl ModelArtifactStore {
         self.root.join("receipts")
     }
 
-    pub(super) fn staging_dir_for(&self, staging_id: &str) -> Result<PathBuf, ArtifactImportErrorV1> {
+    pub(super) fn staging_dir_for(
+        &self,
+        staging_id: &str,
+    ) -> Result<PathBuf, ArtifactImportErrorV1> {
         if !is_valid_staging_id(staging_id) {
             return Err(ArtifactImportErrorV1::UnsafeStagingHandle);
         }
@@ -73,7 +76,11 @@ impl ModelArtifactStore {
     }
 
     #[cfg(test)]
-    pub(super) fn member_path(&self, digest: &Sha256DigestHex, role: ArtifactMemberRoleV1) -> PathBuf {
+    pub(super) fn member_path(
+        &self,
+        digest: &Sha256DigestHex,
+        role: ArtifactMemberRoleV1,
+    ) -> PathBuf {
         self.artifact_dir(digest).join(member_file_name(role))
     }
 
@@ -108,14 +115,19 @@ impl ModelArtifactStore {
     }
 
     #[cfg(test)]
-    pub(super) fn save_inventory(&self, inventory: &ArtifactInventoryV1) -> Result<(), ArtifactImportErrorV1> {
+    pub(super) fn save_inventory(
+        &self,
+        inventory: &ArtifactInventoryV1,
+    ) -> Result<(), ArtifactImportErrorV1> {
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
         self.save_inventory_locked(inventory)?;
         Ok(())
     }
 
-    pub(super) fn load_inventory_locked(&self) -> Result<ArtifactInventoryV1, ArtifactImportErrorV1> {
+    pub(super) fn load_inventory_locked(
+        &self,
+    ) -> Result<ArtifactInventoryV1, ArtifactImportErrorV1> {
         let Some(bytes) = read_optional_cap_file(&self.root_dir, "inventory.json")? else {
             return Ok(ArtifactInventoryV1::default());
         };

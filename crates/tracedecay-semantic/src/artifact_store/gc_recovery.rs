@@ -109,7 +109,10 @@ impl ModelArtifactStore {
         }
     }
 
-    pub(super) fn ensure_session_dir(&self, session: &ImportSession) -> Result<(), ArtifactImportErrorV1> {
+    pub(super) fn ensure_session_dir(
+        &self,
+        session: &ImportSession,
+    ) -> Result<(), ArtifactImportErrorV1> {
         if self.staging_dir_for(&session.staging_id)? != session.staging_path {
             return Err(ArtifactImportErrorV1::UnsafeStagingHandle);
         }
@@ -443,7 +446,10 @@ impl ModelArtifactStore {
         Ok(())
     }
 
-    pub(super) fn remove_staging_dir_path(&self, staging_id: &str) -> Result<(), ArtifactImportErrorV1> {
+    pub(super) fn remove_staging_dir_path(
+        &self,
+        staging_id: &str,
+    ) -> Result<(), ArtifactImportErrorV1> {
         if !is_valid_staging_id(staging_id) {
             return Err(ArtifactImportErrorV1::UnsafeStagingHandle);
         }

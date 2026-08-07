@@ -580,12 +580,11 @@ pub struct ModelArtifactStore {
     operation_lock: Arc<Mutex<()>>,
 }
 
-
-mod paths;
-mod import;
-mod lease_admission;
 mod gc_recovery;
+mod import;
 mod io_primitives;
+mod lease_admission;
+mod paths;
 use io_primitives::*;
 
 include!("artifact_store/tests.rs");
