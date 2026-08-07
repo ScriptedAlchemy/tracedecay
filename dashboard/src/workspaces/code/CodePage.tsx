@@ -173,7 +173,7 @@ export function CodePage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <WorkspaceHeader
-        path="/code"
+        path="code"
         title="Code"
         note="indexed symbols and relations under one sealed graph generation"
       />
