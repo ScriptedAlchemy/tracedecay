@@ -7,33 +7,34 @@ import {
   summarizeTokenMix,
 } from './spend.ts';
 
-/** The 25 rows the daemon served on 2026-07-25. Twenty of them are within a
- * few percent of 1.80B because every worktree shares one cache. */
+/** The 25 savings figures the daemon served on 2026-07-25, under capability
+ * names for the worktrees that produced them. Twenty of them are within a few
+ * percent of 1.80B because every worktree shares one cache. */
 const LIVE_PROJECTS = [
   { path: '/fast/projects/tracedecay', tokens_saved: 2_939_894_592 },
   { path: '/w/sqlite-storage-runtime-current', tokens_saved: 2_140_723_247 },
   { path: '/w/sqlite-storage-runtime', tokens_saved: 2_101_200_356 },
   { path: '/w/live-repair', tokens_saved: 2_078_590_272 },
   { path: '/w/runtime-hardening', tokens_saved: 1_946_100_344 },
-  { path: '/w/pr8-migration', tokens_saved: 1_831_192_520 },
-  { path: '/w/pr8-acceptance-runner', tokens_saved: 1_824_171_535 },
-  { path: '/w/pr8-live-tools', tokens_saved: 1_824_065_209 },
-  { path: '/w/pr8-move-symbol', tokens_saved: 1_802_722_260 },
-  { path: '/w/pr8-kernel', tokens_saved: 1_801_796_023 },
+  { path: '/w/migration', tokens_saved: 1_831_192_520 },
+  { path: '/w/acceptance-runner', tokens_saved: 1_824_171_535 },
+  { path: '/w/live-tools', tokens_saved: 1_824_065_209 },
+  { path: '/w/move-symbol', tokens_saved: 1_802_722_260 },
+  { path: '/w/kernel', tokens_saved: 1_801_796_023 },
   { path: '/w/plan-topology-integration', tokens_saved: 1_799_923_909 },
-  { path: '/w/pr8-refresh', tokens_saved: 1_799_813_188 },
-  { path: '/w/pr8-runtime', tokens_saved: 1_799_356_160 },
-  { path: '/w/pr8-compat', tokens_saved: 1_796_821_496 },
+  { path: '/w/refresh', tokens_saved: 1_799_813_188 },
+  { path: '/w/runtime', tokens_saved: 1_799_356_160 },
+  { path: '/w/compatibility', tokens_saved: 1_796_821_496 },
   { path: '/w/plan-dashboard', tokens_saved: 1_799_400_000 },
   { path: '/w/plan-task-runtime', tokens_saved: 1_799_400_000 },
   { path: '/w/plan-lsp-hooks', tokens_saved: 1_799_400_000 },
   { path: '/w/plan-git-stack', tokens_saved: 1_799_400_000 },
   { path: '/w/plan-policy-anchors', tokens_saved: 1_799_400_000 },
-  { path: '/w/pr8-automation', tokens_saved: 1_799_400_000 },
-  { path: '/w/pr8-benchmark', tokens_saved: 1_799_400_000 },
-  { path: '/w/pr8-refresh-surfaces', tokens_saved: 1_799_400_000 },
-  { path: '/w/pr8-transport', tokens_saved: 1_799_400_000 },
-  { path: '/w/pr8-context', tokens_saved: 1_799_400_000 },
+  { path: '/w/automation', tokens_saved: 1_799_400_000 },
+  { path: '/w/benchmark', tokens_saved: 1_799_400_000 },
+  { path: '/w/refresh-surfaces', tokens_saved: 1_799_400_000 },
+  { path: '/w/transport', tokens_saved: 1_799_400_000 },
+  { path: '/w/context', tokens_saved: 1_799_400_000 },
   { path: '/fast/projects/tracedecay-astgrep', tokens_saved: 380_000_000 },
 ];
 
