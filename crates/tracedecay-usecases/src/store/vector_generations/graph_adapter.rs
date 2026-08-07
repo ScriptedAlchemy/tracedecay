@@ -327,7 +327,7 @@ impl GraphVectorGenerationStoreV1 {
         let snapshot = runtime
             .recover_verified_generation(&verified_head.key, &authority)
             .map_err(map_graph_error)?;
-        if snapshot.verified_head() != &verified_head {
+        if snapshot.verified_head() != verified_head.as_ref() {
             return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
         }
         Ok(Some(Self {

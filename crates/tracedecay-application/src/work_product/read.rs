@@ -502,10 +502,9 @@ pub(crate) fn validate_result(
     }
     if let WorkGraphReadV1::Evolution { timeline, .. }
     | WorkGraphReadV1::Forensic { timeline, .. } = result
+        && timeline.validate().is_err()
     {
-        if timeline.validate().is_err() {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        }
+        return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
     }
     for entry in result.entries() {
         if entry.projected_at() != request.observed_at

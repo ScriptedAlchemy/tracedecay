@@ -89,7 +89,7 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
         let consumption = grant
             .consume(request_id.clone(), input_digest.clone(), consumed_at)
             .map_err(|_| HandoffOpenAuthorityError::Unavailable)?;
-        let outcome = HandoffOpenConsumeOutcomeV1::Consumed(consumption);
+        let outcome = HandoffOpenConsumeOutcomeV1::Consumed(Box::new(consumption));
         state
             .consumptions
             .insert(token_digest.clone(), outcome.clone());

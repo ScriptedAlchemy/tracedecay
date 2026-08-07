@@ -135,7 +135,7 @@ fn cancelled_attempt_can_be_rebuilt_and_published_generation_recovers_exactly() 
         1,
         Some(match lookup {
             SemanticVectorPublishedGenerationLookup::Published { verified_head, .. } => {
-                verified_head
+                *verified_head
             }
             SemanticVectorPublishedGenerationLookup::Missing => unreachable!(),
         }),
@@ -169,7 +169,7 @@ fn historical_published_semantic_generation_remains_lookupable_after_new_head() 
         .published_semantic_generation(&first_key, &context)
         .unwrap()
     {
-        SemanticVectorPublishedGenerationLookup::Published { verified_head, .. } => verified_head,
+        SemanticVectorPublishedGenerationLookup::Published { verified_head, .. } => *verified_head,
         SemanticVectorPublishedGenerationLookup::Missing => panic!("first generation missing"),
     };
     let second = SemanticVectorStagePlan::new(
@@ -250,7 +250,7 @@ fn retirement_tombstone_and_relational_descendants_commit_atomically() {
             .unwrap()
         {
             SemanticVectorPublishedGenerationLookup::Published { verified_head, .. } => {
-                verified_head
+                *verified_head
             }
             SemanticVectorPublishedGenerationLookup::Missing => panic!("first is missing"),
         }

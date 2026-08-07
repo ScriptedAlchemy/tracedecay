@@ -61,7 +61,7 @@ pub(super) fn batch_receipt(
         return Ok(SemanticVectorStageBatchReceiptLookup::Missing);
     };
     let result = receipt_by_ordinal(&snapshot, stage.id, key.ordinal)?
-        .map(|(_, receipt)| SemanticVectorStageBatchReceiptLookup::Found(receipt))
+        .map(|(_, receipt)| SemanticVectorStageBatchReceiptLookup::Found(Box::new(receipt)))
         .unwrap_or(SemanticVectorStageBatchReceiptLookup::Missing);
     ensure_live(context)?;
     Ok(result)

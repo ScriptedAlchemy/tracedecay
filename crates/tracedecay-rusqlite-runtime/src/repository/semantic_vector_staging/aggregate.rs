@@ -39,8 +39,8 @@ impl SemanticVectorPublicationAuthority for SemanticVectorStagingExactSqlStorage
         rollback(tx)?;
         ensure_live(context)?;
         Ok(SemanticVectorPublishedGenerationLookup::Published {
-            record,
-            verified_head,
+            record: Box::new(record),
+            verified_head: Box::new(verified_head),
         })
     }
 }

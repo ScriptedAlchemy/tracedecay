@@ -323,9 +323,9 @@ impl WorkflowEffectPreparedV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "payload")]
 pub enum WorkflowEffectSuccessV1 {
-    DefinitionRegistered(WorkflowDefinition),
-    HandoffIssued(TaskHandoffGrant),
-    HandoffRedeemed(TaskHandoffRedeemed),
+    DefinitionRegistered(Box<WorkflowDefinition>),
+    HandoffIssued(Box<TaskHandoffGrant>),
+    HandoffRedeemed(Box<TaskHandoffRedeemed>),
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

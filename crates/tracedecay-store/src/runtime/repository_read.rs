@@ -304,7 +304,7 @@ pub enum ProfileReadOperationV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileReadResultV1 {
-    ConfigurationRevision(Option<ConfigurationRevisionRecordV1>),
+    ConfigurationRevision(Option<Box<ConfigurationRevisionRecordV1>>),
 }
 
 /// Project-family read operations across facts, observations, and diagnostics.

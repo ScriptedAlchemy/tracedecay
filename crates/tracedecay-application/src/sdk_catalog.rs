@@ -175,11 +175,13 @@ mod tests {
     use crate::{application_catalog_contributions, git_surface_catalog_contribution};
 
     #[derive(JsonSchema)]
+    #[allow(dead_code)]
     struct TestGitStatusRequest {
         max_entries: Option<u32>,
     }
 
     #[derive(JsonSchema)]
+    #[allow(dead_code)]
     struct TestGitStatusResult {
         changed_paths: Vec<String>,
     }

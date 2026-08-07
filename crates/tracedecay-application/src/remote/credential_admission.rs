@@ -101,12 +101,12 @@ pub enum RemoteCredentialAdmissionErrorV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialAuthorityRecordV1 {
     Grant {
-        grant: EnrollmentGrantV1,
-        admission: RemoteEnrollmentAdmissionEvidenceV1,
+        grant: Box<EnrollmentGrantV1>,
+        admission: Box<RemoteEnrollmentAdmissionEvidenceV1>,
     },
     Enrollment {
-        enrollment: EnrollmentCredentialRecordV1,
-        receipt: RemoteEnrollmentCommitReceiptV1,
+        enrollment: Box<EnrollmentCredentialRecordV1>,
+        receipt: Box<RemoteEnrollmentCommitReceiptV1>,
     },
 }
 
@@ -793,8 +793,8 @@ mod tests {
         };
         receipt.validate().unwrap();
         RemoteCredentialAuthorityRecordV1::Enrollment {
-            enrollment: receipt.enrollment.clone(),
-            receipt,
+            enrollment: Box::new(receipt.enrollment.clone()),
+            receipt: Box::new(receipt),
         }
     }
 

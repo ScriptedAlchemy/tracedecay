@@ -730,17 +730,18 @@ pub struct SourceCommitReceiptV1 {
 
 impl SourceCommitReceiptV1 {
     fn new(
-        idempotency_key: ManifestDigest,
-        request_digest: ManifestDigest,
-        definition: &SourceDefinitionV1,
-        binding: &SourceBindingV1,
-        prior_source_frontier: Option<SourceAggregateFrontierV1>,
-        source_frontier: SourceAggregateFrontierV1,
-        partition: SourcePartitionIdV1,
+        commit: &SourceCommitV1,
         mutations: Vec<SourceObjectMutationV1>,
         lineage: Vec<SourceObjectLineageV1>,
-        snapshot_completion: Option<SourceSnapshotCompletionV1>,
     ) -> SourceStoreResult<Self> {
+        let idempotency_key = commit.idempotency_key().clone();
+        let request_digest = commit.request_digest().clone();
+        let definition = commit.definition();
+        let binding = commit.binding();
+        let prior_source_frontier = commit.expected_frontier().cloned();
+        let source_frontier = commit.next_frontier().clone();
+        let partition = commit.partition().clone();
+        let snapshot_completion = commit.snapshot_completion().cloned();
         let receipt_digest = canonical_sha256(&(
             "tracedecay.external-source.source-commit-receipt.v1",
             &idempotency_key,
@@ -1331,7 +1332,6 @@ pub fn build_source_projection(
     pending.validate()?;
     projector.validate()?;
     let receipt = pending.receipt();
-    let expected_projection_frontier = pending.expected_projection_frontier.clone();
     let mut mutations = receipt.mutations().to_vec();
     let mut effects = mutations
         .iter()
@@ -1375,17 +1375,7 @@ pub fn build_source_projection(
             mutations.push(mutation);
         }
     }
-    SourceProjectionCommitV1::new(
-        projector,
-        &pending.definition,
-        &pending.binding,
-        expected_projection_frontier,
-        receipt.source_frontier().clone(),
-        receipt.receipt_digest().clone(),
-        mutations,
-        effects,
-        lineage,
-    )
+    SourceProjectionCommitV1::new(projector, pending, mutations, effects, lineage)
 }
 
 /// Publishes one deterministic projection transition with exact source and

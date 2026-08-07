@@ -267,8 +267,8 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
     };
     receipt.validate().unwrap();
     let record = RemoteCredentialAuthorityRecordV1::Enrollment {
-        enrollment: receipt.enrollment.clone(),
-        receipt,
+        enrollment: Box::new(receipt.enrollment.clone()),
+        receipt: Box::new(receipt),
     };
     RemoteCredentialAdmissionServiceV1::new(OneCredentialAuthority {
         fingerprint: RemoteCredentialFingerprintV1::from_secret(ACTIVE_CREDENTIAL).unwrap(),

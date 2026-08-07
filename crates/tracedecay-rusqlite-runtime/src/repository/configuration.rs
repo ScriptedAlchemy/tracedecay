@@ -95,7 +95,9 @@ impl ConfigurationExecutor {
             .map(|revision_id| read_revision(snapshot, revision_id))
             .transpose()?
             .flatten();
-        Ok(ProfileReadResultV1::ConfigurationRevision(revision))
+        Ok(ProfileReadResultV1::ConfigurationRevision(
+            revision.map(Box::new),
+        ))
     }
 }
 

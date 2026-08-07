@@ -227,7 +227,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
                 {
                     return Err(codec_unavailable());
                 }
-                return Ok(HandoffOpenConsumeOutcomeV1::Consumed(consumption));
+                return Ok(HandoffOpenConsumeOutcomeV1::Consumed(Box::new(consumption)));
             }
             (None, None, None) => {}
             _ => return Err(codec_unavailable()),
@@ -255,7 +255,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         .map_err(unavailable)?;
         transaction
             .commit()
-            .map(|_| HandoffOpenConsumeOutcomeV1::Consumed(consumption))
+            .map(|_| HandoffOpenConsumeOutcomeV1::Consumed(Box::new(consumption)))
             .map_err(unavailable)
     }
 }

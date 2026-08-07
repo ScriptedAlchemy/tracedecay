@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::VectorGenerationIdV1;
 
-use super::SemanticVectorStageRecord;
 use super::super::{
     GraphDependencyGenerationIdentityV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphVerifiedHeadV1, StorageRuntimeContractErrorV1,
 };
+use super::SemanticVectorStageRecord;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -35,8 +35,8 @@ impl SemanticVectorPublishedGenerationKey {
 pub enum SemanticVectorPublishedGenerationLookup {
     Missing,
     Published {
-        record: SemanticVectorStageRecord,
-        verified_head: GraphVerifiedHeadV1,
+        record: Box<SemanticVectorStageRecord>,
+        verified_head: Box<GraphVerifiedHeadV1>,
     },
 }
 
@@ -46,8 +46,8 @@ pub enum SemanticVectorStageResumeOutcome {
     Pending(SemanticVectorStageRecord),
     Ready(SemanticVectorStageRecord),
     Published {
-        record: SemanticVectorStageRecord,
-        verified_head: GraphVerifiedHeadV1,
+        record: Box<SemanticVectorStageRecord>,
+        verified_head: Box<GraphVerifiedHeadV1>,
     },
     Cancelled(SemanticVectorStageRecord),
 }
@@ -57,8 +57,8 @@ pub enum SemanticVectorStageBeginOutcome {
     Begun(SemanticVectorStageRecord),
     ExactReplay(SemanticVectorStageRecord),
     Published {
-        record: SemanticVectorStageRecord,
-        verified_head: GraphVerifiedHeadV1,
+        record: Box<SemanticVectorStageRecord>,
+        verified_head: Box<GraphVerifiedHeadV1>,
     },
     InputConflict {
         existing: SemanticVectorStageRecord,

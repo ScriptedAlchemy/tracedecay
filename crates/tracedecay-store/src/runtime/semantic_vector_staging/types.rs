@@ -731,7 +731,7 @@ pub struct SemanticVectorStageGraphBatchEffect {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticVectorStageAppendOutcome {
     Appended {
-        stage: SemanticVectorStageRecord,
+        stage: Box<SemanticVectorStageRecord>,
         effect: SemanticVectorStageGraphBatchEffect,
     },
     ExactReplay {
@@ -760,7 +760,7 @@ pub enum SemanticVectorStageAppendOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticVectorStageBatchReceiptLookup {
-    Found(SemanticVectorStageBatchReceipt),
+    Found(Box<SemanticVectorStageBatchReceipt>),
     Missing,
 }
 
@@ -856,7 +856,7 @@ pub enum SemanticVectorStageSettlementOutcome {
     Conflict(SemanticVectorStageGraphBatchEffect),
     StaleOrdinal { next_applied_ordinal: u64 },
     StaleFence { actual: SemanticVectorWriterFence },
-    Cancelled(SemanticVectorStageRecord),
+    Cancelled(Box<SemanticVectorStageRecord>),
     MissingBatch,
 }
 

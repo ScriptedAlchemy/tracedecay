@@ -99,10 +99,12 @@ sha256_digest!(
 
 impl GraphCanonicalReplaySourceDigestV1 {
     pub fn for_source(source: &[u8]) -> Self {
-        Self(tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
-            "sha256:",
-            &Sha256::digest(source),
-        ))
+        Self(
+            tracedecay_domain::canonical_text::encode_tagged_lowercase_hex(
+                "sha256:",
+                &Sha256::digest(source),
+            ),
+        )
     }
 }
 
@@ -897,7 +899,7 @@ pub enum GraphReplayAppendOutcomeV1 {
     /// Exact replay of a generation proven verified by ordered head history.
     ExactVerifiedReplay {
         replay: GraphPublicationReplayRecordV1,
-        receipt: GraphVerifiedHeadV1,
+        receipt: Box<GraphVerifiedHeadV1>,
     },
     Conflict {
         existing: GraphPublicationReplayRecordV1,

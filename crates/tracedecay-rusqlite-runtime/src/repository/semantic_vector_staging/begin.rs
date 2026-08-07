@@ -35,8 +35,8 @@ pub(super) fn begin_stage(
         rollback(tx)?;
         return Ok(if exact_semantic_plan {
             SemanticVectorStageBeginOutcome::Published {
-                record,
-                verified_head,
+                record: Box::new(record),
+                verified_head: Box::new(verified_head),
             }
         } else {
             SemanticVectorStageBeginOutcome::SemanticGenerationConflict { existing: record }

@@ -406,7 +406,7 @@ impl SemanticVectorProjectCensusReceipt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticVectorPublishedGenerationDependencyLookup {
     Missing,
-    Published(SemanticVectorCensusDependencyV1),
+    Published(Box<SemanticVectorCensusDependencyV1>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,5 +495,5 @@ pub struct SemanticVectorCancelledRetirement {
 pub enum SemanticVectorCancelledRetirementOutcome {
     Removed,
     ExactMissing,
-    NotCancelled(SemanticVectorStageRecord),
+    NotCancelled(Box<SemanticVectorStageRecord>),
 }

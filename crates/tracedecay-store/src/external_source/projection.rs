@@ -38,15 +38,16 @@ pub struct SourceProjectionCommitV1 {
 impl SourceProjectionCommitV1 {
     pub(super) fn new(
         projector: ComponentVersion,
-        definition: &SourceDefinitionV1,
-        binding: &SourceBindingV1,
-        expected_projection_frontier: Option<SourceAggregateFrontierV1>,
-        source_frontier: SourceAggregateFrontierV1,
-        source_receipt_digest: ManifestDigest,
+        pending: &SourcePendingProjectionV1,
         mutations: Vec<SourceObjectMutationV1>,
         effects: Vec<SourceProjectionEffectV1>,
         lineage: Vec<SourceObjectLineageV1>,
     ) -> SourceStoreResult<Self> {
+        let definition = &pending.definition;
+        let binding = &pending.binding;
+        let expected_projection_frontier = pending.expected_projection_frontier.clone();
+        let source_frontier = pending.receipt.source_frontier().clone();
+        let source_receipt_digest = pending.receipt.receipt_digest().clone();
         projector.validate()?;
         definition.validate()?;
         binding.validate_against(definition)?;

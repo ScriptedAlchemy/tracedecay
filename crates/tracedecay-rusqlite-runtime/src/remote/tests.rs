@@ -536,8 +536,8 @@ fn credential_admission_looks_up_only_the_fingerprint_indexed_final_authority() 
             )
             .unwrap(),
         RemoteCredentialAuthorityRecordV1::Grant {
-            grant: grant.clone(),
-            admission,
+            grant: Box::new(grant.clone()),
+            admission: Box::new(admission),
         }
     );
     let unknown = RemoteCredentialFingerprintV1::from_secret(&[8_u8; 32]).unwrap();

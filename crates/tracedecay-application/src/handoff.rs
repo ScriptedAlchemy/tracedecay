@@ -422,7 +422,7 @@ impl HandoffOpenConsumptionV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandoffOpenConsumeOutcomeV1 {
-    Consumed(HandoffOpenConsumptionV1),
+    Consumed(Box<HandoffOpenConsumptionV1>),
     Concealed,
 }
 
@@ -717,7 +717,7 @@ where
             )
             .map_err(authority_error)?
         {
-            HandoffOpenConsumeOutcomeV1::Consumed(consumption) => consumption,
+            HandoffOpenConsumeOutcomeV1::Consumed(consumption) => *consumption,
             HandoffOpenConsumeOutcomeV1::Concealed => {
                 return Err(HandoffOpenError::NotFoundOrNotAuthorized);
             }

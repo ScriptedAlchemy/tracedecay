@@ -249,7 +249,7 @@ pub(super) fn published_generation_dependency(
                     "semantic vector published dependency identity is inconsistent",
                 ));
             }
-            SemanticVectorPublishedGenerationDependencyLookup::Published(
+            SemanticVectorPublishedGenerationDependencyLookup::Published(Box::new(
                 SemanticVectorCensusDependencyV1 {
                     semantic_generation_id: plan.semantic_generation_id,
                     source_scope: plan.source_scope,
@@ -258,7 +258,7 @@ pub(super) fn published_generation_dependency(
                     source_dependency: plan.source_dependency,
                     stage_state: SemanticVectorStageState::Published,
                 },
-            )
+            ))
         }
         _ => {
             rollback(tx)?;
@@ -550,7 +550,7 @@ pub(super) fn remove_cancelled_generation(
         let record = stage.record;
         rollback(tx)?;
         return Ok(SemanticVectorCancelledRetirementOutcome::NotCancelled(
-            record,
+            Box::new(record),
         ));
     }
     validate_stage_history(&tx, &stage, context)?;

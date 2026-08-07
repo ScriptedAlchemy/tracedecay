@@ -247,7 +247,7 @@ impl GraphVectorGenerationStoreV1 {
                     require_same_semantic_plan(&record, &stage_plan)?;
                     let publication =
                         self.recover_published_generation(&plan, &verified_head, &authority)?;
-                    break (record, Some(publication));
+                    break (*record, Some(publication));
                 }
                 match self
                     .runtime
@@ -324,7 +324,7 @@ impl GraphVectorGenerationStoreV1 {
                                             &verified_head,
                                             &authority,
                                         )?;
-                                        break (record, Some(publication));
+                                        break (*record, Some(publication));
                                     }
                                     SemanticVectorStageResumeOutcome::Ready(_) => {
                                         return Err(
@@ -353,7 +353,7 @@ impl GraphVectorGenerationStoreV1 {
                         require_resumed_plan(&record, &stage_plan)?;
                         let publication =
                             self.recover_published_generation(&plan, &verified_head, &authority)?;
-                        break (record, Some(publication));
+                        break (*record, Some(publication));
                     }
                     SemanticVectorStageResumeOutcome::Cancelled(record) => {
                         if !rebuild {

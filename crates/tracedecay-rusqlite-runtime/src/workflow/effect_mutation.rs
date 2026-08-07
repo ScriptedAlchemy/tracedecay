@@ -58,7 +58,7 @@ fn apply_definition_registration(
             sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
         return Ok(if existing_digest == digest.as_str() {
             WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(
-                definition.clone(),
+                Box::new(definition.clone()),
             ))
         } else {
             WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::InvalidRequest)
@@ -78,7 +78,7 @@ fn apply_definition_registration(
     )
     .map_err(workflow_effect_unavailable)?;
     Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::DefinitionRegistered(definition.clone()),
+        WorkflowEffectSuccessV1::DefinitionRegistered(Box::new(definition.clone())),
     ))
 }
 
@@ -115,7 +115,7 @@ fn apply_handoff_issue(
     )
     .map_err(workflow_effect_unavailable)?;
     Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::HandoffIssued(grant.clone()),
+        WorkflowEffectSuccessV1::HandoffIssued(Box::new(grant.clone())),
     ))
 }
 
@@ -163,8 +163,8 @@ fn apply_handoff_redeem(
         return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
     }
     Ok(WorkflowEffectOutcomeV1::Success(
-        WorkflowEffectSuccessV1::HandoffRedeemed(TaskHandoffRedeemed {
+        WorkflowEffectSuccessV1::HandoffRedeemed(Box::new(TaskHandoffRedeemed {
             scope: expected_scope.clone(),
-        }),
+        })),
     ))
 }

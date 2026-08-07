@@ -401,7 +401,7 @@ impl SemanticVectorStagingStore for SemanticVectorStagingExactSqlStorage {
         };
         commit(tx)?;
         Ok(SemanticVectorStageAppendOutcome::Appended {
-            stage: next,
+            stage: Box::new(next),
             effect,
         })
     }
@@ -467,7 +467,9 @@ impl SemanticVectorStagingStore for SemanticVectorStagingExactSqlStorage {
         if stage.record.state == SemanticVectorStageState::Cancelled {
             let record = stage.record;
             rollback(tx)?;
-            return Ok(SemanticVectorStageSettlementOutcome::Cancelled(record));
+            return Ok(SemanticVectorStageSettlementOutcome::Cancelled(Box::new(
+                record,
+            )));
         }
         let Some((batch_id, receipt)) =
             receipt_by_ordinal(&tx, stage.id, settlement.batch.ordinal)?
@@ -682,7 +684,7 @@ impl SemanticVectorStagingStore for SemanticVectorStagingExactSqlStorage {
                     tracedecay_store::GraphReplayAppendOutcomeV1::ExactVerifiedReplay {
                         receipt,
                         ..
-                    } => actual.as_ref() == Some(&receipt),
+                    } => actual.as_ref() == Some(receipt.as_ref()),
                     _ => false,
                 };
                 if !exact {

@@ -72,18 +72,7 @@ pub fn apply_source_commit(
             }
         }
     }
-    let receipt = SourceCommitReceiptV1::new(
-        commit.idempotency_key().clone(),
-        commit.request_digest().clone(),
-        commit.definition(),
-        commit.binding(),
-        commit.expected_frontier().cloned(),
-        commit.next_frontier().clone(),
-        commit.partition().clone(),
-        committed_mutations,
-        committed_lineage,
-        commit.snapshot_completion().cloned(),
-    )?;
+    let receipt = SourceCommitReceiptV1::new(&commit, committed_mutations, committed_lineage)?;
     Ok(SourceCommitApplyOutcomeV1::Committed(Box::new(
         SourceStoreStateV1 {
             definition: commit.definition().clone(),
