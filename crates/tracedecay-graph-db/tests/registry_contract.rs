@@ -230,7 +230,7 @@ fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
     };
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
-    let database = registry.resolve_raw_for_harness(registration).unwrap();
+    let database = registry.resolve(registration).unwrap();
     assert!(database.snapshot().is_ok());
 }
 
@@ -265,8 +265,8 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 4 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
-    let first = registry.resolve_raw_for_harness(request.clone()).unwrap();
-    let second = registry.resolve_raw_for_harness(request).unwrap();
+    let first = registry.resolve(request.clone()).unwrap();
+    let second = registry.resolve(request).unwrap();
 
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(
@@ -287,13 +287,13 @@ fn profile_sessions_scope_uses_exact_profile_authority() {
     let second_root = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let first = registry
-        .resolve_raw_for_harness(registration(
+        .resolve(registration(
             profile_sessions_identity("profile-a"),
             first_root.path(),
         ))
         .unwrap();
     let second = registry
-        .resolve_raw_for_harness(registration(
+        .resolve(registration(
             profile_sessions_identity("profile-b"),
             second_root.path(),
         ))
@@ -326,7 +326,7 @@ fn broad_profile_scope_is_rejected() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve_raw_for_harness(registration(
+        registry.resolve(registration(
             broad_profile_identity("profile-a"),
             root.path(),
         )),
@@ -346,13 +346,13 @@ fn project_session_and_code_scopes_keep_distinct_locator_authority() {
     let code_binding = code_identity("profile-a", "project-a");
 
     let project = registry
-        .resolve_raw_for_harness(registration(project_binding.clone(), project_root.path()))
+        .resolve(registration(project_binding.clone(), project_root.path()))
         .unwrap();
     let sessions = registry
-        .resolve_raw_for_harness(registration(sessions_binding.clone(), sessions_root.path()))
+        .resolve(registration(sessions_binding.clone(), sessions_root.path()))
         .unwrap();
     let code = registry
-        .resolve_raw_for_harness(registration(code_binding.clone(), code_root.path()))
+        .resolve(registration(code_binding.clone(), code_root.path()))
         .unwrap();
 
     assert!(!Arc::ptr_eq(&project, &sessions));
@@ -391,7 +391,7 @@ fn concurrent_resolution_singleflights_one_persistent_handle() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                registry.resolve_raw_for_harness(request).unwrap()
+                registry.resolve(request).unwrap()
             })
         })
         .collect::<Vec<_>>();
@@ -412,18 +412,18 @@ fn identity_and_canonical_path_cannot_be_rebound() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 4 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
     registry
-        .resolve_raw_for_harness(registration(first_identity.clone(), first_root.path()))
+        .resolve(registration(first_identity.clone(), first_root.path()))
         .unwrap();
 
     assert_eq!(
         registry
-            .resolve_raw_for_harness(registration(first_identity, second_root.path()))
+            .resolve(registration(first_identity, second_root.path()))
             .unwrap_err(),
         GraphDbError::Conflict
     );
     assert_eq!(
         registry
-            .resolve_raw_for_harness(registration(
+            .resolve(registration(
                 identity("profile-a", "project-b"),
                 first_root.path(),
             ))
@@ -445,7 +445,7 @@ fn identity_and_canonical_path_cannot_be_rebound() {
     });
     assert_eq!(
         registry
-            .resolve_raw_for_harness(changed_locator)
+            .resolve(changed_locator)
             .unwrap_err(),
         GraphDbError::InvalidRequest {
             message: "verified graph locator digest does not bind the canonical graph path"
@@ -462,7 +462,7 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
     let mut stale = registered.clone();
     stale.authority_epoch = StoreAuthorityEpochV1::new(2).unwrap();
     let handle = registry
-        .resolve_raw_for_harness(registration(registered.clone(), temp.path()))
+        .resolve(registration(registered.clone(), temp.path()))
         .unwrap();
     drop(handle);
 
@@ -486,7 +486,7 @@ fn stale_binding_cannot_close_or_rebind_the_registered_store() {
     );
     assert!(
         registry
-            .resolve_raw_for_harness(registration(registered, temp.path()))
+            .resolve(registration(registered, temp.path()))
             .is_ok()
     );
 }
@@ -503,7 +503,7 @@ fn symlinked_graph_directory_is_rejected_before_open() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve_raw_for_harness(registration(identity("profile-a", "project-a"), &alias,)),
+        registry.resolve(registration(identity("profile-a", "project-a"), &alias,)),
         Err(GraphDbError::InvalidRequest { .. })
     ));
     assert!(!graph_path(target.path()).exists());
@@ -522,7 +522,7 @@ fn symlinked_graph_database_file_is_rejected_before_open() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
-        registry.resolve_raw_for_harness(registration(
+        registry.resolve(registration(
             identity("profile-a", "project-a"),
             store.path(),
         )),
@@ -536,7 +536,7 @@ fn single_file_reopens_with_identical_traversal() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
-    let database = registry.resolve_raw_for_harness(request.clone()).unwrap();
+    let database = registry.resolve(request.clone()).unwrap();
     database
         .apply_unverified(batch(
             "code",
@@ -604,7 +604,7 @@ fn close_and_retention_refuse_an_active_handle() {
     let first_identity = identity("profile-a", "project-a");
     let first_request = registration(first_identity.clone(), first_root.path());
     let active = registry
-        .resolve_raw_for_harness(first_request.clone())
+        .resolve(first_request.clone())
         .unwrap();
 
     assert_eq!(
@@ -613,7 +613,7 @@ fn close_and_retention_refuse_an_active_handle() {
     );
     assert_eq!(
         registry
-            .resolve_raw_for_harness(registration(
+            .resolve(registration(
                 identity("profile-a", "project-b"),
                 second_root.path(),
             ))
@@ -629,7 +629,7 @@ fn snapshot_lease_prevents_close_after_operation_handle_is_dropped() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
-    let database = registry.resolve_raw_for_harness(request.clone()).unwrap();
+    let database = registry.resolve(request.clone()).unwrap();
     let snapshot = database.snapshot().unwrap();
     drop(database);
 
@@ -656,7 +656,7 @@ fn idle_retention_closes_and_evicts_unleased_handles() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
     let first = registry
-        .resolve_raw_for_harness(registration(first_identity.clone(), first_root.path()))
+        .resolve(registration(first_identity.clone(), first_root.path()))
         .unwrap();
     drop(first);
 
@@ -676,7 +676,7 @@ fn idle_retention_closes_and_evicts_unleased_handles() {
     );
 
     registry
-        .resolve_raw_for_harness(registration(
+        .resolve(registration(
             identity("profile-a", "project-b"),
             second_root.path(),
         ))
@@ -692,7 +692,7 @@ fn cancelled_open_does_not_create_or_register_a_store() {
     request.cancellation = Arc::new(Cancelled);
 
     assert_eq!(
-        registry.resolve_raw_for_harness(request).unwrap_err(),
+        registry.resolve(request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert_eq!(
@@ -717,7 +717,7 @@ fn lifecycle_cancellation_before_database_file_creation_is_typed() {
     request.lifecycle_cancellation = cancellation.clone();
 
     assert_eq!(
-        registry.resolve_raw_for_harness(request).unwrap_err(),
+        registry.resolve(request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert!(
@@ -741,13 +741,13 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
     let mut expired = registration(store_identity.clone(), temp.path());
     expired.deadline = std::time::Instant::now();
     assert_eq!(
-        registry.resolve_raw_for_harness(expired).unwrap_err(),
+        registry.resolve(expired).unwrap_err(),
         GraphDbError::DeadlineExceeded
     );
     assert!(!graph_path(temp.path()).exists());
 
     let request = registration(store_identity.clone(), temp.path());
-    let handle = registry.resolve_raw_for_harness(request.clone()).unwrap();
+    let handle = registry.resolve(request.clone()).unwrap();
     drop(handle);
     let mut expired_close = request;
     expired_close.deadline = std::time::Instant::now();
@@ -776,7 +776,7 @@ fn cancellation_after_database_file_creation_finishes_format_before_retry() {
     request.cancellation = cancellation.clone();
 
     assert_eq!(
-        registry.resolve_raw_for_harness(request).unwrap_err(),
+        registry.resolve(request).unwrap_err(),
         GraphDbError::Cancelled
     );
     assert!(
@@ -792,7 +792,7 @@ fn cancellation_after_database_file_creation_finishes_format_before_retry() {
     assert!(graph_path(temp.path()).is_file());
     assert!(
         registry
-            .resolve_raw_for_harness(registration(store_identity.clone(), temp.path()))
+            .resolve(registration(store_identity.clone(), temp.path()))
             .is_ok(),
         "retry must open the fully initialized store instead of requiring a reset"
     );
@@ -812,7 +812,7 @@ fn registry_retains_authority_lease_until_the_graph_is_closed() {
         drop_counter: Some(Arc::clone(&dropped)),
     });
 
-    let database = registry.resolve_raw_for_harness(request).unwrap();
+    let database = registry.resolve(request).unwrap();
     assert_eq!(dropped.load(Ordering::SeqCst), 0);
     drop(database);
     assert!(
@@ -841,7 +841,7 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
     assert!(matches!(
-        registry.resolve_raw_for_harness(request.clone()),
+        registry.resolve(request.clone()),
         Err(GraphDbError::ResetRequired { .. })
     ));
     assert_eq!(
@@ -865,7 +865,7 @@ fn preexisting_empty_graph_file_is_corrupt() {
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
     assert!(matches!(
-        registry.resolve_raw_for_harness(request),
+        registry.resolve(request),
         Err(GraphDbError::Corrupt { .. })
     ));
 }

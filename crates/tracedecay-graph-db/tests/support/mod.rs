@@ -65,7 +65,7 @@ impl RegisteredGraph {
         let registered = Self::new(root)?;
         let database = registered
             .registry
-            .resolve_raw_for_harness(registration(registered.binding.clone(), root))?;
+            .resolve(registration(registered.binding.clone(), root))?;
         Ok((registered, database))
     }
 

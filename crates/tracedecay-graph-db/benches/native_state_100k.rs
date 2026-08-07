@@ -73,7 +73,7 @@ fn registry() -> GraphDbRegistry {
 
 fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration, entity_count: usize) {
     let db = registry
-        .resolve_raw_for_harness(request.clone())
+        .resolve(request.clone())
         .expect("benchmark store opens");
     let mutations = (0..entity_count)
         .map(|index| {
@@ -149,7 +149,7 @@ fn native_state_100k(criterion: &mut Criterion) {
     });
 
     let db = registry
-        .resolve_raw_for_harness(request.clone())
+        .resolve(request.clone())
         .expect("benchmark store opens for point reads");
     let namespace = GraphNamespace::new("benchmark").expect("benchmark namespace is valid");
     let identity = GraphEntityId::new("entity-099999").expect("benchmark identity is valid");
@@ -176,7 +176,7 @@ fn native_state_100k(criterion: &mut Criterion) {
     let ten_x_entity_count = ENTITY_COUNT * 10;
     populate(&ten_x_registry, &ten_x_request, ten_x_entity_count);
     let ten_x_db = ten_x_registry
-        .resolve_raw_for_harness(ten_x_request.clone())
+        .resolve(ten_x_request.clone())
         .expect("10x benchmark store opens");
     let ten_x_sequence = AtomicUsize::new(2);
     criterion.bench_function("native_state/small_update_1m", |bencher| {

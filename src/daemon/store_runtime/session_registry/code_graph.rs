@@ -8,7 +8,7 @@ use tracedecay_domain::{
     CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
     GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
     SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
@@ -41,6 +41,7 @@ use seals::{
 };
 
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
+const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 
 struct AtomicGraphCancellationV1 {
     cancelled: Arc<AtomicBool>,

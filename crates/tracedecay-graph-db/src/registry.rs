@@ -211,7 +211,13 @@ impl GraphDbRegistry {
         })
     }
 
-    pub(crate) fn resolve(
+    /// Opens (or joins) the registered runtime and returns the live handle.
+    ///
+    /// Replayed code graphs must read through [`crate::VerifiedGraphSnapshot`]
+    /// via the publication surface; the raw runtime is for graphs whose native
+    /// state is itself the authority (for example daemon-owned session
+    /// relation graphs) and for direct storage tests.
+    pub fn resolve(
         &self,
         registration: GraphDbRegistration,
     ) -> Result<Arc<GraphDb>, GraphDbError> {
@@ -445,18 +451,6 @@ impl GraphDbRegistry {
             .insert(registration.binding().shard_id.clone(), faulted);
         self.inner.changed.notify_all();
         Ok(())
-    }
-
-    /// Opens a raw runtime only for direct storage tests and developer evals.
-    ///
-    /// Production readers obtain [`crate::VerifiedGraphSnapshot`] from this
-    /// registry instead.
-    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-    pub fn resolve_raw_for_harness(
-        &self,
-        registration: GraphDbRegistration,
-    ) -> Result<Arc<GraphDb>, GraphDbError> {
-        self.resolve(registration)
     }
 
     pub(crate) fn reopen(

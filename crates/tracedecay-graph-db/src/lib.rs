@@ -46,11 +46,7 @@ pub(crate) use location::{
 pub use owner::GraphDbOwner;
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use owner::GraphDbOwner;
-pub use projection::NeverCancelled;
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-pub use projection::ProjectionReplacement;
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub(crate) use projection::ProjectionReplacement;
+pub use projection::{NeverCancelled, ProjectionReplacement};
 pub use projection::{
     GraphCancellation, GraphCommit, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
@@ -84,10 +80,7 @@ pub use registry::{
     SemanticVectorRetirementReservation, VerifiedGenerationBatchApply,
     VerifiedGenerationBatchCommit,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub(crate) use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
 pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use vector::{GraphVectorIndexRequest, GraphVectorIndexStatus};
