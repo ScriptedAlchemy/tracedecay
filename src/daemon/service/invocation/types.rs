@@ -67,10 +67,24 @@ pub(crate) trait HookOrchestrationPortV1: Send + Sync {
 type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type HookOrchestrationWorkV1 =
     dyn Fn(HookOrchestrationRequestV1) -> HookOrchestrationFutureV1 + Send + Sync;
+/// Exact hook identity: one project, one worktree, one hook event. Two
+/// admissions that agree on all three describe the same boundary, so they must
+/// share one cycle rather than start a second.
+type HookOrchestrationInFlightKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
+type HookOrchestrationInFlightV1 =
+    StdMutex<BTreeMap<HookOrchestrationInFlightKeyV1, Vec<HookOrchestrationCompletionV1>>>;
+
+/// Upper bound on admissions that may join one in-flight cycle. Beyond it the
+/// caller is backpressured instead of queued, so a hook storm can never grow
+/// unbounded retained state behind a single bounded operation.
+pub(in crate::daemon::service) const MAX_COALESCED_HOOK_COMPLETIONS: usize = 32;
 
 pub(crate) struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
+    in_flight: Arc<HookOrchestrationInFlightV1>,
+    cancellation: crate::application::context::CancellationToken,
 }
 
 impl BoundedHookOrchestratorV1 {
@@ -84,29 +98,81 @@ impl BoundedHookOrchestratorV1 {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
+                in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
+                cancellation: crate::application::context::CancellationToken::new(),
             })
         })
     }
 }
 
 impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
-    fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
-        let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            return HookOrchestrationAdmissionV1::Backpressured;
-        };
-        let work = Arc::clone(&self.work);
-        let completion = request.completion.clone();
+    fn admit(&self, mut request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return HookOrchestrationAdmissionV1::Unavailable;
         };
+        let envelope = request.hook.envelope();
+        let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let completion = request.completion.take();
+        let permit = {
+            let Ok(mut in_flight) = self.in_flight.lock() else {
+                return HookOrchestrationAdmissionV1::Unavailable;
+            };
+            if let Some(completions) = in_flight.get_mut(&key) {
+                // The exact boundary is already running. Join it: one cycle
+                // terminates once and every joined admission observes that one
+                // terminal, so a duplicate never consumes a second permit.
+                if let Some(completion) = completion {
+                    if completions.len() >= MAX_COALESCED_HOOK_COMPLETIONS {
+                        return HookOrchestrationAdmissionV1::Backpressured;
+                    }
+                    completions.push(completion);
+                }
+                return HookOrchestrationAdmissionV1::Enqueued;
+            }
+            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                return HookOrchestrationAdmissionV1::Backpressured;
+            };
+            in_flight.insert(key, completion.into_iter().collect());
+            permit
+        };
+        let work = Arc::clone(&self.work);
+        let in_flight = Arc::clone(&self.in_flight);
+        let cancellation = self.cancellation.clone();
         handle.spawn(async move {
-            (work)(request).await;
-            if let Some(completion) = completion {
-                completion();
+            let completed = tokio::select! {
+                () = cancellation.cancelled() => false,
+                () = (work)(request) => true,
+            };
+            let completions = in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+            match completions {
+                // Only completed work clears the joined admissions. Cancelled
+                // work reports nothing: silence is a normal result, and an
+                // adapter must never invent a termination reason.
+                Some(completions) if completed => {
+                    for completion in completions {
+                        completion();
+                    }
+                }
+                Some(_) => {}
+                None => tracing::error!(
+                    event = "hook_orchestration_completion_missing",
+                    "daemon-owned advisory work finished without its in-flight admission"
+                ),
             }
             drop(permit);
         });
         HookOrchestrationAdmissionV1::Enqueued
+    }
+}
+
+impl Drop for BoundedHookOrchestratorV1 {
+    fn drop(&mut self) {
+        // Retiring the owner cancels every worker it still holds. The workers
+        // drop their in-flight entry without firing completions.
+        self.cancellation.cancel();
     }
 }
 
