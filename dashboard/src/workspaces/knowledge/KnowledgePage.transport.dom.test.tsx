@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   allRoutesFail,
@@ -87,7 +88,12 @@ function renderKnowledge() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <KnowledgePage />
+      {/* The workspace's view camera lives in the address (`?view=`), so the
+        * page needs a router to read it. `MemoryRouter` rather than the real
+        * one: these cases assert reads and states, not navigation. */}
+      <MemoryRouter>
+        <KnowledgePage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

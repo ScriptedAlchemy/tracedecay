@@ -23,6 +23,18 @@ import {
   MemoryStatusPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import { KnowledgeCuration } from './KnowledgeCuration.tsx';
+import { CurationConsole } from './CurationConsole.tsx';
+import { FactTrustHistory } from './FactTrustHistory.tsx';
+import { MemoryGeometry } from './MemoryGeometry.tsx';
+import { MemoryOplog } from './MemoryOplog.tsx';
+import {
+  KNOWLEDGE_PANEL_ID,
+  KnowledgeViewSwitcher,
+  knowledgeTabId,
+  knowledgeViewNote,
+  useKnowledgeView,
+  type KnowledgeViewKind,
+} from './KnowledgeViews.tsx';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -36,10 +48,72 @@ import {
 
 const BASE = '/api/plugins/holographic';
 
-/** Knowledge: memory facts with trust as the primary visual axis, entity
- * summary, and fact drill-down. The semantic WebGL map is the phase-2 canvas
- * per the visualization catalog. */
+/**
+ * Knowledge — channel seven.
+ *
+ * Four camera positions over one memory store, in the order a reader descends
+ * through it: the facts explorer, the phase geometry those facts sit in, what
+ * the curator has done and is configured to do, and the store's own record of
+ * what changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads,
+ * so a position is paid for only when it is looked at.
+ *
+ * Everything the daemon mounts for holographic memory is now consumed here.
+ * Three of those routes are contracted (`/`, `/status`, `/fact/{id}`) and read
+ * through the generated schemas; the rest answer bare JSON and are read through
+ * the house legacy ladder with schemas written against their handlers — see
+ * `data/query/memory.ts`, which explains why that split exists and what it
+ * obliges.
+ */
 export function KnowledgePage() {
+  const [view, selectView] = useKnowledgeView();
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {/* `flex-wrap`, because the note under the camera is prose and the
+        * switcher is four 44px targets: held on one row they laid the note
+        * past the right edge at 320 CSS px and at 400% zoom. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 px-4 py-2">
+        <h1 className="text-sm font-semibold tracking-tight">Knowledge</h1>
+        <KnowledgeViewSwitcher active={view} onSelect={selectView} />
+        <p className="min-w-0 text-2xs text-text-muted">{knowledgeViewNote(view)}</p>
+      </div>
+      {/* The element `aria-controls` names, present for as long as the switcher
+        * is — a reference to an element that was never drawn is an invalid one,
+        * which is what the accessibility gate reads it as. */}
+      <div
+        id={KNOWLEDGE_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={knowledgeTabId(view)}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <KnowledgeView kind={view} />
+      </div>
+    </div>
+  );
+}
+
+/** The camera, applied. Exhaustive so a view added to the switcher cannot be
+ * left without something to draw. */
+function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
+  switch (kind) {
+    case 'facts':
+      return <KnowledgeFacts />;
+    case 'geometry':
+      return <MemoryGeometry />;
+    case 'curation':
+      return <CurationConsole />;
+    case 'oplog':
+      return <MemoryOplog />;
+    default: {
+      const unhandled: never = kind;
+      return unhandled;
+    }
+  }
+}
+
+/** The facts explorer: memory facts with trust as the primary visual axis,
+ * entity summary, and fact drill-down. The semantic WebGL map is the phase-2
+ * canvas per the visualization catalog. */
+function KnowledgeFacts() {
   const [query, setQuery] = useState('');
   const [applied, setApplied] = useState('');
   const overview = useEnvelope(
@@ -78,11 +152,6 @@ export function KnowledgePage() {
 
   return (
     <ExplorerSplit
-      header={
-        <div className="border-b border-edge-subtle bg-surface-1 px-4 py-2">
-          <h1 className="text-sm font-semibold tracking-tight">Knowledge</h1>
-        </div>
-      }
       filters={
         <>
         <ReadSection
@@ -272,6 +341,11 @@ export function KnowledgePage() {
                   Object.entries(selectedDetail).filter(([k]) => k !== 'content'),
                 )}
               />
+              {/* The gauge and the split above are terminal figures: where the
+                * score landed, not how. The audit says how, and it is the one
+                * reading on this inspector that can report its own
+                * incompleteness. */}
+              <FactTrustHistory factId={selectedDetail.fact_id ?? null} />
             </div>
           </InspectorPanel>
         ) : undefined

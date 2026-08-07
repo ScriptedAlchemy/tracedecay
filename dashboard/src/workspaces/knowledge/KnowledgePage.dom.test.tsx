@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FeedbackSplit, KnowledgePage } from './KnowledgePage.tsx';
@@ -162,7 +163,9 @@ describe('KnowledgePage fact detail', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <KnowledgePage />
+        <MemoryRouter>
+          <KnowledgePage />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
 
@@ -245,7 +248,12 @@ function renderKnowledge() {
   });
   render(
     <QueryClientProvider client={client}>
-      <KnowledgePage />
+      {/* The workspace's view camera lives in the address (`?view=`), so the
+        * page needs a router to read it. `MemoryRouter` rather than the real
+        * one: these cases assert reads and states, not navigation. */}
+      <MemoryRouter>
+        <KnowledgePage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

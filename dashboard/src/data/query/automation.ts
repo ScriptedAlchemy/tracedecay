@@ -245,6 +245,33 @@ export function useAutomationSkills() {
   return useLegacy(['automation', 'skills'], '/api/automation/skills', SkillsPayloadSchema);
 }
 
+/**
+ * Fact proposals, from the automation namespace — deliberately, not from the
+ * memory one.
+ *
+ * The daemon mounts this family twice. `automation_fact_proposals_api` serves
+ * `/api/automation/fact-proposals` and `memory_api` serves
+ * `/api/plugins/holographic/fact-proposals`, and they are aliases over one
+ * authority: both list through `automation::fact_proposals::
+ * list_fact_proposals`, both apply through `apply_fact_proposal_with_result`
+ * (refreshing the memory digest on a newly promoted fact), both reject through
+ * `reject_fact_proposal`, and both build the identical
+ * `{proposals, count, limit, error}` list body from the same `json!` literal.
+ * There is no payload, filter, or authority difference to choose between.
+ *
+ * The one behavioural difference is reviewer attribution on the writes: the
+ * memory namespace accepts an explicit `reviewer` in the request body, while
+ * this one records `"dashboard"`. That settles the choice rather than
+ * complicating it. This dashboard has no reviewer identity to supply — nothing
+ * in the shell authenticates a person — so sending a reviewer would mean
+ * inventing one, and a fixed, honest `"dashboard"` attribution is the true
+ * record of who applied the proposal.
+ *
+ * So the namespace stays, and the memory-side alias stays unconsumed on
+ * purpose. Two surfaces applying the same proposal through two routes would be
+ * two apply paths over one ledger, and the Knowledge workspace links to this
+ * queue rather than duplicating it.
+ */
 export function useAutomationProposals() {
   return useLegacy(
     ['automation', 'fact-proposals'],
