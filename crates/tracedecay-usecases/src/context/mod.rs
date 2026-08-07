@@ -275,10 +275,9 @@ macro_rules! digest {
 digest!(CapabilityDigest, PolicyDigest, ConfigurationDigest);
 
 /// The monotonic deadline and cooperative cancellation token moved into
-/// `tracedecay_runtime_core::cancellation`: the kernel's
-/// `store_runtime::rusqlite_parity` bounds every parity probe with them.
-/// Re-exported so every historical `application::context::<item>` path keeps
-/// resolving.
+/// `tracedecay_runtime_core::cancellation`: the kernel bounds its store-runtime
+/// probes with them. Re-exported so every historical
+/// `application::context::<item>` path keeps resolving.
 pub use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

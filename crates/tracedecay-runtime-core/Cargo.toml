@@ -79,10 +79,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 criterion = "0.5"
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-# `store_runtime::rusqlite_parity` is `#![cfg(test)]` and speaks the parity
-# helper's wire protocol. Leaf crate (hex/serde/serde_json/sha2 only), so this
-# adds no crate-graph edge outside the test build.
-tracedecay-sqlite-parity-protocol = { path = "../tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 # The kernel depends on `tracedecay-code-extraction` with `default-features =
 # false` (no grammars) for production. Redundancy fingerprint tests parse real
 # Rust, so the test build opts into the `lite` grammar tier to register the

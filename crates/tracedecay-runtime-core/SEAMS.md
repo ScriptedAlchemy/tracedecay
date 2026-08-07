@@ -41,13 +41,8 @@ once each — against 25 genuine `crate::daemon` references, 24 of which were in
 `tracedecay_rusqlite_runtime::RuntimeWriteAuthority` over it.
 
 What moved: `graph_metadata`, `registry` (+ `attachment`, `capacity`, `close`,
-`leases`, `open`, `ports`, `tests`), `resolver`, `rusqlite_parity`, `shard`,
-`telemetry` — 11.1K of the 12.9K lines. See seam 9 for the part that stayed.
-
-`store_runtime::rusqlite_parity` is `#![cfg(test)]` and speaks the parity
-helper's wire protocol, so `tracedecay-sqlite-parity-protocol` was added as a
-**dev-dependency**. It is a leaf crate (hex/serde/serde_json/sha2), so it adds
-no edge to the non-test crate graph.
+`leases`, `open`, `ports`, `tests`), `resolver`, `shard`, `telemetry` — 11.1K of
+the 12.9K lines. See seam 9 for the part that stayed.
 
 ### 9. `session_registry` could not follow the registry down
 
@@ -224,17 +219,17 @@ re-exported across a crate boundary) and is re-exported at
 | `crate::global_db::{RegisteredGlobalDb, StoreInstanceRecord}` (storage.rs) | `try_classify_project_storage_with_registry` and `classify_registry_storage` lifted to the root `src/storage.rs` shim over a newly `pub` `classify_registry_storage_fields`. No trait object was needed. |
 | `include_str!("../tests/fixtures/redundancy_eval_labeled.json")` (redundancy.rs) | Repointed at `../../../tests/fixtures/…`; the fixture stays in the repo-root `tests/`. |
 | `impl ExactSqlWriteAuthority for DatabaseAuthority` (`src/db/access.rs`) | The trait belongs to `tracedecay_rusqlite_runtime`, so the orphan rule allows the implementation only beside `DatabaseAuthority`. |
-| `daemon::store_runtime::{graph_metadata, registry, resolver, rusqlite_parity, shard, telemetry}` | Moved into `runtime_core::store_runtime` (11.1K lines); root `src/daemon/store_runtime.rs` glob-re-exports. Closes seams 1 and 2. |
+| `daemon::store_runtime::{graph_metadata, registry, resolver, shard, telemetry}` | Moved into `runtime_core::store_runtime` (11.1K lines); root `src/daemon/store_runtime.rs` glob-re-exports. Closes seams 1 and 2. |
 | `branch::{sanitize_branch_name, detect_default_branch, resolve_branch_db_path}` | Moved into `runtime_core::branch`; root re-exports. All three are pure over `gix`, `branch::current_branch`, and `branch_meta::BranchMeta`. `tracedecay-migrate` consumes all three and could not reach the root. |
 | `config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment}` | Moved into `runtime_core::config`; root re-exports. Same reason — `tracedecay_migrate::inventory` prunes directories with it. |
-| `application::context::{CancellationToken, MonotonicDeadline}` | Moved into the new `runtime_core::cancellation`; `src/application/context.rs` re-exports. `store_runtime::rusqlite_parity` bounds every parity probe with them. `is_same_token` widened from `pub(crate)` to `pub` for `src/application/session/types.rs`. |
+| `application::context::{CancellationToken, MonotonicDeadline}` | Moved into the new `runtime_core::cancellation`; `src/application/context.rs` re-exports. The kernel bounds its store-runtime probes with them. `is_same_token` widened from `pub(crate)` to `pub` for `src/application/session/types.rs`. |
 
 ## Feature map
 
 | Root feature | Kernel | Notes |
 |---|---|---|
 | `test-transport` | forwarded to `tracedecay-runtime-core/test-transport`, which forwards to `tracedecay-rusqlite-runtime/test-transport` | 39 `cfg(feature = "test-transport")` sites in the moved files. **Unblocked** — seam 1 is closed and the feature build is green. |
-| `production`, `lite`, `full`, `medium`, `lang-*`, `token-counting`, `semantic-fastembed`, `rusqlite-parity-helper` | not forwarded | No moved file references them. |
+| `production`, `lite`, `full`, `medium`, `lang-*`, `token-counting`, `semantic-fastembed` | not forwarded | No moved file references them. |
 
 Platform cfgs travel with the code: `cfg(windows)` (`lifecycle_lease`,
 `os_str_bytes`, `windows_file`, `db/access/owner_io`), `cfg(unix)`

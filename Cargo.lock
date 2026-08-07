@@ -5656,13 +5656,11 @@ dependencies = [
  "tracedecay-policy",
  "tracedecay-query",
  "tracedecay-runtime-core",
- "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sdk",
  "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-sessions",
- "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
@@ -6073,26 +6071,12 @@ dependencies = [
  "tracedecay-lsp",
  "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
- "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
  "tracing",
  "tree-sitter",
  "url",
  "windows-sys 0.61.2",
  "xattr",
-]
-
-[[package]]
-name = "tracedecay-rusqlite-parity"
-version = "0.1.0"
-dependencies = [
- "hex",
- "rusqlite",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tracedecay-sqlite-parity-protocol",
- "url",
 ]
 
 [[package]]
@@ -6203,17 +6187,6 @@ dependencies = [
  "tracedecay-temporal-query",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "tracedecay-sqlite-parity-protocol"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
 ]
 
 [[package]]

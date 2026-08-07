@@ -29,7 +29,6 @@ CRATE_LANES = (
     "tracedecay-domain",
     "tracedecay-hooks",
     "tracedecay-policy",
-    "tracedecay-rusqlite-parity",
     "tracedecay-rusqlite-runtime",
     "tracedecay-sdk",
     "tracedecay-store",
