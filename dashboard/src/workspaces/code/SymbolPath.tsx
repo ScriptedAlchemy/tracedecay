@@ -164,7 +164,7 @@ function EndpointPicker({
             onChange={(event) => onChange({ ...endpoint, term: event.target.value })}
             aria-label={`Search for the ${label} symbol`}
             placeholder="search symbols, then press Enter"
-            className="h-6 min-w-0 flex-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1.5 text-2xs text-text-primary focus:border-accent/60 focus:outline-none"
+            className="min-h-[var(--touch-target-min)] min-w-0 flex-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1.5 text-2xs text-text-primary focus:border-accent/60 focus:outline-none"
           />
         </label>
       </form>

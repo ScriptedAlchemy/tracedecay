@@ -319,7 +319,7 @@ function RefreshButton({
       aria-label={label}
       aria-busy={pending}
       title={controls.refusal}
-      className="flex shrink-0 items-center gap-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1.5 py-0.5 text-3xs text-text-secondary hover:border-accent/60 hover:text-text-primary focus:border-accent/60 focus:outline-none disabled:opacity-50 disabled:hover:border-edge-subtle disabled:hover:text-text-secondary"
+      className="flex min-h-[var(--touch-target-min)] shrink-0 items-center gap-1 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1.5 py-0.5 text-3xs text-text-secondary hover:border-accent/60 hover:text-text-primary focus:border-accent/60 focus:outline-none disabled:opacity-50 disabled:hover:border-edge-subtle disabled:hover:text-text-secondary"
     >
       <RefreshCw aria-hidden size={9} className={cn(pending && 'animate-spin')} />
       {pending ? 'sent' : text}
