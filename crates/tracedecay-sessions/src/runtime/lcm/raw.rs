@@ -298,6 +298,39 @@ fn externalized_payload_metadata(
     Ok(metadata.to_string())
 }
 
+/// Raw-authority write for one projection-derived message row.
+///
+/// Observation capture already privacy-sanitized and size-bounded the payload
+/// before it became durable, so the projected row stays inline; this binds a
+/// fresh content receipt to the stored text so the canonical raw-read
+/// authority ([`load_raw_message`]) can hydrate observation-projected
+/// messages instead of refusing them as receipt-less rows.
+pub async fn upsert_projection_raw_message(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+) -> Result<(), LcmError> {
+    let sanitization = sanitize_lcm_payload_text(&message.text)
+        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
+    let mut prepared = PreparedMessage {
+        text: sanitization.sanitized_text().to_owned(),
+        metadata_json: None,
+        external_kind: None,
+        sanitization,
+        quarantine_receipt: None,
+        nested_external_payloads: 0,
+        quarantine_reason: None,
+        quarantine_kind: None,
+    };
+    prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
+    upsert_inline_raw_message(
+        conn,
+        message,
+        &prepared.text,
+        prepared.metadata_json.as_deref(),
+    )
+    .await
+}
+
 pub async fn upsert_raw_message_with_payload_tracked(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,

@@ -13,9 +13,6 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_sessions::compatibility::{
-    derived_text_for_index, derived_text_for_snippet, projected_content_hash,
-};
 use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
@@ -514,50 +511,16 @@ pub(super) async fn apply_session(
     }
 }
 
+/// Writes the projection-derived raw row through the canonical LCM raw
+/// authority so it carries the content-bound sanitization receipt that
+/// hydration requires; a receipt-less raw row is unreadable, not raw storage.
 async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
-) -> bool {
-    let content_hash = projected_content_hash(&message.text);
-    let snippet = derived_text_for_snippet(&message.text);
-    let index = derived_text_for_index(&message.text);
-    conn.execute(
-        "INSERT INTO lcm_raw_messages (
-            provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inline', NULL, ?9, ?10, 0, 0, ?11)
-         ON CONFLICT(provider, message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            role = excluded.role,
-            ordinal = excluded.ordinal,
-            timestamp = excluded.timestamp,
-            content = excluded.content,
-            content_hash = excluded.content_hash,
-            storage_kind = excluded.storage_kind,
-            payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
-            metadata_json = excluded.metadata_json",
-        params![
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            message.session_id.as_str(),
-            message.role.as_str(),
-            message.ordinal,
-            message.timestamp,
-            message.text.as_str(),
-            content_hash.as_str(),
-            snippet.as_str(),
-            index.as_str(),
-            message.metadata_json.as_deref(),
-        ],
-    )
-    .await
-    .is_ok()
+) -> ProjectionStoreResult<()> {
+    tracedecay_sessions::runtime::lcm::raw::upsert_projection_raw_message(conn, message)
+        .await
+        .map_err(|error| storage("upsert projected LCM raw message", error))
 }
 
 async fn apply_rows(
@@ -653,14 +616,8 @@ async fn apply_rows(
             provider: message.provider.clone(),
             message_id: message.message_id.clone(),
         })?;
-    if projected_message.provider != "hermes"
-        && !preserve_protected_payload
-        && !upsert_projected_raw_message(conn, &projected_message).await
-    {
-        return Err(storage_message(
-            "upsert projected LCM raw message",
-            "database write failed",
-        ));
+    if projected_message.provider != "hermes" && !preserve_protected_payload {
+        upsert_projected_raw_message(conn, &projected_message).await?;
     }
     Ok(transition == MessageTransition::Insert)
 }
