@@ -241,6 +241,27 @@ fn generate_plugin_bundle() {
     );
     append_generated_plugin_files(
         &mut code,
+        "GENERATED_OPENCODE_AGENT_FILES",
+        agents.iter().map(|agent| {
+            (
+                format!("agents/{}", agent.file_name),
+                // OpenCode validates agent frontmatter against its own schema:
+                // `tools` must be a map of tool name to boolean (the Claude
+                // comma-separated string invalidates the whole host
+                // configuration), `mode: subagent` keeps these out of the
+                // primary-agent rotation, and Claude-specific `name`/`model`
+                // keys are dropped. The canonical read-only intent maps to
+                // denying OpenCode's mutating built-ins.
+                format!(
+                    "---\ndescription: {}\nmode: subagent\ntools:\n  write: false\n  edit: false\n  bash: false\n  patch: false\n---\n{}",
+                    quoted_string(&agent.description),
+                    agent.body
+                ),
+            )
+        }),
+    );
+    append_generated_plugin_files(
+        &mut code,
         "GENERATED_CODEX_AGENT_FILES",
         agents.iter().map(|agent| {
             (

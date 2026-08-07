@@ -365,9 +365,13 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
 
 /// `OpenCode` Agent component: host-loadable skills, agent definitions, and
 /// command prompt templates. `AGENTS.md` remains Core instruction content.
+///
+/// Agents deploy in the OpenCode-derived form: stock OpenCode validates agent
+/// frontmatter against its own schema and rejects the Claude `tools:` string,
+/// which would invalidate the host's entire configuration.
 pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
     compose(
-        &[GENERATED_CLAUDE_AGENT_FILES, CLAUDE_COMMAND_FILES],
+        &[GENERATED_OPENCODE_AGENT_FILES, CLAUDE_COMMAND_FILES],
         all_skill_files(),
     )
 }
@@ -387,7 +391,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn plugin_source_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
     }
 
     /// No host deploys the same relative path twice.
