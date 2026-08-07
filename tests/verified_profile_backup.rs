@@ -18,7 +18,7 @@ use tracedecay_graph_db::{
     GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphTraversalDirection,
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
 };
-use tracedecay_migrate::profile_backup::{
+use tracedecay::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
 };
 use tracedecay_runtime_core::storage::{
@@ -245,7 +245,7 @@ fn verified_backup_restores_databases_that_open_and_accept_writes() {
     let backup = create_backup(&temp, &profile);
 
     let manifest =
-        tracedecay_migrate::profile_backup::load_and_verify_backup(&backup).unwrap();
+        tracedecay::profile_backup::load_and_verify_backup(&backup).unwrap();
     assert_eq!(manifest.source_brain_id, BRAIN_ID);
     assert_eq!(manifest.source_profile_id, PROFILE_ID);
     assert_eq!(manifest.projects.len(), 1);

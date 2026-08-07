@@ -7,9 +7,9 @@
 //! historical `crate::daemon::store_runtime::…` path resolving.
 //!
 //! `session_registry` did **not** follow. It stores `Arc<RegisteredGlobalDb>`
-//! in its public surface, and `tracedecay-global-db` depends on
-//! `tracedecay-migrate`, which depends on the kernel — so the kernel taking
-//! that edge is a Cargo cycle. It also reaches `daemon::{authority,
+//! in its public surface, and `tracedecay-global-db` depends on the kernel —
+//! so the kernel taking that edge is a Cargo cycle. It also reaches
+//! `daemon::{authority,
 //! code_index_scheduler, profile_identity, transport}` and `log_daemon_event`.
 //! `crates/tracedecay-runtime-core/SEAMS.md` catalogs the remainder.
 
@@ -20,9 +20,9 @@ pub(crate) mod session_registry;
 /// Installs the root-owned registered global/session schema installer into the
 /// kernel's store-runtime registry.
 ///
-/// The schema lives in `tracedecay-global-db`, which already depends on
-/// `tracedecay-migrate`, which depends on the kernel — so the kernel reaches it
-/// through `tracedecay_runtime_core::ports::registered_schema` instead. The
+/// The schema lives in `tracedecay-global-db`, which already depends on the
+/// kernel — so the kernel reaches it through
+/// `tracedecay_runtime_core::ports::registered_schema` instead. The
 /// port fails closed, so every path that can initialise a profile- or
 /// session-scoped shard must call this first. Idempotent.
 pub(crate) fn register_registered_schema_installer() {

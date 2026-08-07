@@ -25,7 +25,7 @@ pub(super) fn read_required_profile_identity(
     profile_root: &Path,
     corrupt_material: bool,
 ) -> Result<(String, String), ProfileBackupError> {
-    crate::profile_identity::read_required(profile_root)
+    crate::daemon::profile_identity::read_required(profile_root)
         .map(|(brain_id, profile_id)| {
             (
                 brain_id.as_str().to_owned(),

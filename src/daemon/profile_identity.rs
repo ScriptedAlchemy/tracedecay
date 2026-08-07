@@ -74,6 +74,23 @@ pub(crate) fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityA
     })
 }
 
+/// Reads the exact final profile identity record, failing when it is absent.
+///
+/// Backup and restore verification require the persisted identity; unlike
+/// [`load_or_create`] this never mints a new one, and unlike
+/// [`load_existing`] it does not validate the enclosing root — the record may
+/// live inside staged backup material rather than a live profile root.
+pub(crate) fn read_required(profile_root: &Path) -> Result<(BrainId, UserProfileId)> {
+    let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
+    let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
+            path.display()
+        ),
+    })?;
+    Ok((record.brain_id, record.profile_id))
+}
+
 pub(super) fn load_or_create_pinned(
     profile_root: &Path,
     expected: Option<(&BrainId, &UserProfileId)>,

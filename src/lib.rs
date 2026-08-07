@@ -98,13 +98,13 @@ mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
 pub mod memory;
-pub mod migrate;
 pub mod monitor;
 #[cfg(test)]
 mod os_str_bytes;
 mod path_scope;
 mod path_tree;
 pub mod privacy;
+pub mod profile_backup;
 pub mod profile_registry_maintenance;
 pub mod project_registry;
 pub mod redundancy;

@@ -281,7 +281,7 @@ fn handle_backup_profile(
     let backup = tracedecay::daemon::with_quiesced_installed_service(
         "complete profile backup",
         |lifecycle| {
-            tracedecay::migrate::profile_backup::create_complete_profile_backup(
+            tracedecay::profile_backup::create_complete_profile_backup(
                 &profile_root,
                 Path::new(&destination),
                 &backup_id,
@@ -304,7 +304,7 @@ fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,
 ) -> tracedecay::errors::Result<()> {
-    let manifest = tracedecay::migrate::profile_backup::rehearse_complete_profile_backup(
+    let manifest = tracedecay::profile_backup::rehearse_complete_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )
