@@ -111,8 +111,8 @@ impl LogicalEffectIdempotencyDomain {
     const fn domain(self) -> &'static str {
         match self {
             Self::HostObservation => "tracedecay.host-observation.idempotency.v1",
-            Self::FeedbackObservation => "tracedecay.feedback.observation.plan26.v1",
-            Self::FeedbackSourceEvent => "tracedecay.feedback.source-event.plan26.v1",
+            Self::FeedbackObservation => "tracedecay.feedback.observation.v1",
+            Self::FeedbackSourceEvent => "tracedecay.feedback.source-event.v1",
             Self::ConfigurationEffect => "tracedecay.configuration.effect-idempotency.v1",
         }
     }
@@ -540,7 +540,7 @@ mod tests {
         let saved = "saved.fixture";
         let observation = "observation.fixture";
         let legacy = canonical_sha256(&(
-            "tracedecay.feedback.observation.plan26.v1",
+            "tracedecay.feedback.observation.v1",
             saved,
             observation,
         ))
@@ -560,7 +560,7 @@ mod tests {
         let subject = "subject.fixture";
         let source_event = "source.fixture";
         let legacy = canonical_sha256(&(
-            "tracedecay.feedback.source-event.plan26.v1",
+            "tracedecay.feedback.source-event.v1",
             subject,
             UtcMicros(7),
             source_event,

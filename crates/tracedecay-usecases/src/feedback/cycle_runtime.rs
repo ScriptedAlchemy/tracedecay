@@ -48,8 +48,8 @@ use tracedecay_runtime_core::db::Database;
 use super::concrete::{FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore};
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26LspMethodClassV1, Plan26LspStateV1,
+    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackLspMethodClassV1, FeedbackLspStateV1,
 };
 
 /// Resolves one LSP lifecycle request to the already-authorized, bounded
@@ -240,7 +240,7 @@ pub struct FeedbackCycleRuntime {
     lsp_input: FeedbackCycleLspInput,
     provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
-    source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 /// Opens the one concrete feedback-cycle owner from already-open project
@@ -319,7 +319,7 @@ impl FeedbackCycleRuntime {
 
     pub fn source_observation_port(
         &self,
-    ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
+    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.source_observations)
     }
 
@@ -481,16 +481,16 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
                     u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 runtime.source_observations.observe_source_event(
                     &invocation.request.input,
-                    Plan26FeedbackSourceEventV1::ArgumentRejected {
-                        operation: Plan26FeedbackOperationV1::LspSession,
-                        outcome: Plan26FeedbackOutcomeV1::Rejected,
+                    FeedbackSourceEventV1::ArgumentRejected {
+                        operation: FeedbackOperationV1::LspSession,
+                        outcome: FeedbackOutcomeV1::Rejected,
                     },
                 );
                 runtime.source_observations.observe_source_event(
                     &invocation.request.input,
                     lsp_method_state_event(
-                        Plan26LspStateV1::MethodRejected,
-                        Plan26FeedbackOutcomeV1::Rejected,
+                        FeedbackLspStateV1::MethodRejected,
+                        FeedbackOutcomeV1::Rejected,
                         0,
                         duration_micros,
                     ),
@@ -503,8 +503,8 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             runtime.source_observations.observe_source_event(
                 &input,
                 lsp_method_state_event(
-                    Plan26LspStateV1::MethodAdmitted,
-                    Plan26FeedbackOutcomeV1::Admitted,
+                    FeedbackLspStateV1::MethodAdmitted,
+                    FeedbackOutcomeV1::Admitted,
                     1,
                     admission_duration_micros,
                 ),
@@ -513,14 +513,14 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             let duration_micros =
                 u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
             let outcome = if result.is_ok() {
-                Plan26FeedbackOutcomeV1::Completed
+                FeedbackOutcomeV1::Completed
             } else {
-                Plan26FeedbackOutcomeV1::Failed
+                FeedbackOutcomeV1::Failed
             };
             runtime.source_observations.observe_source_event(
                 &input,
                 lsp_method_state_event(
-                    Plan26LspStateV1::MethodCompleted,
+                    FeedbackLspStateV1::MethodCompleted,
                     outcome,
                     u32::from(result.is_ok()),
                     duration_micros,
@@ -528,9 +528,9 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             );
             runtime.source_observations.observe_source_event(
                 &input,
-                Plan26FeedbackSourceEventV1::Delivery {
-                    operation: Plan26FeedbackOperationV1::FeedbackCycle,
-                    route: Plan26DeliveryRouteV1::Lsp,
+                FeedbackSourceEventV1::Delivery {
+                    operation: FeedbackOperationV1::FeedbackCycle,
+                    route: FeedbackDeliveryRouteV1::Lsp,
                     outcome,
                     item_count: u32::from(result.is_ok()),
                     duration_micros: Some(duration_micros),
@@ -915,14 +915,14 @@ fn lsp_trigger_matches_invocation(
 }
 
 fn lsp_method_state_event(
-    state: Plan26LspStateV1,
-    outcome: Plan26FeedbackOutcomeV1,
+    state: FeedbackLspStateV1,
+    outcome: FeedbackOutcomeV1,
     item_count: u32,
     duration_micros: u64,
-) -> Plan26FeedbackSourceEventV1 {
-    Plan26FeedbackSourceEventV1::LspState {
+) -> FeedbackSourceEventV1 {
+    FeedbackSourceEventV1::LspState {
         state,
-        method: Some(Plan26LspMethodClassV1::Diagnostics),
+        method: Some(FeedbackLspMethodClassV1::Diagnostics),
         outcome,
         item_count,
         duration_micros: Some(duration_micros),

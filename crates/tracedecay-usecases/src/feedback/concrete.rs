@@ -41,10 +41,10 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::concrete_evidence::{complete, interruption, unavailable};
 use super::observations::{
-    DurablePlan26FeedbackObservationQueueAdapterV1, DurablePlan26FeedbackObservationSinkV1,
+    DurableFeedbackObservationQueueAdapterV1, DurableFeedbackObservationSinkV1,
     FeedbackObservationEnvelopeV1, FeedbackObservationReadModelV1, FeedbackObservationSinkOutcome,
-    Plan26AnchorOperationV1, Plan26FeedbackObservationAdapter, Plan26FeedbackObservationEmitterV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+    FeedbackAnchorOperationV1, FeedbackObservationAdapter, FeedbackObservationEmitterV1,
+    FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 use super::owner::{
     AuthorizedFeedbackReadRequestV1, CanonicalFeedbackReadOwnerV1, DaemonFeedbackReadOwnerV1,
@@ -60,7 +60,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseWriteTransaction};
 
 const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.completed-publications.v1";
-const OBSERVATION_LEDGER_METADATA_KEY: &str = "feedback.plan26-observations.v1";
+const OBSERVATION_LEDGER_METADATA_KEY: &str = "feedback.observations.v1";
 const PUBLICATION_LEDGER_SCHEMA_VERSION: u16 = 1;
 const OBSERVATION_LEDGER_SCHEMA_VERSION: u16 = 3;
 const REQUEST_HANDLE_SCHEMA_VERSION: u16 = 1;
@@ -97,7 +97,7 @@ pub enum FeedbackRuntimeError {
 pub struct ProjectFeedbackStore {
     database: Database,
     project_root: PathBuf,
-    source_observations: Option<Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
+    source_observations: Option<Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -131,7 +131,7 @@ pub struct FeedbackRuntime {
     publications: ProjectFeedbackStore,
     access: ProjectSourceAccessSnapshot,
     observations: Arc<dyn FeedbackObservationPort + Send + Sync>,
-    source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -254,7 +254,7 @@ impl ProjectFeedbackObservationSinkV1 {
     }
 }
 
-impl DurablePlan26FeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1 {
+impl DurableFeedbackObservationSinkV1 for ProjectFeedbackObservationSinkV1 {
     fn enqueue_durable_feedback_observation(
         &self,
         mut envelope: FeedbackObservationEnvelopeV1,
@@ -294,10 +294,10 @@ impl Drop for ProjectFeedbackObservationSinkV1 {
         let sequence = self.next_sequence();
         let observed_at = now_micros();
         let Some(mut envelope) =
-            super::observations::plan26_feedback_source_event_envelope_for_subject(
+            super::observations::feedback_source_event_envelope_for_subject(
                 self.boot_id.clone(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::TelemetryDropObserved {
+                FeedbackSourceEventV1::TelemetryDropObserved {
                     dropped_count: dropped,
                     last_sequence: sequence.saturating_sub(1),
                     terminal: true,
@@ -372,11 +372,11 @@ impl FeedbackRuntime {
         let route_authorization = ProjectFeedbackRouteAuthorization {
             access: access.clone(),
         };
-        let durable_observations = DurablePlan26FeedbackObservationQueueAdapterV1::new(
+        let durable_observations = DurableFeedbackObservationQueueAdapterV1::new(
             ProjectFeedbackObservationSinkV1::start(publications.database.clone()).await?,
         );
         let observation_adapter =
-            Arc::new(Plan26FeedbackObservationAdapter::new(durable_observations));
+            Arc::new(FeedbackObservationAdapter::new(durable_observations));
         publications.source_observations = Some(observation_adapter.clone());
         let service = FeedbackReadService::new(
             CanonicalFeedbackReadOwnerV1::new(publications.clone()),
@@ -415,7 +415,7 @@ impl FeedbackRuntime {
 
     pub fn source_observation_port(
         &self,
-    ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
+    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.source_observations)
     }
 
@@ -893,7 +893,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 self.observe_expansion(
                     context.request,
                     request,
-                    Plan26FeedbackOutcomeV1::Unavailable,
+                    FeedbackOutcomeV1::Unavailable,
                     0,
                     observed_at,
                 );
@@ -915,7 +915,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 self.observe_expansion(
                     context.request,
                     request,
-                    Plan26FeedbackOutcomeV1::Stale,
+                    FeedbackOutcomeV1::Stale,
                     0,
                     finished_at,
                 );
@@ -925,7 +925,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 self.observe_expansion(
                     context.request,
                     request,
-                    Plan26FeedbackOutcomeV1::Denied,
+                    FeedbackOutcomeV1::Denied,
                     0,
                     finished_at,
                 );
@@ -940,7 +940,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 self.observe_expansion(
                     context.request,
                     request,
-                    Plan26FeedbackOutcomeV1::Partial,
+                    FeedbackOutcomeV1::Partial,
                     0,
                     observed_at,
                 );
@@ -965,7 +965,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
                 self.observe_expansion(
                     context.request,
                     request,
-                    Plan26FeedbackOutcomeV1::Unavailable,
+                    FeedbackOutcomeV1::Unavailable,
                     0,
                     finished_at,
                 );
@@ -974,7 +974,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
             self.observe_expansion(
                 context.request,
                 request,
-                Plan26FeedbackOutcomeV1::Completed,
+                FeedbackOutcomeV1::Completed,
                 expanded.anchors.len().try_into().unwrap_or(u32::MAX),
                 finished_at,
             );
@@ -1085,14 +1085,14 @@ impl ProjectFeedbackStore {
     pub async fn observation_read_model(
         &self,
     ) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
-        plan26_feedback_observation_read_model(&self.database).await
+        feedback_observation_read_model(&self.database).await
     }
 
     fn observe_expansion(
         &self,
         context: &RequestContext,
         request: &FeedbackExpandRequestV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        outcome: FeedbackOutcomeV1,
         returned_count: u32,
         observed_at: UtcMicros,
     ) {
@@ -1109,8 +1109,8 @@ impl ProjectFeedbackStore {
         observations.observe_source_event_for_subject(
             subject_digest,
             observed_at,
-            Plan26FeedbackSourceEventV1::AnchorExpansion {
-                operation: Plan26AnchorOperationV1::EvidenceExpansion,
+            FeedbackSourceEventV1::AnchorExpansion {
+                operation: FeedbackAnchorOperationV1::EvidenceExpansion,
                 outcome,
                 returned_count,
                 duration_micros: None,
@@ -1355,7 +1355,7 @@ impl ProjectFeedbackStore {
 /// Read the canonical durable Plan-26 observation projection from an already
 /// admitted project database. Doctor uses this same projection rather than
 /// deriving a second telemetry model.
-pub async fn plan26_feedback_observation_read_model(
+pub async fn feedback_observation_read_model(
     database: &Database,
 ) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
     let ledger = match database
@@ -1402,7 +1402,7 @@ fn project_observation_ledger(
         model.watermark.observed_through = boot.last_observed_at;
         if ledger.observations.is_empty() && ledger.retention_dropped == 0 && incomplete_boots == 0
         {
-            model.coverage = super::observations::Plan26CoverageV1::Known;
+            model.coverage = super::observations::FeedbackCoverageV1::Known;
         }
     }
     Ok(model)
@@ -1477,11 +1477,11 @@ fn decode_ledger(
 fn interruption_outcome(
     context: &RequestContext,
     observed_at: UtcMicros,
-) -> Plan26FeedbackOutcomeV1 {
+) -> FeedbackOutcomeV1 {
     match context.admission_at(observed_at) {
-        RequestAdmission::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-        RequestAdmission::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
-        RequestAdmission::Admitted => Plan26FeedbackOutcomeV1::Unavailable,
+        RequestAdmission::Cancelled => FeedbackOutcomeV1::Cancelled,
+        RequestAdmission::TimedOut => FeedbackOutcomeV1::TimedOut,
+        RequestAdmission::Admitted => FeedbackOutcomeV1::Unavailable,
     }
 }
 
@@ -1493,7 +1493,7 @@ async fn persist_feedback_observation(
         return Err(FeedbackRuntimeError::Corrupt);
     }
     let transaction = database
-        .begin_write_transaction("record plan26 feedback observation")
+        .begin_write_transaction("record feedback observation")
         .await
         .map_err(|_| FeedbackRuntimeError::Store)?;
     let mut ledger = load_observation_ledger(&transaction).await?;
@@ -1517,7 +1517,7 @@ async fn persist_feedback_observation(
         .ok_or(FeedbackRuntimeError::Corrupt)?;
     let terminal = matches!(
         envelope.source_event.as_ref(),
-        Some(Plan26FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
+        Some(FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
     );
     match ledger
         .producer_boots
@@ -1574,7 +1574,7 @@ async fn persist_feedback_producer_boot(
         .validate()
         .map_err(|_| FeedbackRuntimeError::Corrupt)?;
     let transaction = database
-        .begin_write_transaction("record plan26 feedback producer boot")
+        .begin_write_transaction("record feedback producer boot")
         .await
         .map_err(|_| FeedbackRuntimeError::Store)?;
     let mut ledger = load_observation_ledger(&transaction).await?;
@@ -1728,7 +1728,7 @@ fn apply_pending_worker_drops(
     let pending = dropped_count.swap(0, Ordering::Relaxed);
     envelope.delivery.dropped = envelope.delivery.dropped.saturating_add(pending);
     if envelope.delivery.dropped > 0 {
-        envelope.delivery.coverage = super::observations::Plan26CoverageV1::Partial;
+        envelope.delivery.coverage = super::observations::FeedbackCoverageV1::Partial;
     }
     envelope.delivery.dropped
 }
@@ -1913,12 +1913,12 @@ mod tests {
     }
 
     fn source_envelope(boot_id: &ManifestDigest, sequence: u64) -> FeedbackObservationEnvelopeV1 {
-        super::super::observations::plan26_feedback_source_event_envelope_for_subject(
+        super::super::observations::feedback_source_event_envelope_for_subject(
             boot_id.clone(),
             UtcMicros(sequence.try_into().unwrap()),
-            Plan26FeedbackSourceEventV1::ArgumentRejected {
-                operation: super::super::observations::Plan26FeedbackOperationV1::FeedbackGet,
-                outcome: Plan26FeedbackOutcomeV1::Rejected,
+            FeedbackSourceEventV1::ArgumentRejected {
+                operation: super::super::observations::FeedbackOperationV1::FeedbackGet,
+                outcome: FeedbackOutcomeV1::Rejected,
             },
         )
         .unwrap()
@@ -1975,7 +1975,7 @@ mod tests {
         let terminal = control_receiver.try_recv().unwrap();
         assert!(matches!(
             terminal.source_event,
-            Some(Plan26FeedbackSourceEventV1::TelemetryDropObserved {
+            Some(FeedbackSourceEventV1::TelemetryDropObserved {
                 dropped_count: 0,
                 terminal: true,
                 ..
@@ -2042,7 +2042,7 @@ mod tests {
         let model = project_observation_ledger(&decoded).unwrap();
         assert_eq!(
             model.coverage,
-            super::super::observations::Plan26CoverageV1::Unknown
+            super::super::observations::FeedbackCoverageV1::Unknown
         );
         assert_eq!(model.denominators.retention_dropped, 1);
         assert_eq!(model.denominators.incomplete_boots, 1);
@@ -2062,7 +2062,7 @@ mod tests {
         assert_eq!(dropped_count.load(Ordering::Relaxed), 0);
         assert_eq!(
             envelope.delivery.coverage,
-            super::super::observations::Plan26CoverageV1::Partial
+            super::super::observations::FeedbackCoverageV1::Partial
         );
 
         saturating_add(&dropped_count, envelope.delivery.dropped.saturating_add(1));

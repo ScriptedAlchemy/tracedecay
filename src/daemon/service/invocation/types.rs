@@ -160,10 +160,10 @@ pub(in crate::daemon::service) struct SwitchableFeedbackCycleRuntimeV1 {
 }
 
 pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
-    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
     project_id: &ProjectId,
     request: &FeedbackCycleRequest,
-    outcome: Plan26FeedbackOutcomeV1,
+    outcome: FeedbackOutcomeV1,
 ) {
     let trigger = match request.trigger {
         DiagnosticTrigger::DocumentSave => "document_save",
@@ -181,9 +181,9 @@ pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
     observations.observe_source_event_for_subject(
         subject,
         now_micros(),
-        Plan26FeedbackSourceEventV1::Delivery {
-            operation: Plan26FeedbackOperationV1::FeedbackCycle,
-            route: Plan26DeliveryRouteV1::Lsp,
+        FeedbackSourceEventV1::Delivery {
+            operation: FeedbackOperationV1::FeedbackCycle,
+            route: FeedbackDeliveryRouteV1::Lsp,
             outcome,
             item_count: 0,
             duration_micros: None,
@@ -193,13 +193,13 @@ pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
 
 pub(in crate::daemon::service) struct UnavailableFeedbackCycleRuntimeV1 {
     project_id: ProjectId,
-    observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 impl UnavailableFeedbackCycleRuntimeV1 {
     pub(in crate::daemon::service) fn new(
         project_id: ProjectId,
-        observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+        observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
     ) -> Self {
         Self {
             project_id,
@@ -220,7 +220,7 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
                 &observations,
                 &project_id,
                 &request,
-                Plan26FeedbackOutcomeV1::Unavailable,
+                FeedbackOutcomeV1::Unavailable,
             );
             Err(LspRuntimeFailure::new("feedback-cycle-unavailable"))
         })
@@ -291,7 +291,7 @@ impl RegisteredFeedbackRuntime {
 
     pub(in crate::daemon::service) fn source_observation_port(
         &self,
-    ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
+    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         self.runtime.source_observation_port()
     }
 }

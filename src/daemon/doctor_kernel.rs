@@ -505,23 +505,23 @@ pub fn observability_read_from_model(
             ObservabilityReadV1::Absent
         }
         Ok(model) => {
-            use crate::application::feedback::observations::Plan26CoverageV1;
+            use crate::application::feedback::observations::FeedbackCoverageV1;
             let (state, coverage) = match model.coverage {
-                Plan26CoverageV1::Known => (
+                FeedbackCoverageV1::Known => (
                     ObservabilityStateV1::Current,
                     DoctorCoverageCompletenessV1::Complete,
                 ),
-                Plan26CoverageV1::Stale => (
+                FeedbackCoverageV1::Stale => (
                     ObservabilityStateV1::Stale,
                     DoctorCoverageCompletenessV1::Partial,
                 ),
-                Plan26CoverageV1::Partial
-                | Plan26CoverageV1::Sampled
-                | Plan26CoverageV1::Capped => (
+                FeedbackCoverageV1::Partial
+                | FeedbackCoverageV1::Sampled
+                | FeedbackCoverageV1::Capped => (
                     ObservabilityStateV1::Current,
                     DoctorCoverageCompletenessV1::Partial,
                 ),
-                Plan26CoverageV1::Unknown => (
+                FeedbackCoverageV1::Unknown => (
                     ObservabilityStateV1::Current,
                     DoctorCoverageCompletenessV1::Unknown,
                 ),
@@ -1359,7 +1359,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     &project_root,
                 ),
                 language_server_read_from_broker(&diagnostic_broker),
-                crate::application::feedback::concrete::plan26_feedback_observation_read_model(
+                crate::application::feedback::concrete::feedback_observation_read_model(
                     &graph,
                 ),
                 advisory_feedback_read,

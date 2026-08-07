@@ -498,11 +498,11 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
         Box::pin(async { panic!("controlled RMCP fixture uses application invocation") })
     }
 
-    fn observe_plan26_feedback(
+    fn observe_feedback(
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
+        _event: crate::application::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
         Box::pin(async { panic!("controlled RMCP fixture does not observe feedback") })
     }

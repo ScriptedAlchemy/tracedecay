@@ -73,9 +73,9 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::application::feedback::observations::{
-    Plan26ArgumentRejectionClassV1, Plan26DeliveryRouteV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26RejectedArgumentV1,
-    Plan26SseLifecycleV1,
+    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackRejectedArgumentV1,
+    FeedbackSseLifecycleV1,
 };
 use crate::application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
@@ -1511,11 +1511,11 @@ impl Drop for SseDisconnectObserver {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = executor
-                    .observe_plan26_feedback(
+                    .observe_feedback(
                         subject,
                         current_micros().unwrap_or(UtcMicros(1)),
-                        Plan26FeedbackSourceEventV1::SseLifecycle {
-                            lifecycle: Plan26SseLifecycleV1::Disconnected,
+                        FeedbackSourceEventV1::SseLifecycle {
+                            lifecycle: FeedbackSseLifecycleV1::Disconnected,
                             sequence: None,
                             item_count: 0,
                             duration_micros: None,
@@ -1607,34 +1607,34 @@ fn sse_observation_subject(request_id: &RequestId, operation_id: &str) -> Option
     .ok()
 }
 
-async fn emit_http_plan26_observation(
+async fn emit_http_feedback_observation(
     state: &HttpOperationEventState,
     subject: Option<&ManifestDigest>,
     observed_at: UtcMicros,
-    event: Plan26FeedbackSourceEventV1,
+    event: FeedbackSourceEventV1,
 ) {
     if let (Some(subject), Some(executor)) = (subject, state.executor.as_ref()) {
         let _ = executor
-            .observe_plan26_feedback(subject.clone(), observed_at, event)
+            .observe_feedback(subject.clone(), observed_at, event)
             .await;
     }
 }
 
-fn plan26_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(Plan26SseLifecycleV1, u32, bool)> {
+fn feedback_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(FeedbackSseLifecycleV1, u32, bool)> {
     match &event.kind {
-        StreamEventKind::Item(_) => Some((Plan26SseLifecycleV1::EventDelivered, 1, false)),
+        StreamEventKind::Item(_) => Some((FeedbackSseLifecycleV1::EventDelivered, 1, false)),
         StreamEventKind::Progress { .. } => None,
-        StreamEventKind::Gap(_) => Some((Plan26SseLifecycleV1::Gap, 0, false)),
+        StreamEventKind::Gap(_) => Some((FeedbackSseLifecycleV1::Gap, 0, false)),
         StreamEventKind::Terminal(terminal) => Some((
             match terminal.termination {
-                OperationTermination::Completed => Plan26SseLifecycleV1::Completed,
-                OperationTermination::Cancelled => Plan26SseLifecycleV1::Cancelled,
-                OperationTermination::TimedOut => Plan26SseLifecycleV1::TimedOut,
+                OperationTermination::Completed => FeedbackSseLifecycleV1::Completed,
+                OperationTermination::Cancelled => FeedbackSseLifecycleV1::Cancelled,
+                OperationTermination::TimedOut => FeedbackSseLifecycleV1::TimedOut,
                 OperationTermination::Failed | OperationTermination::EffectUnknown => {
-                    Plan26SseLifecycleV1::Failed
+                    FeedbackSseLifecycleV1::Failed
                 }
-                OperationTermination::Unavailable => Plan26SseLifecycleV1::Unavailable,
-                OperationTermination::Partial => Plan26SseLifecycleV1::Partial,
+                OperationTermination::Unavailable => FeedbackSseLifecycleV1::Unavailable,
+                OperationTermination::Partial => FeedbackSseLifecycleV1::Partial,
             },
             0,
             true,
@@ -1736,17 +1736,17 @@ async fn http_operation_events(
     let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
         OperationId::from_request(operation_id)
     } else {
-        emit_http_plan26_observation(
+        emit_http_feedback_observation(
             &state,
             observation_subject.as_ref(),
             current_micros().unwrap_or(UtcMicros(1)),
-            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                operation: Plan26FeedbackOperationV1::SseStream,
-                route: Some(Plan26DeliveryRouteV1::Http),
-                argument: Plan26RejectedArgumentV1::RequestHandle,
-                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::SseStream,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestHandle,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
                 schema_revision: 1,
-                outcome: Plan26FeedbackOutcomeV1::Rejected,
+                outcome: FeedbackOutcomeV1::Rejected,
             },
         )
         .await;
@@ -1786,30 +1786,30 @@ async fn http_operation_events(
     {
         Ok(context) => context,
         Err(error) => {
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    route: Some(Plan26DeliveryRouteV1::Http),
-                    argument: Plan26RejectedArgumentV1::RequestHandle,
-                    rejection: Plan26ArgumentRejectionClassV1::Unauthorized,
+                FeedbackSourceEventV1::SurfaceArgumentRejected {
+                    operation: FeedbackOperationV1::SseStream,
+                    route: Some(FeedbackDeliveryRouteV1::Http),
+                    argument: FeedbackRejectedArgumentV1::RequestHandle,
+                    rejection: FeedbackArgumentRejectionClassV1::Unauthorized,
                     schema_revision: 1,
-                    outcome: Plan26FeedbackOutcomeV1::Denied,
+                    outcome: FeedbackOutcomeV1::Denied,
                 },
             )
             .await;
             return operation_event_problem(&request_id, error);
         }
     };
-    emit_http_plan26_observation(
+    emit_http_feedback_observation(
         &state,
         observation_subject.as_ref(),
         observed_at,
-        Plan26FeedbackSourceEventV1::Dispatch {
-            operation: Plan26FeedbackOperationV1::SseStream,
-            outcome: Plan26FeedbackOutcomeV1::Admitted,
+        FeedbackSourceEventV1::Dispatch {
+            operation: FeedbackOperationV1::SseStream,
+            outcome: FeedbackOutcomeV1::Admitted,
             capacity: 1,
             admitted: 1,
         },
@@ -1829,13 +1829,13 @@ async fn http_operation_events(
         Ok(subscription) => subscription,
         Err(error) => {
             if matches!(&error, OperationEventError::Saturated) {
-                emit_http_plan26_observation(
+                emit_http_feedback_observation(
                     &state,
                     observation_subject.as_ref(),
                     observed_at,
-                    Plan26FeedbackSourceEventV1::Dispatch {
-                        operation: Plan26FeedbackOperationV1::SseStream,
-                        outcome: Plan26FeedbackOutcomeV1::AtCapacity,
+                    FeedbackSourceEventV1::Dispatch {
+                        operation: FeedbackOperationV1::SseStream,
+                        outcome: FeedbackOutcomeV1::AtCapacity,
                         capacity: 1,
                         admitted: 0,
                     },
@@ -1846,15 +1846,15 @@ async fn http_operation_events(
                 &error,
                 OperationEventError::FrontierExpired | OperationEventError::ResumeExpired
             ) {
-                Plan26SseLifecycleV1::Expired
+                FeedbackSseLifecycleV1::Expired
             } else {
-                Plan26SseLifecycleV1::Failed
+                FeedbackSseLifecycleV1::Failed
             };
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::SseLifecycle {
+                FeedbackSourceEventV1::SseLifecycle {
                     lifecycle,
                     sequence: None,
                     item_count: 0,
@@ -1865,12 +1865,12 @@ async fn http_operation_events(
             return operation_event_problem(&request_id, error);
         }
     };
-    emit_http_plan26_observation(
+    emit_http_feedback_observation(
         &state,
         observation_subject.as_ref(),
         observed_at,
-        Plan26FeedbackSourceEventV1::SseLifecycle {
-            lifecycle: Plan26SseLifecycleV1::Opened,
+        FeedbackSourceEventV1::SseLifecycle {
+            lifecycle: FeedbackSseLifecycleV1::Opened,
             sequence: None,
             item_count: 0,
             duration_micros: None,
@@ -1891,17 +1891,17 @@ async fn http_operation_events(
         let observer = observer.clone();
         async move {
             if let (Some(observer), Some((lifecycle, item_count, is_terminal))) =
-                (observer, plan26_sse_stream_event(&event))
+                (observer, feedback_sse_stream_event(&event))
             {
                 if is_terminal {
                     observer.terminal.store(true, Ordering::Relaxed);
                 }
                 let _ = observer
                     .executor
-                    .observe_plan26_feedback(
+                    .observe_feedback(
                         observer.subject.clone(),
                         current_micros().unwrap_or(UtcMicros(1)),
-                        Plan26FeedbackSourceEventV1::SseLifecycle {
+                        FeedbackSourceEventV1::SseLifecycle {
                             lifecycle,
                             sequence: Some(event.sequence),
                             item_count,
@@ -2008,17 +2008,17 @@ async fn http_operation_cancel(
     let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
         OperationId::from_request(operation_id)
     } else {
-        emit_http_plan26_observation(
+        emit_http_feedback_observation(
             &state,
             observation_subject.as_ref(),
             current_micros().unwrap_or(UtcMicros(1)),
-            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                operation: Plan26FeedbackOperationV1::SseStream,
-                route: Some(Plan26DeliveryRouteV1::Http),
-                argument: Plan26RejectedArgumentV1::RequestHandle,
-                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::SseStream,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestHandle,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
                 schema_revision: 1,
-                outcome: Plan26FeedbackOutcomeV1::Rejected,
+                outcome: FeedbackOutcomeV1::Rejected,
             },
         )
         .await;
@@ -2057,13 +2057,13 @@ async fn http_operation_cancel(
     {
         Ok(context) => context,
         Err(error) => {
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::Cancellation {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Denied,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Denied,
                 },
             )
             .await;
@@ -2084,13 +2084,13 @@ async fn http_operation_cancel(
             if let Some(cancellation) = target_cancellation {
                 let _ = cancellation.cancel(observed_at);
             }
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::Cancellation {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Accepted,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Accepted,
                 },
             )
             .await;
@@ -2106,13 +2106,13 @@ async fn http_operation_cancel(
             if let Some(cancellation) = target_cancellation {
                 let _ = cancellation.cancel(observed_at);
             }
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::Cancellation {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Duplicate,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Duplicate,
                 },
             )
             .await;
@@ -2125,13 +2125,13 @@ async fn http_operation_cancel(
                 .into_response()
         }
         Ok(OperationCancelOutcome::AlreadyTerminal) => {
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::Cancellation {
-                    operation: Plan26FeedbackOperationV1::SseStream,
-                    outcome: Plan26FeedbackOutcomeV1::Completed,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
+                    outcome: FeedbackOutcomeV1::Completed,
                 },
             )
             .await;
@@ -2144,16 +2144,16 @@ async fn http_operation_cancel(
                 .into_response()
         }
         Err(error) => {
-            emit_http_plan26_observation(
+            emit_http_feedback_observation(
                 &state,
                 observation_subject.as_ref(),
                 observed_at,
-                Plan26FeedbackSourceEventV1::Cancellation {
-                    operation: Plan26FeedbackOperationV1::SseStream,
+                FeedbackSourceEventV1::Cancellation {
+                    operation: FeedbackOperationV1::SseStream,
                     outcome: if matches!(&error, OperationEventError::Saturated) {
-                        Plan26FeedbackOutcomeV1::AtCapacity
+                        FeedbackOutcomeV1::AtCapacity
                     } else {
-                        Plan26FeedbackOutcomeV1::Failed
+                        FeedbackOutcomeV1::Failed
                     },
                 },
             )
@@ -3050,7 +3050,7 @@ pub async fn execute_application_surface(
     let binding_id = dispatched.invocation.binding_id.clone();
     let request_id = dispatched.request_id;
     let surface = dispatched.surface;
-    let delivery_route = plan26_delivery_route(dispatched.surface);
+    let delivery_route = feedback_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
     let (
@@ -3351,7 +3351,7 @@ pub async fn execute_application_surface(
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            if plan26_surface_is_observable(operation)
+            if feedback_surface_is_observable(operation)
                 && let Ok(subject_digest) = canonical_sha256(&(
                     "tracedecay.feedback.transport-observation.v1",
                     request_id.as_str(),
@@ -3362,27 +3362,27 @@ pub async fn execute_application_surface(
             {
                 let event = match &error {
                     DaemonInvocationError::Cancelled { .. } => {
-                        Plan26FeedbackSourceEventV1::Cancellation {
-                            operation: plan26_surface_operation(operation),
-                            outcome: Plan26FeedbackOutcomeV1::Cancelled,
+                        FeedbackSourceEventV1::Cancellation {
+                            operation: feedback_surface_operation(operation),
+                            outcome: FeedbackOutcomeV1::Cancelled,
                         }
                     }
                     DaemonInvocationError::TimedOut { .. } => {
-                        Plan26FeedbackSourceEventV1::Cancellation {
-                            operation: plan26_surface_operation(operation),
-                            outcome: Plan26FeedbackOutcomeV1::TimedOut,
+                        FeedbackSourceEventV1::Cancellation {
+                            operation: feedback_surface_operation(operation),
+                            outcome: FeedbackOutcomeV1::TimedOut,
                         }
                     }
-                    DaemonInvocationError::Unavailable => Plan26FeedbackSourceEventV1::Delivery {
-                        operation: plan26_surface_operation(operation),
+                    DaemonInvocationError::Unavailable => FeedbackSourceEventV1::Delivery {
+                        operation: feedback_surface_operation(operation),
                         route: delivery_route,
-                        outcome: Plan26FeedbackOutcomeV1::Unavailable,
+                        outcome: FeedbackOutcomeV1::Unavailable,
                         item_count: 0,
                         duration_micros: None,
                     },
                 };
                 let _ = executor
-                    .observe_plan26_feedback(subject_digest, observed_at, event)
+                    .observe_feedback(subject_digest, observed_at, event)
                     .await;
             }
             return Ok(ApplicationSurfaceInvocationResult {
@@ -3501,31 +3501,31 @@ pub async fn execute_application_surface(
     })
 }
 
-fn plan26_delivery_route(surface: BindingSurface) -> Plan26DeliveryRouteV1 {
+fn feedback_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     match surface {
-        BindingSurface::Cli => Plan26DeliveryRouteV1::Cli,
-        BindingSurface::Mcp => Plan26DeliveryRouteV1::Mcp,
-        BindingSurface::Http | BindingSurface::Dashboard => Plan26DeliveryRouteV1::Http,
-        BindingSurface::Lsp => Plan26DeliveryRouteV1::Lsp,
+        BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
+        BindingSurface::Mcp => FeedbackDeliveryRouteV1::Mcp,
+        BindingSurface::Http | BindingSurface::Dashboard => FeedbackDeliveryRouteV1::Http,
+        BindingSurface::Lsp => FeedbackDeliveryRouteV1::Lsp,
     }
 }
 
-fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26FeedbackOperationV1 {
+fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> FeedbackOperationV1 {
     match operation {
         ApplicationSurfaceOperation::FeedbackDiagnostics => {
-            Plan26FeedbackOperationV1::FeedbackDiagnostics
+            FeedbackOperationV1::FeedbackDiagnostics
         }
-        ApplicationSurfaceOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
-        ApplicationSurfaceOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
-        ApplicationSurfaceOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        ApplicationSurfaceOperation::FeedbackGet => FeedbackOperationV1::FeedbackGet,
+        ApplicationSurfaceOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
+        ApplicationSurfaceOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
         ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
-            Plan26FeedbackOperationV1::FeedbackCycle
+            FeedbackOperationV1::FeedbackCycle
         }
-        ApplicationSurfaceOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
+        ApplicationSurfaceOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
         ApplicationSurfaceOperation::AffectedTests => {
-            Plan26FeedbackOperationV1::PrimitiveAffectedTests
+            FeedbackOperationV1::PrimitiveAffectedTests
         }
-        ApplicationSurfaceOperation::TestResults => Plan26FeedbackOperationV1::PrimitiveTestResults,
+        ApplicationSurfaceOperation::TestResults => FeedbackOperationV1::PrimitiveTestResults,
         ApplicationSurfaceOperation::GitStatus
         | ApplicationSurfaceOperation::GitDiff
         | ApplicationSurfaceOperation::GitHistory
@@ -3584,12 +3584,12 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ContextScoutClaim
         | ApplicationSurfaceOperation::ContextScoutDelivery
         | ApplicationSurfaceOperation::ContextScoutFeedback => {
-            Plan26FeedbackOperationV1::FeedbackCycle
+            FeedbackOperationV1::FeedbackCycle
         }
     }
 }
 
-fn plan26_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool {
+fn feedback_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool {
     matches!(
         operation,
         ApplicationSurfaceOperation::FeedbackDiagnostics
@@ -3623,7 +3623,7 @@ pub async fn observe_surface_argument_rejection(
     request_id: &RequestId,
     error: &ApplicationSurfaceAdapterError,
 ) {
-    if !plan26_surface_is_observable(operation) {
+    if !feedback_surface_is_observable(operation) {
         return;
     }
     let Some((argument, rejection, outcome)) = surface_rejection_metadata(error) else {
@@ -3642,12 +3642,12 @@ pub async fn observe_surface_argument_rejection(
         return;
     };
     let _ = executor
-        .observe_plan26_feedback(
+        .observe_feedback(
             subject_digest,
             observed_at,
-            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                operation: plan26_surface_operation(operation),
-                route: Some(plan26_delivery_route(surface)),
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: feedback_surface_operation(operation),
+                route: Some(feedback_delivery_route(surface)),
                 argument,
                 rejection,
                 schema_revision: 1,
@@ -3660,25 +3660,25 @@ pub async fn observe_surface_argument_rejection(
 fn surface_rejection_metadata(
     error: &ApplicationSurfaceAdapterError,
 ) -> Option<(
-    Plan26RejectedArgumentV1,
-    Plan26ArgumentRejectionClassV1,
-    Plan26FeedbackOutcomeV1,
+    FeedbackRejectedArgumentV1,
+    FeedbackArgumentRejectionClassV1,
+    FeedbackOutcomeV1,
 )> {
     match error {
         ApplicationSurfaceAdapterError::InvalidRequestHandle => Some((
-            Plan26RejectedArgumentV1::RequestHandle,
-            Plan26ArgumentRejectionClassV1::InvalidShape,
-            Plan26FeedbackOutcomeV1::Rejected,
+            FeedbackRejectedArgumentV1::RequestHandle,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
+            FeedbackOutcomeV1::Rejected,
         )),
         ApplicationSurfaceAdapterError::InvalidSurfaceRequest => Some((
-            Plan26RejectedArgumentV1::RequestBody,
-            Plan26ArgumentRejectionClassV1::InvalidShape,
-            Plan26FeedbackOutcomeV1::Rejected,
+            FeedbackRejectedArgumentV1::RequestBody,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
+            FeedbackOutcomeV1::Rejected,
         )),
         ApplicationSurfaceAdapterError::UnknownOrNotAuthorized => Some((
-            Plan26RejectedArgumentV1::Operation,
-            Plan26ArgumentRejectionClassV1::Unauthorized,
-            Plan26FeedbackOutcomeV1::Denied,
+            FeedbackRejectedArgumentV1::Operation,
+            FeedbackArgumentRejectionClassV1::Unauthorized,
+            FeedbackOutcomeV1::Denied,
         )),
         ApplicationSurfaceAdapterError::Catalog(_)
         | ApplicationSurfaceAdapterError::Contract(_)

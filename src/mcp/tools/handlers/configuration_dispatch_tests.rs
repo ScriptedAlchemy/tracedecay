@@ -80,11 +80,11 @@ impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecuto
         Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_plan26_feedback(
+    fn observe_feedback(
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
+        _event: crate::application::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }

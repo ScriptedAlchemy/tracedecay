@@ -20,13 +20,13 @@ use crate::request_identity::{
 };
 use tracedecay_runtime_core::timeutil::nearest_rank;
 
-const OBSERVATION_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.observation.plan26.v1";
-const SOURCE_EVENT_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.source-event.plan26.v1";
-const SAVED_EVALUATION_DOMAIN: &str = "tracedecay.feedback.saved-evaluation.plan26.v1";
+const OBSERVATION_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.observation.v1";
+const SOURCE_EVENT_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.source-event.v1";
+const SAVED_EVALUATION_DOMAIN: &str = "tracedecay.feedback.saved-evaluation.v1";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26FeedbackOperationV1 {
+pub enum FeedbackOperationV1 {
     FeedbackCycle,
     FeedbackDiagnostics,
     FeedbackGet,
@@ -47,7 +47,7 @@ pub enum Plan26FeedbackOperationV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26FeedbackOutcomeV1 {
+pub enum FeedbackOutcomeV1 {
     Accepted,
     Admitted,
     Rejected,
@@ -68,7 +68,7 @@ pub enum Plan26FeedbackOutcomeV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26DeliveryRouteV1 {
+pub enum FeedbackDeliveryRouteV1 {
     Cli,
     Mcp,
     Http,
@@ -80,7 +80,7 @@ pub enum Plan26DeliveryRouteV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26RejectedArgumentV1 {
+pub enum FeedbackRejectedArgumentV1 {
     RequestBody,
     Pagination,
     RequestHandle,
@@ -91,7 +91,7 @@ pub enum Plan26RejectedArgumentV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26ArgumentRejectionClassV1 {
+pub enum FeedbackArgumentRejectionClassV1 {
     Missing,
     InvalidShape,
     OutOfBounds,
@@ -103,7 +103,7 @@ pub enum Plan26ArgumentRejectionClassV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26LspMethodClassV1 {
+pub enum FeedbackLspMethodClassV1 {
     Lifecycle,
     DocumentSync,
     Diagnostics,
@@ -117,7 +117,7 @@ pub enum Plan26LspMethodClassV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26LspStateV1 {
+pub enum FeedbackLspStateV1 {
     SessionOpened,
     Initialized,
     Detached,
@@ -149,7 +149,7 @@ pub enum Plan26LspStateV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26GitHubLifecycleV1 {
+pub enum FeedbackGitHubLifecycleV1 {
     Current,
     Outdated,
     Resolved,
@@ -159,7 +159,7 @@ pub enum Plan26GitHubLifecycleV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26AdvisoryProviderV1 {
+pub enum FeedbackAdvisoryProviderV1 {
     #[serde(rename = "github_review")]
     GitHubReview,
     CiLocalization,
@@ -168,7 +168,7 @@ pub enum Plan26AdvisoryProviderV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26CiProviderV1 {
+pub enum FeedbackCiProviderV1 {
     GitHubActions,
     RetainedObservation,
     ExactCodeEvidence,
@@ -178,7 +178,7 @@ pub enum Plan26CiProviderV1 {
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26CoverageV1 {
+pub enum FeedbackCoverageV1 {
     Known,
     Partial,
     Stale,
@@ -191,7 +191,7 @@ pub enum Plan26CoverageV1 {
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26RelevanceDispositionV1 {
+pub enum FeedbackRelevanceDispositionV1 {
     Helpful,
     Stale,
     Irrelevant,
@@ -203,7 +203,7 @@ pub enum Plan26RelevanceDispositionV1 {
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26StackTransitionV1 {
+pub enum FeedbackStackTransitionV1 {
     DependencyReady,
     ConflictDetected,
     ConflictCleared,
@@ -220,7 +220,7 @@ pub struct FeedbackObservationDeliveryV1 {
     pub emitted: u64,
     pub delayed: u64,
     pub dropped: u64,
-    pub coverage: Plan26CoverageV1,
+    pub coverage: FeedbackCoverageV1,
 }
 
 impl FeedbackObservationDeliveryV1 {
@@ -229,7 +229,7 @@ impl FeedbackObservationDeliveryV1 {
             emitted: 0,
             delayed: 0,
             dropped: 0,
-            coverage: Plan26CoverageV1::Unknown,
+            coverage: FeedbackCoverageV1::Unknown,
         }
     }
 
@@ -239,27 +239,27 @@ impl FeedbackObservationDeliveryV1 {
             delayed: 0,
             dropped,
             coverage: if dropped == 0 {
-                Plan26CoverageV1::Known
+                FeedbackCoverageV1::Known
             } else {
-                Plan26CoverageV1::Partial
+                FeedbackCoverageV1::Partial
             },
         }
     }
 
     fn validate(&self, persisted: bool) -> Option<()> {
         match self.coverage {
-            Plan26CoverageV1::Known
+            FeedbackCoverageV1::Known
                 if (!persisted || self.emitted == 1) && self.delayed == 0 && self.dropped == 0 =>
             {
                 Some(())
             }
-            Plan26CoverageV1::Partial
+            FeedbackCoverageV1::Partial
                 if (!persisted || self.emitted == 1) && (self.delayed > 0 || self.dropped > 0) =>
             {
                 Some(())
             }
-            Plan26CoverageV1::Unknown if !persisted && self.emitted == 0 => Some(()),
-            Plan26CoverageV1::Sampled | Plan26CoverageV1::Capped | Plan26CoverageV1::Stale
+            FeedbackCoverageV1::Unknown if !persisted && self.emitted == 0 => Some(()),
+            FeedbackCoverageV1::Sampled | FeedbackCoverageV1::Capped | FeedbackCoverageV1::Stale
                 if !persisted || self.emitted == 1 =>
             {
                 Some(())
@@ -277,7 +277,7 @@ impl Default for FeedbackObservationDeliveryV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26ProximityTransitionV1 {
+pub enum FeedbackProximityTransitionV1 {
     Emitted,
     Suppressed,
     Expired,
@@ -285,7 +285,7 @@ pub enum Plan26ProximityTransitionV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26ProximityRiskV1 {
+pub enum FeedbackProximityRiskV1 {
     None,
     BelowThreshold,
     AtOrAboveThreshold,
@@ -293,7 +293,7 @@ pub enum Plan26ProximityRiskV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26AnchorOperationV1 {
+pub enum FeedbackAnchorOperationV1 {
     Anchor,
     HandleExpansion,
     EvidenceExpansion,
@@ -301,7 +301,7 @@ pub enum Plan26AnchorOperationV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26HookScoutPhaseV1 {
+pub enum FeedbackHookScoutPhaseV1 {
     Admission,
     Delivery,
     FeedbackTerminal,
@@ -309,7 +309,7 @@ pub enum Plan26HookScoutPhaseV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum Plan26SseLifecycleV1 {
+pub enum FeedbackSseLifecycleV1 {
     Opened,
     EventDelivered,
     Gap,
@@ -327,46 +327,46 @@ pub enum Plan26SseLifecycleV1 {
 /// digests, counts, or durations; provider payloads never enter this type.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Plan26FeedbackSourceEventV1 {
+pub enum FeedbackSourceEventV1 {
     ArgumentRejected {
-        operation: Plan26FeedbackOperationV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackOperationV1,
+        outcome: FeedbackOutcomeV1,
     },
     SurfaceArgumentRejected {
-        operation: Plan26FeedbackOperationV1,
-        route: Option<Plan26DeliveryRouteV1>,
-        argument: Plan26RejectedArgumentV1,
-        rejection: Plan26ArgumentRejectionClassV1,
+        operation: FeedbackOperationV1,
+        route: Option<FeedbackDeliveryRouteV1>,
+        argument: FeedbackRejectedArgumentV1,
+        rejection: FeedbackArgumentRejectionClassV1,
         schema_revision: u16,
-        outcome: Plan26FeedbackOutcomeV1,
+        outcome: FeedbackOutcomeV1,
     },
     LspState {
-        state: Plan26LspStateV1,
-        method: Option<Plan26LspMethodClassV1>,
-        outcome: Plan26FeedbackOutcomeV1,
+        state: FeedbackLspStateV1,
+        method: Option<FeedbackLspMethodClassV1>,
+        outcome: FeedbackOutcomeV1,
         item_count: u32,
         duration_micros: Option<u64>,
     },
     Dispatch {
-        operation: Plan26FeedbackOperationV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackOperationV1,
+        outcome: FeedbackOutcomeV1,
         capacity: u32,
         admitted: u32,
     },
     Delivery {
-        operation: Plan26FeedbackOperationV1,
-        route: Plan26DeliveryRouteV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackOperationV1,
+        route: FeedbackDeliveryRouteV1,
+        outcome: FeedbackOutcomeV1,
         item_count: u32,
         duration_micros: Option<u64>,
     },
     Truncation {
-        operation: Plan26FeedbackOperationV1,
+        operation: FeedbackOperationV1,
         returned_count: u32,
         omitted_count: u32,
     },
     RelevanceFeedback {
-        disposition: Plan26RelevanceDispositionV1,
+        disposition: FeedbackRelevanceDispositionV1,
     },
     EvidenceDiversity {
         eligible_source_families: u32,
@@ -374,17 +374,17 @@ pub enum Plan26FeedbackSourceEventV1 {
         selected_count: u32,
     },
     AnchorExpansion {
-        operation: Plan26AnchorOperationV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackAnchorOperationV1,
+        outcome: FeedbackOutcomeV1,
         returned_count: u32,
         duration_micros: Option<u64>,
     },
     GitHubLifecycle {
-        lifecycle: Plan26GitHubLifecycleV1,
+        lifecycle: FeedbackGitHubLifecycleV1,
         item_count: u32,
     },
     GitHubIngress {
-        outcome: Plan26FeedbackOutcomeV1,
+        outcome: FeedbackOutcomeV1,
         item_count: u32,
         duration_micros: Option<u64>,
     },
@@ -395,14 +395,14 @@ pub enum Plan26FeedbackSourceEventV1 {
         item_count: u32,
     },
     ProviderState {
-        provider: Plan26AdvisoryProviderV1,
+        provider: FeedbackAdvisoryProviderV1,
         state: ProviderEvaluationStateV1,
     },
     CiLocalization {
-        outcome: Plan26FeedbackOutcomeV1,
-        provider: Plan26CiProviderV1,
+        outcome: FeedbackOutcomeV1,
+        provider: FeedbackCiProviderV1,
         exact_evidence: bool,
-        coverage: Plan26CoverageV1,
+        coverage: FeedbackCoverageV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_degradation: Option<CiFailureSourceDegradationV1>,
         localized_count: u32,
@@ -410,41 +410,41 @@ pub enum Plan26FeedbackSourceEventV1 {
         duration_micros: Option<u64>,
     },
     Proximity {
-        transition: Plan26ProximityTransitionV1,
-        risk: Plan26ProximityRiskV1,
+        transition: FeedbackProximityTransitionV1,
+        risk: FeedbackProximityRiskV1,
         configuration_revision: ManifestDigest,
         candidate_count: u32,
         affected_count: u32,
     },
     HostDelivery {
-        route: Plan26DeliveryRouteV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        route: FeedbackDeliveryRouteV1,
+        outcome: FeedbackOutcomeV1,
         rollback: bool,
         item_count: u32,
         duration_micros: Option<u64>,
     },
     HookScout {
-        route: Plan26DeliveryRouteV1,
-        phase: Plan26HookScoutPhaseV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        route: FeedbackDeliveryRouteV1,
+        phase: FeedbackHookScoutPhaseV1,
+        outcome: FeedbackOutcomeV1,
         item_count: u32,
         duration_micros: Option<u64>,
     },
     Cancellation {
-        operation: Plan26FeedbackOperationV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackOperationV1,
+        outcome: FeedbackOutcomeV1,
     },
     AuthorizationRevoked {
-        operation: Plan26FeedbackOperationV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        operation: FeedbackOperationV1,
+        outcome: FeedbackOutcomeV1,
         propagation_micros: u64,
     },
     StackTransition {
-        transition: Plan26StackTransitionV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        transition: FeedbackStackTransitionV1,
+        outcome: FeedbackOutcomeV1,
     },
     SseLifecycle {
-        lifecycle: Plan26SseLifecycleV1,
+        lifecycle: FeedbackSseLifecycleV1,
         sequence: Option<u64>,
         item_count: u32,
         duration_micros: Option<u64>,
@@ -456,7 +456,7 @@ pub enum Plan26FeedbackSourceEventV1 {
     },
 }
 
-impl Plan26FeedbackSourceEventV1 {
+impl FeedbackSourceEventV1 {
     pub const fn event_kind(&self) -> &'static str {
         match self {
             Self::ArgumentRejected { .. } | Self::SurfaceArgumentRejected { .. } => {
@@ -539,7 +539,7 @@ pub struct FeedbackObservationEnvelopeV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<FeedbackCycleObservationV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_event: Option<Plan26FeedbackSourceEventV1>,
+    pub source_event: Option<FeedbackSourceEventV1>,
     pub observed_at: UtcMicros,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer_boot_id: Option<ManifestDigest>,
@@ -646,7 +646,7 @@ pub struct FeedbackObservationReadModelV1 {
     pub first_observed_at: Option<UtcMicros>,
     pub last_observed_at: Option<UtcMicros>,
     pub event_counts: BTreeMap<String, u64>,
-    pub coverage: Plan26CoverageV1,
+    pub coverage: FeedbackCoverageV1,
     pub watermark: FeedbackObservationWatermarkV1,
     pub denominators: FeedbackObservationDenominatorsV1,
     pub system_quality: FeedbackSystemQualityReadModelV1,
@@ -731,7 +731,7 @@ pub struct FeedbackSystemMetricV1 {
     pub numerator: Option<u64>,
     pub denominator: Option<u64>,
     pub denominator_population: FeedbackSystemMetricDenominatorV1,
-    pub coverage: Plan26CoverageV1,
+    pub coverage: FeedbackCoverageV1,
     pub unavailable_reason: Option<FeedbackSystemMetricUnavailableReasonV1>,
 }
 
@@ -750,7 +750,7 @@ impl FeedbackObservationReadModelV1 {
             first_observed_at: None,
             last_observed_at: None,
             event_counts: BTreeMap::new(),
-            coverage: Plan26CoverageV1::Unknown,
+            coverage: FeedbackCoverageV1::Unknown,
             watermark: FeedbackObservationWatermarkV1 {
                 producer_boot_id: None,
                 producer_sequence: None,
@@ -769,7 +769,7 @@ impl FeedbackObservationReadModelV1 {
                 &[],
                 0,
                 0,
-                Plan26CoverageV1::Unknown,
+                FeedbackCoverageV1::Unknown,
             ),
         }
     }
@@ -827,20 +827,20 @@ impl FeedbackObservationReadModelV1 {
             .saturating_add(dropped)
             .saturating_add(retention_dropped);
         let coverage = if incomplete_boots > 0 {
-            Plan26CoverageV1::Unknown
+            FeedbackCoverageV1::Unknown
         } else if retention_dropped > 0 {
-            Plan26CoverageV1::Capped
+            FeedbackCoverageV1::Capped
         } else if delayed > 0 || dropped > 0 {
-            Plan26CoverageV1::Partial
+            FeedbackCoverageV1::Partial
         } else if observations.is_empty() {
-            Plan26CoverageV1::Unknown
+            FeedbackCoverageV1::Unknown
         } else if observations
             .iter()
             .all(|observation| observation.producer_sequence.is_some())
         {
-            Plan26CoverageV1::Known
+            FeedbackCoverageV1::Known
         } else {
-            Plan26CoverageV1::Unknown
+            FeedbackCoverageV1::Unknown
         };
         let system_quality =
             FeedbackSystemQualityReadModelV1::project(observations, eligible, persisted, coverage);
@@ -871,7 +871,7 @@ impl FeedbackSystemQualityReadModelV1 {
         observations: &[FeedbackObservationEnvelopeV1],
         eligible_observations: u64,
         persisted_observations: u64,
-        observation_coverage: Plan26CoverageV1,
+        observation_coverage: FeedbackCoverageV1,
     ) -> Self {
         let mut relevance_helpful = 0u64;
         let mut relevance_total = 0u64;
@@ -902,26 +902,26 @@ impl FeedbackSystemQualityReadModelV1 {
             if let Some(outcome) = source_event_outcome(event) {
                 outcome_total = outcome_total.saturating_add(1);
                 denied_outcomes = denied_outcomes
-                    .saturating_add(u64::from(outcome == Plan26FeedbackOutcomeV1::Denied));
+                    .saturating_add(u64::from(outcome == FeedbackOutcomeV1::Denied));
                 stale_outcomes = stale_outcomes
-                    .saturating_add(u64::from(outcome == Plan26FeedbackOutcomeV1::Stale));
+                    .saturating_add(u64::from(outcome == FeedbackOutcomeV1::Stale));
             }
             match event {
-                Plan26FeedbackSourceEventV1::RelevanceFeedback { disposition } => {
+                FeedbackSourceEventV1::RelevanceFeedback { disposition } => {
                     relevance_total = relevance_total.saturating_add(1);
                     match disposition {
-                        Plan26RelevanceDispositionV1::Helpful => {
+                        FeedbackRelevanceDispositionV1::Helpful => {
                             relevance_helpful = relevance_helpful.saturating_add(1);
                         }
-                        Plan26RelevanceDispositionV1::Unknown => {
+                        FeedbackRelevanceDispositionV1::Unknown => {
                             relevance_unknown = relevance_unknown.saturating_add(1);
                         }
-                        Plan26RelevanceDispositionV1::Stale
-                        | Plan26RelevanceDispositionV1::Irrelevant
-                        | Plan26RelevanceDispositionV1::Contradictory => {}
+                        FeedbackRelevanceDispositionV1::Stale
+                        | FeedbackRelevanceDispositionV1::Irrelevant
+                        | FeedbackRelevanceDispositionV1::Contradictory => {}
                     }
                 }
-                Plan26FeedbackSourceEventV1::EvidenceDiversity {
+                FeedbackSourceEventV1::EvidenceDiversity {
                     eligible_source_families,
                     represented_source_families,
                     ..
@@ -931,7 +931,7 @@ impl FeedbackSystemQualityReadModelV1 {
                     diversity_represented = diversity_represented
                         .saturating_add(u64::from(*represented_source_families));
                 }
-                Plan26FeedbackSourceEventV1::Truncation {
+                FeedbackSourceEventV1::Truncation {
                     returned_count,
                     omitted_count,
                     ..
@@ -939,14 +939,14 @@ impl FeedbackSystemQualityReadModelV1 {
                     returned_items = returned_items.saturating_add(u64::from(*returned_count));
                     omitted_items = omitted_items.saturating_add(u64::from(*omitted_count));
                 }
-                Plan26FeedbackSourceEventV1::GitHubStale { item_count } => {
+                FeedbackSourceEventV1::GitHubStale { item_count } => {
                     outcome_total = outcome_total.saturating_add(u64::from(*item_count));
                     stale_outcomes = stale_outcomes.saturating_add(u64::from(*item_count));
                 }
-                Plan26FeedbackSourceEventV1::AuthorizationRevoked {
+                FeedbackSourceEventV1::AuthorizationRevoked {
                     propagation_micros, ..
                 } => revocation_samples.push(*propagation_micros),
-                Plan26FeedbackSourceEventV1::StackTransition { .. } => {
+                FeedbackSourceEventV1::StackTransition { .. } => {
                     stack_transitions = stack_transitions.saturating_add(1);
                 }
                 _ => {}
@@ -955,7 +955,7 @@ impl FeedbackSystemQualityReadModelV1 {
 
         let metric_coverage = |has_support: bool| {
             if !has_support {
-                Plan26CoverageV1::Unknown
+                FeedbackCoverageV1::Unknown
             } else {
                 observation_coverage
             }
@@ -1073,7 +1073,7 @@ fn scalar_metric(
     support: u64,
     denominator_population: FeedbackSystemMetricDenominatorV1,
     unavailable_reason: FeedbackSystemMetricUnavailableReasonV1,
-    coverage: Plan26CoverageV1,
+    coverage: FeedbackCoverageV1,
 ) -> FeedbackSystemMetricV1 {
     FeedbackSystemMetricV1 {
         metric,
@@ -1085,7 +1085,7 @@ fn scalar_metric(
         coverage: if support > 0 {
             coverage
         } else {
-            Plan26CoverageV1::Unknown
+            FeedbackCoverageV1::Unknown
         },
         unavailable_reason: (support == 0).then_some(unavailable_reason),
     }
@@ -1096,52 +1096,52 @@ fn percentile_95(samples: &mut [u64]) -> Option<u64> {
     nearest_rank(samples, 95)
 }
 
-fn source_event_duration_micros(event: &Plan26FeedbackSourceEventV1) -> Option<u64> {
+fn source_event_duration_micros(event: &FeedbackSourceEventV1) -> Option<u64> {
     match event {
-        Plan26FeedbackSourceEventV1::LspState {
+        FeedbackSourceEventV1::LspState {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::Delivery {
+        | FeedbackSourceEventV1::Delivery {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::AnchorExpansion {
+        | FeedbackSourceEventV1::AnchorExpansion {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::GitHubIngress {
+        | FeedbackSourceEventV1::GitHubIngress {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::CiLocalization {
+        | FeedbackSourceEventV1::CiLocalization {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::HostDelivery {
+        | FeedbackSourceEventV1::HostDelivery {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::HookScout {
+        | FeedbackSourceEventV1::HookScout {
             duration_micros, ..
         }
-        | Plan26FeedbackSourceEventV1::SseLifecycle {
+        | FeedbackSourceEventV1::SseLifecycle {
             duration_micros, ..
         } => *duration_micros,
-        Plan26FeedbackSourceEventV1::GitHubRateLimit { duration_micros } => *duration_micros,
+        FeedbackSourceEventV1::GitHubRateLimit { duration_micros } => *duration_micros,
         _ => None,
     }
 }
 
-fn source_event_outcome(event: &Plan26FeedbackSourceEventV1) -> Option<Plan26FeedbackOutcomeV1> {
+fn source_event_outcome(event: &FeedbackSourceEventV1) -> Option<FeedbackOutcomeV1> {
     match event {
-        Plan26FeedbackSourceEventV1::ArgumentRejected { outcome, .. }
-        | Plan26FeedbackSourceEventV1::SurfaceArgumentRejected { outcome, .. }
-        | Plan26FeedbackSourceEventV1::LspState { outcome, .. }
-        | Plan26FeedbackSourceEventV1::Dispatch { outcome, .. }
-        | Plan26FeedbackSourceEventV1::Delivery { outcome, .. }
-        | Plan26FeedbackSourceEventV1::AnchorExpansion { outcome, .. }
-        | Plan26FeedbackSourceEventV1::GitHubIngress { outcome, .. }
-        | Plan26FeedbackSourceEventV1::CiLocalization { outcome, .. }
-        | Plan26FeedbackSourceEventV1::HostDelivery { outcome, .. }
-        | Plan26FeedbackSourceEventV1::HookScout { outcome, .. }
-        | Plan26FeedbackSourceEventV1::Cancellation { outcome, .. }
-        | Plan26FeedbackSourceEventV1::AuthorizationRevoked { outcome, .. }
-        | Plan26FeedbackSourceEventV1::StackTransition { outcome, .. } => Some(*outcome),
+        FeedbackSourceEventV1::ArgumentRejected { outcome, .. }
+        | FeedbackSourceEventV1::SurfaceArgumentRejected { outcome, .. }
+        | FeedbackSourceEventV1::LspState { outcome, .. }
+        | FeedbackSourceEventV1::Dispatch { outcome, .. }
+        | FeedbackSourceEventV1::Delivery { outcome, .. }
+        | FeedbackSourceEventV1::AnchorExpansion { outcome, .. }
+        | FeedbackSourceEventV1::GitHubIngress { outcome, .. }
+        | FeedbackSourceEventV1::CiLocalization { outcome, .. }
+        | FeedbackSourceEventV1::HostDelivery { outcome, .. }
+        | FeedbackSourceEventV1::HookScout { outcome, .. }
+        | FeedbackSourceEventV1::Cancellation { outcome, .. }
+        | FeedbackSourceEventV1::AuthorizationRevoked { outcome, .. }
+        | FeedbackSourceEventV1::StackTransition { outcome, .. } => Some(*outcome),
         _ => None,
     }
 }
@@ -1191,24 +1191,24 @@ fn observation_envelope(
 
 /// Maps a content-free owner event onto the same saved-content envelope and
 /// idempotency boundary used by generic feedback-cycle observations.
-pub fn plan26_feedback_source_event_envelope(
+pub fn feedback_source_event_envelope(
     input: &FeedbackEvaluationInputV1,
-    source_event: Plan26FeedbackSourceEventV1,
+    source_event: FeedbackSourceEventV1,
 ) -> Option<FeedbackObservationEnvelopeV1> {
     let saved = input.saved().ok()?;
     source_event.validate()?;
     let saved_evaluation_digest = canonical_sha256(&(SAVED_EVALUATION_DOMAIN, saved)).ok()?;
-    plan26_feedback_source_event_envelope_for_subject(
+    feedback_source_event_envelope_for_subject(
         saved_evaluation_digest,
         input.observed_at,
         source_event,
     )
 }
 
-pub fn plan26_feedback_source_event_envelope_for_subject(
+pub fn feedback_source_event_envelope_for_subject(
     subject_digest: ManifestDigest,
     observed_at: UtcMicros,
-    source_event: Plan26FeedbackSourceEventV1,
+    source_event: FeedbackSourceEventV1,
 ) -> Option<FeedbackObservationEnvelopeV1> {
     subject_digest.validate().ok()?;
     source_event.validate()?;
@@ -1232,18 +1232,18 @@ pub fn plan26_feedback_source_event_envelope_for_subject(
     Some(envelope)
 }
 
-pub trait Plan26FeedbackObservationEmitterV1 {
+pub trait FeedbackObservationEmitterV1 {
     fn observe_source_event(
         &self,
         input: &FeedbackEvaluationInputV1,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     );
 
     fn observe_source_event_for_subject(
         &self,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     );
 }
 
@@ -1259,7 +1259,7 @@ pub enum FeedbackObservationSinkOutcome {
 /// is not conforming. `Dropped` is the explicit bounded-overflow outcome, not
 /// permission to block or retry on the feedback path. Durable cursor/projection
 /// commit and loss accounting remain daemon-owned.
-pub trait Plan26FeedbackObservationQueue {
+pub trait FeedbackObservationQueue {
     fn enqueue_feedback_observation(
         &self,
         envelope: FeedbackObservationEnvelopeV1,
@@ -1279,7 +1279,7 @@ pub trait Plan26FeedbackObservationQueue {
 /// atomically retaining the idempotency key with the queued observation and
 /// for preserving replay protection across process restart. This adapter has
 /// no database handle, filesystem path, or retry worker of its own.
-pub trait DurablePlan26FeedbackObservationSinkV1 {
+pub trait DurableFeedbackObservationSinkV1 {
     fn enqueue_durable_feedback_observation(
         &self,
         envelope: FeedbackObservationEnvelopeV1,
@@ -1296,19 +1296,19 @@ pub trait DurablePlan26FeedbackObservationSinkV1 {
 /// Concrete adapter from the durable daemon ingress to the application's
 /// non-blocking queue boundary. Corrupt or privacy-invalid values are dropped
 /// before the sink receives them, so a replay never turns bad input into state.
-pub struct DurablePlan26FeedbackObservationQueueAdapterV1<S> {
+pub struct DurableFeedbackObservationQueueAdapterV1<S> {
     sink: S,
 }
 
-impl<S> DurablePlan26FeedbackObservationQueueAdapterV1<S> {
+impl<S> DurableFeedbackObservationQueueAdapterV1<S> {
     pub fn new(sink: S) -> Self {
         Self { sink }
     }
 }
 
-impl<S> Plan26FeedbackObservationQueue for DurablePlan26FeedbackObservationQueueAdapterV1<S>
+impl<S> FeedbackObservationQueue for DurableFeedbackObservationQueueAdapterV1<S>
 where
-    S: DurablePlan26FeedbackObservationSinkV1,
+    S: DurableFeedbackObservationSinkV1,
 {
     fn enqueue_feedback_observation(
         &self,
@@ -1333,24 +1333,21 @@ where
     }
 }
 
-/// Compatibility name for existing root-owned observation sinks.
-pub use Plan26FeedbackObservationQueue as FeedbackObservationEventSink;
-
 /// Adapts canonical Plan-26 envelopes to the application's one-way observation
 /// port. Observation loss cannot alter feedback truth or trigger a retry cycle.
-pub struct Plan26FeedbackObservationAdapter<S> {
+pub struct FeedbackObservationAdapter<S> {
     sink: S,
 }
 
-impl<S> Plan26FeedbackObservationAdapter<S> {
+impl<S> FeedbackObservationAdapter<S> {
     pub fn new(sink: S) -> Self {
         Self { sink }
     }
 }
 
-impl<S> FeedbackObservationPort for Plan26FeedbackObservationAdapter<S>
+impl<S> FeedbackObservationPort for FeedbackObservationAdapter<S>
 where
-    S: Plan26FeedbackObservationQueue,
+    S: FeedbackObservationQueue,
 {
     fn observe(&self, input: &FeedbackEvaluationInputV1, observation: FeedbackCycleObservationV1) {
         if let Some(envelope) = feedback_observation_envelope(input, observation) {
@@ -1359,16 +1356,16 @@ where
     }
 }
 
-impl<S> Plan26FeedbackObservationEmitterV1 for Plan26FeedbackObservationAdapter<S>
+impl<S> FeedbackObservationEmitterV1 for FeedbackObservationAdapter<S>
 where
-    S: Plan26FeedbackObservationQueue,
+    S: FeedbackObservationQueue,
 {
     fn observe_source_event(
         &self,
         input: &FeedbackEvaluationInputV1,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     ) {
-        if let Some(envelope) = plan26_feedback_source_event_envelope(input, source_event) {
+        if let Some(envelope) = feedback_source_event_envelope(input, source_event) {
             let _ = self.sink.enqueue_feedback_observation(envelope);
         }
     }
@@ -1377,9 +1374,9 @@ where
         &self,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     ) {
-        if let Some(envelope) = plan26_feedback_source_event_envelope_for_subject(
+        if let Some(envelope) = feedback_source_event_envelope_for_subject(
             subject_digest,
             observed_at,
             source_event,
@@ -1525,7 +1522,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingSink(Rc<RefCell<Vec<FeedbackObservationEnvelopeV1>>>);
 
-    impl FeedbackObservationEventSink for RecordingSink {
+    impl FeedbackObservationQueue for RecordingSink {
         fn enqueue_feedback_observation(
             &self,
             envelope: FeedbackObservationEnvelopeV1,
@@ -1546,7 +1543,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct DroppingSink(Rc<Cell<usize>>);
 
-    impl FeedbackObservationEventSink for DroppingSink {
+    impl FeedbackObservationQueue for DroppingSink {
         fn enqueue_feedback_observation(
             &self,
             _envelope: FeedbackObservationEnvelopeV1,
@@ -1562,7 +1559,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl DurablePlan26FeedbackObservationSinkV1 for RestartSafeSink {
+    impl DurableFeedbackObservationSinkV1 for RestartSafeSink {
         fn enqueue_durable_feedback_observation(
             &self,
             envelope: FeedbackObservationEnvelopeV1,
@@ -1597,7 +1594,7 @@ mod tests {
 
         let sink = RecordingSink::default();
         let recorded = sink.0.clone();
-        let adapter = Plan26FeedbackObservationAdapter::new(sink);
+        let adapter = FeedbackObservationAdapter::new(sink);
         adapter.observe(&input, observation.clone());
         adapter.observe(&input, observation);
         let overlay = overlay_input();
@@ -1608,11 +1605,11 @@ mod tests {
     #[test]
     fn source_events_are_content_free_and_replay_stable() {
         let input = saved_input();
-        let event = Plan26FeedbackSourceEventV1::CiLocalization {
-            outcome: Plan26FeedbackOutcomeV1::Partial,
-            provider: Plan26CiProviderV1::GitHubActions,
+        let event = FeedbackSourceEventV1::CiLocalization {
+            outcome: FeedbackOutcomeV1::Partial,
+            provider: FeedbackCiProviderV1::GitHubActions,
             exact_evidence: true,
-            coverage: Plan26CoverageV1::Partial,
+            coverage: FeedbackCoverageV1::Partial,
             source_degradation: Some(CiFailureSourceDegradationV1::Failed(
                 tracedecay_domain::feedback::CiFailureSourceFailureV1::Schema,
             )),
@@ -1620,8 +1617,8 @@ mod tests {
             candidate_count: 3,
             duration_micros: Some(42),
         };
-        let first = plan26_feedback_source_event_envelope(&input, event.clone()).unwrap();
-        let replay = plan26_feedback_source_event_envelope(&input, event).unwrap();
+        let first = feedback_source_event_envelope(&input, event.clone()).unwrap();
+        let replay = feedback_source_event_envelope(&input, event).unwrap();
         assert_eq!(first, replay);
         assert_eq!(first.producer, "feedback_source");
         assert!(first.observation.is_none());
@@ -1629,7 +1626,7 @@ mod tests {
             first
                 .source_event
                 .as_ref()
-                .map(Plan26FeedbackSourceEventV1::event_kind),
+                .map(FeedbackSourceEventV1::event_kind),
             Some("feedback.ci.localization.observed.v1")
         );
         let encoded = serde_json::to_string(&first).unwrap();
@@ -1642,24 +1639,24 @@ mod tests {
     fn github_lifecycle_ingress_rate_limit_and_stale_are_distinct_events() {
         let input = saved_input();
         let events = [
-            Plan26FeedbackSourceEventV1::GitHubLifecycle {
-                lifecycle: Plan26GitHubLifecycleV1::Outdated,
+            FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: FeedbackGitHubLifecycleV1::Outdated,
                 item_count: 1,
             },
-            Plan26FeedbackSourceEventV1::GitHubIngress {
-                outcome: Plan26FeedbackOutcomeV1::Partial,
+            FeedbackSourceEventV1::GitHubIngress {
+                outcome: FeedbackOutcomeV1::Partial,
                 item_count: 1,
                 duration_micros: None,
             },
-            Plan26FeedbackSourceEventV1::GitHubRateLimit {
+            FeedbackSourceEventV1::GitHubRateLimit {
                 duration_micros: Some(1_000),
             },
-            Plan26FeedbackSourceEventV1::GitHubStale { item_count: 1 },
+            FeedbackSourceEventV1::GitHubStale { item_count: 1 },
         ];
         let kinds = events
             .into_iter()
             .map(|event| {
-                plan26_feedback_source_event_envelope(&input, event)
+                feedback_source_event_envelope(&input, event)
                     .unwrap()
                     .source_event
                     .unwrap()
@@ -1673,23 +1670,23 @@ mod tests {
     fn advisory_provider_state_is_orthogonal_and_content_free() {
         let input = saved_input();
         let events = [
-            Plan26FeedbackSourceEventV1::GitHubLifecycle {
-                lifecycle: Plan26GitHubLifecycleV1::Current,
+            FeedbackSourceEventV1::GitHubLifecycle {
+                lifecycle: FeedbackGitHubLifecycleV1::Current,
                 item_count: 1,
             },
-            Plan26FeedbackSourceEventV1::GitHubIngress {
-                outcome: Plan26FeedbackOutcomeV1::Completed,
+            FeedbackSourceEventV1::GitHubIngress {
+                outcome: FeedbackOutcomeV1::Completed,
                 item_count: 1,
                 duration_micros: None,
             },
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::GitHubReview,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::GitHubReview,
                 state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Partial,
             },
         ];
         let envelopes = events
             .into_iter()
-            .map(|event| plan26_feedback_source_event_envelope(&input, event).unwrap())
+            .map(|event| feedback_source_event_envelope(&input, event).unwrap())
             .collect::<Vec<_>>();
         let kinds = envelopes
             .iter()
@@ -1709,12 +1706,12 @@ mod tests {
     #[test]
     fn lsp_state_observation_is_bounded_and_content_free() {
         let input = saved_input();
-        let envelope = plan26_feedback_source_event_envelope(
+        let envelope = feedback_source_event_envelope(
             &input,
-            Plan26FeedbackSourceEventV1::LspState {
-                state: Plan26LspStateV1::DiagnosticPublished,
-                method: Some(Plan26LspMethodClassV1::Diagnostics),
-                outcome: Plan26FeedbackOutcomeV1::Partial,
+            FeedbackSourceEventV1::LspState {
+                state: FeedbackLspStateV1::DiagnosticPublished,
+                method: Some(FeedbackLspMethodClassV1::Diagnostics),
+                outcome: FeedbackOutcomeV1::Partial,
                 item_count: 3,
                 duration_micros: Some(17),
             },
@@ -1736,15 +1733,15 @@ mod tests {
     #[test]
     fn rejected_argument_observation_keeps_only_normalized_metadata() {
         let input = saved_input();
-        let envelope = plan26_feedback_source_event_envelope(
+        let envelope = feedback_source_event_envelope(
             &input,
-            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                operation: Plan26FeedbackOperationV1::FeedbackDiagnostics,
-                route: Some(Plan26DeliveryRouteV1::Http),
-                argument: Plan26RejectedArgumentV1::RequestBody,
-                rejection: Plan26ArgumentRejectionClassV1::InvalidShape,
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
+                operation: FeedbackOperationV1::FeedbackDiagnostics,
+                route: Some(FeedbackDeliveryRouteV1::Http),
+                argument: FeedbackRejectedArgumentV1::RequestBody,
+                rejection: FeedbackArgumentRejectionClassV1::InvalidShape,
                 schema_revision: 1,
-                outcome: Plan26FeedbackOutcomeV1::Rejected,
+                outcome: FeedbackOutcomeV1::Rejected,
             },
         )
         .unwrap();
@@ -1766,32 +1763,32 @@ mod tests {
                 FeedbackCycleObservationV1::trigger(&input).unwrap(),
             )
             .unwrap(),
-            plan26_feedback_source_event_envelope(
+            feedback_source_event_envelope(
                 &input,
-                Plan26FeedbackSourceEventV1::Delivery {
-                    operation: Plan26FeedbackOperationV1::FeedbackList,
-                    route: Plan26DeliveryRouteV1::Mcp,
-                    outcome: Plan26FeedbackOutcomeV1::Completed,
+                FeedbackSourceEventV1::Delivery {
+                    operation: FeedbackOperationV1::FeedbackList,
+                    route: FeedbackDeliveryRouteV1::Mcp,
+                    outcome: FeedbackOutcomeV1::Completed,
                     item_count: 2,
                     duration_micros: Some(10),
                 },
             )
             .unwrap(),
-            plan26_feedback_source_event_envelope(
+            feedback_source_event_envelope(
                 &input,
-                Plan26FeedbackSourceEventV1::Delivery {
-                    operation: Plan26FeedbackOperationV1::FeedbackList,
-                    route: Plan26DeliveryRouteV1::Http,
-                    outcome: Plan26FeedbackOutcomeV1::Completed,
+                FeedbackSourceEventV1::Delivery {
+                    operation: FeedbackOperationV1::FeedbackList,
+                    route: FeedbackDeliveryRouteV1::Http,
+                    outcome: FeedbackOutcomeV1::Completed,
                     item_count: 2,
                     duration_micros: Some(12),
                 },
             )
             .unwrap(),
-            plan26_feedback_source_event_envelope(
+            feedback_source_event_envelope(
                 &input,
-                Plan26FeedbackSourceEventV1::SseLifecycle {
-                    lifecycle: Plan26SseLifecycleV1::Gap,
+                FeedbackSourceEventV1::SseLifecycle {
+                    lifecycle: FeedbackSseLifecycleV1::Gap,
                     sequence: Some(7),
                     item_count: 0,
                     duration_micros: None,
@@ -1838,7 +1835,7 @@ mod tests {
 
         let model =
             FeedbackObservationReadModelV1::project_with_accounting(&[envelope], 3, 1).unwrap();
-        assert_eq!(model.coverage, Plan26CoverageV1::Unknown);
+        assert_eq!(model.coverage, FeedbackCoverageV1::Unknown);
         assert_eq!(model.watermark.producer_boot_id, Some(boot_id));
         assert_eq!(model.watermark.producer_sequence, Some(7));
         assert_eq!(model.denominators.persisted, 1);
@@ -1852,38 +1849,38 @@ mod tests {
     #[test]
     fn system_quality_projection_is_denominator_safe_and_complete() {
         let input = saved_input();
-        let source = |event| plan26_feedback_source_event_envelope(&input, event).unwrap();
+        let source = |event| feedback_source_event_envelope(&input, event).unwrap();
         let observations = vec![
-            source(Plan26FeedbackSourceEventV1::RelevanceFeedback {
-                disposition: Plan26RelevanceDispositionV1::Helpful,
+            source(FeedbackSourceEventV1::RelevanceFeedback {
+                disposition: FeedbackRelevanceDispositionV1::Helpful,
             }),
-            source(Plan26FeedbackSourceEventV1::EvidenceDiversity {
+            source(FeedbackSourceEventV1::EvidenceDiversity {
                 eligible_source_families: 3,
                 represented_source_families: 2,
                 selected_count: 4,
             }),
-            source(Plan26FeedbackSourceEventV1::Delivery {
-                operation: Plan26FeedbackOperationV1::FeedbackList,
-                route: Plan26DeliveryRouteV1::Http,
-                outcome: Plan26FeedbackOutcomeV1::Denied,
+            source(FeedbackSourceEventV1::Delivery {
+                operation: FeedbackOperationV1::FeedbackList,
+                route: FeedbackDeliveryRouteV1::Http,
+                outcome: FeedbackOutcomeV1::Denied,
                 item_count: 0,
                 duration_micros: Some(90),
             }),
-            source(Plan26FeedbackSourceEventV1::Truncation {
-                operation: Plan26FeedbackOperationV1::FeedbackList,
+            source(FeedbackSourceEventV1::Truncation {
+                operation: FeedbackOperationV1::FeedbackList,
                 returned_count: 8,
                 omitted_count: 2,
             }),
-            source(Plan26FeedbackSourceEventV1::AuthorizationRevoked {
-                operation: Plan26FeedbackOperationV1::FeedbackGet,
-                outcome: Plan26FeedbackOutcomeV1::Completed,
+            source(FeedbackSourceEventV1::AuthorizationRevoked {
+                operation: FeedbackOperationV1::FeedbackGet,
+                outcome: FeedbackOutcomeV1::Completed,
                 propagation_micros: 40,
             }),
-            source(Plan26FeedbackSourceEventV1::StackTransition {
-                transition: Plan26StackTransitionV1::BaseDrifted,
-                outcome: Plan26FeedbackOutcomeV1::Completed,
+            source(FeedbackSourceEventV1::StackTransition {
+                transition: FeedbackStackTransitionV1::BaseDrifted,
+                outcome: FeedbackOutcomeV1::Completed,
             }),
-            source(Plan26FeedbackSourceEventV1::GitHubStale { item_count: 1 }),
+            source(FeedbackSourceEventV1::GitHubStale { item_count: 1 }),
         ];
 
         let projected = FeedbackObservationReadModelV1::project(&observations).unwrap();
@@ -1937,7 +1934,7 @@ mod tests {
                 .iter()
                 .all(|metric| metric.value.is_none()
                     && metric.denominator.is_none()
-                    && metric.coverage == Plan26CoverageV1::Unknown)
+                    && metric.coverage == FeedbackCoverageV1::Unknown)
         );
     }
 
@@ -1955,7 +1952,7 @@ mod tests {
 
         let dropping = DroppingSink::default();
         let dropped = dropping.0.clone();
-        let adapter = Plan26FeedbackObservationAdapter::new(dropping);
+        let adapter = FeedbackObservationAdapter::new(dropping);
         adapter.observe(&input, observation);
         assert_eq!(dropped.get(), 1);
     }
@@ -1969,13 +1966,13 @@ mod tests {
         )
         .unwrap();
         let sink = RestartSafeSink::default();
-        let first_adapter = DurablePlan26FeedbackObservationQueueAdapterV1::new(sink.clone());
+        let first_adapter = DurableFeedbackObservationQueueAdapterV1::new(sink.clone());
         assert_eq!(
             first_adapter.enqueue_feedback_observation(envelope.clone()),
             FeedbackObservationSinkOutcome::Enqueued
         );
 
-        let restarted_adapter = DurablePlan26FeedbackObservationQueueAdapterV1::new(sink.clone());
+        let restarted_adapter = DurableFeedbackObservationQueueAdapterV1::new(sink.clone());
         assert_eq!(
             restarted_adapter.replay_feedback_observation(envelope.clone()),
             FeedbackObservationSinkOutcome::Duplicate

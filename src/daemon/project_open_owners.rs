@@ -84,8 +84,8 @@ use crate::application::advisory::{
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 use crate::application::feedback::{
     FeedbackCycleInvocation, FeedbackCycleLspInput, ProductionFeedbackCycleAuthorizationFuture,
@@ -165,7 +165,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                     &registration.host_delivery.source_observations,
                     &feedback_scope.project_id,
                     &terminal_request,
-                    Plan26FeedbackOutcomeV1::Unavailable,
+                    FeedbackOutcomeV1::Unavailable,
                 );
                 return Err(error);
             }
@@ -2052,7 +2052,7 @@ async fn run_production_hook_cycle(
                 &registration.host_delivery.source_observations,
                 &feedback_scope.project_id,
                 &feedback_request,
-                Plan26FeedbackOutcomeV1::Unavailable,
+                FeedbackOutcomeV1::Unavailable,
             );
             return;
         }
@@ -2064,7 +2064,7 @@ async fn run_production_hook_cycle(
             observe_hook_feedback_cycle_terminal(
                 &registration.host_delivery.source_observations,
                 &request,
-                Plan26FeedbackOutcomeV1::Partial,
+                FeedbackOutcomeV1::Partial,
             );
             return;
         };
@@ -2084,7 +2084,7 @@ async fn run_production_hook_cycle(
         observe_hook_feedback_cycle_terminal(
             &registration.host_delivery.source_observations,
             &request,
-            Plan26FeedbackOutcomeV1::Unavailable,
+            FeedbackOutcomeV1::Unavailable,
         );
         return;
     };
@@ -2145,7 +2145,7 @@ async fn run_production_hook_cycle(
         observe_hook_feedback_cycle_terminal(
             &registration.host_delivery.source_observations,
             &request,
-            Plan26FeedbackOutcomeV1::Unavailable,
+            FeedbackOutcomeV1::Unavailable,
         );
         return;
     }
@@ -2274,9 +2274,9 @@ async fn run_production_hook_cycle(
 }
 
 fn observe_hook_feedback_cycle_terminal(
-    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
     request: &HookOrchestrationRequestV1,
-    outcome: Plan26FeedbackOutcomeV1,
+    outcome: FeedbackOutcomeV1,
 ) {
     let envelope = request.hook.envelope();
     let trigger = match request.trigger {
@@ -2298,9 +2298,9 @@ fn observe_hook_feedback_cycle_terminal(
     observations.observe_source_event_for_subject(
         subject,
         envelope.observed_at,
-        Plan26FeedbackSourceEventV1::Delivery {
-            operation: Plan26FeedbackOperationV1::FeedbackCycle,
-            route: Plan26DeliveryRouteV1::HookV2,
+        FeedbackSourceEventV1::Delivery {
+            operation: FeedbackOperationV1::FeedbackCycle,
+            route: FeedbackDeliveryRouteV1::HookV2,
             outcome,
             item_count: 0,
             duration_micros: None,
@@ -2312,7 +2312,7 @@ fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
     indexed_files: &[String],
     request: &HookOrchestrationRequestV1,
-    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 ) -> Option<String> {
     let document_uri = hook_feedback_document_uri(project_root, indexed_files, request);
     if document_uri.is_none() {
@@ -2320,9 +2320,9 @@ fn hook_feedback_document_uri_or_observe(
             observations,
             request,
             if indexed_files.is_empty() {
-                Plan26FeedbackOutcomeV1::Unavailable
+                FeedbackOutcomeV1::Unavailable
             } else {
-                Plan26FeedbackOutcomeV1::Partial
+                FeedbackOutcomeV1::Partial
             },
         );
     }
@@ -3123,13 +3123,13 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingHookCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
+    struct RecordingHookCycleObservations(std::sync::Mutex<Vec<FeedbackSourceEventV1>>);
 
-    impl Plan26FeedbackObservationEmitterV1 for RecordingHookCycleObservations {
+    impl FeedbackObservationEmitterV1 for RecordingHookCycleObservations {
         fn observe_source_event(
             &self,
             _input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-            source_event: Plan26FeedbackSourceEventV1,
+            source_event: FeedbackSourceEventV1,
         ) {
             self.0.lock().expect("observations").push(source_event);
         }
@@ -3138,7 +3138,7 @@ mod tests {
             &self,
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: UtcMicros,
-            source_event: Plan26FeedbackSourceEventV1,
+            source_event: FeedbackSourceEventV1,
         ) {
             self.0.lock().expect("observations").push(source_event);
         }
@@ -3319,7 +3319,7 @@ mod tests {
         let request = saved_edit_hook_request([99; 16]);
         let observations = Arc::new(RecordingHookCycleObservations::default());
         let observation_port =
-            Arc::clone(&observations) as Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>;
+            Arc::clone(&observations) as Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>;
 
         assert!(
             hook_feedback_document_uri_or_observe(
@@ -3332,8 +3332,8 @@ mod tests {
         );
         assert!(matches!(
             observations.0.lock().expect("observations").as_slice(),
-            [Plan26FeedbackSourceEventV1::Delivery {
-                outcome: Plan26FeedbackOutcomeV1::Unavailable,
+            [FeedbackSourceEventV1::Delivery {
+                outcome: FeedbackOutcomeV1::Unavailable,
                 ..
             }]
         ));
@@ -3350,8 +3350,8 @@ mod tests {
         );
         assert!(matches!(
             observations.0.lock().expect("observations").as_slice(),
-            [Plan26FeedbackSourceEventV1::Delivery {
-                outcome: Plan26FeedbackOutcomeV1::Partial,
+            [FeedbackSourceEventV1::Delivery {
+                outcome: FeedbackOutcomeV1::Partial,
                 ..
             }]
         ));

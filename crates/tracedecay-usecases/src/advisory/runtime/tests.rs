@@ -36,16 +36,16 @@ fn provider_state_events_preserve_each_closed_provider_identity() {
     assert_eq!(
         events,
         vec![
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::GitHubReview,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::GitHubReview,
                 state: ProviderEvaluationStateV1::Absent,
             },
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::CiLocalization,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::CiLocalization,
                 state: ProviderEvaluationStateV1::Absent,
             },
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::Proximity,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::Proximity,
                 state: ProviderEvaluationStateV1::Absent,
             },
         ]
@@ -76,12 +76,12 @@ fn unrequested_remote_providers_are_typed_unavailable_not_omitted() {
             .map(provider_state_event)
             .collect::<Vec<_>>(),
         vec![
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::GitHubReview,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::GitHubReview,
                 state: ProviderEvaluationStateV1::Unavailable,
             },
-            Plan26FeedbackSourceEventV1::ProviderState {
-                provider: Plan26AdvisoryProviderV1::CiLocalization,
+            FeedbackSourceEventV1::ProviderState {
+                provider: FeedbackAdvisoryProviderV1::CiLocalization,
                 state: ProviderEvaluationStateV1::Unavailable,
             },
         ]
@@ -94,8 +94,8 @@ fn ci_discovery_degradation_never_collapses_to_clean() {
         ci_discovery_terminal_state(&ProductionCiFailureDiscoveryOutcomeV1::NotFound),
         Some((
             ProviderEvaluationStateV1::SupportedCompletedComplete,
-            Plan26FeedbackOutcomeV1::Completed,
-            Plan26CoverageV1::Known,
+            FeedbackOutcomeV1::Completed,
+            FeedbackCoverageV1::Known,
         ))
     );
     for (discovery, expected) in [

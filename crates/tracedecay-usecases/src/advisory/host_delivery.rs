@@ -24,8 +24,8 @@ use tracedecay_lsp::DaemonLspProviderBundle;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
-    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26HookScoutPhaseV1,
+    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackHookScoutPhaseV1,
 };
 use crate::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_host_integration::{
@@ -346,7 +346,7 @@ pub struct AdvisoryHostDeliveryRegistrationV1 {
     pub lsp_session_factory: Arc<DaemonLspSessionFactory>,
     pub hook_delivery_port:
         Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync>,
-    pub source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    pub source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 /// One daemon-startup bundle for advisory execution and every existing delivery
@@ -469,8 +469,8 @@ impl AdvisoryHostDeliveryRegistrationV1 {
         };
         self.source_observations.observe_source_event(
             observation_input,
-            Plan26FeedbackSourceEventV1::Truncation {
-                operation: Plan26FeedbackOperationV1::FeedbackCycle,
+            FeedbackSourceEventV1::Truncation {
+                operation: FeedbackOperationV1::FeedbackCycle,
                 returned_count: publication
                     .result
                     .returned_findings
@@ -515,8 +515,8 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             return Err(AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
         };
         let delivery_route = match rollback.route {
-            HookFeedbackDeliveryRouteV1::HookV2 => Plan26DeliveryRouteV1::HookV2,
-            HookFeedbackDeliveryRouteV1::Legacy => Plan26DeliveryRouteV1::HookLegacy,
+            HookFeedbackDeliveryRouteV1::HookV2 => FeedbackDeliveryRouteV1::HookV2,
+            HookFeedbackDeliveryRouteV1::Legacy => FeedbackDeliveryRouteV1::HookLegacy,
         };
         let Some(route) = self
             .host_routes(host)
@@ -526,8 +526,8 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             self.observe_hook_delivery(
                 observation_input,
                 delivery_route,
-                Plan26HookScoutPhaseV1::Admission,
-                Plan26FeedbackOutcomeV1::Unavailable,
+                FeedbackHookScoutPhaseV1::Admission,
+                FeedbackOutcomeV1::Unavailable,
                 rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
                 0,
             );
@@ -539,8 +539,8 @@ impl AdvisoryHostDeliveryRegistrationV1 {
             self.observe_hook_delivery(
                 observation_input,
                 delivery_route,
-                Plan26HookScoutPhaseV1::Admission,
-                Plan26FeedbackOutcomeV1::Unavailable,
+                FeedbackHookScoutPhaseV1::Admission,
+                FeedbackOutcomeV1::Unavailable,
                 rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
                 0,
             );
@@ -551,21 +551,21 @@ impl AdvisoryHostDeliveryRegistrationV1 {
         self.observe_hook_delivery(
             observation_input,
             delivery_route,
-            Plan26HookScoutPhaseV1::Admission,
-            Plan26FeedbackOutcomeV1::Admitted,
+            FeedbackHookScoutPhaseV1::Admission,
+            FeedbackOutcomeV1::Admitted,
             rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
             1,
         );
         let outcome = deliver_feedback_with_rollback(rollback, &notice, port)?;
         let observed_outcome = match outcome {
-            HookFeedbackDeliveryOutcomeV1::Delivered => Plan26FeedbackOutcomeV1::Completed,
-            HookFeedbackDeliveryOutcomeV1::Duplicate => Plan26FeedbackOutcomeV1::Duplicate,
-            HookFeedbackDeliveryOutcomeV1::Unavailable => Plan26FeedbackOutcomeV1::Unavailable,
+            HookFeedbackDeliveryOutcomeV1::Delivered => FeedbackOutcomeV1::Completed,
+            HookFeedbackDeliveryOutcomeV1::Duplicate => FeedbackOutcomeV1::Duplicate,
+            HookFeedbackDeliveryOutcomeV1::Unavailable => FeedbackOutcomeV1::Unavailable,
         };
         self.observe_hook_delivery(
             observation_input,
             delivery_route,
-            Plan26HookScoutPhaseV1::Delivery,
+            FeedbackHookScoutPhaseV1::Delivery,
             observed_outcome,
             rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
             1,
@@ -573,7 +573,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
         self.observe_hook_delivery(
             observation_input,
             delivery_route,
-            Plan26HookScoutPhaseV1::FeedbackTerminal,
+            FeedbackHookScoutPhaseV1::FeedbackTerminal,
             observed_outcome,
             rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
             1,
@@ -594,15 +594,15 @@ impl AdvisoryHostDeliveryRegistrationV1 {
     fn observe_hook_delivery(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        route: Plan26DeliveryRouteV1,
-        phase: Plan26HookScoutPhaseV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        route: FeedbackDeliveryRouteV1,
+        phase: FeedbackHookScoutPhaseV1,
+        outcome: FeedbackOutcomeV1,
         rollback: bool,
         item_count: u32,
     ) {
         self.source_observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::HookScout {
+            FeedbackSourceEventV1::HookScout {
                 route,
                 phase,
                 outcome,
@@ -610,10 +610,10 @@ impl AdvisoryHostDeliveryRegistrationV1 {
                 duration_micros: None,
             },
         );
-        if phase == Plan26HookScoutPhaseV1::Delivery {
+        if phase == FeedbackHookScoutPhaseV1::Delivery {
             self.source_observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::HostDelivery {
+                FeedbackSourceEventV1::HostDelivery {
                     route,
                     outcome,
                     rollback,

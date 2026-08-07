@@ -582,11 +582,11 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
         })
     }
 
-    fn observe_plan26_feedback(
+    fn observe_feedback(
         &self,
         subject_digest: tracedecay_domain::ManifestDigest,
         observed_at: tracedecay_domain::UtcMicros,
-        event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
+        event: crate::application::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
             let request_id = crate::request_identity::mint_global_request_id(

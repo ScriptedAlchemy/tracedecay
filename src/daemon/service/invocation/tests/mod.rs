@@ -12,13 +12,13 @@ use tracedecay_lsp::{
 };
 
 #[derive(Default)]
-struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
+struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<FeedbackSourceEventV1>>);
 
-impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
+impl FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
     fn observe_source_event(
         &self,
         _input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     ) {
         self.0.lock().expect("observations").push(source_event);
     }
@@ -27,7 +27,7 @@ impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
         &self,
         _subject_digest: ManifestDigest,
         _observed_at: UtcMicros,
-        source_event: Plan26FeedbackSourceEventV1,
+        source_event: FeedbackSourceEventV1,
     ) {
         self.0.lock().expect("observations").push(source_event);
     }

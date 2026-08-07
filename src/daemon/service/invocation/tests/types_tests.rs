@@ -20,10 +20,10 @@ async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtim
     assert!(router.execute(request.clone()).await.is_err());
     assert!(matches!(
         observations.0.lock().expect("observations").as_slice(),
-        [Plan26FeedbackSourceEventV1::Delivery {
-            operation: Plan26FeedbackOperationV1::FeedbackCycle,
-            route: Plan26DeliveryRouteV1::Lsp,
-            outcome: Plan26FeedbackOutcomeV1::Unavailable,
+        [FeedbackSourceEventV1::Delivery {
+            operation: FeedbackOperationV1::FeedbackCycle,
+            route: FeedbackDeliveryRouteV1::Lsp,
+            outcome: FeedbackOutcomeV1::Unavailable,
             item_count: 0,
             ..
         }]

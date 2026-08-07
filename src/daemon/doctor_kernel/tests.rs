@@ -365,7 +365,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     let mut active =
         crate::application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("active empty projection");
-    active.coverage = crate::application::feedback::observations::Plan26CoverageV1::Known;
+    active.coverage = crate::application::feedback::observations::FeedbackCoverageV1::Known;
     active.watermark.producer_boot_id =
         Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
     assert_eq!(

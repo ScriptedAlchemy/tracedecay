@@ -57,13 +57,13 @@ impl DaemonInvocationService {
                     observations.as_ref(),
                     observation_subject.as_ref(),
                     current_micros(),
-                    Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
+                    FeedbackSourceEventV1::SurfaceArgumentRejected {
                         operation: feedback_observation_operation(operation),
                         route: delivery_route,
                         argument,
                         rejection,
                         schema_revision: 1,
-                        outcome: Plan26FeedbackOutcomeV1::Rejected,
+                        outcome: FeedbackOutcomeV1::Rejected,
                     },
                 );
             }
@@ -75,9 +75,9 @@ impl DaemonInvocationService {
                 observations.as_ref(),
                 observation_subject.as_ref(),
                 dispatched_at,
-                Plan26FeedbackSourceEventV1::Dispatch {
+                FeedbackSourceEventV1::Dispatch {
                     operation: feedback_observation_operation(operation),
-                    outcome: Plan26FeedbackOutcomeV1::Admitted,
+                    outcome: FeedbackOutcomeV1::Admitted,
                     capacity: 1,
                     admitted: 1,
                 },

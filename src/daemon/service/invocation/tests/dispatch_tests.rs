@@ -879,8 +879,8 @@ fn feedback_invocation_retains_trusted_delivery_route() {
         Deadline::new(UtcMicros(2)).expect("deadline"),
         CancellationContext::active("cancel.delivery-route").expect("cancellation"),
     )
-    .with_delivery_route(Plan26DeliveryRouteV1::Mcp);
-    assert_eq!(request.delivery_route, Some(Plan26DeliveryRouteV1::Mcp));
+    .with_delivery_route(FeedbackDeliveryRouteV1::Mcp);
+    assert_eq!(request.delivery_route, Some(FeedbackDeliveryRouteV1::Mcp));
     let encoded = serde_json::to_value(&request).expect("serialize request");
     assert_eq!(encoded["delivery_route"], "mcp");
     assert!(request.validate().is_ok());
@@ -926,8 +926,8 @@ fn feedback_observation_invocation_accepts_only_content_free_events() {
         "request.feedback-observe",
         subject,
         UtcMicros(1),
-        Plan26FeedbackSourceEventV1::SseLifecycle {
-            lifecycle: crate::application::feedback::observations::Plan26SseLifecycleV1::Gap,
+        FeedbackSourceEventV1::SseLifecycle {
+            lifecycle: crate::application::feedback::observations::FeedbackSseLifecycleV1::Gap,
             sequence: Some(1),
             item_count: 0,
             duration_micros: None,

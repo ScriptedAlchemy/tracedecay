@@ -74,15 +74,15 @@ async fn daemon_impact_adapter_reports_missing_identity_without_minting_paths() 
 fn lsp_method_state_event_is_bounded_and_measured() {
     assert_eq!(
         lsp_method_state_event(
-            Plan26LspStateV1::MethodCompleted,
-            Plan26FeedbackOutcomeV1::Completed,
+            FeedbackLspStateV1::MethodCompleted,
+            FeedbackOutcomeV1::Completed,
             1,
             42,
         ),
-        Plan26FeedbackSourceEventV1::LspState {
-            state: Plan26LspStateV1::MethodCompleted,
-            method: Some(Plan26LspMethodClassV1::Diagnostics),
-            outcome: Plan26FeedbackOutcomeV1::Completed,
+        FeedbackSourceEventV1::LspState {
+            state: FeedbackLspStateV1::MethodCompleted,
+            method: Some(FeedbackLspMethodClassV1::Diagnostics),
+            outcome: FeedbackOutcomeV1::Completed,
             item_count: 1,
             duration_micros: Some(42),
         }

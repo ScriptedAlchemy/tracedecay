@@ -16,7 +16,7 @@ use tracedecay_domain::{
 
 use crate::feedback::observations::{
     FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
-    FeedbackSystemMetricUnitV1, Plan26CoverageV1,
+    FeedbackSystemMetricUnitV1, FeedbackCoverageV1,
 };
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 
@@ -735,7 +735,7 @@ pub fn attach_feedback_system_quality(
             unavailable_reason: unavailable,
         }));
     }
-    read_model.current &= feedback.coverage == Plan26CoverageV1::Known;
+    read_model.current &= feedback.coverage == FeedbackCoverageV1::Known;
     read_model.watermark = format!("{};{watermark}", read_model.watermark);
 }
 
@@ -802,14 +802,14 @@ const fn feedback_denominator_name(denominator: FeedbackSystemMetricDenominatorV
     }
 }
 
-const fn feedback_coverage_state(coverage: Plan26CoverageV1) -> CoverageStateV1 {
+const fn feedback_coverage_state(coverage: FeedbackCoverageV1) -> CoverageStateV1 {
     match coverage {
-        Plan26CoverageV1::Known => CoverageStateV1::Known,
-        Plan26CoverageV1::Partial => CoverageStateV1::Partial,
-        Plan26CoverageV1::Stale => CoverageStateV1::Stale,
-        Plan26CoverageV1::Unknown => CoverageStateV1::Unknown,
-        Plan26CoverageV1::Sampled => CoverageStateV1::Sampled,
-        Plan26CoverageV1::Capped => CoverageStateV1::Capped,
+        FeedbackCoverageV1::Known => CoverageStateV1::Known,
+        FeedbackCoverageV1::Partial => CoverageStateV1::Partial,
+        FeedbackCoverageV1::Stale => CoverageStateV1::Stale,
+        FeedbackCoverageV1::Unknown => CoverageStateV1::Unknown,
+        FeedbackCoverageV1::Sampled => CoverageStateV1::Sampled,
+        FeedbackCoverageV1::Capped => CoverageStateV1::Capped,
     }
 }
 

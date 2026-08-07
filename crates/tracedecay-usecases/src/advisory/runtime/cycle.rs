@@ -6,7 +6,7 @@ pub struct AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
     github: Option<Arc<GitHubReviewRuntimeOwnerV1<GR, GA>>>,
     ci: ConcreteCiFailureLocalizationOwnerV1<CS, CE>,
     proximity: ConcreteProximityRuntimeOwnerV1<PE, PC>,
-    observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 impl<GR, GA, CS, CE, PE, PC> AdvisoryRuntime<GR, GA, CS, CE, PE, PC>
@@ -92,7 +92,7 @@ where
 
     pub fn source_observation_port(
         &self,
-    ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
+    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.observations)
     }
 
@@ -109,9 +109,9 @@ where
         if let Err(error) = request.validate_for(&self.feedback_scope) {
             self.observations.observe_source_event(
                 &request.feedback.input,
-                Plan26FeedbackSourceEventV1::ArgumentRejected {
-                    operation: Plan26FeedbackOperationV1::FeedbackCycle,
-                    outcome: Plan26FeedbackOutcomeV1::Rejected,
+                FeedbackSourceEventV1::ArgumentRejected {
+                    operation: FeedbackOperationV1::FeedbackCycle,
+                    outcome: FeedbackOutcomeV1::Rejected,
                 },
             );
             return Err(error);
@@ -126,9 +126,9 @@ where
         if !context_matches_scope(context, &self.feedback_scope) {
             self.observations.observe_source_event(
                 &request.feedback.input,
-                Plan26FeedbackSourceEventV1::Dispatch {
-                    operation: Plan26FeedbackOperationV1::FeedbackCycle,
-                    outcome: Plan26FeedbackOutcomeV1::Denied,
+                FeedbackSourceEventV1::Dispatch {
+                    operation: FeedbackOperationV1::FeedbackCycle,
+                    outcome: FeedbackOutcomeV1::Denied,
                     capacity: saturating_u32(request.feedback.maximum_returned_findings),
                     admitted: 0,
                 },
@@ -137,9 +137,9 @@ where
         }
         self.observations.observe_source_event(
             &request.feedback.input,
-            Plan26FeedbackSourceEventV1::Dispatch {
-                operation: Plan26FeedbackOperationV1::FeedbackCycle,
-                outcome: Plan26FeedbackOutcomeV1::Admitted,
+            FeedbackSourceEventV1::Dispatch {
+                operation: FeedbackOperationV1::FeedbackCycle,
+                outcome: FeedbackOutcomeV1::Admitted,
                 capacity: saturating_u32(request.feedback.maximum_returned_findings),
                 admitted: saturating_u32(request.feedback.providers.len() as u64),
             },
@@ -185,7 +185,7 @@ where
                     GitHubReviewRefreshOutcomeV1::Denied => {
                         self.observe_github_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::Denied,
+                            FeedbackOutcomeV1::Denied,
                         );
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
@@ -195,7 +195,7 @@ where
                     GitHubReviewRefreshOutcomeV1::Unavailable => {
                         self.observe_github_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::Unavailable,
+                            FeedbackOutcomeV1::Unavailable,
                         );
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
@@ -205,7 +205,7 @@ where
                     GitHubReviewRefreshOutcomeV1::Stale => {
                         self.observations.observe_source_event(
                             &request.feedback.input,
-                            Plan26FeedbackSourceEventV1::GitHubStale { item_count: 0 },
+                            FeedbackSourceEventV1::GitHubStale { item_count: 0 },
                         );
                         contributions.set_state(
                             AdvisoryProviderV1::GitHub,
@@ -216,7 +216,7 @@ where
             } else {
                 self.observe_github_terminal(
                     &request.feedback.input,
-                    Plan26FeedbackOutcomeV1::Unavailable,
+                    FeedbackOutcomeV1::Unavailable,
                 );
                 contributions.set_state(
                     AdvisoryProviderV1::GitHub,
@@ -250,8 +250,8 @@ where
                     CiFailureLocalizationPortOutcomeV1::Denied => {
                         self.observe_ci_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::Denied,
-                            Plan26CoverageV1::Known,
+                            FeedbackOutcomeV1::Denied,
+                            FeedbackCoverageV1::Known,
                             None,
                         );
                         contributions.set_state(
@@ -262,8 +262,8 @@ where
                     CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint) => {
                         self.observe_ci_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::RateLimited,
-                            Plan26CoverageV1::Unknown,
+                            FeedbackOutcomeV1::RateLimited,
+                            FeedbackCoverageV1::Unknown,
                             Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
                                 checkpoint,
                             )),
@@ -274,8 +274,8 @@ where
                     CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
                         self.observe_ci_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::Failed,
-                            Plan26CoverageV1::Unknown,
+                            FeedbackOutcomeV1::Failed,
+                            FeedbackCoverageV1::Unknown,
                             Some(
                                 tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
                                     cause,
@@ -288,8 +288,8 @@ where
                     CiFailureLocalizationPortOutcomeV1::Unavailable => {
                         self.observe_ci_terminal(
                             &request.feedback.input,
-                            Plan26FeedbackOutcomeV1::Unavailable,
-                            Plan26CoverageV1::Unknown,
+                            FeedbackOutcomeV1::Unavailable,
+                            FeedbackCoverageV1::Unknown,
                             None,
                         );
                         contributions.set_state(
@@ -325,8 +325,8 @@ where
                     // Found is handled above; fail closed if the terminal map regresses.
                     self.observe_ci_terminal(
                         &request.feedback.input,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                        Plan26CoverageV1::Unknown,
+                        FeedbackOutcomeV1::Unavailable,
+                        FeedbackCoverageV1::Unknown,
                         None,
                     );
                     contributions.set_state(
@@ -406,11 +406,11 @@ where
     ) -> AdvisoryCycleOutcome {
         self.observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::Cancellation {
-                operation: Plan26FeedbackOperationV1::FeedbackCycle,
+            FeedbackSourceEventV1::Cancellation {
+                operation: FeedbackOperationV1::FeedbackCycle,
                 outcome: match interruption {
-                    AdvisoryCycleInterruption::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-                    AdvisoryCycleInterruption::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+                    AdvisoryCycleInterruption::Cancelled => FeedbackOutcomeV1::Cancelled,
+                    AdvisoryCycleInterruption::TimedOut => FeedbackOutcomeV1::TimedOut,
                 },
             },
         );
@@ -442,21 +442,21 @@ where
         ingress: &GitHubReviewIngressResultV1,
     ) {
         let outcome = match ingress.outcome {
-            GitHubReviewIngressProviderOutcomeV1::Complete => Plan26FeedbackOutcomeV1::Completed,
-            GitHubReviewIngressProviderOutcomeV1::Partial => Plan26FeedbackOutcomeV1::Partial,
+            GitHubReviewIngressProviderOutcomeV1::Complete => FeedbackOutcomeV1::Completed,
+            GitHubReviewIngressProviderOutcomeV1::Partial => FeedbackOutcomeV1::Partial,
             GitHubReviewIngressProviderOutcomeV1::Unavailable => {
-                Plan26FeedbackOutcomeV1::Unavailable
+                FeedbackOutcomeV1::Unavailable
             }
-            GitHubReviewIngressProviderOutcomeV1::Denied => Plan26FeedbackOutcomeV1::Denied,
+            GitHubReviewIngressProviderOutcomeV1::Denied => FeedbackOutcomeV1::Denied,
             GitHubReviewIngressProviderOutcomeV1::RateLimited => {
-                Plan26FeedbackOutcomeV1::RateLimited
+                FeedbackOutcomeV1::RateLimited
             }
-            GitHubReviewIngressProviderOutcomeV1::Stale => Plan26FeedbackOutcomeV1::Stale,
-            GitHubReviewIngressProviderOutcomeV1::Failed => Plan26FeedbackOutcomeV1::Failed,
+            GitHubReviewIngressProviderOutcomeV1::Stale => FeedbackOutcomeV1::Stale,
+            GitHubReviewIngressProviderOutcomeV1::Failed => FeedbackOutcomeV1::Failed,
         };
         self.observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::GitHubIngress {
+            FeedbackSourceEventV1::GitHubIngress {
                 outcome,
                 item_count: saturating_u32(ingress.items.len() as u64),
                 duration_micros: None,
@@ -465,7 +465,7 @@ where
         if ingress.outcome == GitHubReviewIngressProviderOutcomeV1::RateLimited {
             self.observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::GitHubRateLimit {
+                FeedbackSourceEventV1::GitHubRateLimit {
                     duration_micros: None,
                 },
             );
@@ -473,7 +473,7 @@ where
         if ingress.outcome == GitHubReviewIngressProviderOutcomeV1::Stale {
             self.observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::GitHubStale {
+                FeedbackSourceEventV1::GitHubStale {
                     item_count: saturating_u32(ingress.items.len() as u64),
                 },
             );
@@ -494,15 +494,15 @@ where
                 continue;
             }
             let lifecycle = match lifecycle {
-                GitHubReviewLifecycleV1::Current => Plan26GitHubLifecycleV1::Current,
-                GitHubReviewLifecycleV1::Outdated => Plan26GitHubLifecycleV1::Outdated,
-                GitHubReviewLifecycleV1::Resolved => Plan26GitHubLifecycleV1::Resolved,
-                GitHubReviewLifecycleV1::Edited => Plan26GitHubLifecycleV1::Edited,
-                GitHubReviewLifecycleV1::Deleted => Plan26GitHubLifecycleV1::Deleted,
+                GitHubReviewLifecycleV1::Current => FeedbackGitHubLifecycleV1::Current,
+                GitHubReviewLifecycleV1::Outdated => FeedbackGitHubLifecycleV1::Outdated,
+                GitHubReviewLifecycleV1::Resolved => FeedbackGitHubLifecycleV1::Resolved,
+                GitHubReviewLifecycleV1::Edited => FeedbackGitHubLifecycleV1::Edited,
+                GitHubReviewLifecycleV1::Deleted => FeedbackGitHubLifecycleV1::Deleted,
             };
             self.observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::GitHubLifecycle {
+                FeedbackSourceEventV1::GitHubLifecycle {
                     lifecycle,
                     item_count: saturating_u32(count as u64),
                 },
@@ -513,11 +513,11 @@ where
     fn observe_github_terminal(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        outcome: Plan26FeedbackOutcomeV1,
+        outcome: FeedbackOutcomeV1,
     ) {
         self.observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::GitHubIngress {
+            FeedbackSourceEventV1::GitHubIngress {
                 outcome,
                 item_count: 0,
                 duration_micros: None,
@@ -531,29 +531,29 @@ where
         localization: &CiFailureLocalizationResultV1,
     ) {
         let outcome = match localization.state {
-            CiFailureLocalizationStateV1::Complete => Plan26FeedbackOutcomeV1::Completed,
-            CiFailureLocalizationStateV1::Partial => Plan26FeedbackOutcomeV1::Partial,
-            CiFailureLocalizationStateV1::Stale => Plan26FeedbackOutcomeV1::Stale,
-            CiFailureLocalizationStateV1::Unavailable => Plan26FeedbackOutcomeV1::Unavailable,
-            CiFailureLocalizationStateV1::Denied => Plan26FeedbackOutcomeV1::Denied,
-            CiFailureLocalizationStateV1::Failed => Plan26FeedbackOutcomeV1::Failed,
+            CiFailureLocalizationStateV1::Complete => FeedbackOutcomeV1::Completed,
+            CiFailureLocalizationStateV1::Partial => FeedbackOutcomeV1::Partial,
+            CiFailureLocalizationStateV1::Stale => FeedbackOutcomeV1::Stale,
+            CiFailureLocalizationStateV1::Unavailable => FeedbackOutcomeV1::Unavailable,
+            CiFailureLocalizationStateV1::Denied => FeedbackOutcomeV1::Denied,
+            CiFailureLocalizationStateV1::Failed => FeedbackOutcomeV1::Failed,
         };
         let coverage = match localization.coverage {
-            CiFailureCoverageV1::Complete => Plan26CoverageV1::Known,
-            CiFailureCoverageV1::Partial => Plan26CoverageV1::Partial,
+            CiFailureCoverageV1::Complete => FeedbackCoverageV1::Known,
+            CiFailureCoverageV1::Partial => FeedbackCoverageV1::Partial,
             CiFailureCoverageV1::Unavailable | CiFailureCoverageV1::Denied => {
-                Plan26CoverageV1::Unknown
+                FeedbackCoverageV1::Unknown
             }
-            CiFailureCoverageV1::Stale => Plan26CoverageV1::Stale,
+            CiFailureCoverageV1::Stale => FeedbackCoverageV1::Stale,
         };
         let localized_count = u32::from(localization.symbol.is_some())
             .saturating_add(saturating_u32(localization.callers.len() as u64))
             .saturating_add(saturating_u32(localization.tests.len() as u64));
         self.observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::CiLocalization {
+            FeedbackSourceEventV1::CiLocalization {
                 outcome,
-                provider: Plan26CiProviderV1::GitHubActions,
+                provider: FeedbackCiProviderV1::GitHubActions,
                 exact_evidence: localization.generation.is_some(),
                 coverage,
                 source_degradation: localization.source_degradation.clone(),
@@ -567,15 +567,15 @@ where
     fn observe_ci_terminal(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        outcome: Plan26FeedbackOutcomeV1,
-        coverage: Plan26CoverageV1,
+        outcome: FeedbackOutcomeV1,
+        coverage: FeedbackCoverageV1,
         source_degradation: Option<tracedecay_domain::feedback::CiFailureSourceDegradationV1>,
     ) {
         self.observations.observe_source_event(
             input,
-            Plan26FeedbackSourceEventV1::CiLocalization {
+            FeedbackSourceEventV1::CiLocalization {
                 outcome,
-                provider: Plan26CiProviderV1::GitHubActions,
+                provider: FeedbackCiProviderV1::GitHubActions,
                 exact_evidence: false,
                 coverage,
                 source_degradation,
@@ -615,25 +615,25 @@ where
         let candidate_count = saturating_u32(contributions.len() as u64);
         for (transition, risk, count) in [
             (
-                Plan26ProximityTransitionV1::Emitted,
-                Plan26ProximityRiskV1::AtOrAboveThreshold,
+                FeedbackProximityTransitionV1::Emitted,
+                FeedbackProximityRiskV1::AtOrAboveThreshold,
                 emitted_count,
             ),
             (
-                Plan26ProximityTransitionV1::Suppressed,
+                FeedbackProximityTransitionV1::Suppressed,
                 if contributions
                     .iter()
                     .any(|item| item.inclusion == ProximityInclusionV1::BelowThreshold)
                 {
-                    Plan26ProximityRiskV1::BelowThreshold
+                    FeedbackProximityRiskV1::BelowThreshold
                 } else {
-                    Plan26ProximityRiskV1::None
+                    FeedbackProximityRiskV1::None
                 },
                 suppressed_count,
             ),
             (
-                Plan26ProximityTransitionV1::Expired,
-                Plan26ProximityRiskV1::None,
+                FeedbackProximityTransitionV1::Expired,
+                FeedbackProximityRiskV1::None,
                 expired_count,
             ),
         ] {
@@ -642,7 +642,7 @@ where
             }
             self.observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::Proximity {
+                FeedbackSourceEventV1::Proximity {
                     transition,
                     risk,
                     configuration_revision: input.request.configuration_digest.clone(),
@@ -654,9 +654,9 @@ where
         if contributions.is_empty() {
             self.observations.observe_source_event(
                 input,
-                Plan26FeedbackSourceEventV1::Proximity {
-                    transition: Plan26ProximityTransitionV1::Suppressed,
-                    risk: Plan26ProximityRiskV1::None,
+                FeedbackSourceEventV1::Proximity {
+                    transition: FeedbackProximityTransitionV1::Suppressed,
+                    risk: FeedbackProximityRiskV1::None,
                     configuration_revision: input.request.configuration_digest.clone(),
                     candidate_count: 0,
                     affected_count: 0,
@@ -760,13 +760,13 @@ pub(super) fn saturating_u32(value: u64) -> u32 {
 
 pub(super) fn provider_state_event(
     provider: &AdvisoryProviderStateV1,
-) -> Plan26FeedbackSourceEventV1 {
+) -> FeedbackSourceEventV1 {
     let provider_kind = match provider.provider {
-        AdvisoryProviderV1::GitHub => Plan26AdvisoryProviderV1::GitHubReview,
-        AdvisoryProviderV1::Ci => Plan26AdvisoryProviderV1::CiLocalization,
-        AdvisoryProviderV1::Proximity => Plan26AdvisoryProviderV1::Proximity,
+        AdvisoryProviderV1::GitHub => FeedbackAdvisoryProviderV1::GitHubReview,
+        AdvisoryProviderV1::Ci => FeedbackAdvisoryProviderV1::CiLocalization,
+        AdvisoryProviderV1::Proximity => FeedbackAdvisoryProviderV1::Proximity,
     };
-    Plan26FeedbackSourceEventV1::ProviderState {
+    FeedbackSourceEventV1::ProviderState {
         provider: provider_kind,
         state: provider.state,
     }
@@ -795,46 +795,46 @@ pub(super) fn ci_discovery_terminal_state(
     discovery: &ProductionCiFailureDiscoveryOutcomeV1,
 ) -> Option<(
     ProviderEvaluationStateV1,
-    Plan26FeedbackOutcomeV1,
-    Plan26CoverageV1,
+    FeedbackOutcomeV1,
+    FeedbackCoverageV1,
 )> {
     match discovery {
         ProductionCiFailureDiscoveryOutcomeV1::Found(_) => None,
         ProductionCiFailureDiscoveryOutcomeV1::NotFound => Some((
             ProviderEvaluationStateV1::SupportedCompletedComplete,
-            Plan26FeedbackOutcomeV1::Completed,
-            Plan26CoverageV1::Known,
+            FeedbackOutcomeV1::Completed,
+            FeedbackCoverageV1::Known,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::Ambiguous => Some((
             ProviderEvaluationStateV1::Failed,
-            Plan26FeedbackOutcomeV1::Failed,
-            Plan26CoverageV1::Unknown,
+            FeedbackOutcomeV1::Failed,
+            FeedbackCoverageV1::Unknown,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::Denied => Some((
             ProviderEvaluationStateV1::Unavailable,
-            Plan26FeedbackOutcomeV1::Denied,
-            Plan26CoverageV1::Unknown,
+            FeedbackOutcomeV1::Denied,
+            FeedbackCoverageV1::Unknown,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::Stale => Some((
             ProviderEvaluationStateV1::Stale,
-            Plan26FeedbackOutcomeV1::Stale,
-            Plan26CoverageV1::Stale,
+            FeedbackOutcomeV1::Stale,
+            FeedbackCoverageV1::Stale,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::RateLimited(_) => Some((
             ProviderEvaluationStateV1::Partial,
-            Plan26FeedbackOutcomeV1::RateLimited,
-            Plan26CoverageV1::Unknown,
+            FeedbackOutcomeV1::RateLimited,
+            FeedbackCoverageV1::Unknown,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::Failed(_) => Some((
             ProviderEvaluationStateV1::Failed,
-            Plan26FeedbackOutcomeV1::Failed,
-            Plan26CoverageV1::Unknown,
+            FeedbackOutcomeV1::Failed,
+            FeedbackCoverageV1::Unknown,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
         | ProductionCiFailureDiscoveryOutcomeV1::Unavailable => Some((
             ProviderEvaluationStateV1::Unavailable,
-            Plan26FeedbackOutcomeV1::Unavailable,
-            Plan26CoverageV1::Unknown,
+            FeedbackOutcomeV1::Unavailable,
+            FeedbackCoverageV1::Unknown,
         )),
     }
 }

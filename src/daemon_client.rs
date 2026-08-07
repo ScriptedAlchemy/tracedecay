@@ -27,7 +27,7 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
+    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
 use crate::request_identity::{
     ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
@@ -382,11 +382,11 @@ pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync 
         Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
     >;
 
-    fn observe_plan26_feedback(
+    fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        event: Plan26FeedbackSourceEventV1,
+        event: FeedbackSourceEventV1,
     ) -> DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>>;
 }
 
@@ -491,11 +491,11 @@ impl DaemonInvocationClient {
         result
     }
 
-    pub async fn observe_plan26_feedback(
+    pub async fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        event: Plan26FeedbackSourceEventV1,
+        event: FeedbackSourceEventV1,
     ) -> crate::errors::Result<()> {
         let request_id = mint_global_request_id(GlobalRequestSurface::FeedbackObservation)
             .map_err(|error| crate::errors::TraceDecayError::Config {
@@ -673,13 +673,13 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
         ))
     }
 
-    fn observe_plan26_feedback(
+    fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        event: Plan26FeedbackSourceEventV1,
+        event: FeedbackSourceEventV1,
     ) -> DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
-        Box::pin(DaemonInvocationClient::observe_plan26_feedback(
+        Box::pin(DaemonInvocationClient::observe_feedback(
             self,
             subject_digest,
             observed_at,
@@ -773,7 +773,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                 } => {
                     let event = serde_json::from_value(event)
                         .map_err(|_| InvocationError::InvalidRequest)?;
-                    self.observe_plan26_feedback(configuration_digest, observed_at, event)
+                    self.observe_feedback(configuration_digest, observed_at, event)
                         .await
                         .map_err(|_| InvocationError::Unavailable)?;
                     Ok(ApplicationResponse::ObservationAccepted)
@@ -793,12 +793,12 @@ pub fn invocation_now_micros() -> UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
-pub(crate) fn application_delivery_route(surface: BindingSurface) -> Plan26DeliveryRouteV1 {
+pub(crate) fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
     match surface {
-        BindingSurface::Cli => Plan26DeliveryRouteV1::Cli,
-        BindingSurface::Mcp => Plan26DeliveryRouteV1::Mcp,
-        BindingSurface::Http | BindingSurface::Dashboard => Plan26DeliveryRouteV1::Http,
-        BindingSurface::Lsp => Plan26DeliveryRouteV1::Lsp,
+        BindingSurface::Cli => FeedbackDeliveryRouteV1::Cli,
+        BindingSurface::Mcp => FeedbackDeliveryRouteV1::Mcp,
+        BindingSurface::Http | BindingSurface::Dashboard => FeedbackDeliveryRouteV1::Http,
+        BindingSurface::Lsp => FeedbackDeliveryRouteV1::Lsp,
     }
 }
 

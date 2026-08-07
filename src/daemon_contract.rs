@@ -46,7 +46,7 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::application::feedback::observations::{
-    Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
+    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
 use crate::application::primitives::PrimitiveRequest;
 use crate::application_surface::{
@@ -310,7 +310,7 @@ pub struct DaemonInvocationRequest {
     pub(crate) revision: u16,
     pub(crate) request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) delivery_route: Option<Plan26DeliveryRouteV1>,
+    pub(crate) delivery_route: Option<FeedbackDeliveryRouteV1>,
     #[serde(flatten)]
     pub(crate) payload: DaemonInvocationPayload,
 }
@@ -385,7 +385,7 @@ pub(crate) enum DaemonInvocationPayload {
     FeedbackObserve {
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        event: Plan26FeedbackSourceEventV1,
+        event: FeedbackSourceEventV1,
     },
     PrimitiveImpact {
         request: tracedecay_application::retrieval::GraphImpactPrimitiveRequest,
@@ -750,7 +750,7 @@ impl DaemonInvocationRequest {
         request_id: impl Into<String>,
         subject_digest: ManifestDigest,
         observed_at: UtcMicros,
-        event: Plan26FeedbackSourceEventV1,
+        event: FeedbackSourceEventV1,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -1270,7 +1270,7 @@ impl DaemonInvocationRequest {
         }
     }
 
-    pub(crate) fn with_delivery_route(mut self, route: Plan26DeliveryRouteV1) -> Self {
+    pub(crate) fn with_delivery_route(mut self, route: FeedbackDeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
         self
     }

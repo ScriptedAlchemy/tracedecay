@@ -116,9 +116,9 @@ use crate::application::feedback::cycle_production::{
     ProductionFeedbackCycleProximityPortV1, production_proximity_feedback_cycle_input,
 };
 use crate::application::feedback::observations::{
-    Plan26AnchorOperationV1, Plan26ArgumentRejectionClassV1, Plan26DeliveryRouteV1,
-    Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
-    Plan26FeedbackSourceEventV1, Plan26RejectedArgumentV1,
+    FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
+    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
+    FeedbackSourceEventV1, FeedbackRejectedArgumentV1,
 };
 use crate::application::feedback::owner::{
     DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,

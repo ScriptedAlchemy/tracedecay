@@ -5,7 +5,7 @@ use super::*;
 pub(super) fn invocation_observation_subject(
     request_id: &str,
     operation: DaemonInvocationOperation,
-    route: Option<Plan26DeliveryRouteV1>,
+    route: Option<FeedbackDeliveryRouteV1>,
 ) -> Option<ManifestDigest> {
     canonical_sha256(&(
         "tracedecay.feedback.transport-observation.v1",
@@ -35,34 +35,34 @@ pub(super) fn is_observable_operation(operation: DaemonInvocationOperation) -> b
 
 pub(super) fn feedback_observation_operation(
     operation: DaemonInvocationOperation,
-) -> Plan26FeedbackOperationV1 {
+) -> FeedbackOperationV1 {
     match operation {
         DaemonInvocationOperation::FeedbackDiagnostics => {
-            Plan26FeedbackOperationV1::FeedbackDiagnostics
+            FeedbackOperationV1::FeedbackDiagnostics
         }
-        DaemonInvocationOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
-        DaemonInvocationOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
-        DaemonInvocationOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        DaemonInvocationOperation::FeedbackGet => FeedbackOperationV1::FeedbackGet,
+        DaemonInvocationOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
+        DaemonInvocationOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
         DaemonInvocationOperation::FeedbackAdvisoryCycle => {
-            Plan26FeedbackOperationV1::FeedbackCycle
+            FeedbackOperationV1::FeedbackCycle
         }
-        DaemonInvocationOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
+        DaemonInvocationOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::AffectedTests => {
-            Plan26FeedbackOperationV1::PrimitiveAffectedTests
+            FeedbackOperationV1::PrimitiveAffectedTests
         }
-        DaemonInvocationOperation::PrimitiveImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
+        DaemonInvocationOperation::PrimitiveImpact => FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::PrimitiveAffectedTests => {
-            Plan26FeedbackOperationV1::PrimitiveAffectedTests
+            FeedbackOperationV1::PrimitiveAffectedTests
         }
         DaemonInvocationOperation::PrimitiveTestResults => {
-            Plan26FeedbackOperationV1::PrimitiveTestResults
+            FeedbackOperationV1::PrimitiveTestResults
         }
         DaemonInvocationOperation::LspOpen
         | DaemonInvocationOperation::LspFrame
         | DaemonInvocationOperation::LspPoll
         | DaemonInvocationOperation::LspAcknowledge
         | DaemonInvocationOperation::LspReconnect
-        | DaemonInvocationOperation::LspDetach => Plan26FeedbackOperationV1::LspSession,
+        | DaemonInvocationOperation::LspDetach => FeedbackOperationV1::LspSession,
         DaemonInvocationOperation::FeedbackObserve
         | DaemonInvocationOperation::PrimitiveRead
         | DaemonInvocationOperation::CodeExactOccurrence
@@ -89,22 +89,22 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::GitBlame
         | DaemonInvocationOperation::GitHunks
         | DaemonInvocationOperation::GitPreview
-        | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
+        | DaemonInvocationOperation::GitApply => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
 pub(super) fn emit_invocation_observation(
-    observations: Option<&Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
+    observations: Option<&Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
     observed_at: UtcMicros,
-    event: Plan26FeedbackSourceEventV1,
+    event: FeedbackSourceEventV1,
 ) {
     if let (Some(observations), Some(subject)) = (observations, subject) {
         observations.observe_source_event_for_subject(subject.clone(), observed_at, event);
     }
 }
 
-fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26FeedbackOutcomeV1 {
+fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackOutcomeV1 {
     match &response.outcome {
         DaemonInvocationOutcome::GitRead { .. }
         | DaemonInvocationOutcome::GitPreview { .. }
@@ -122,54 +122,54 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26Fee
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
         | DaemonInvocationOutcome::LspReconnected { .. }
-        | DaemonInvocationOutcome::LspDetached => Plan26FeedbackOutcomeV1::Completed,
+        | DaemonInvocationOutcome::LspDetached => FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
         | DaemonInvocationOutcome::CallableCode { result, .. } => {
             match result.execution().termination {
-                OperationTermination::Completed => Plan26FeedbackOutcomeV1::Completed,
-                OperationTermination::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-                OperationTermination::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+                OperationTermination::Completed => FeedbackOutcomeV1::Completed,
+                OperationTermination::Cancelled => FeedbackOutcomeV1::Cancelled,
+                OperationTermination::TimedOut => FeedbackOutcomeV1::TimedOut,
                 OperationTermination::Failed | OperationTermination::EffectUnknown => {
-                    Plan26FeedbackOutcomeV1::Failed
+                    FeedbackOutcomeV1::Failed
                 }
-                OperationTermination::Unavailable => Plan26FeedbackOutcomeV1::Unavailable,
-                OperationTermination::Partial => Plan26FeedbackOutcomeV1::Partial,
+                OperationTermination::Unavailable => FeedbackOutcomeV1::Unavailable,
+                OperationTermination::Partial => FeedbackOutcomeV1::Partial,
             }
         }
         DaemonInvocationOutcome::LspFrameAccepted { backpressured, .. } => {
             if *backpressured {
-                Plan26FeedbackOutcomeV1::AtCapacity
+                FeedbackOutcomeV1::AtCapacity
             } else {
-                Plan26FeedbackOutcomeV1::Accepted
+                FeedbackOutcomeV1::Accepted
             }
         }
         DaemonInvocationOutcome::LspFrame { closed, .. } => {
             if *closed {
-                Plan26FeedbackOutcomeV1::Disconnected
+                FeedbackOutcomeV1::Disconnected
             } else {
-                Plan26FeedbackOutcomeV1::Completed
+                FeedbackOutcomeV1::Completed
             }
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => match problem.kind() {
-            ApplicationProblemKind::InvalidRequest => Plan26FeedbackOutcomeV1::Rejected,
-            ApplicationProblemKind::NotFoundOrNotAuthorized => Plan26FeedbackOutcomeV1::Denied,
+            ApplicationProblemKind::InvalidRequest => FeedbackOutcomeV1::Rejected,
+            ApplicationProblemKind::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
             ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-                Plan26FeedbackOutcomeV1::Stale
+                FeedbackOutcomeV1::Stale
             }
             ApplicationProblemKind::Unsupported | ApplicationProblemKind::Unavailable => {
-                Plan26FeedbackOutcomeV1::Unavailable
+                FeedbackOutcomeV1::Unavailable
             }
-            ApplicationProblemKind::Saturated => Plan26FeedbackOutcomeV1::AtCapacity,
-            ApplicationProblemKind::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-            ApplicationProblemKind::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+            ApplicationProblemKind::Saturated => FeedbackOutcomeV1::AtCapacity,
+            ApplicationProblemKind::Cancelled => FeedbackOutcomeV1::Cancelled,
+            ApplicationProblemKind::TimedOut => FeedbackOutcomeV1::TimedOut,
         },
         DaemonInvocationOutcome::Problem { problem } => match problem {
             DaemonInvocationProblem::InvalidRequest
-            | DaemonInvocationProblem::UnsupportedRevision => Plan26FeedbackOutcomeV1::Rejected,
-            DaemonInvocationProblem::NotFoundOrNotAuthorized => Plan26FeedbackOutcomeV1::Denied,
+            | DaemonInvocationProblem::UnsupportedRevision => FeedbackOutcomeV1::Rejected,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
             DaemonInvocationProblem::ResetRequired | DaemonInvocationProblem::Unavailable => {
-                Plan26FeedbackOutcomeV1::Unavailable
+                FeedbackOutcomeV1::Unavailable
             }
         },
     }
@@ -177,7 +177,7 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26Fee
 
 pub(super) fn invocation_rejected_argument(
     response: &DaemonInvocationResponse,
-) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
+) -> Option<(FeedbackRejectedArgumentV1, FeedbackArgumentRejectionClassV1)> {
     match &response.outcome {
         DaemonInvocationOutcome::Problem { problem } => {
             invocation_problem_rejected_argument(*problem)
@@ -186,8 +186,8 @@ pub(super) fn invocation_rejected_argument(
             if problem.kind() == ApplicationProblemKind::InvalidRequest =>
         {
             Some((
-                Plan26RejectedArgumentV1::RequestBody,
-                Plan26ArgumentRejectionClassV1::InvalidShape,
+                FeedbackRejectedArgumentV1::RequestBody,
+                FeedbackArgumentRejectionClassV1::InvalidShape,
             ))
         }
         _ => None,
@@ -196,15 +196,15 @@ pub(super) fn invocation_rejected_argument(
 
 pub(super) const fn invocation_problem_rejected_argument(
     problem: DaemonInvocationProblem,
-) -> Option<(Plan26RejectedArgumentV1, Plan26ArgumentRejectionClassV1)> {
+) -> Option<(FeedbackRejectedArgumentV1, FeedbackArgumentRejectionClassV1)> {
     match problem {
         DaemonInvocationProblem::InvalidRequest => Some((
-            Plan26RejectedArgumentV1::RequestBody,
-            Plan26ArgumentRejectionClassV1::InvalidShape,
+            FeedbackRejectedArgumentV1::RequestBody,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
         )),
         DaemonInvocationProblem::UnsupportedRevision => Some((
-            Plan26RejectedArgumentV1::Lifecycle,
-            Plan26ArgumentRejectionClassV1::Unsupported,
+            FeedbackRejectedArgumentV1::Lifecycle,
+            FeedbackArgumentRejectionClassV1::Unsupported,
         )),
         DaemonInvocationProblem::NotFoundOrNotAuthorized
         | DaemonInvocationProblem::ResetRequired
@@ -213,10 +213,10 @@ pub(super) const fn invocation_problem_rejected_argument(
 }
 
 pub(super) fn observe_invocation_response(
-    observations: Option<&Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>>,
+    observations: Option<&Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>>,
     subject: Option<&ManifestDigest>,
     operation: DaemonInvocationOperation,
-    route: Option<Plan26DeliveryRouteV1>,
+    route: Option<FeedbackDeliveryRouteV1>,
     started_at: UtcMicros,
     response: &DaemonInvocationResponse,
 ) {
@@ -228,7 +228,7 @@ pub(super) fn observe_invocation_response(
             observations,
             subject,
             observed_at,
-            Plan26FeedbackSourceEventV1::Delivery {
+            FeedbackSourceEventV1::Delivery {
                 operation: feedback_observation_operation(operation),
                 route,
                 outcome,
@@ -246,13 +246,13 @@ pub(super) fn observe_invocation_response(
     }
     if matches!(
         outcome,
-        Plan26FeedbackOutcomeV1::Cancelled | Plan26FeedbackOutcomeV1::TimedOut
+        FeedbackOutcomeV1::Cancelled | FeedbackOutcomeV1::TimedOut
     ) {
         emit_invocation_observation(
             observations,
             subject,
             observed_at,
-            Plan26FeedbackSourceEventV1::Cancellation {
+            FeedbackSourceEventV1::Cancellation {
                 operation: feedback_observation_operation(operation),
                 outcome,
             },
@@ -263,7 +263,7 @@ pub(super) fn observe_invocation_response(
             observations,
             subject,
             observed_at,
-            Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
+            FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: feedback_observation_operation(operation),
                 route,
                 argument,
@@ -286,7 +286,7 @@ pub(super) fn observe_invocation_response(
                 observations,
                 subject,
                 observed_at,
-                Plan26FeedbackSourceEventV1::Truncation {
+                FeedbackSourceEventV1::Truncation {
                     operation: feedback_observation_operation(operation),
                     returned_count: result.page().returned.try_into().unwrap_or(u32::MAX),
                     omitted_count: omitted.try_into().unwrap_or(u32::MAX),
@@ -299,8 +299,8 @@ pub(super) fn observe_invocation_response(
             observations,
             subject,
             observed_at,
-            Plan26FeedbackSourceEventV1::AnchorExpansion {
-                operation: Plan26AnchorOperationV1::HandleExpansion,
+            FeedbackSourceEventV1::AnchorExpansion {
+                operation: FeedbackAnchorOperationV1::HandleExpansion,
                 outcome,
                 returned_count: match &response.outcome {
                     DaemonInvocationOutcome::Feedback { result, .. } => {

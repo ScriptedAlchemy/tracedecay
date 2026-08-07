@@ -14,7 +14,7 @@ use tracedecay_api::feedback::{
 use tracedecay_application::ApplicationContractError;
 
 use crate::application::feedback::observations::{
-    FeedbackObservationReadModelV1, Plan26CoverageV1,
+    FeedbackObservationReadModelV1, FeedbackCoverageV1,
 };
 
 use super::DashboardState;
@@ -65,12 +65,12 @@ fn status_envelope(
 ) -> DashboardEnvelopeV1<FeedbackObservationReadModelV1> {
     let presentation = projected.map(|payload| FeedbackStatusPresentationV1 {
         coverage: match payload.coverage {
-            Plan26CoverageV1::Known => FeedbackStatusCoverageV1::Known,
-            Plan26CoverageV1::Partial => FeedbackStatusCoverageV1::Partial,
-            Plan26CoverageV1::Sampled => FeedbackStatusCoverageV1::Sampled,
-            Plan26CoverageV1::Capped => FeedbackStatusCoverageV1::Capped,
-            Plan26CoverageV1::Stale => FeedbackStatusCoverageV1::Stale,
-            Plan26CoverageV1::Unknown => FeedbackStatusCoverageV1::Unknown,
+            FeedbackCoverageV1::Known => FeedbackStatusCoverageV1::Known,
+            FeedbackCoverageV1::Partial => FeedbackStatusCoverageV1::Partial,
+            FeedbackCoverageV1::Sampled => FeedbackStatusCoverageV1::Sampled,
+            FeedbackCoverageV1::Capped => FeedbackStatusCoverageV1::Capped,
+            FeedbackCoverageV1::Stale => FeedbackStatusCoverageV1::Stale,
+            FeedbackCoverageV1::Unknown => FeedbackStatusCoverageV1::Unknown,
         },
         total_count: payload.total_count,
         denominators: FeedbackStatusDenominatorsV1 {
@@ -97,20 +97,20 @@ fn status_envelope(
 mod tests {
     use super::*;
     use crate::application::feedback::observations::{
-        FeedbackObservationDeliveryV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
-        Plan26FeedbackSourceEventV1, plan26_feedback_source_event_envelope_for_subject,
+        FeedbackObservationDeliveryV1, FeedbackOperationV1, FeedbackOutcomeV1,
+        FeedbackSourceEventV1, feedback_source_event_envelope_for_subject,
     };
     use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
     #[test]
     fn partial_status_preserves_drop_denominator_and_unknowns() {
         let subject = canonical_sha256(&"dashboard-feedback-status").unwrap();
-        let mut event = plan26_feedback_source_event_envelope_for_subject(
+        let mut event = feedback_source_event_envelope_for_subject(
             subject,
             UtcMicros(100),
-            Plan26FeedbackSourceEventV1::AuthorizationRevoked {
-                operation: Plan26FeedbackOperationV1::FeedbackGet,
-                outcome: Plan26FeedbackOutcomeV1::Completed,
+            FeedbackSourceEventV1::AuthorizationRevoked {
+                operation: FeedbackOperationV1::FeedbackGet,
+                outcome: FeedbackOutcomeV1::Completed,
                 propagation_micros: 50,
             },
         )
@@ -127,7 +127,7 @@ mod tests {
             .unwrap();
         let model =
             FeedbackObservationReadModelV1::project_with_accounting(&[event], 0, 0).unwrap();
-        assert_eq!(model.coverage, Plan26CoverageV1::Partial);
+        assert_eq!(model.coverage, FeedbackCoverageV1::Partial);
         assert_eq!(model.denominators.eligible, 3);
         assert_eq!(
             model.system_quality.metrics.len(),
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn empty_projection_never_fabricates_available_metrics() {
         let model = FeedbackObservationReadModelV1::project(&[]).unwrap();
-        assert_eq!(model.coverage, Plan26CoverageV1::Unknown);
+        assert_eq!(model.coverage, FeedbackCoverageV1::Unknown);
         assert!(
             model
                 .system_quality

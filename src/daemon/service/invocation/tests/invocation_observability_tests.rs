@@ -11,8 +11,8 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
     assert_eq!(
         invocation_rejected_argument(&invalid),
         Some((
-            Plan26RejectedArgumentV1::RequestBody,
-            Plan26ArgumentRejectionClassV1::InvalidShape,
+            FeedbackRejectedArgumentV1::RequestBody,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
         ))
     );
 
@@ -23,8 +23,8 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
     assert_eq!(
         invocation_rejected_argument(&unsupported),
         Some((
-            Plan26RejectedArgumentV1::Lifecycle,
-            Plan26ArgumentRejectionClassV1::Unsupported,
+            FeedbackRejectedArgumentV1::Lifecycle,
+            FeedbackArgumentRejectionClassV1::Unsupported,
         ))
     );
 }

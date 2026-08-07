@@ -29,12 +29,12 @@ use super::{
     HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
     application_negotiated_features, application_surface_dispatch_input_with_controls,
     current_micros, execute_application_surface, http_operation_event_router,
-    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
+    normalize_application_tool_args, parse_application_surface_request, feedback_sse_stream_event,
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
 use crate::application::feedback::observations::{
-    Plan26ArgumentRejectionClassV1, Plan26FeedbackOutcomeV1, Plan26RejectedArgumentV1,
+    FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
 };
 use crate::application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -1155,9 +1155,9 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
 fn sse_item_maps_to_content_free_delivery_lifecycle() {
     let event = StreamEvent::item(7, "content-is-not-observed").expect("stream item");
     assert_eq!(
-        plan26_sse_stream_event(&event),
+        feedback_sse_stream_event(&event),
         Some((
-            crate::application::feedback::observations::Plan26SseLifecycleV1::EventDelivered,
+            crate::application::feedback::observations::FeedbackSseLifecycleV1::EventDelivered,
             1,
             false,
         ))
@@ -1560,17 +1560,17 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
     assert_eq!(
         surface_rejection_metadata(&ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         Some((
-            Plan26RejectedArgumentV1::RequestBody,
-            Plan26ArgumentRejectionClassV1::InvalidShape,
-            Plan26FeedbackOutcomeV1::Rejected,
+            FeedbackRejectedArgumentV1::RequestBody,
+            FeedbackArgumentRejectionClassV1::InvalidShape,
+            FeedbackOutcomeV1::Rejected,
         ))
     );
     assert_eq!(
         surface_rejection_metadata(&ApplicationSurfaceAdapterError::UnknownOrNotAuthorized),
         Some((
-            Plan26RejectedArgumentV1::Operation,
-            Plan26ArgumentRejectionClassV1::Unauthorized,
-            Plan26FeedbackOutcomeV1::Denied,
+            FeedbackRejectedArgumentV1::Operation,
+            FeedbackArgumentRejectionClassV1::Unauthorized,
+            FeedbackOutcomeV1::Denied,
         ))
     );
     assert_eq!(

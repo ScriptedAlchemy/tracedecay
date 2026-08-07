@@ -4,7 +4,7 @@ pub struct AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC> {
     pub advisory: AdvisoryRuntime<GR, GA, CS, CE, PE, PC>,
     pub feedback_owner: Arc<ConcreteFeedbackOwner>,
     pub publication_store: ProjectFeedbackStore,
-    pub source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    pub source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
 pub fn open_advisory_daemon_registration<GR, GA, CS, CE, PE, PC>(
