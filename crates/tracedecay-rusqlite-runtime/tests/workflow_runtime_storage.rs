@@ -334,7 +334,7 @@ fn definition_effects_retain_sources_without_sql_topology_authority() {
         .unwrap()
         .outcome(),
         &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(
-            first.clone()
+            Box::new(first.clone())
         ))
     );
 
@@ -523,10 +523,8 @@ fn definition_source_journal_and_handoff_survive_registered_store_restart() {
         "actor.workflow.source",
         'j',
     );
-    let prepared = WorkflowEffectPreparedV1::register_definition(
-        identity.input_digest().clone(),
-        first,
-    );
+    let prepared =
+        WorkflowEffectPreparedV1::register_definition(identity.input_digest().clone(), first);
     let definition_record = WorkflowEffectAuthorityPortV1::execute_effect(
         &authority,
         &identity,
@@ -609,7 +607,7 @@ fn lost_issue_response_replays_the_exact_committed_terminal() {
     assert_eq!(first.state(), WorkflowEffectJournalStateV1::Reconciled);
     assert_eq!(
         first.terminal().unwrap().outcome(),
-        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(grant))
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(Box::new(grant)))
     );
     assert_eq!(store.count("workflow_handoffs"), 1);
 }
@@ -660,9 +658,9 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
     assert_eq!(retry, first);
     assert_eq!(
         retry.terminal().unwrap().outcome(),
-        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(Box::new(
             TaskHandoffRedeemed { scope }
-        ))
+        )))
     );
 }
 
@@ -749,10 +747,7 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
     .unwrap();
 
     assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
-    assert_eq!(
-        restarted.count("workflow_definition_source_journal"),
-        1
-    );
+    assert_eq!(restarted.count("workflow_definition_source_journal"), 1);
 }
 
 #[test]
@@ -918,7 +913,9 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
     );
     assert_eq!(
         record.terminal().unwrap().outcome(),
-        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(original_grant))
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(Box::new(
+            original_grant
+        )))
     );
 }
 
