@@ -25,11 +25,19 @@ pub use tracedecay_tool_catalog as operation;
 pub mod work {
     pub use tracedecay_application::{
         AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand,
-        AttachRuntimeEvidenceCommand, CreateWorkCommand, ReplanDependenciesCommand,
-        ReviewProposalCommand, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+        AdmitWorkPlacementCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
+        PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
+        ResumeWorkRunCommand, ReviewProposalCommand, WorkPlacementPreflightRequestV1,
+        WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+        WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
         work_executable_binding_registry as executable_binding_registry,
     };
-    pub use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+    pub use tracedecay_domain::{
+        WorkPlacementBlockerV1, WorkPlacementKindV1, WorkPlacementPreflightV1,
+        WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1, WorkProjection,
+        WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlReasonV1,
+        WorkRunControlStateV1, WorkRunControlV1,
+    };
 }
 
 /// Workflow definition storage and task-handoff commands, plus their

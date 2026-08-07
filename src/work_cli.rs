@@ -14,10 +14,12 @@ use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationEnvelope,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
     AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationSignal, CreateWorkCommand,
-    Deadline, GenerateProposalRequest, LegalAction, ReplanDependenciesCommand, ResultContractRef,
-    ResumeWorkAttemptsCommand, RetryDirective, ReviewProposalRequestV1, SafeDiagnostic,
-    StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AdmitWorkPlacementCommand, Deadline, GenerateProposalRequest, LegalAction,
+    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
+    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1,
     work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
@@ -113,6 +115,23 @@ fn decode_work_invocation(
         WorkOperation::Views => {
             decode::<WorkGraphReadRequestV1>(body).map(WorkApplicationInvocationV1::Views)
         }
+        WorkOperation::PauseRun => {
+            decode::<PauseWorkRunCommand>(body).map(WorkApplicationInvocationV1::PauseRun)
+        }
+        WorkOperation::ResumeRun => {
+            decode::<ResumeWorkRunCommand>(body).map(WorkApplicationInvocationV1::ResumeRun)
+        }
+        WorkOperation::RunControl => {
+            decode::<WorkRunControlRequestV1>(body).map(WorkApplicationInvocationV1::RunControl)
+        }
+        WorkOperation::PlacementPreflight => decode::<WorkPlacementPreflightRequestV1>(body)
+            .map(WorkApplicationInvocationV1::PlacementPreflight),
+        WorkOperation::AdmitPlacement => decode::<AdmitWorkPlacementCommand>(body)
+            .map(WorkApplicationInvocationV1::AdmitPlacement),
+        WorkOperation::PlacementStatus => decode::<WorkPlacementStatusRequestV1>(body)
+            .map(WorkApplicationInvocationV1::PlacementStatus),
+        WorkOperation::ReleasePlacement => decode::<ReleaseWorkPlacementCommand>(body)
+            .map(WorkApplicationInvocationV1::ReleasePlacement),
     }
 }
 
@@ -173,6 +192,34 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
                 WorkApplicationOutcomeV1::ListAttempts(_)
             )
             | (WorkOperation::Views, WorkApplicationOutcomeV1::Views(_))
+            | (
+                WorkOperation::PauseRun,
+                WorkApplicationOutcomeV1::PauseRun(_)
+            )
+            | (
+                WorkOperation::ResumeRun,
+                WorkApplicationOutcomeV1::ResumeRun(_)
+            )
+            | (
+                WorkOperation::RunControl,
+                WorkApplicationOutcomeV1::RunControl(_)
+            )
+            | (
+                WorkOperation::PlacementPreflight,
+                WorkApplicationOutcomeV1::PlacementPreflight(_)
+            )
+            | (
+                WorkOperation::AdmitPlacement,
+                WorkApplicationOutcomeV1::AdmitPlacement(_)
+            )
+            | (
+                WorkOperation::PlacementStatus,
+                WorkApplicationOutcomeV1::PlacementStatus(_)
+            )
+            | (
+                WorkOperation::ReleasePlacement,
+                WorkApplicationOutcomeV1::ReleasePlacement(_)
+            )
     )
 }
 
@@ -278,6 +325,13 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::ResumeAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ListAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Views(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::PauseRun(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::ResumeRun(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::RunControl(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::PlacementPreflight(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::AdmitPlacement(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::PlacementStatus(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::ReleasePlacement(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
 }

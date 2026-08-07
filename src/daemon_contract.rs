@@ -27,13 +27,16 @@ use tracedecay_application::{
     MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
     MultiRootScopeSetReadRequestV1, Omission, OpenInvestigationHandoffRequestV1,
     OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
-    OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult, ReconciliationState,
-    ReplanDependenciesCommand, RequestId, ResolvedScope, ResumeWorkAttemptsCommand,
-    RetrieverContribution, ReviewProposalRequestV1, StartWorkAttemptCommand, TaskHandoffGrant,
-    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AdmitWorkPlacementCommand, OperationReceipt, PageRequest, PageState, PauseWorkRunCommand,
+    PreviewId, PreviewResult, ReconciliationState, ReleaseWorkPlacementCommand,
+    ReplanDependenciesCommand, RequestId, ResolvedScope,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetrieverContribution, ReviewProposalRequestV1,
+    StartWorkAttemptCommand, TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    TaskHandoffRedeemed, TemporalState, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+    WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkRunControlReadingV1, WorkRunControlRequestV1,
     WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
     WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
@@ -42,8 +45,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
-    ScopeSetId, UtcMicros, WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1,
-    WorkProjectionSnapshotV1,
+    ScopeSetId, UtcMicros, WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1,
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
 };
 use tracedecay_lsp::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
@@ -308,6 +311,13 @@ pub(crate) enum WorkApplicationInvocationV1 {
     ResumeAttempts(ResumeWorkAttemptsCommand),
     ListAttempts(WorkAttemptListRequestV1),
     Views(WorkGraphReadRequestV1),
+    PauseRun(PauseWorkRunCommand),
+    ResumeRun(ResumeWorkRunCommand),
+    RunControl(WorkRunControlRequestV1),
+    PlacementPreflight(WorkPlacementPreflightRequestV1),
+    AdmitPlacement(AdmitWorkPlacementCommand),
+    PlacementStatus(WorkPlacementStatusRequestV1),
+    ReleasePlacement(ReleaseWorkPlacementCommand),
 }
 
 impl WorkApplicationInvocationV1 {
@@ -329,6 +339,13 @@ impl WorkApplicationInvocationV1 {
             Self::ResumeAttempts(_) => "resume_attempts",
             Self::ListAttempts(_) => "list_attempts",
             Self::Views(_) => "views",
+            Self::PauseRun(_) => "pause_run",
+            Self::ResumeRun(_) => "resume_run",
+            Self::RunControl(_) => "run_control",
+            Self::PlacementPreflight(_) => "placement_preflight",
+            Self::AdmitPlacement(_) => "admit_placement",
+            Self::PlacementStatus(_) => "placement_status",
+            Self::ReleasePlacement(_) => "release_placement",
         }
     }
 }
@@ -347,6 +364,11 @@ pub(crate) enum WorkflowApplicationInvocation {
     DiffDefinition(WorkflowDefinitionDiffRequest),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
+    StartRun(tracedecay_application::WorkflowRunStartRequest),
+    PauseRun(tracedecay_application::WorkflowRunPauseRequest),
+    ResumeRun(tracedecay_application::WorkflowRunResumeRequest),
+    CancelRun(tracedecay_application::WorkflowRunCancelRequest),
+    GetRun(tracedecay_application::WorkflowRunGetRequest),
 }
 
 impl WorkflowApplicationInvocation {
@@ -363,6 +385,11 @@ impl WorkflowApplicationInvocation {
             Self::DiffDefinition(_) => "diff_definition",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
+            Self::StartRun(_) => "start_run",
+            Self::PauseRun(_) => "pause_run",
+            Self::ResumeRun(_) => "resume_run",
+            Self::CancelRun(_) => "cancel_run",
+            Self::GetRun(_) => "get_run",
         }
     }
 }
@@ -2446,6 +2473,13 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
     Views(ApplicationOutcome<WorkGraphReadV1>),
+    PauseRun(ApplicationOutcome<WorkRunControlV1>),
+    ResumeRun(ApplicationOutcome<WorkRunControlV1>),
+    RunControl(ApplicationOutcome<WorkRunControlReadingV1>),
+    PlacementPreflight(ApplicationOutcome<WorkPlacementPreflightV1>),
+    AdmitPlacement(ApplicationOutcome<WorkPlacementV1>),
+    PlacementStatus(ApplicationOutcome<WorkPlacementReadingV1>),
+    ReleasePlacement(ApplicationOutcome<WorkPlacementV1>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2462,6 +2496,11 @@ pub(crate) enum WorkflowApplicationOutcome {
     DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),
+    StartRun(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
+    PauseRun(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
+    ResumeRun(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
+    CancelRun(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
+    GetRun(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

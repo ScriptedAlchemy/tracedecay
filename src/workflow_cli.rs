@@ -82,6 +82,24 @@ fn decode_workflow_invocation(
         }
         WorkflowOperation::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
             .map(WorkflowApplicationInvocation::HandoffRedeem),
+        WorkflowOperation::StartRun => decode::<tracedecay_application::WorkflowRunStartRequest>(
+            body,
+        )
+        .map(WorkflowApplicationInvocation::StartRun),
+        WorkflowOperation::PauseRun => decode::<tracedecay_application::WorkflowRunPauseRequest>(
+            body,
+        )
+        .map(WorkflowApplicationInvocation::PauseRun),
+        WorkflowOperation::ResumeRun => decode::<tracedecay_application::WorkflowRunResumeRequest>(
+            body,
+        )
+        .map(WorkflowApplicationInvocation::ResumeRun),
+        WorkflowOperation::CancelRun => decode::<tracedecay_application::WorkflowRunCancelRequest>(
+            body,
+        )
+        .map(WorkflowApplicationInvocation::CancelRun),
+        WorkflowOperation::GetRun => decode::<tracedecay_application::WorkflowRunGetRequest>(body)
+            .map(WorkflowApplicationInvocation::GetRun),
     }
 }
 
@@ -124,6 +142,21 @@ fn workflow_outcome_matches(
         ) | (
             WorkflowOperation::HandoffRedeem,
             WorkflowApplicationOutcome::HandoffRedeem(_)
+        ) | (
+            WorkflowOperation::StartRun,
+            WorkflowApplicationOutcome::StartRun(_)
+        ) | (
+            WorkflowOperation::PauseRun,
+            WorkflowApplicationOutcome::PauseRun(_)
+        ) | (
+            WorkflowOperation::ResumeRun,
+            WorkflowApplicationOutcome::ResumeRun(_)
+        ) | (
+            WorkflowOperation::CancelRun,
+            WorkflowApplicationOutcome::CancelRun(_)
+        ) | (
+            WorkflowOperation::GetRun,
+            WorkflowApplicationOutcome::GetRun(_)
         )
     )
 }
@@ -227,6 +260,11 @@ fn erase_workflow_outcome(
         WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::StartRun(outcome)
+        | WorkflowApplicationOutcome::PauseRun(outcome)
+        | WorkflowApplicationOutcome::ResumeRun(outcome)
+        | WorkflowApplicationOutcome::CancelRun(outcome)
+        | WorkflowApplicationOutcome::GetRun(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
 }

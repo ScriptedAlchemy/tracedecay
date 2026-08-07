@@ -9,7 +9,8 @@ use tracedecay_application::{
     WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidateRequest, WorkflowRunCancelRequest, WorkflowRunGetRequest,
+    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -234,6 +235,76 @@ async fn invoke_operation(
             )
             .await
         }
+        WorkflowOperation::StartRun => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowRunStartRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowRunProjection>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::StartRun(decoded),
+                start_run_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::PauseRun => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowRunPauseRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowRunProjection>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::PauseRun(decoded),
+                pause_run_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::ResumeRun => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowRunResumeRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowRunProjection>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::ResumeRun(decoded),
+                resume_run_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::CancelRun => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowRunCancelRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowRunProjection>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::CancelRun(decoded),
+                cancel_run_outcome,
+            )
+            .await
+        }
+        WorkflowOperation::GetRun => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowRunGetRequest>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            invoke::<tracedecay_domain::WorkflowRunProjection>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                WorkflowApplicationInvocation::GetRun(decoded),
+                get_run_outcome,
+            )
+            .await
+        }
     }
 }
 
@@ -339,4 +410,29 @@ workflow_selector!(
     handoff_redeem_outcome,
     HandoffRedeem,
     tracedecay_application::TaskHandoffRedeemed
+);
+workflow_selector!(
+    start_run_outcome,
+    StartRun,
+    tracedecay_domain::WorkflowRunProjection
+);
+workflow_selector!(
+    pause_run_outcome,
+    PauseRun,
+    tracedecay_domain::WorkflowRunProjection
+);
+workflow_selector!(
+    resume_run_outcome,
+    ResumeRun,
+    tracedecay_domain::WorkflowRunProjection
+);
+workflow_selector!(
+    cancel_run_outcome,
+    CancelRun,
+    tracedecay_domain::WorkflowRunProjection
+);
+workflow_selector!(
+    get_run_outcome,
+    GetRun,
+    tracedecay_domain::WorkflowRunProjection
 );

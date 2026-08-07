@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{
-    ManifestDigest, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
-    canonical_sha256,
+    ManifestDigest, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
+    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
@@ -18,16 +18,21 @@ use tracedecay_tool_catalog::{
 use tracedecay_domain::WorkAttemptV1;
 
 use crate::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
+    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
+    AttachRuntimeEvidenceCommand,
     CancelWorkAttemptCommand, CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal,
-    ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ReviewProposalRequestV1,
-    StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, ReviewProposalRequestV1,
+    StartWorkAttemptCommand,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 16] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 23] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -96,6 +101,41 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 16] = [
         "use-case.work.list_attempts",
     ),
     ("views", "capability.work.views", "use-case.work.views"),
+    (
+        "pause_run",
+        "capability.work.pause_run",
+        "use-case.work.pause_run",
+    ),
+    (
+        "resume_run",
+        "capability.work.resume_run",
+        "use-case.work.resume_run",
+    ),
+    (
+        "run_control",
+        "capability.work.run_control",
+        "use-case.work.run_control",
+    ),
+    (
+        "placement_preflight",
+        "capability.work.placement_preflight",
+        "use-case.work.placement_preflight",
+    ),
+    (
+        "admit_placement",
+        "capability.work.admit_placement",
+        "use-case.work.admit_placement",
+    ),
+    (
+        "placement_status",
+        "capability.work.placement_status",
+        "use-case.work.placement_status",
+    ),
+    (
+        "release_placement",
+        "capability.work.release_placement",
+        "use-case.work.release_placement",
+    ),
 ];
 
 pub fn work_executable_binding_registry()
@@ -180,6 +220,41 @@ pub fn work_executable_binding_registry()
             "views",
             "/application/work/views",
             EffectClass::Read,
+        )?,
+        available::<PauseWorkRunCommand, WorkRunControlV1>(
+            "pause_run",
+            "/application/work/pause-run",
+            EffectClass::Administrative,
+        )?,
+        available::<ResumeWorkRunCommand, WorkRunControlV1>(
+            "resume_run",
+            "/application/work/resume-run",
+            EffectClass::Administrative,
+        )?,
+        available::<WorkRunControlRequestV1, WorkRunControlReadingV1>(
+            "run_control",
+            "/application/work/run-control",
+            EffectClass::Read,
+        )?,
+        available::<WorkPlacementPreflightRequestV1, WorkPlacementPreflightV1>(
+            "placement_preflight",
+            "/application/work/placement-preflight",
+            EffectClass::Read,
+        )?,
+        available::<AdmitWorkPlacementCommand, WorkPlacementV1>(
+            "admit_placement",
+            "/application/work/admit-placement",
+            EffectClass::Administrative,
+        )?,
+        available::<WorkPlacementStatusRequestV1, WorkPlacementReadingV1>(
+            "placement_status",
+            "/application/work/placement-status",
+            EffectClass::Read,
+        )?,
+        available::<ReleaseWorkPlacementCommand, WorkPlacementV1>(
+            "release_placement",
+            "/application/work/release-placement",
+            EffectClass::Administrative,
         )?,
     ];
     ExecutableBindingRegistryV1::new(bindings)

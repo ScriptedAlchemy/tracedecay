@@ -26,16 +26,20 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblem,
-    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
-    GenerateProposalRequest, GeneratedWorkProposal, ReplanDependenciesCommand, RequestId,
-    ResumeWorkAttemptsCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
+    ApplicationProblem, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
+    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
     WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1,
 };
 use tracedecay_domain::{
-    WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+    WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
+    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
 };
 
 use crate::http::{
@@ -66,6 +70,13 @@ pub enum WorkOperation {
     ResumeAttempts,
     ListAttempts,
     Views,
+    PauseRun,
+    ResumeRun,
+    RunControl,
+    PlacementPreflight,
+    AdmitPlacement,
+    PlacementStatus,
+    ReleasePlacement,
 }
 
 /// Derive every Work operation projection from one `(variant, key, segment)`
@@ -131,11 +142,18 @@ work_operations! {
     ResumeAttempts: "resume_attempts", "resume-attempts";
     ListAttempts: "list_attempts", "list-attempts";
     Views: "views", "views";
+    PauseRun: "pause_run", "pause-run";
+    ResumeRun: "resume_run", "resume-run";
+    RunControl: "run_control", "run-control";
+    PlacementPreflight: "placement_preflight", "placement-preflight";
+    AdmitPlacement: "admit_placement", "admit-placement";
+    PlacementStatus: "placement_status", "placement-status";
+    ReleasePlacement: "release_placement", "release-placement";
 }
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 23] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -152,6 +170,13 @@ impl WorkOperation {
         Self::ResumeAttempts,
         Self::ListAttempts,
         Self::Views,
+        Self::PauseRun,
+        Self::ResumeRun,
+        Self::RunControl,
+        Self::PlacementPreflight,
+        Self::AdmitPlacement,
+        Self::PlacementStatus,
+        Self::ReleasePlacement,
     ];
 
     /// The catalog operation id.
@@ -169,6 +194,9 @@ impl WorkOperation {
                 | Self::AttemptStatus
                 | Self::ListAttempts
                 | Self::Views
+                | Self::RunControl
+                | Self::PlacementPreflight
+                | Self::PlacementStatus
         )
     }
 
@@ -191,6 +219,13 @@ impl WorkOperation {
             Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
             Self::ListAttempts => schema_name::<WorkAttemptListRequestV1>(),
             Self::Views => schema_name::<WorkGraphReadRequestV1>(),
+            Self::PauseRun => schema_name::<PauseWorkRunCommand>(),
+            Self::ResumeRun => schema_name::<ResumeWorkRunCommand>(),
+            Self::RunControl => schema_name::<WorkRunControlRequestV1>(),
+            Self::PlacementPreflight => schema_name::<WorkPlacementPreflightRequestV1>(),
+            Self::AdmitPlacement => schema_name::<AdmitWorkPlacementCommand>(),
+            Self::PlacementStatus => schema_name::<WorkPlacementStatusRequestV1>(),
+            Self::ReleasePlacement => schema_name::<ReleaseWorkPlacementCommand>(),
         }
     }
 
@@ -213,6 +248,11 @@ impl WorkOperation {
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
             Self::Views => schema_name::<WorkGraphReadV1>(),
+            Self::PauseRun | Self::ResumeRun => schema_name::<WorkRunControlV1>(),
+            Self::RunControl => schema_name::<WorkRunControlReadingV1>(),
+            Self::PlacementPreflight => schema_name::<WorkPlacementPreflightV1>(),
+            Self::AdmitPlacement | Self::ReleasePlacement => schema_name::<WorkPlacementV1>(),
+            Self::PlacementStatus => schema_name::<WorkPlacementReadingV1>(),
         }
     }
 
@@ -437,7 +477,10 @@ mod tests {
                 WorkOperation::GenerateProposal,
                 WorkOperation::AttemptStatus,
                 WorkOperation::ListAttempts,
-                WorkOperation::Views
+                WorkOperation::Views,
+                WorkOperation::RunControl,
+                WorkOperation::PlacementPreflight,
+                WorkOperation::PlacementStatus,
             ]
         );
     }

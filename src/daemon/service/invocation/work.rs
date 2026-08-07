@@ -100,7 +100,10 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::GenerateProposal(_)
         | WorkApplicationInvocationV1::AttemptStatus(_)
         | WorkApplicationInvocationV1::ListAttempts(_)
-        | WorkApplicationInvocationV1::Views(_) => false,
+        | WorkApplicationInvocationV1::Views(_)
+        | WorkApplicationInvocationV1::RunControl(_)
+        | WorkApplicationInvocationV1::PlacementPreflight(_)
+        | WorkApplicationInvocationV1::PlacementStatus(_) => false,
         WorkApplicationInvocationV1::Create(_)
         | WorkApplicationInvocationV1::ReplanDependencies(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
@@ -110,8 +113,86 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::AcceptTask(_)
         | WorkApplicationInvocationV1::StartAttempt(_)
         | WorkApplicationInvocationV1::CancelAttempt(_)
-        | WorkApplicationInvocationV1::ResumeAttempts(_) => true,
+        | WorkApplicationInvocationV1::ResumeAttempts(_)
+        | WorkApplicationInvocationV1::PauseRun(_)
+        | WorkApplicationInvocationV1::ResumeRun(_)
+        | WorkApplicationInvocationV1::AdmitPlacement(_)
+        | WorkApplicationInvocationV1::ReleasePlacement(_) => true,
     }
+}
+
+/// Observes one placement target through the native Git authority.
+///
+/// Plan 36 owns Git evidence, so this reads status rather than deciding
+/// anything: the application's placement service turns these counts into typed
+/// blockers. Every failure path answers `readable: false` instead of an empty
+/// reading, because a target that could not be read is not a clean one.
+///
+/// `unique_commits` is deliberately left unmeasured (`None`). Reachability is
+/// not something status can answer, and Plan 32 forbids cleaning when the state
+/// is "unknown" — so an unmeasured target quarantines on release rather than
+/// being assumed worthless. Measuring it is the follow-up that turns a
+/// quarantine into a clean release.
+fn observe_placement_target(
+    project_root: Option<&std::path::Path>,
+    target: &tracedecay_domain::WorkPlacementTargetV1,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkPlacementObservationV1, ApplicationProblem> {
+    use tracedecay_domain::git::{GitChangeKindV1, GitStatusEntryV1};
+
+    let unreadable = tracedecay_domain::WorkPlacementObservationV1 {
+        dirty_tracked_paths: 0,
+        untracked_paths: 0,
+        unique_commits: None,
+        readable: false,
+        // Exclusivity is storage's answer, not the filesystem's; the service
+        // overwrites this from the durable placement rows.
+        active_holder: false,
+        network_required: false,
+        observed_at,
+    };
+    // A managed placement is judged at its own root; an in-place or unmanaged
+    // placement is judged at the project the request resolved to. Neither is
+    // inferred from a current directory.
+    let root = match target.root() {
+        Some(root) => std::path::PathBuf::from(root),
+        None => match project_root {
+            Some(root) => root.to_path_buf(),
+            None => return Ok(unreadable),
+        },
+    };
+    let Ok(repository) =
+        tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
+    else {
+        return Ok(unreadable);
+    };
+    let Ok(status) = repository.status() else {
+        return Ok(unreadable);
+    };
+    let mut dirty_tracked_paths = 0u32;
+    let mut untracked_paths = 0u32;
+    for entry in &status.entries {
+        match entry {
+            GitStatusEntryV1::Tracked(tracked) => {
+                if tracked.index != GitChangeKindV1::Unmodified
+                    || tracked.worktree != GitChangeKindV1::Unmodified
+                {
+                    dirty_tracked_paths = dirty_tracked_paths.saturating_add(1);
+                }
+            }
+            GitStatusEntryV1::Untracked { .. } => {
+                untracked_paths = untracked_paths.saturating_add(1);
+            }
+            // Ignored paths are not the caller's uncommitted work.
+            GitStatusEntryV1::Ignored { .. } => {}
+        }
+    }
+    Ok(tracedecay_domain::WorkPlacementObservationV1 {
+        dirty_tracked_paths,
+        untracked_paths,
+        readable: true,
+        ..unreadable
+    })
 }
 
 /// Attempt state carried by a committed attempt mutation. Attempt states are
@@ -340,7 +421,19 @@ fn dispatch_work_application(
             WorkApplicationOutcomeV1::AcceptTask,
         ),
         WorkApplicationInvocationV1::StartAttempt(command) => {
-            let started = services.attempts().start(&context, command);
+            // Plan 32 ("One runtime, run control, and effect budget"): "pause
+            // and cancellation fence new reservations". The decision lives in
+            // the run-control service; this dispatch only composes the two
+            // application authorities in the order the fence requires, exactly
+            // as the attempt list composes the topology authority below.
+            let started = match services.run_control().admit_reservation(
+                &context,
+                &command.task_id,
+                &command.run_id,
+            ) {
+                Ok(()) => services.attempts().start(&context, command),
+                Err(problem) => Err(problem),
+            };
             if let (Ok(attempt), Some(project_root)) = (&started, project_root.as_ref())
                 && attempt.state() == tracedecay_domain::WorkAttemptStateV1::Leased
             {
@@ -497,6 +590,114 @@ fn dispatch_work_application(
                 observed_at,
                 deadline,
                 WorkApplicationOutcomeV1::Views,
+            )
+        }
+        WorkApplicationInvocationV1::PauseRun(command) => complete_work_effect(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.run_control().pause(&context, command),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::PauseRun,
+        ),
+        WorkApplicationInvocationV1::ResumeRun(command) => complete_work_effect(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.run_control().resume(&context, command),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::ResumeRun,
+        ),
+        WorkApplicationInvocationV1::RunControl(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.run_control().read(&context, &request),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::RunControl,
+        ),
+        WorkApplicationInvocationV1::PlacementPreflight(request) => {
+            let placement_root = project_root.clone();
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                services.placement().preflight(&context, request, |target| {
+                    observe_placement_target(placement_root.as_deref(), target, observed_at)
+                }),
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PlacementPreflight,
+            )
+        }
+        WorkApplicationInvocationV1::AdmitPlacement(command) => {
+            let placement_root = project_root.clone();
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                services
+                    .placement()
+                    .admit_placement(&context, command, |target| {
+                        observe_placement_target(placement_root.as_deref(), target, observed_at)
+                    }),
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AdmitPlacement,
+            )
+        }
+        WorkApplicationInvocationV1::PlacementStatus(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.placement().status(&context, &request),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::PlacementStatus,
+        ),
+        WorkApplicationInvocationV1::ReleasePlacement(command) => {
+            let placement_root = project_root.clone();
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                services.placement().release(&context, command, |target| {
+                    observe_placement_target(placement_root.as_deref(), target, observed_at)
+                }),
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ReleasePlacement,
             )
         }
     }
@@ -876,7 +1077,356 @@ pub(super) async fn execute_workflow_application(
                 deadline,
             )
         }
+        WorkflowApplicationInvocation::StartRun(request) => {
+            let result = start_workflow_run(
+                &registered,
+                &services,
+                &context,
+                request,
+                &input_digest,
+                observed_at,
+            );
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::StartRun,
+            )
+        }
+        WorkflowApplicationInvocation::PauseRun(request) => {
+            let result = apply_workflow_run_command(
+                &services,
+                &request.run_id,
+                request.expected_sequence,
+                tracedecay_domain::WorkflowRunCommand::Pause,
+                request.command_id,
+                &input_digest,
+                observed_at,
+            );
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::PauseRun,
+            )
+        }
+        WorkflowApplicationInvocation::ResumeRun(request) => {
+            let result = apply_workflow_run_command(
+                &services,
+                &request.run_id,
+                request.expected_sequence,
+                tracedecay_domain::WorkflowRunCommand::Resume,
+                request.command_id,
+                &input_digest,
+                observed_at,
+            );
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::ResumeRun,
+            )
+        }
+        WorkflowApplicationInvocation::CancelRun(request) => {
+            let result = cancel_workflow_run(&services, request, &input_digest, observed_at);
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::CancelRun,
+            )
+        }
+        WorkflowApplicationInvocation::GetRun(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            tracedecay_application::WorkflowRunStoragePort::projection(
+                services.effects(),
+                &request.run_id,
+            )
+            .map_err(workflow_run_storage_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::GetRun,
+        ),
     }
+}
+
+/// Admits a workflow run from an Active definition version.
+///
+/// Every admission digest is derived by the daemon from its registered
+/// environment: live policy/configuration digests, the shipped workflow
+/// catalog digest, the pinned work topology policy digest, and the digest of
+/// the provider registry built from the request's registration. A definition
+/// pinned against a different environment is a typed staleness denial, and a
+/// registry that cannot place the definition's entry step denies admission
+/// before any event is journaled.
+fn start_workflow_run(
+    registered: &RegisteredWorkRuntime,
+    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    context: &RequestContext,
+    request: tracedecay_application::WorkflowRunStartRequest,
+    input_digest: &ManifestDigest,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+    let definition = services
+        .definitions()
+        .get(&request.definition_id, request.definition_version)
+        .map_err(workflow_coordination_problem)?;
+    if definition.project_id() != &context.scope().project_id {
+        return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+    }
+    let disposition = services
+        .definitions()
+        .disposition(&request.definition_id, request.definition_version)
+        .map_err(workflow_coordination_problem)?;
+    if disposition.state != tracedecay_application::WorkflowDefinitionLifecycleState::Active {
+        return Err(DaemonInvocationProblem::InvalidRequest);
+    }
+    let registry = tracedecay_application::WorkflowProviderRegistry::new(
+        registered.configuration_digest.clone(),
+        vec![request.provider],
+    )
+    .map_err(workflow_placement_problem)?;
+    let topology = &registered.work_topology_policy;
+    let topology_digest = topology
+        .compute_digest()
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?
+        .0;
+    let entry_step = definition
+        .steps()
+        .first()
+        .ok_or(DaemonInvocationProblem::InvalidRequest)?
+        .step_id
+        .clone();
+    tracedecay_application::WorkflowProviderPlacementService::new(registry.clone())
+        .place(
+            &tracedecay_application::WorkflowTopologyPlacementRequest {
+                run_id: request.run_id.clone(),
+                step_id: entry_step,
+                configuration_digest: registered.configuration_digest.clone(),
+                topology_digest: topology_digest.clone(),
+            },
+            topology,
+        )
+        .map_err(workflow_placement_problem)?;
+    let admission = tracedecay_application::WorkflowAdmissionSnapshot {
+        policy_digest: registered.policy_digest.clone(),
+        configuration_digest: registered.configuration_digest.clone(),
+        catalog_digest: tracedecay_application::work_executable_catalog_digest()
+            .map_err(|_| DaemonInvocationProblem::Unavailable)?,
+        topology_digest,
+        provider_registry_digest: registry.digest().clone(),
+    };
+    tracedecay_application::WorkflowRunService::new(services.effects().clone())
+        .admit(
+            request.run_id,
+            definition,
+            admission,
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: request.command_id,
+                input_digest: input_digest.clone(),
+                occurred_at: observed_at,
+            },
+        )
+        .map_err(workflow_run_problem)
+}
+
+fn apply_workflow_run_command(
+    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    run_id: &tracedecay_domain::RunId,
+    expected_sequence: u64,
+    command: tracedecay_domain::WorkflowRunCommand,
+    command_id: tracedecay_domain::WorkCommandId,
+    input_digest: &ManifestDigest,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+    tracedecay_application::WorkflowRunService::new(services.effects().clone())
+        .apply(
+            run_id,
+            expected_sequence,
+            command,
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id,
+                input_digest: input_digest.clone(),
+                occurred_at: observed_at,
+            },
+        )
+        .map_err(workflow_run_problem)
+}
+
+/// Requests cooperative cancellation and, when no step is still running,
+/// immediately reconciles the run to its terminal `Cancelled` state under a
+/// command identity derived from the caller's, so replays settle identically.
+fn cancel_workflow_run(
+    services: &crate::global_db::RegisteredWorkflowApplicationServicesV1,
+    request: tracedecay_application::WorkflowRunCancelRequest,
+    input_digest: &ManifestDigest,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+    let reconcile_command_id = tracedecay_domain::WorkCommandId::try_from(format!(
+        "{}.reconcile",
+        request.command_id.as_str()
+    ))
+    .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+    let cancelling = apply_workflow_run_command(
+        services,
+        &request.run_id,
+        request.expected_sequence,
+        tracedecay_domain::WorkflowRunCommand::RequestCancellation,
+        request.command_id,
+        input_digest,
+        observed_at,
+    )?;
+    let any_step_running = cancelling.definition().steps().iter().any(|step| {
+        cancelling.step(&step.step_id).is_some_and(|projected| {
+            projected.status() == tracedecay_domain::WorkflowStepStatus::Running
+        })
+    });
+    if any_step_running {
+        return Ok(cancelling);
+    }
+    apply_workflow_run_command(
+        services,
+        &request.run_id,
+        cancelling.sequence(),
+        tracedecay_domain::WorkflowRunCommand::ReconcileCancelled,
+        reconcile_command_id,
+        input_digest,
+        observed_at,
+    )
+}
+
+fn workflow_run_problem(
+    error: tracedecay_application::WorkflowRunServiceError,
+) -> DaemonInvocationProblem {
+    match error {
+        tracedecay_application::WorkflowRunServiceError::PolicyDigestMismatch
+        | tracedecay_application::WorkflowRunServiceError::ConfigurationDigestMismatch
+        | tracedecay_application::WorkflowRunServiceError::CatalogDigestMismatch
+        | tracedecay_application::WorkflowRunServiceError::State(_) => {
+            DaemonInvocationProblem::InvalidRequest
+        }
+        tracedecay_application::WorkflowRunServiceError::Storage(error) => {
+            workflow_run_storage_problem(error)
+        }
+    }
+}
+
+fn workflow_run_storage_problem(
+    error: tracedecay_application::WorkflowRunStorageError,
+) -> DaemonInvocationProblem {
+    match error {
+        tracedecay_application::WorkflowRunStorageError::NotFound => {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+        tracedecay_application::WorkflowRunStorageError::VersionConflict
+        | tracedecay_application::WorkflowRunStorageError::IdempotencyConflict => {
+            DaemonInvocationProblem::InvalidRequest
+        }
+        tracedecay_application::WorkflowRunStorageError::InvalidHistory => {
+            DaemonInvocationProblem::ResetRequired
+        }
+        tracedecay_application::WorkflowRunStorageError::Unavailable => {
+            DaemonInvocationProblem::Unavailable
+        }
+    }
+}
+
+fn workflow_placement_problem(
+    error: tracedecay_application::WorkflowProviderPlacementError,
+) -> DaemonInvocationProblem {
+    match error {
+        tracedecay_application::WorkflowProviderPlacementError::InvalidRegistry
+        | tracedecay_application::WorkflowProviderPlacementError::ConfigurationDigestMismatch
+        | tracedecay_application::WorkflowProviderPlacementError::TopologyDigestMismatch
+        | tracedecay_application::WorkflowProviderPlacementError::InvalidTopology => {
+            DaemonInvocationProblem::InvalidRequest
+        }
+        tracedecay_application::WorkflowProviderPlacementError::Unavailable => {
+            DaemonInvocationProblem::Unavailable
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_workflow_run_effect(
+    registered: &RegisteredWorkRuntime,
+    request_id: String,
+    context: &RequestContext,
+    canonical_request_id: RequestId,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: ManifestDigest,
+    result: Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem>,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    wrap: fn(
+        ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>,
+    ) -> WorkflowApplicationOutcome,
+) -> DaemonInvocationResponse {
+    let result = match result {
+        Ok(result) => result,
+        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+    };
+    let outcome = match work_command_effect(
+        registered,
+        context,
+        canonical_request_id,
+        operation_key,
+        use_case,
+        input_digest,
+        result,
+        observed_at,
+        deadline,
+    ) {
+        Ok(outcome) => wrap(outcome),
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::WorkflowApplication {
+            scope: context.scope().clone(),
+            outcome,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

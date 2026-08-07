@@ -64,6 +64,13 @@ dashboard_work_routes!(
     ResumeAttempts,
     ListAttempts,
     Views,
+    PauseRun,
+    ResumeRun,
+    RunControl,
+    PlacementPreflight,
+    AdmitPlacement,
+    PlacementStatus,
+    ReleasePlacement,
 );
 
 pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContractV1] {

@@ -112,8 +112,8 @@ mod multi_root_http;
 mod workflow;
 
 use configuration_wire::{
-    build_configuration_wire_schema_registry, is_configuration_operation,
-    validate_configuration_outcome,
+    build_configuration_wire_schema_registry, configuration_invocation_payload,
+    is_configuration_operation, validate_configuration_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
@@ -1063,6 +1063,41 @@ async fn invoke_work_operation(
             tracedecay_application::WorkGraphReadRequestV1,
             Views,
             tracedecay_application::WorkGraphReadV1
+        ),
+        WorkOperation::PauseRun => core!(
+            tracedecay_application::PauseWorkRunCommand,
+            PauseRun,
+            tracedecay_domain::WorkRunControlV1
+        ),
+        WorkOperation::ResumeRun => core!(
+            tracedecay_application::ResumeWorkRunCommand,
+            ResumeRun,
+            tracedecay_domain::WorkRunControlV1
+        ),
+        WorkOperation::RunControl => core!(
+            tracedecay_application::WorkRunControlRequestV1,
+            RunControl,
+            tracedecay_application::WorkRunControlReadingV1
+        ),
+        WorkOperation::PlacementPreflight => core!(
+            tracedecay_application::WorkPlacementPreflightRequestV1,
+            PlacementPreflight,
+            tracedecay_domain::WorkPlacementPreflightV1
+        ),
+        WorkOperation::AdmitPlacement => core!(
+            tracedecay_application::AdmitWorkPlacementCommand,
+            AdmitPlacement,
+            tracedecay_domain::WorkPlacementV1
+        ),
+        WorkOperation::PlacementStatus => core!(
+            tracedecay_application::WorkPlacementStatusRequestV1,
+            PlacementStatus,
+            tracedecay_application::WorkPlacementReadingV1
+        ),
+        WorkOperation::ReleasePlacement => core!(
+            tracedecay_application::ReleaseWorkPlacementCommand,
+            ReleasePlacement,
+            tracedecay_domain::WorkPlacementV1
         ),
     }
 }
@@ -3251,10 +3286,7 @@ pub async fn execute_application_surface(
             | ApplicationSurfaceOperation::ConfigurationUnset
             | ApplicationSurfaceOperation::ConfigurationBatch,
             ApplicationSurfaceRequest::Configuration(request),
-        ) => Some(
-            serde_json::to_value(request)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
-        ),
+        ) => Some(configuration_invocation_payload(request)?),
         (
             ApplicationSurfaceOperation::FeedbackGet,
             ApplicationSurfaceRequest::Feedback(request),
