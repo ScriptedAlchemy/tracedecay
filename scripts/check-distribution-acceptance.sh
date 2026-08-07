@@ -104,7 +104,11 @@ if tests == 0 or ignored != tests:
 
 gate_text = gate.read_text(encoding="utf-8")
 for required in ("--features semantic-fastembed", "--run-ignored all"):
-    if required not in gate_text:
+    # Match the flag as a real continued command-line argument, not as any
+    # mention of the string — otherwise this very check, which names both flags
+    # in its own diagnostics, would keep satisfying itself after the invocation
+    # below lost them.
+    if not re.search(rf"^\s+{re.escape(required)} \\$", gate_text, re.MULTILINE):
         raise SystemExit(
             "distribution acceptance: this gate no longer passes "
             f"{required!r}, so the FastEmbed acquisition suite would never run"
