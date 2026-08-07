@@ -816,8 +816,11 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
 async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     let fixture = production_fixture().await;
 
-    let mcp = invoke_mcp_symbol_search(&fixture.client, "request.application-reachability.parity.mcp")
-        .await;
+    let mcp = invoke_mcp_symbol_search(
+        &fixture.client,
+        "request.application-reachability.parity.mcp",
+    )
+    .await;
     let mcp = evidence_payload(&mcp).clone();
     assert_first_page_of_many("MCP", &mcp);
 

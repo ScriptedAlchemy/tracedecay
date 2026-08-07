@@ -210,8 +210,7 @@ fn spawn_scripted_daemon(
                 }
                 FakeDaemonResponse::TruncatedJsonRpc => {
                     let mut writer = stream;
-                    write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":")
-                        .expect("write truncated frame");
+                    write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":").expect("write truncated frame");
                     // Close without a terminating newline so the client sees EOF mid-frame.
                 }
                 FakeDaemonResponse::HoldOpen => {
@@ -534,9 +533,9 @@ fn enroll_native_capture_project(
     let data_root = home.join(".tracedecay/projects").join(project_id);
     std::fs::create_dir_all(&data_root).unwrap();
     let now = capture_test_now();
-    HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
-        hook_configuration_path(&data_root, host),
-    ))
+    HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
+        &data_root, host,
+    )))
     .publish(HookConfigurationSnapshotV1 {
         schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
         revision: 1,
@@ -567,7 +566,12 @@ fn capture_test_now() -> UtcMicros {
     UtcMicros(i64::try_from(elapsed.as_micros()).unwrap())
 }
 
-fn run_native_capture_hook(home: &Path, project: &Path, command_arg: &str, event: &Value) -> Output {
+fn run_native_capture_hook(
+    home: &Path,
+    project: &Path,
+    command_arg: &str,
+    event: &Value,
+) -> Output {
     let event = event.to_string();
     tracedecay_command_with_home(home)
         .current_dir(project)

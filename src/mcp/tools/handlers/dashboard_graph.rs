@@ -25,15 +25,15 @@ use tracedecay_application::{
     DashboardGraphOverviewV1, DashboardGraphPathV1, DashboardGraphReadErrorV1,
     DashboardGraphReadFutureV1, DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1,
     DashboardGraphReadPortV1, DashboardGraphReadRequestV1, DashboardGraphReadV1,
-    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1,
-    DashboardGraphTotalsV1, ResolvedScope, VerifiedDashboardGraphGenerationV1,
+    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1, DashboardGraphTotalsV1,
+    ResolvedScope, VerifiedDashboardGraphGenerationV1,
 };
 use tracedecay_domain::code_intelligence::{FileRecord, GraphStats};
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId, GraphGenerationManifest,
-    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    GraphProperty, GraphPropertyName, GraphWatermark, SourceGeneration,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
+    GraphPropertyName, GraphWatermark, SourceGeneration,
 };
 
 use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
@@ -256,7 +256,9 @@ impl DashboardGraphReadAdapter {
             edges: queries::total_edges(&conn).await.map_err(unavailable)?,
             files: queries::total_files(&conn).await.map_err(unavailable)?,
             max_edge_id: queries::max_edge_id(&conn).await.map_err(unavailable)?,
-            last_node_update: queries::last_node_update(&conn).await.map_err(unavailable)?,
+            last_node_update: queries::last_node_update(&conn)
+                .await
+                .map_err(unavailable)?,
         })
     }
 
@@ -342,7 +344,10 @@ impl DashboardGraphReadAdapter {
         node_id: &str,
     ) -> Result<Option<DashboardGraphNodeV1>, DashboardGraphReadErrorV1> {
         let conn = self.graph_database.engine_conn();
-        let Some(row) = queries::node_row(&conn, node_id).await.map_err(unavailable)? else {
+        let Some(row) = queries::node_row(&conn, node_id)
+            .await
+            .map_err(unavailable)?
+        else {
             return Ok(None);
         };
         Ok(self.hydrate_nodes(vec![row]).await?.into_iter().next())
@@ -626,15 +631,15 @@ impl DashboardGraphReadAdapter {
                     .map_err(unavailable)?;
                 for row in rows {
                     let edge = decode_edge(row)?;
-                    let (known, discovered) =
-                        if visited.contains(&edge.source) && !visited.contains(&edge.target) {
-                            (edge.source.clone(), edge.target.clone())
-                        } else if visited.contains(&edge.target) && !visited.contains(&edge.source)
-                        {
-                            (edge.target.clone(), edge.source.clone())
-                        } else {
-                            continue;
-                        };
+                    let (known, discovered) = if visited.contains(&edge.source)
+                        && !visited.contains(&edge.target)
+                    {
+                        (edge.source.clone(), edge.target.clone())
+                    } else if visited.contains(&edge.target) && !visited.contains(&edge.source) {
+                        (edge.target.clone(), edge.source.clone())
+                    } else {
+                        continue;
+                    };
                     visited.insert(discovered.clone());
                     parents.insert(discovered.clone(), (known, edge));
                     if discovered == to {
@@ -924,7 +929,11 @@ mod tests {
 
     #[test]
     fn foreign_scope_reads_are_denied_not_aliased() {
-        let own = scope("project.dash-graph", "repository.dash-graph", "worktree.dash-graph");
+        let own = scope(
+            "project.dash-graph",
+            "repository.dash-graph",
+            "worktree.dash-graph",
+        );
 
         let foreign_project = scope(
             "project.other",

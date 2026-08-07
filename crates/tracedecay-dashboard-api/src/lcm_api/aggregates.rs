@@ -626,7 +626,8 @@ mod tests {
 
     #[test]
     fn overview_reduction_preserves_exact_counts_and_deterministic_recency() {
-        let value = overview_json(aggregate_page(), String::new(), 1, "profile_sharded").expect("valid aggregate");
+        let value = overview_json(aggregate_page(), String::new(), 1, "profile_sharded")
+            .expect("valid aggregate");
 
         assert_eq!(value["overview"]["messages_total"], 2);
         assert_eq!(value["overview"]["sessions_total"], 2);
@@ -641,7 +642,13 @@ mod tests {
         let mut page = aggregate_page();
         page.messages[1].metadata_json =
             Some(r#"{"usage":{"input_tokens":900,"output_tokens":8}}"#.to_owned());
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 1, "profile_sharded");
+        let value = timeline_json(
+            page,
+            DashboardLcmTimelineBucketV1::Day,
+            None,
+            1,
+            "profile_sharded",
+        );
 
         assert_eq!(value["buckets"][0]["bucket"], "1970-01-02");
         #[cfg(feature = "token-counting")]
@@ -675,7 +682,13 @@ mod tests {
         page.messages[0].role = "assistant".to_owned();
         page.messages[0].metadata_json = Some(r#"{"usage":{"output_tokens":91}}"#.to_owned());
 
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25, "profile_sharded");
+        let value = timeline_json(
+            page,
+            DashboardLcmTimelineBucketV1::Day,
+            None,
+            25,
+            "profile_sharded",
+        );
         let bucket = &value["buckets"][0];
         assert_eq!(bucket["count"], 2);
         assert!(bucket["token_count"].is_null());
@@ -692,7 +705,13 @@ mod tests {
         page.messages[0].role = "assistant".to_owned();
         page.messages[0].metadata_json = Some(r#"{"usage":{"output_tokens":91}}"#.to_owned());
 
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25, "profile_sharded");
+        let value = timeline_json(
+            page,
+            DashboardLcmTimelineBucketV1::Day,
+            None,
+            25,
+            "profile_sharded",
+        );
         let bucket = &value["buckets"][0];
         assert!(bucket["token_count"].as_i64().is_some());
         assert_eq!(bucket["token_count_provenance"], "o200k_approximate");
@@ -705,8 +724,8 @@ mod tests {
         let mut page = aggregate_page();
         page.summary_nodes[0].source_token_count = None;
 
-        let value =
-            overview_json(page, String::new(), 25, "profile_sharded").expect("other overview fields remain valid");
+        let value = overview_json(page, String::new(), 25, "profile_sharded")
+            .expect("other overview fields remain valid");
         assert!(value["overview"]["compression"]["source_token_count"].is_null());
         assert!(value["overview"]["compression"]["ratio"].is_null());
     }

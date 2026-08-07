@@ -236,8 +236,7 @@ pub struct ToolCallRegistryOptions<'a> {
     /// identity, so it must not be derived from the project-session store —
     /// that authority mounts behind the core project-open publication and is
     /// absent on the core server that answers the first tool calls.
-    pub(crate) daemon_user_profile_id:
-        Option<tracedecay_domain::configuration::UserProfileId>,
+    pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,

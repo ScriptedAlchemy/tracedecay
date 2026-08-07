@@ -449,7 +449,10 @@ async fn concurrent_registered_mounts_singleflight_to_one_runtime() {
     // published database runtime underneath must be one shared allocation —
     // the singleflight production's runtime slot guarantees.
     for mounted in [&second, &third, &fourth] {
-        assert!(Arc::ptr_eq(first.runtime().runtime(), mounted.runtime().runtime()));
+        assert!(Arc::ptr_eq(
+            first.runtime().runtime(),
+            mounted.runtime().runtime()
+        ));
         assert_eq!(first.binding(), mounted.binding());
     }
 }

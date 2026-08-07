@@ -212,7 +212,8 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), duplicate_writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), duplicate_writer).await;
 
     // The constructor schedules startup replay. This explicit pass joins the
     // same single-flight, so either ordering leaves one authoritative attempt
@@ -1574,9 +1575,13 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
     }
     assert_eq!(broker.pending_count().await, 65);
 
-    let server =
-        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), success_writer())
-            .await;
+    let server = server_with_owned_project_replay_worker(
+        cg,
+        &authority,
+        Arc::clone(&broker),
+        success_writer(),
+    )
+    .await;
 
     assert!(
         server
@@ -1618,7 +1623,8 @@ async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
         })
     };
 
-    let server = server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while server.project_host_admission_replay_backoff_count().await < 2
@@ -1666,7 +1672,8 @@ async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
         })
     };
 
-    let server = server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("worker must enter an in-flight canonical attempt");

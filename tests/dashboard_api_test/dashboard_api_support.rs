@@ -582,11 +582,14 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
                     role: &message.role,
                     content: &message.text,
                     model: message.model.as_deref(),
-                    timestamp: message
-                        .timestamp
-                        .unwrap_or_else(|| panic!("fixture message {} has no timestamp", message.message_id)),
+                    timestamp: message.timestamp.unwrap_or_else(|| {
+                        panic!("fixture message {} has no timestamp", message.message_id)
+                    }),
                     ordinal: u64::try_from(message.ordinal).unwrap_or_else(|_| {
-                        panic!("fixture message {} has a negative ordinal", message.message_id)
+                        panic!(
+                            "fixture message {} has a negative ordinal",
+                            message.message_id
+                        )
                     }),
                 },
             )
