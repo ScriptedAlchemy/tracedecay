@@ -475,14 +475,7 @@ where
 
     let effect_id = effect_id(&request.idempotency_key, &input_digest)?;
     let durable_request = durable_request(operation, &request, &current_authority);
-    let recovery_files = if planned_files
-        .iter()
-        .all(|file| file.expected.is_some() && file.intended.is_some())
-    {
-        planned_files.clone()
-    } else {
-        Vec::new()
-    };
+    let recovery_files = planned_files.clone();
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
         .transpose()?;
@@ -593,6 +586,7 @@ where
             durability.persist_journal(&journal)?;
         }
     }
+    durability.persist_rollback_record(&journal, &committed_state, outcome.success())?;
     let record = applied_record(
         &journal,
         &outcome,

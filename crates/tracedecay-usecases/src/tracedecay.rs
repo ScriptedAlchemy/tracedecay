@@ -244,6 +244,10 @@ pub trait GraphRuntimePort: Send + Sync {
         &'a self,
         files: &'a [PlannedSourceEditFile],
     ) -> GraphFuture<'a, ()>;
+    fn apply_source_edit_rollback<'a>(
+        &'a self,
+        files: &'a [PlannedSourceEditFile],
+    ) -> GraphFuture<'a, ()>;
     /// Reindex every candidate to its intended post-edit content when crash
     /// recovery rolls a completed-but-unfinalized edit forward. The bytes are
     /// already on disk; this only reconciles the graph index, which a crash
