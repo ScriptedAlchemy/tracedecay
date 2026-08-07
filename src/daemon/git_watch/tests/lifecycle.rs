@@ -587,6 +587,11 @@ fn pruning_the_last_root_retires_registration_authority() {
 
     assert!(state.prune_missing_worktrees(|| false));
     assert!(
+        !cancellation.is_cancelled(),
+        "pruning alone must leave the owner live so a concurrent registration can win"
+    );
+    assert!(state.retire_if_empty());
+    assert!(
         cancellation.is_cancelled(),
         "the zero-root transition must retire under the registration authority"
     );
