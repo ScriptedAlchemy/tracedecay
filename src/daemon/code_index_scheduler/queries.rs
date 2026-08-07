@@ -1327,6 +1327,15 @@ where
             evidence.budget = application_budget_usage(usage);
             RetrievalPortOutcome::Partial(evidence)
         }
+        NativeLaneOutcomeV1::TimedOut(usage) => {
+            let mut evidence = terminal_lane_evidence(
+                finished_at,
+                prepared.latest.generation.manifest().generation_id.clone(),
+                OmissionReason::TimedOut,
+            );
+            evidence.budget = application_budget_usage(usage);
+            RetrievalPortOutcome::TimedOut(evidence)
+        }
         NativeLaneOutcomeV1::Cancelled => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,

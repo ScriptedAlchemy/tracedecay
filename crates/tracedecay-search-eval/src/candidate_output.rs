@@ -1364,6 +1364,7 @@ fn retriever_outcome_candidate_count<E>(
         | RetrieverOutcome::Denied
         | RetrieverOutcome::Stale(_)
         | RetrieverOutcome::BudgetExceeded(_)
+        | RetrieverOutcome::TimedOut(_)
         | RetrieverOutcome::Cancelled => 0,
     }
 }

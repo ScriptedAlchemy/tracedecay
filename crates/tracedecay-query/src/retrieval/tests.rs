@@ -1,6 +1,7 @@
 mod authority;
 mod composition;
 mod cursor;
+mod evidence_lanes;
 mod request;
 mod rerank;
 

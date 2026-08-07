@@ -29,7 +29,10 @@ use super::resolution::summary::SummarySourceState;
 use super::resolution::types::{
     ResolutionAssertion, ResolutionEvidence, ResolutionOccurrence, ValidatedAuthorization,
 };
-use super::{TemporalKernelError, TemporalKernelRequest, execute_temporal_kernel};
+use super::{
+    TemporalKernelError, TemporalKernelRequest, execute_temporal_candidate_export,
+    execute_temporal_kernel,
+};
 use crate::test_support::block_on;
 
 struct FakeReadPort {
@@ -389,6 +392,28 @@ fn basic_port() -> FakeReadPort {
             TemporalRecord::Occurrence(occurrence('b', "b", 10)),
         ],
     )
+}
+
+#[test]
+fn candidate_export_ranks_without_reading_payload_bytes() {
+    block_on(async {
+        let port = basic_port();
+        let hydrator = FakeHydrator::default();
+        let export = execute_temporal_candidate_export(
+            &request(TemporalModeV1::Current, 1),
+            &port,
+            &authenticator("key-1", 1, 7),
+        )
+        .await
+        .expect("ranked compact export");
+
+        assert_eq!(export.ranked().len(), 1);
+        assert!(export.next_cursor().is_some());
+        assert!(
+            hydrator.calls.lock().expect("calls lock").is_empty(),
+            "candidate export must not authorize or read payload bytes",
+        );
+    });
 }
 
 #[test]

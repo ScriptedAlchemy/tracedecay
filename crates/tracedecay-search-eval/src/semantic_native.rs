@@ -52,6 +52,7 @@ pub enum SemanticNativePendingReasonV1 {
     SemanticGenerationUnavailable,
     SemanticGenerationIncomplete,
     SemanticCancelled,
+    SemanticTimedOut,
     RerankerArtifactUnavailable,
     RerankerUnavailable,
     RerankCancelled,
@@ -555,6 +556,15 @@ fn evaluate_semantic(
         RetrieverOutcome::BudgetExceeded(_) => Err(SemanticNativeEvaluationErrorV1::Contract(
             "production exact-flat semantic execution exceeded its evaluated budget".to_owned(),
         )),
+        RetrieverOutcome::TimedOut(_) => Ok((
+            SemanticNativeStageResultV1::Pending {
+                reason: SemanticNativePendingReasonV1::SemanticTimedOut,
+            },
+            None,
+            SemanticNativeStageResultV1::Pending {
+                reason: SemanticNativePendingReasonV1::SemanticTimedOut,
+            },
+        )),
         RetrieverOutcome::Cancelled => Ok((
             SemanticNativeStageResultV1::Pending {
                 reason: SemanticNativePendingReasonV1::SemanticCancelled,
@@ -576,6 +586,7 @@ fn composition_lane_candidate_count(lane: &CompositionLaneInput) -> u64 {
         | RetrieverOutcome::Denied
         | RetrieverOutcome::Stale(_)
         | RetrieverOutcome::BudgetExceeded(_)
+        | RetrieverOutcome::TimedOut(_)
         | RetrieverOutcome::Cancelled => 0,
     }
 }

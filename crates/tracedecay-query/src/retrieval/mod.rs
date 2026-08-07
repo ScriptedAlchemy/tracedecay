@@ -14,6 +14,7 @@
 
 pub mod dedupe;
 pub mod diversity;
+pub mod evidence_lanes;
 pub mod exact;
 pub mod execution;
 pub mod fusion;

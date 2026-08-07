@@ -465,6 +465,7 @@ impl CompositionLaneInput {
             RetrieverOutcome::Denied => RetrieverOutcome::Denied,
             RetrieverOutcome::Stale(freshness) => RetrieverOutcome::Stale(freshness),
             RetrieverOutcome::BudgetExceeded(usage) => RetrieverOutcome::BudgetExceeded(usage),
+            RetrieverOutcome::TimedOut(usage) => RetrieverOutcome::TimedOut(usage),
             RetrieverOutcome::Cancelled => RetrieverOutcome::Cancelled,
         };
         Ok(Self { lane, outcome })
@@ -789,6 +790,7 @@ fn admitted_lanes(input: &FusionStageInput) -> Result<AdmittedLanes, FusionStage
             | RetrieverOutcome::Denied
             | RetrieverOutcome::Stale(_)
             | RetrieverOutcome::BudgetExceeded(_)
+            | RetrieverOutcome::TimedOut(_)
             | RetrieverOutcome::Cancelled => {
                 if matches!(lane, RetrieverKind::ExactLiteral | RetrieverKind::Lexical) {
                     return Err(FusionStageError::RequiredLaneUnavailable);
@@ -837,6 +839,7 @@ fn unit_outcome(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> RetrieverOutc
         RetrieverOutcome::Denied => RetrieverOutcome::Denied,
         RetrieverOutcome::Stale(freshness) => RetrieverOutcome::Stale(freshness.clone()),
         RetrieverOutcome::BudgetExceeded(usage) => RetrieverOutcome::BudgetExceeded(*usage),
+        RetrieverOutcome::TimedOut(usage) => RetrieverOutcome::TimedOut(*usage),
         RetrieverOutcome::Cancelled => RetrieverOutcome::Cancelled,
     }
 }
@@ -850,6 +853,7 @@ fn public_status(outcome: &RetrieverOutcome<RetrieverBatch<()>>) -> PublicRetrie
         RetrieverOutcome::Stale(_) => PublicRetrieverStatus::Stale,
         RetrieverOutcome::Unavailable(_)
         | RetrieverOutcome::Denied
+        | RetrieverOutcome::TimedOut(_)
         | RetrieverOutcome::Cancelled => PublicRetrieverStatus::Unavailable,
     }
 }

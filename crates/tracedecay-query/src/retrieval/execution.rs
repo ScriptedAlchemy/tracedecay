@@ -113,6 +113,7 @@ pub enum NativeLaneOutcomeV1<T> {
     Denied,
     Stale(SourceFreshness),
     BudgetExceeded(RetrievalBudgetUsage),
+    TimedOut(RetrievalBudgetUsage),
     Cancelled,
 }
 
@@ -342,6 +343,7 @@ where
             RetrieverOutcome::BudgetExceeded(usage) => {
                 Ok(NativeLaneOutcomeV1::BudgetExceeded(usage))
             }
+            RetrieverOutcome::TimedOut(usage) => Ok(NativeLaneOutcomeV1::TimedOut(usage)),
             RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
         }
     }
