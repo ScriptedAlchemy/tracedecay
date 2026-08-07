@@ -216,10 +216,9 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
             .await
     );
 
-    let media_payload = format!(
-        "data:image/png;base64,{}",
-        "QWxhZGRpbjpvcGVuIHNlc2FtZQ==".repeat(160)
-    );
+    // Low-entropy media body: the privacy firewall leaves it to payload
+    // externalization instead of hard-redacting it as a candidate secret.
+    let media_payload = format!("data:image/png;base64,{}", "QUJDRA==".repeat(160));
     let content = json!({
         "content": [
             {"type": "text", "text": "keep searchable nested canary"},
@@ -243,7 +242,7 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(raw.content.contains("keep searchable nested canary"));
-    assert!(!raw.content.contains("QWxhZGRpbjpvcGVuIHNlc2FtZQ"));
+    assert!(!raw.content.contains("QUJDRA==QUJDRA=="));
     assert!(raw.content.contains("[Externalized LCM ingest payload:"));
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["nested_external_payloads"], 1);
@@ -261,7 +260,7 @@ async fn externalizes_nested_json_media_payload_without_externalizing_scaffold()
         .expect("nested payload should expand with hash and ownership checks");
     assert_eq!(expanded.content, media_payload);
     assert_eq!(lcm_fts_count(&db, "nested").await, 1);
-    assert_eq!(lcm_fts_count(&db, "QWxhZGRpbjpvcGVu").await, 0);
+    assert_eq!(lcm_fts_count(&db, "QUJDRA").await, 0);
 }
 
 // Mirrors hermes-lcm `_protect_payload_substrings`
@@ -323,11 +322,13 @@ async fn data_uri_substring_externalizes_span_keeping_surrounding_text_searchabl
     assert_eq!(expanded.content, media_span);
 }
 
-// Mirrors hermes-lcm `_protect_payload_substrings` pass 2: a long generic
-// base64 run embedded in plain text is externalized as a substring while the
-// surrounding log text stays inline.
+// A long generic base64 run embedded in plain text is indistinguishable from
+// a candidate secret, so the privacy firewall hard-redacts the span (lossy,
+// receipted) instead of preserving it behind a recoverable payload ref, while
+// the surrounding log text stays inline and searchable. This supersedes the
+// old substring-externalization contract for high-entropy runs.
 #[tokio::test]
-async fn long_base64_run_substring_externalizes_span_inline() {
+async fn long_generic_base64_run_is_hard_redacted_inline() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
@@ -354,18 +355,18 @@ async fn long_base64_run_substring_externalizes_span_inline() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(raw.content.starts_with("buildlogprefixcanary ["));
     assert!(raw.content.ends_with(" buildlogsuffixcanary"));
-    assert!(raw.content.contains("[Externalized LCM ingest payload:"));
+    assert!(
+        raw.content
+            .contains("[TraceDecay redacted: high-entropy token]")
+    );
     assert!(!raw.content.contains(&run));
+
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
 
     assert_eq!(lcm_fts_count(&db, "buildlogprefixcanary").await, 1);
     assert_eq!(lcm_fts_count(&db, "buildlogsuffixcanary").await, 1);
-
-    let payload_ref = externalized_ref_from_placeholder(&raw.content);
-    let expanded = store
-        .lcm_expand_payload("cursor", "session-1", &payload_ref, 0, run.chars().count())
-        .await
-        .expect("substring payload should expand");
-    assert_eq!(expanded.content, run);
 }
 
 // When the message body is nothing but the media payload there is no inline

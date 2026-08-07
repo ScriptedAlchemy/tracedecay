@@ -40,12 +40,14 @@ async fn boundary_skip_starts_preflight_compression_cooldown() {
     assert_eq!(response.status, "ok");
     assert!(!response.should_compress);
     assert_eq!(response.reason, "compression_boundary_cooldown");
-    // Cooldown is lossless: fresh messages were still ingested and replayed.
-    assert_eq!(response.replay_messages.len(), 1);
+    // Cooldown is lossless for stored history: the read-only preflight
+    // replays every persisted message. Host-active messages are not ingested
+    // by preflight anymore — ingest belongs to the transcript/compress paths.
+    assert_eq!(response.replay_messages.len(), 4);
     assert!(
         db.lcm_load_raw_message("cursor", "fresh-user")
             .await
-            .is_some()
+            .is_none()
     );
 }
 

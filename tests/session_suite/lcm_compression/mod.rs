@@ -178,8 +178,29 @@ fn preflight_request(
         reserve_tokens_floor: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
     }
+}
+
+/// Ingests host-active messages through the daemon compression path without
+/// creating summary nodes — the production replacement for the retired
+/// ingesting preflight (preflight is a read-only decision surface now).
+async fn ingest_active_messages(
+    db: &LcmTestRuntime,
+    provider: &str,
+    session_id: &str,
+    messages: Vec<Value>,
+) -> tracedecay::sessions::lcm::LcmCompressionResponse {
+    let message_count = messages.len();
+    let mut request = compress_request(provider, session_id, LcmSummarizerMode::Noop);
+    request.messages = messages;
+    request.fresh_tail_count = Some(message_count.max(1));
+    let response = db
+        .lcm_compress(request)
+        .await
+        .expect("ingest-only compress");
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 0);
+    response
 }
 
 fn compress_request(

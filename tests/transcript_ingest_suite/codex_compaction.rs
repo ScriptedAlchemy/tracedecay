@@ -183,13 +183,6 @@ done
     assert_eq!(description.summary_nodes.len(), 1);
     assert_eq!(description.summary_nodes[0].depth, 1);
     assert_eq!(description.summary_nodes[0].source_count, 2);
-    assert!(
-        description.summary_nodes[0]
-            .metadata_json
-            .as_deref()
-            .unwrap_or_default()
-            .contains("codex_app_server:codex-hook-test")
-    );
 
     let node_id = description.summary_nodes[0].node_id.clone();
     let expanded = runtime
@@ -202,6 +195,15 @@ done
         .unwrap();
     let summary = expanded.summary_node.expect("summary node should expand");
     assert_eq!(summary.source_count, 2);
+    // Provenance metadata rides the node-level describe; the session-level
+    // summary listing is a lightweight overview without metadata_json.
+    assert!(
+        summary
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("codex_app_server:codex-hook-test")
+    );
 
     let expansion = runtime
         .lcm_expand_for_test(LcmExpandRequest {

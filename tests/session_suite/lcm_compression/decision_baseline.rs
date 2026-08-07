@@ -129,8 +129,11 @@ async fn assert_compress_baseline_case(case: CompressBaselineCase) {
                 .unwrap();
 
             assert_eq!(response.status, "needs_summary", "{case_name}");
+            // The daemon authority resolves auxiliary summaries itself; with
+            // no authoritative summarizer registered the pending summary is
+            // typed unavailable rather than delegated back to the host.
             assert_eq!(
-                response.reason, "hermes_auxiliary_not_available",
+                response.reason, "authoritative_summarizer_unavailable",
                 "{case_name}"
             );
             assert_eq!(response.summary_nodes_created, 0, "{case_name}");

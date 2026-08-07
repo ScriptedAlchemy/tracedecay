@@ -14,7 +14,7 @@ use tracedecay::sessions::hermes::{
     ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
     ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
 };
-use tracedecay::sessions::lcm::LcmPreflightRequest;
+use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay::sessions::source::TranscriptIngestStats;
 use tracedecay::sessions::{SessionProvider, SessionRecord};
 use tracedecay_domain::{MAX_OBSERVATION_RECORD_BYTES, ProjectId};
@@ -482,8 +482,10 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
 
     let raw_message_id = format!("{SESSION_ID}:3");
     let runtime_owned_raw = "runtime-owned raw message from active replay";
+    // Active-message ingest is owned by the compress path; preflight is
+    // read-only under the daemon-owned compaction authority.
     db.runtime()
-        .lcm_preflight_for_test(LcmPreflightRequest {
+        .lcm_compress_for_test(LcmCompressionRequest {
             provider: "hermes".into(),
             session_id: SESSION_ID.into(),
             messages: vec![json!({
@@ -492,6 +494,11 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
                 "content": runtime_owned_raw,
             })],
             current_tokens: Some(12),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
             threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -503,9 +510,7 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
             dynamic_leaf_chunk_max: None,
             context_length: None,
             reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
+            summarizer: LcmSummarizerMode::Noop,
         })
         .await
         .unwrap();
@@ -519,7 +524,7 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
         db.get_session_message("hermes", &raw_message_id)
             .await
             .is_none(),
-        "LCM preflight should not create a session-message projection"
+        "LCM active-message ingest should not create a session-message projection"
     );
 
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;

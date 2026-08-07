@@ -1,7 +1,12 @@
 use super::*;
 
+// Preflight is a read-only decision surface under the daemon-owned compaction
+// authority: host-supplied messages are never ingested and the replay comes
+// from the stored transcript only (ingest-protection rewriting moved to the
+// compress/ingest path, retiring the old ingest_protection_changed_replay
+// preflight reason).
 #[tokio::test]
-async fn preflight_can_request_compression_when_ingest_protection_changes_replay() {
+async fn preflight_is_read_only_and_never_ingests_active_messages() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
@@ -29,19 +34,25 @@ async fn preflight_can_request_compression_when_ingest_protection_changes_replay
             reserve_tokens_floor: None,
             ignore_session_patterns: Vec::new(),
             stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
         })
         .await
         .unwrap();
 
     assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "ingest_protection_changed_replay");
+    assert!(!response.should_compress);
+    assert_eq!(response.reason, "no_compression_needed");
+    assert!(response.replay_messages.is_empty());
     assert!(
-        response.replay_messages[0]["content"]
-            .as_str()
+        db.lcm_load_raw_message("cursor", "protected-1")
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-1"))
+            .await
             .unwrap()
-            .contains("[Externalized LCM ingest payload")
+            .raw_message_count,
+        0
     );
 }
 

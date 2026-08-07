@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::SessionMessageRecord;
-use tracedecay::sessions::lcm::LcmPreflightRequest;
+use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay::sessions::source::{
     ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
@@ -105,12 +105,19 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
         "ingest_protection": {"source": "original-message"},
     });
 
-    let preflight = db
-        .lcm_preflight(LcmPreflightRequest {
+    // Active-message ingest happens on the compress path now; preflight is a
+    // read-only decision surface and never stores host messages.
+    let response = db
+        .lcm_compress(LcmCompressionRequest {
             provider: "cursor".into(),
             session_id: "session-active-metadata".into(),
             messages: vec![active_message.clone()],
             current_tokens: Some(100),
+            focus_topic: None,
+            ignore_session_patterns: Vec::new(),
+            stateless_session_patterns: Vec::new(),
+            ignore_message_patterns: Vec::new(),
+            expected_current_frontier_store_id: None,
             threshold_tokens: None,
             max_assembly_tokens: None,
             leaf_chunk_tokens: None,
@@ -122,13 +129,12 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
             dynamic_leaf_chunk_max: None,
             context_length: None,
             reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
+            summarizer: LcmSummarizerMode::Noop,
         })
         .await
         .unwrap();
-    assert_eq!(preflight.replay_messages[0], active_message);
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.summary_nodes_created, 0);
 
     let raw = db
         .lcm_load_raw_message("cursor", "active-collision-metadata")
@@ -136,7 +142,7 @@ async fn active_replay_metadata_namespaces_original_fields_from_storage_metadata
         .expect("raw active message should exist");
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["lcm_active_replay"], true);
-    assert_eq!(metadata["active_replay"], preflight.replay_messages[0]);
+    assert_eq!(metadata["active_replay"], active_message);
     assert!(metadata.get("payload_ref").is_none());
     assert!(metadata.get("byte_count").is_none());
     assert!(metadata.get("char_count").is_none());

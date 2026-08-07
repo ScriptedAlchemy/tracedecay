@@ -339,28 +339,7 @@ async fn repeated_active_ingest_preserves_existing_message_ordinals() {
         json!({"id": "active-2", "role": "assistant", "content": "hi"}),
     ];
 
-    db.lcm_preflight(LcmPreflightRequest {
-        provider: "cursor".into(),
-        session_id: "session-1".into(),
-        messages: messages.clone(),
-        current_tokens: Some(10),
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-    })
-    .await
-    .unwrap();
+    ingest_active_messages(&db, "cursor", "session-1", messages.clone()).await;
     let first_ordinals = (
         db.lcm_load_raw_message("cursor", "active-1")
             .await

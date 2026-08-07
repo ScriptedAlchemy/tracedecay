@@ -1,7 +1,10 @@
 use super::*;
 
+// The daemon LCM authority owns summarizer selection: a compress without a
+// persisted summary ingests active messages and, with nothing eligible to
+// compact, reports no_backlog_to_compress without creating summary nodes.
 #[tokio::test]
-async fn noop_summarizer_ingests_without_summary_nodes() {
+async fn ingest_only_compress_stores_messages_without_summary_nodes() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-1").await;
@@ -38,7 +41,7 @@ async fn noop_summarizer_ingests_without_summary_nodes() {
         .unwrap();
 
     assert_eq!(response.status, "ok");
-    assert_eq!(response.reason, "noop_summarizer");
+    assert_eq!(response.reason, "no_backlog_to_compress");
     assert_eq!(response.summary_nodes_created, 0);
     assert_eq!(response.replay_messages.len(), 1);
     assert_eq!(
@@ -219,7 +222,10 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
         "response reason: {}",
         response.reason
     );
-    assert_eq!(response.reason, "hermes_auxiliary_not_available");
+    // The daemon authority resolves auxiliary summaries itself; without a
+    // registered authoritative summarizer the pending summary stays typed
+    // unavailable instead of asking the host to fill it.
+    assert_eq!(response.reason, "authoritative_summarizer_unavailable");
     let summary_request = response
         .summary_request
         .expect("threshold pressure should select source messages to summarize");
@@ -230,7 +236,7 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
 }
 
 #[tokio::test]
-async fn active_structured_content_survives_preflight_and_noop_compress_replay() {
+async fn active_structured_content_survives_compress_ingest_and_preflight_replay() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-structured").await;
@@ -251,78 +257,31 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
         json!({"id": "structured-object", "role": "assistant", "content": content_object.clone()}),
     ];
 
+    let compress =
+        ingest_active_messages(&db, "cursor", "session-structured", messages.clone()).await;
+    assert_eq!(compress.replay_messages[0]["content"], content_array);
+    assert_eq!(compress.replay_messages[1]["content"], content_object);
+
+    // Preflight is read-only and replays the stored transcript.
     let preflight = db
-        .lcm_preflight(LcmPreflightRequest {
-            provider: "cursor".into(),
-            session_id: "session-structured".into(),
-            messages: messages.clone(),
-            current_tokens: Some(100),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
-        })
+        .lcm_preflight(preflight_request(
+            "cursor",
+            "session-structured",
+            Vec::new(),
+            Some(100),
+        ))
         .await
         .unwrap();
     assert_eq!(preflight.status, "ok");
     assert_eq!(preflight.replay_messages[0]["content"], content_array);
     assert_eq!(preflight.replay_messages[1]["content"], content_object);
 
-    let compress = db
-        .lcm_compress(LcmCompressionRequest {
-            provider: "cursor".into(),
-            session_id: "session-structured".into(),
-            messages,
-            current_tokens: Some(100),
-            focus_topic: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
-            expected_current_frontier_store_id: None,
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            summarizer: LcmSummarizerMode::Noop,
-        })
-        .await
-        .unwrap();
-    assert_eq!(compress.status, "ok");
-    assert_eq!(
-        compress.replay_messages[0]["content"],
-        preflight.replay_messages[0]["content"]
-    );
-    assert_eq!(
-        compress.replay_messages[1]["content"],
-        preflight.replay_messages[1]["content"]
-    );
-
     let raw = db
         .lcm_load_raw_message("cursor", "structured-array")
         .await
         .expect("structured raw message should exist");
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        metadata["active_replay"]["content"],
-        preflight.replay_messages[0]["content"]
-    );
+    assert_eq!(metadata["active_replay"]["content"], content_array);
 }
 
 #[tokio::test]
@@ -331,20 +290,18 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-idless-replay").await;
 
-    let initial = db
-        .lcm_preflight(preflight_request(
-            "cursor",
-            "session-idless-replay",
-            vec![
-                json!({"role": "user", "content": "old user context"}),
-                json!({"role": "assistant", "content": "old assistant context"}),
-                json!({"role": "user", "content": "fresh user context"}),
-                json!({"role": "assistant", "content": "fresh assistant context"}),
-            ],
-            Some(100),
-        ))
-        .await
-        .unwrap();
+    let initial = ingest_active_messages(
+        &db,
+        "cursor",
+        "session-idless-replay",
+        vec![
+            json!({"role": "user", "content": "old user context"}),
+            json!({"role": "assistant", "content": "old assistant context"}),
+            json!({"role": "user", "content": "fresh user context"}),
+            json!({"role": "assistant", "content": "fresh assistant context"}),
+        ],
+    )
+    .await;
     assert_eq!(
         db.lcm_status("cursor", Some("session-idless-replay"))
             .await
@@ -372,14 +329,13 @@ async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
             .all(|message| message["store_id"].is_number())
     );
 
-    db.lcm_preflight(preflight_request(
+    ingest_active_messages(
+        &db,
         "cursor",
         "session-idless-replay",
         compressed.replay_messages,
-        Some(100),
-    ))
-    .await
-    .unwrap();
+    )
+    .await;
     assert_eq!(
         db.lcm_status("cursor", Some("session-idless-replay"))
             .await
@@ -412,30 +368,13 @@ async fn active_replay_preserves_top_level_fields_that_collide_with_storage_meta
         "reasoning": {"kind": "user-authored-field"},
     });
 
-    let preflight = db
-        .lcm_preflight(LcmPreflightRequest {
-            provider: "cursor".into(),
-            session_id: "session-collision".into(),
-            messages: vec![active_message.clone()],
-            current_tokens: Some(100),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(preflight.replay_messages[0], active_message);
+    ingest_active_messages(
+        &db,
+        "cursor",
+        "session-collision",
+        vec![active_message.clone()],
+    )
+    .await;
 
     let raw = db
         .lcm_load_raw_message("cursor", "structured-collision")
@@ -481,10 +420,11 @@ async fn raw_replay_strips_disposable_provider_reasoning_sidecars() {
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-sidecars").await;
 
-    db.lcm_preflight(LcmPreflightRequest {
-        provider: "cursor".into(),
-        session_id: "session-sidecars".into(),
-        messages: vec![json!({
+    ingest_active_messages(
+        &db,
+        "cursor",
+        "session-sidecars",
+        vec![json!({
             "id": "assistant-sidecars",
             "role": "assistant",
             "content": "assistant visible content",
@@ -494,24 +434,8 @@ async fn raw_replay_strips_disposable_provider_reasoning_sidecars() {
             "codex_reasoning_items": [{"encrypted_content": "large encrypted blob"}],
             "codex_message_items": [{"type": "reasoning"}],
         })],
-        current_tokens: Some(100),
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-    })
-    .await
-    .unwrap();
+    )
+    .await;
 
     let raw = db
         .lcm_load_raw_message("cursor", "assistant-sidecars")
@@ -589,28 +513,7 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
         }),
     ];
 
-    db.lcm_preflight(LcmPreflightRequest {
-        provider: "cursor".into(),
-        session_id: "session-tools".into(),
-        messages,
-        current_tokens: Some(100),
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages: None,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count: None,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length: None,
-        reserve_tokens_floor: None,
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-    })
-    .await
-    .unwrap();
+    ingest_active_messages(&db, "cursor", "session-tools", messages).await;
 
     let replay_from_raw = db
         .lcm_compress(LcmCompressionRequest {
@@ -669,40 +572,37 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
     }))
     .expect("tool call arguments should serialize");
 
-    let preflight = db
-        .lcm_preflight(preflight_request(
-            "cursor",
-            "session-tool-calls-protection",
-            vec![json!({
-                "id": "assistant-tool-calls-protected",
-                "role": "assistant",
-                "content": "I will look that up.",
-                "tool_calls": [{
-                    "id": "call_media",
-                    "type": "function",
-                    "api_key": "sk-tool-calls-1234567890abcdef",
-                    "function": {"name": "lookup", "arguments": tool_args},
-                }],
-                "lcm_ingest": {
-                    "sensitive_patterns_enabled": true,
-                    "sensitive_patterns": ["api_key"],
-                },
-            })],
-            Some(100),
-        ))
-        .await
-        .unwrap();
+    // Ingest protection rewrites the replay at ingest time on the compress
+    // path; the read-only preflight no longer reports a replay diff.
+    let ingested = ingest_active_messages(
+        &db,
+        "cursor",
+        "session-tool-calls-protection",
+        vec![json!({
+            "id": "assistant-tool-calls-protected",
+            "role": "assistant",
+            "content": "I will look that up.",
+            "tool_calls": [{
+                "id": "call_media",
+                "type": "function",
+                "api_key": "sk-tool-calls-1234567890abcdef",
+                "function": {"name": "lookup", "arguments": tool_args},
+            }],
+            "lcm_ingest": {
+                "sensitive_patterns_enabled": true,
+                "sensitive_patterns": ["api_key"],
+            },
+        })],
+    )
+    .await;
 
-    assert_eq!(preflight.status, "ok");
-    assert!(preflight.should_compress);
-    assert_eq!(preflight.reason, "ingest_protection_changed_replay");
-    let protected_args = preflight.replay_messages[0]["tool_calls"][0]["function"]["arguments"]
+    let protected_args = ingested.replay_messages[0]["tool_calls"][0]["function"]["arguments"]
         .as_str()
         .expect("protected tool-call arguments should stay stringified JSON");
     assert!(protected_args.contains("[Externalized LCM ingest payload:"));
     assert!(protected_args.contains("tool-call-suffix-canary"));
     assert!(!protected_args.contains("data:image/png;base64"));
-    let protected_tool_call = preflight.replay_messages[0]["tool_calls"][0].to_string();
+    let protected_tool_call = ingested.replay_messages[0]["tool_calls"][0].to_string();
     assert!(!protected_tool_call.contains("sk-tool-calls-1234567890abcdef"));
 
     let payload_ref = externalized_ref_from_placeholder(protected_args);
@@ -746,40 +646,21 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
     insert_session(&db, "cursor", "session-media").await;
 
     let media_payload = format!("data:image/png;base64,{}", "A".repeat(100_000));
-    let response = db
-        .lcm_preflight(LcmPreflightRequest {
-            provider: "cursor".into(),
-            session_id: "session-media".into(),
-            messages: vec![json!({
-                "id": "structured-media",
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Please inspect the screenshot."},
-                    {"type": "image_url", "image_url": {"url": media_payload}},
-                ],
-            })],
-            current_tokens: Some(100),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
-        })
-        .await
-        .unwrap();
+    let response = ingest_active_messages(
+        &db,
+        "cursor",
+        "session-media",
+        vec![json!({
+            "id": "structured-media",
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please inspect the screenshot."},
+                {"type": "image_url", "image_url": {"url": media_payload}},
+            ],
+        })],
+    )
+    .await;
 
-    assert_eq!(response.status, "ok");
-    assert!(response.should_compress);
-    assert_eq!(response.reason, "ingest_protection_changed_replay");
     let replay_content = response.replay_messages[0]["content"]
         .as_array()
         .expect("structured content should stay an array");
@@ -830,33 +711,17 @@ async fn structured_active_content_replay_preserves_shape_while_grep_snippet_sta
         {"type": "text", "text": long_text},
         {"type": "metadata", "value": {"shape": "kept"}},
     ]);
-    let response = db
-        .lcm_preflight(LcmPreflightRequest {
-            provider: "cursor".into(),
-            session_id: "session-bounded".into(),
-            messages: vec![json!({
-                "id": "structured-bounded",
-                "role": "user",
-                "content": content.clone(),
-            })],
-            current_tokens: Some(100),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            ignore_message_patterns: Vec::new(),
-        })
-        .await
-        .unwrap();
+    let response = ingest_active_messages(
+        &db,
+        "cursor",
+        "session-bounded",
+        vec![json!({
+            "id": "structured-bounded",
+            "role": "user",
+            "content": content.clone(),
+        })],
+    )
+    .await;
     assert_eq!(response.replay_messages[0]["content"], content);
 
     let hits = db
