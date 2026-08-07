@@ -76,6 +76,10 @@ pub struct WorkArtifactHydrationRequestV1 {
 
 /// Whether an attempt's terminal evidence has been sealed. An attempt that
 /// has not reported an outcome yet is a typed state, not a missing record.
+// A wire contract type constructed and matched at hydration call sites;
+// boxing the sealed record would ripple through them for a response
+// payload, not a hot allocation path (daemon_contract precedent).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkAttemptEvidenceStateV1 {

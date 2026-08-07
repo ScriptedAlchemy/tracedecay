@@ -80,6 +80,10 @@ pub struct WorkTopologyIntegrationStrategyV1 {
 
 /// The application-owned execution-topology view. Absence of any Work in
 /// scope is a typed state, distinct from an authorized-but-empty page.
+// A wire contract type; boxing the `View` dimensions would ripple through
+// its construction and match sites for a response payload, not a hot
+// allocation path (daemon_contract precedent).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(title = "ExecutionTopologyViewV1")]
