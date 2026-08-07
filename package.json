@@ -1,0 +1,10 @@
+{
+  "name": "tracedecay-development",
+  "private": true,
+  "scripts": {
+    "lint:commit": "commitlint --config commitlint.config.cjs"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.1"
+  }
+}

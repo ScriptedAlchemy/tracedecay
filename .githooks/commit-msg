@@ -2,4 +2,6 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-"$repo_root/scripts/check-conventional-commits.sh" --message-file "$1"
+cd "$repo_root"
+
+git stripspace --strip-comments < "$1" | npm run --silent lint:commit --

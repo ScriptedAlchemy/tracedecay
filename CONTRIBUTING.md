@@ -210,14 +210,15 @@ Install the local `commit-msg` hook once per checkout:
 scripts/install-git-hooks.sh
 ```
 
-CI validates commit subjects with:
+CI validates commit messages with commitlint (`commitlint.config.cjs`):
 
 ```bash
-scripts/check-conventional-commits.sh origin/master..HEAD
+git show --no-patch --format=%B HEAD | npm run --silent lint:commit --
 ```
 
-Run the same command locally before pushing to lint every non-merge commit in a
-branch range. Merge commits are skipped to match CI behavior.
+Run the same command locally (per commit) before pushing to lint every
+non-merge commit in a branch range. Merge commits are skipped to match CI
+behavior.
 
 ## Pull Requests
 

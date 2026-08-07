@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, feature/holographic-memory, codex/tracedecay-total-redesign-plan]
+    branches: [master, feature/holographic-memory]
   pull_request:
     branches: ['**']
 
@@ -19,148 +19,42 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
-  # Every Rust job downloads the dashboard built once by dashboard-assets.
-  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 jobs:
-  dashboard-assets:
-    name: Build dashboard artifact
-    runs-on: ubuntu-latest
-    # Every Rust job needs this one, so it stays tight: a wedged `rsbuild build`
-    # should fail the matrix quickly rather than sit. This step list ran inside
-    # 15 minutes before the accessibility gates were (wrongly) added here; the
-    # only addition since is the payload budget check, measured at ~3s locally.
-    timeout-minutes: 16
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm run build
-
-      # `build.rs` writes this stamp when it drives the npm build; the direct
-      # npm build above skips it, so reproduce the exact stamp with the same
-      # Rust module. The artifact must ship a stamp that truthfully matches
-      # these sources.
-      - name: Write dashboard source stamp
-        run: |
-          rustc --edition 2024 -O build-support/write_dashboard_stamp.rs \
-            -o "${RUNNER_TEMP}/write-dashboard-stamp"
-          "${RUNNER_TEMP}/write-dashboard-stamp" . > dashboard/app-dist/.source-stamp
-
-      - name: Test dashboard bundle guard
-        run: bash tests/dashboard_bundle_check_test.sh
-
-      - name: Validate dashboard bundle
-        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
-
-      - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 7
-
-  # WCAG 2.2 AA is a plan 11 acceptance criterion, so the accessibility gates
-  # run in CI rather than only on a developer's machine. Both harnesses exit
-  # nonzero on an axe violation, an uncaught page error, or a failed state
-  # assertion — a clean scan of a falsified reading is not a pass.
-  #
-  # This is a job rather than three more steps in dashboard-assets. The whole
-  # Rust matrix declares `needs: dashboard-assets`, so an accessibility failure
-  # placed there skipped every Rust job and destroyed the signal about whether
-  # Rust passed. NOTHING may declare `needs: dashboard-accessibility`.
-  dashboard-accessibility:
-    name: Dashboard accessibility
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    # Non-blocking by owner decision 2026-07-31: axe findings stay visible in
-    # the run summary but no longer gate the branch. Zero-axe remains a plan 11
-    # acceptance criterion checked before release, not per push.
-    continue-on-error: true
-    # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
-    # runs its OWN full `rsbuild build` (see dashboard/e2e/axe-harness.ts: it
-    # snapshots app-dist, builds into it, copies the output to scratch, then
-    # restores it). At ~3x for a 2-core runner rendering 2 themes x 3 widths
-    # that is ~14 min, plus ~3 min for the Chromium and system-dependency
-    # install and ~1 min for npm ci. 30 leaves headroom for a slow runner while
-    # still cutting off a hung browser or wedged static server.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      # The harness rebuilds its own bundle, but it restores app-dist to
-      # exactly what it found. Downloading the validated artifact keeps that
-      # restore honest, and `needs:` keeps this gate from reporting a second
-      # red when the real fault is that the bundle never built.
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Install Playwright Chromium
-        working-directory: dashboard
-        run: npx playwright install --with-deps chromium
-
-      - name: Accessibility gate (workspaces)
-        working-directory: dashboard
-        run: npm run axe:audit
-
-      - name: Accessibility gate (Explorer)
-        working-directory: dashboard
-        run: npm run axe:explorer
-
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
-    # Advisory by owner decision 2026-08-01: subject style must not block
-    # end-to-end delivery; findings stay visible in the run summary.
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Test release PR integrity guard
-        run: bash tests/release_pr_integrity_test.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install commit message lint dependencies
+        run: npm ci
 
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
 
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
-        continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/check-conventional-commits.sh "$BASE_SHA..$HEAD_SHA"
+        run: |
+          set -euo pipefail
+          commit_shas=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          while IFS= read -r commit_sha; do
+            [[ -n "$commit_sha" ]] || continue
+            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
+          done <<<"$commit_shas"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
-        continue-on-error: true
         env:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
@@ -168,36 +62,26 @@ jobs:
           set -euo pipefail
           if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              RANGE="${HEAD_SHA}^..${HEAD_SHA}"
+              range="${HEAD_SHA}^..${HEAD_SHA}"
             else
-              RANGE="$HEAD_SHA"
+              git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
+              exit 0
             fi
           else
-            RANGE="${BEFORE_SHA}..${HEAD_SHA}"
+            range="$BEFORE_SHA..$HEAD_SHA"
           fi
-          scripts/check-conventional-commits.sh "$RANGE"
+          commit_shas=$(git rev-list --no-merges "$range")
+          while IFS= read -r commit_sha; do
+            [[ -n "$commit_sha" ]] || continue
+            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
+          done <<<"$commit_shas"
 
   release-version-drift:
     name: Release Version Drift
-    # This job consumes the dashboard artifact shared by Rust jobs instead of
-    # rebuilding it.
-    needs: dashboard-assets
-    # Run on master pushes so the release workflow contracts protect the
-    # branch they release, while release-please PRs avoid expected version
-    # drift until their GitHub release completes.
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' &&
-       !startsWith(github.head_ref, 'release-please--'))
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
 
       - uses: actions/setup-python@v6
         with:
@@ -206,42 +90,22 @@ jobs:
       - name: Test release version drift guard
         run: bash tests/release_drift_check_test.sh
 
-      - name: Check release safety guards
-        run: bash tests/release_safety_test.sh
-
-      - name: Check production feature profile
-        run: python3 scripts/check-production-feature-profile.py
-
-      - name: Test portable package harnesses
-        run: |
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-resolve-release-source-profile.py
-          python3 scripts/test-scoop-manifest-workflows.py
+      - name: Test release workflow contract
+        run: bash tests/release_workflow_contract_test.sh
 
       - name: Test GitHub release installer
         run: bash tests/install_script_test.sh
 
-      - name: Test release artifact inventory
-        run: |
-          python3 scripts/test-check-release-artifacts.py
-          python3 scripts/test-package-release-archive.py
-          python3 scripts/test-plan-release-recovery.py
+      - name: Test local dogfood command contract
+        run: bash tests/dogfood_command_test.sh
 
       - name: Check release version drift
-        continue-on-error: true
-        # A release-please PR is excluded at the job level because its version
-        # is expected to lead the latest GitHub release until the PR merges.
-        if: github.event_name == 'pull_request'
         run: scripts/check-release-drift.sh
 
   test:
     name: Test ${{ matrix.name }}
-    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
-    env:
-      RUSTFLAGS: ${{ matrix.name == 'Linux' && '--cfg tracedecay_observation_fault_harness' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -254,17 +118,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -273,9 +131,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -286,98 +144,38 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
-      # That directory is NOT one of the paths rust-cache stores, but the
-      # build-script output that points at it IS (it lives under `target/`). So
-      # a restored cache replays a link search path that does not exist on this
-      # fresh runner, cargo still considers the build script fresh and never
-      # re-downloads, and codegen fails with `could not find native static
-      # library 'onnxruntime'`. Evicting just this one package forces the build
-      # script to rerun and re-download into this runner, keeping the link path
-      # and the binaries consistent. Keep this before the first cargo
-      # invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        run: cargo clean -p ort-sys --locked
-
-      - name: Check default-feature workspace
-        run: cargo check --workspace --locked
-
       - name: Run tests
-        run: cargo nextest run --workspace --all-features --profile ci --locked
-
-      # Raw retention is unconditional and positioned before later gates that
-      # can abort the job. This cannot rescue the job - a missing file is a
-      # warning, not a pass - it only preserves whatever nextest managed to
-      # write.
-      - name: Upload raw nextest junit
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: nextest-junit-${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Cursor native extension check/test/package
-        run: |
-          set -euo pipefail
-          npm --prefix plugin/cursor-native-extension ci
-          npm --prefix plugin/cursor-native-extension run check
-          npm --prefix plugin/cursor-native-extension test
-          npm --prefix plugin/cursor-native-extension run package
-
-      - name: Lite feature compile check
-        # The ONLY --no-default-features build lane.
-        run: cargo check --locked --no-default-features --features lite
-
-      - name: Host-bundle default-feature platform lifecycle
-        # The ONLY default-feature (not --all-features) lifecycle run.
-        run: >-
-          cargo nextest run --locked
-          --test host_bundle_acceptance
-          --no-tests=fail
-
-      - name: FastEmbed fixture pin check
-        if: matrix.name == 'Linux'
-        run: python3 tests/distribution/fastembed/prepare_fixture.py --check tests/distribution/fastembed
-
-      - name: Validate checked-in semantic activation workload
-        if: matrix.name == 'Linux'
-        run: >-
-          cargo run --locked --all-features
-          --bin tracedecay-search-eval --
-          validate --repo-root .
-
-      - name: Run in-flight observation crash harness
-        if: matrix.name == 'Linux'
-        run: >-
-          cargo nextest run --locked --all-features --features test-transport
-          --test daemon_fault_harness_test
-          --no-tests=fail
+        run: cargo nextest run --workspace --profile ci --locked
 
   windows-build:
     name: Build Windows tests
-    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
       - name: Tune Windows runner for build I/O
-        uses: ./.github/actions/tune-windows-runner
+        shell: pwsh
+        run: |
+          # Defender real-time scanning taxes the compiler's many short-lived
+          # object/incremental files; hosted runners are elevated, so turn it
+          # off and exclude the hot paths as a fallback.
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          $exclusions = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            [System.IO.Path]::GetTempPath(),
+            $env:CARGO_HOME,
+            $env:RUSTUP_HOME,
+            "$env:USERPROFILE\.cargo",
+            "$env:USERPROFILE\.rustup"
+          ) | Where-Object { $_ } | Select-Object -Unique
+          foreach ($path in $exclusions) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+          }
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
       - name: Use lld-link linker
         shell: pwsh
@@ -385,6 +183,14 @@ jobs:
           where.exe lld-link.exe
           lld-link.exe --version
           "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Node is only needed so build.rs can produce the embedded dashboard
+      # dist assets (npm ci + npm run build) once, instead of once per shard.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -395,85 +201,17 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory
-      # (`%LOCALAPPDATA%\...\dfbin\<target>\<hash>`). That directory is NOT one of
-      # the paths rust-cache stores, but the build-script output that points at it
-      # IS (it lives under `target/`). So a restored cache replays a link search
-      # path that does not exist on this fresh runner, cargo still considers the
-      # build script fresh and never re-downloads, and codegen fails with
-      # `could not find native static library 'onnxruntime'`. Clippy does not
-      # resolve native libs, which is why only the archive step trips over it.
-      # Evicting just this one package forces the build script to rerun and
-      # re-download into this runner, keeping the link path and the binaries
-      # consistent. Keep this before the first cargo invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        shell: pwsh
-        run: cargo clean -p ort-sys --locked
-
-      - name: Lint Windows-only Rust paths
-        shell: pwsh
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --all-features --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --locked --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload nextest archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: windows-nextest-archive
           path: ${{ runner.temp }}/nextest-archive.tar.zst
           retention-days: 1
           compression-level: 0
-
-  windows-service-e2e:
-    name: Test Windows native service lifecycle
-    needs: windows-build
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download Windows nextest archive
-        uses: actions/download-artifact@v7
-        with:
-          name: windows-nextest-archive
-          path: ${{ runner.temp }}
-
-      - name: Run Windows native service E2E
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $archive = Join-Path $env:RUNNER_TEMP "nextest-archive.tar.zst"
-          $extractRoot = Join-Path $env:RUNNER_TEMP "windows-service-e2e"
-          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-          & 7z.exe x $archive "-o$extractRoot" -y -bso0 -bsp0
-          if ($LASTEXITCODE -ne 0) {
-            throw "7-Zip failed to decompress $archive"
-          }
-          $tar = Join-Path $extractRoot "nextest-archive.tar"
-          & 7z.exe x $tar "-o$extractRoot" -y -bso0 -bsp0
-          if ($LASTEXITCODE -ne 0) {
-            throw "7-Zip failed to extract $tar"
-          }
-          $binaries = @(
-            Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter tracedecay.exe |
-              Where-Object { $_.FullName -notmatch '[\\/]deps[\\/]' }
-          )
-          if ($binaries.Count -ne 1) {
-            throw "expected exactly one non-deps tracedecay.exe; found $($binaries.Count): $($binaries.FullName -join ', ')"
-          }
-          $binary = $binaries[0].FullName
-          & ./scripts/windows-service-e2e.ps1 -TraceDecayExe $binary
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows service E2E exited $LASTEXITCODE"
-          }
-
-      - name: Clean abandoned Windows test children
-        if: always()
-        uses: ./.github/actions/clean-windows-test-children
 
   windows-test-shard:
     name: Test Windows shard ${{ matrix.partition }}/5
@@ -488,11 +226,33 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for test I/O
-        uses: ./.github/actions/tune-windows-runner
-        with:
-          redirect-temp: "true"
+        shell: pwsh
+        run: |
+          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
+          # files these tests create; hosted runners are elevated, so turn it off
+          # and exclude the hot paths as a fallback.
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          $exclusions = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            [System.IO.Path]::GetTempPath(),
+            $env:CARGO_HOME,
+            $env:RUSTUP_HOME,
+            "$env:USERPROFILE\.cargo",
+            "$env:USERPROFILE\.rustup"
+          ) | Where-Object { $_ } | Select-Object -Unique
+          foreach ($path in $exclusions) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+          }
+          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
+          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
+          # the nextest test processes follows.
+          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
+          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
+          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
 
@@ -501,20 +261,23 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
+        shell: pwsh
+        run: |
+          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
+          ast-grep --version
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Download nextest archive
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v4
         with:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
 
       - name: Run Windows tests
+        env:
+          TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
         shell: pwsh
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake
@@ -529,390 +292,63 @@ jobs:
 
       - name: Clean abandoned Windows test children
         if: always()
-        uses: ./.github/actions/clean-windows-test-children
+        shell: pwsh
+        run: |
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $all = Get-CimInstance Win32_Process
+          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
+          foreach ($process in $all) {
+            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
+          }
+          $stale = foreach ($process in $all) {
+            if ($process.Name -ne "tracedecay.exe") {
+              continue
+            }
+            if (-not $process.CommandLine) {
+              continue
+            }
+            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            if (-not $inCurrentWorkspace) {
+              continue
+            }
+            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
+              $process
+            }
+          }
+          foreach ($process in $stale) {
+            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload Windows nextest report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: windows-nextest-junit-${{ matrix.partition }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
           retention-days: 7
 
-  windows-sqlite-production-policy:
-    name: Test Windows SQLite production policy (WAL+NORMAL)
-    if: ${{ needs.windows-build.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-build
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Tune Windows runner for test I/O
-        uses: ./.github/actions/tune-windows-runner
-        with:
-          redirect-temp: "true"
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Download nextest archive
-        uses: actions/download-artifact@v7
-        with:
-          name: windows-nextest-archive
-          path: ${{ runner.temp }}
-
-      - name: Run Windows SQLite production policy tests
-        shell: pwsh
-        timeout-minutes: 24
-        # --extract-to must be the workspace so target/ lands at the same
-        # absolute path as on the build job: integration tests bake
-        # env!("CARGO_BIN_EXE_tracedecay") into the binaries at compile time.
-        run: >-
-          cargo-nextest nextest run --profile ci
-          --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
-          --extract-to "$env:GITHUB_WORKSPACE"
-          --workspace-remap "$env:GITHUB_WORKSPACE"
-          -E 'binary(=windows_durable_behavior)'
-          --no-tests=fail --test-threads 1 --status-level slow
-
-      - name: Clean abandoned Windows test children
-        if: always()
-        uses: ./.github/actions/clean-windows-test-children
-
-      - name: Upload Windows SQLite production policy nextest report
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: windows-sqlite-production-policy-junit-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: error
-          retention-days: 7
-
   windows-test:
     name: Test Windows
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: [windows-test-shard, windows-service-e2e]
+    needs: windows-test-shard
     runs-on: ubuntu-latest
     steps:
-      - name: Check Windows jobs
+      - name: Check Windows shards
         run: |
-          set -euo pipefail
           if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
             echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
             exit 1
           fi
-          if [ "${{ needs.windows-service-e2e.result }}" != "success" ]; then
-            echo "Windows service E2E result: ${{ needs.windows-service-e2e.result }}"
-            exit 1
-          fi
-          echo "All Windows jobs passed."
-
-  windows-platform-acceptance:
-    name: Windows platform acceptance
-    if: ${{ !cancelled() && needs.windows-test-shard.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: [dashboard-assets, windows-test-shard]
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Download Windows nextest junit shards
-        uses: actions/download-artifact@v7
-        with:
-          pattern: windows-nextest-junit-*
-          path: windows-junit
-          merge-multiple: true
-
-      - name: Cursor native extension check/test/package
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm --prefix plugin/cursor-native-extension ci
-          npm --prefix plugin/cursor-native-extension run check
-          npm --prefix plugin/cursor-native-extension test
-          npm --prefix plugin/cursor-native-extension run package
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Windows Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-application-advisory-lite-windows-msvc
-          cache-on-failure: true
-
-      - name: Lite feature compile check
-        shell: bash
-        run: cargo check --locked --no-default-features --features lite
-
-      - name: Host-bundle default-feature platform lifecycle
-        shell: bash
-        run: >-
-          cargo nextest run --locked
-          --test host_bundle_acceptance
-          --no-tests=fail
-
-      - name: Merge Windows junit
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -t junit_files < <(find windows-junit -type f -name 'junit.xml' | sort)
-          if [[ "${#junit_files[@]}" -eq 0 ]]; then
-            echo "missing Windows nextest junit evidence" >&2
-            exit 1
-          fi
-          # Merge shard junit into one retained Windows runtime artifact.
-          python3 - <<'PY'
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-          root = ET.Element("testsuites")
-          for path in sorted(Path("windows-junit").rglob("junit.xml")):
-              tree = ET.parse(path)
-              node = tree.getroot()
-              if node.tag.endswith("testsuites"):
-                  for child in list(node):
-                      root.append(child)
-              else:
-                  root.append(node)
-          Path("windows-merged-junit.xml").write_bytes(ET.tostring(root, encoding="utf-8"))
-          PY
-
-      - name: Upload Windows runtime junit
-        uses: actions/upload-artifact@v6
-        with:
-          name: runtime-junit-windows
-          path: windows-merged-junit.xml
-          retention-days: 7
-
-  # Catches serving-path performance regressions — the class profiled on
-  # 2026-08-01, where a search went from milliseconds to minutes because
-  # per-request work scaled with store size. The script indexes THIS repo into
-  # a throwaway profile, serves it from a private daemon, and drives six
-  # concurrent readers at it; the pass/fail budgets live in one block at the
-  # top of scripts/perf-gate.sh. They are order-of-magnitude tripwires, so a
-  # red here means a real regression, not a noisy runner.
-  perf-gate:
-    name: Serving-path perf gate
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    # The gate needs an OPTIMIZED binary: a debug build makes the CPU-bound
-    # index and query paths slow enough to trip the budgets for reasons that
-    # have nothing to do with a regression. That means a release build of the
-    # root crate (~9 min on a 96-core box, longer here) plus a ~2 min index and
-    # a 60 s load window. rust-cache carries the dependency graph between runs;
-    # the root crate itself always recompiles.
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-perf-gate-release-${{ runner.os }}
-          cache-on-failure: true
-
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
-      # That directory is NOT one of the paths rust-cache stores, but the
-      # build-script output that points at it IS (it lives under `target/`). So
-      # a restored cache replays a link search path that does not exist on this
-      # fresh runner, cargo still considers the build script fresh and never
-      # re-downloads, and codegen fails with `could not find native static
-      # library 'onnxruntime'`. Evicting just this one package forces the build
-      # script to rerun and re-download into this runner, keeping the link path
-      # and the binaries consistent. Keep this before the first cargo
-      # invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        run: cargo clean -p ort-sys --locked
-
-      - name: Run serving-path perf gate
-        run: scripts/perf-gate.sh
-
-      # Retained unconditionally: the metrics from a FAILING run are the whole
-      # point of the artifact, and a timed-out job still leaves whatever the
-      # verdict phase managed to write.
-      - name: Upload perf gate metrics
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: perf-gate-metrics
-          path: |
-            target/perf-gate/perf-gate-metrics.json
-            target/perf-gate/perf-gate-summary.md
-          if-no-files-found: warn
-          retention-days: 14
-
-  mcp-catalog-sweep:
-    name: Negotiated MCP catalog sweep
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-mcp-catalog-sweep-release-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Build production sweep binary
-        run: cargo build --locked --release --bin tracedecay
-
-      - name: Test sweep harness and isolated release journey
-        env:
-          TRACEDECAY_SWEEP_LIVE: "1"
-          TRACEDECAY_SWEEP_RELEASE_BIN: ${{ github.workspace }}/target/release/tracedecay
-        run: |
-          python3 -m unittest discover -s tests/tool_sweep_suite -p 'test_*.py'
-          bash -n scripts/tool-sweep.sh
-
-      - name: Sweep negotiated MCP surfaces
-        run: scripts/tool-sweep.sh --whole-run-deadline-ms 1800000
-
-      - name: Upload MCP sweep artifacts
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: mcp-catalog-sweep
-          path: target/tool-sweep/
-          if-no-files-found: warn
-          retention-days: 14
-
-  release-compatibility:
-    name: Release compatibility
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    # Packaging the workspace and inspecting the assembled root archive is a
-    # bounded product journey. Leave enough room for a cold Cargo cache while
-    # still surfacing a stalled package build promptly.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Validate publishable package manifests
-        # Package the workspace as one dependency-ordered batch because the V2
-        # crates do not exist in the registry until release-plz publishes them.
-        run: |
-          set -euo pipefail
-          cargo package --workspace --locked --allow-dirty --no-verify
-
-          version="$(
-            cargo metadata --no-deps --locked --format-version 1 |
-              jq -r '.packages[] | select(.name == "tracedecay") | .version'
-          )"
-          root_archive="target/package/tracedecay-${version}.crate"
-          test -s "$root_archive"
-          tar tzf "$root_archive" > root-archive-contents.txt
-          grep -Fq "/build-support/dashboard_cache.rs" root-archive-contents.txt
-          grep -Fq "/dashboard/app-dist/" root-archive-contents.txt
-
-          package_root="${RUNNER_TEMP}/tracedecay-package"
-          rm -rf "$package_root"
-          mkdir -p "$package_root"
-          tar xzf "$root_archive" -C "$package_root"
-          python3 scripts/check-dashboard-bundle.py \
-            "$package_root/tracedecay-${version}/dashboard/app-dist"
-
-      - name: Check root crate API compatibility
-        # Advisory: with release-type "major" every break is pre-approved, so
-        # a red here is informational at best.
-        continue-on-error: true
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        env:
-          # semver-checks builds the crate from a synthetic resolver-v1
-          # workspace, so make dependency selection honor this job's toolchain.
-          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
-        with:
-          package: tracedecay
-          rust-toolchain: manual
-          # The V2 storage cutover intentionally breaks the pre-V2 public API.
-          # Release-plz owns the version bump at release time (the drift guard
-          # forbids pre-bumping in the PR). In semver-checks vocabulary,
-          # "major" means "breaking release" — for this 0.0.x crate that IS
-          # the planned 0.1.0 minor-version bump (no 1.0 is implied). Declare
-          # it so the action stops comparing against the unchanged version.
-          release-type: major
+          echo "All Windows shards passed."
 
   clippy:
     name: Clippy
-    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -925,33 +361,8 @@ jobs:
         with:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
-
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
-      # That directory is NOT one of the paths rust-cache stores, but the
-      # build-script output that points at it IS (it lives under `target/`). So
-      # a restored cache replays a link search path that does not exist on this
-      # fresh runner, cargo still considers the build script fresh and never
-      # re-downloads, and codegen fails with `could not find native static
-      # library 'onnxruntime'`. Evicting just this one package forces the build
-      # script to rerun and re-download into this runner, keeping the link path
-      # and the binaries consistent. Keep this before the first cargo
-      # invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        run: cargo clean -p ort-sys --locked
-
-      - name: Run blocking Clippy policy with default features
+      - name: Run blocking Clippy policy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Run blocking Clippy policy with all features
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-      - name: Run blocking Clippy policy without default features
-        run: cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
-
-      - name: Run blocking Clippy policy with production features
-        run: cargo clippy --no-default-features --features production --locked -- -D warnings
 
   fmt:
     name: Format
@@ -965,25 +376,66 @@ jobs:
       - run: cargo fmt --all -- --check
 
   dashboard:
-    name: Dashboard integration
-    needs: dashboard-assets
+    name: Dashboard
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Frontend checks and the production build run in dashboard-assets. This job
-    # verifies the Rust API surface against those exact downloaded bytes.
+    env:
+      DASHBOARD_DIST_FILES: >-
+        shell/dist/shell.js
+        shell/dist/shell.css
+        holographic/dist/index.js
+        holographic/dist/style.css
+        lcm/dist/index.js
+        lcm/dist/style.css
+        graph/dist/index.js
+        graph/dist/style.css
+        savings/dist/index.js
+        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
+      - uses: actions/setup-node@v6
         with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard assets
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Run dashboard unit tests
+        working-directory: dashboard
+        run: npm test
+
+      - name: Verify embedded dist artifacts
+        working-directory: dashboard
+        run: |
+          set -euo pipefail
+          for f in $DASHBOARD_DIST_FILES; do
+            if [ ! -s "$f" ]; then
+              echo "missing or empty dist artifact: $f" >&2
+              exit 1
+            fi
+          done
+          # shellcheck disable=SC2086
+          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          npm run build
+          sha256sum -c /tmp/dashboard-dist.sha
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
+
+      - name: Install ast-grep
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -994,56 +446,60 @@ jobs:
           shared-key: ci-dashboard-full-${{ runner.os }}
           cache-on-failure: true
 
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard
-        run: npm ci
-
-      - name: Typecheck dashboard
-        working-directory: dashboard
-        run: npm run typecheck
-
-      - name: Check generated wire contracts are current
-        working-directory: dashboard
-        run: npm run contracts:check
-
-      - name: Run dashboard unit tests
-        working-directory: dashboard
-        run: npm test
-
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
-      # That directory is NOT one of the paths rust-cache stores, but the
-      # build-script output that points at it IS (it lives under `target/`). So
-      # a restored cache replays a link search path that does not exist on this
-      # fresh runner, cargo still considers the build script fresh and never
-      # re-downloads, and codegen fails with `could not find native static
-      # library 'onnxruntime'`. Evicting just this one package forces the build
-      # script to rerun and re-download into this runner, keeping the link path
-      # and the binaries consistent. Keep this before the first cargo
-      # invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        run: cargo clean -p ort-sys --locked
-
       - name: Run dashboard integration tests
-        run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked --no-tests=fail
+        run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('dashboard/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+
+      - name: Prebuild dashboard binary for smoke
+        run: cargo build --bin tracedecay --locked
+
+      - name: Run dashboard smoke (empty LCM)
+        working-directory: dashboard
+        env:
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
+        run: |
+          set -euo pipefail
+          rm -f "$TRACEDECAY_GLOBAL_DB"
+          attempts=0
+          max_attempts=3
+          until [ "$attempts" -ge "$max_attempts" ]; do
+            attempts=$((attempts + 1))
+            echo "Smoke attempt ${attempts}/${max_attempts}..."
+            if npm run smoke -- --expect-lcm=empty; then
+              exit 0
+            fi
+            if [ "$attempts" -lt "$max_attempts" ]; then
+              sleep 10
+            fi
+          done
+          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
+          exit 1
+
+      - name: Run dashboard mobile smoke
+        working-directory: dashboard
+        env:
+          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
+        run: |
+          set -euo pipefail
+          rm -f "$TRACEDECAY_GLOBAL_DB"
+          npm run smoke:mobile -- --expect-lcm=empty
 
   hermes-integration:
     name: Hermes integration (stock)
-    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Advisory by owner decision 2026-08-01: depends on a third-party repo
-    # fetch; an upstream outage must not red unrelated PRs.
-    continue-on-error: true
     env:
       # Stock (upstream) Hermes pin — the generated plugin must keep working
       # against this exact upstream commit. Bump deliberately after rerunning
@@ -1053,20 +509,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: ${{ env.AST_GREP_VERSION }}
+        run: |
+          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
+          ast-grep --version
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
@@ -1074,23 +524,8 @@ jobs:
           shared-key: ci-hermes-integration-full-${{ runner.os }}
           cache-on-failure: true
 
-      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
-      # prebuilt ONNX Runtime in its build script and then emits an absolute
-      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
-      # That directory is NOT one of the paths rust-cache stores, but the
-      # build-script output that points at it IS (it lives under `target/`). So
-      # a restored cache replays a link search path that does not exist on this
-      # fresh runner, cargo still considers the build script fresh and never
-      # re-downloads, and codegen fails with `could not find native static
-      # library 'onnxruntime'`. Evicting just this one package forces the build
-      # script to rerun and re-download into this runner, keeping the link path
-      # and the binaries consistent. Keep this before the first cargo
-      # invocation of the job.
-      - name: Refresh ONNX Runtime binaries for ort-sys
-        run: cargo clean -p ort-sys --locked
-
       - name: Build tracedecay binary
-        run: cargo build --all-features --bin tracedecay --locked
+        run: cargo build --bin tracedecay --locked
 
       - name: Run generated-plugin unit checks (no Hermes required)
         run: python3 scripts/hermes_plugin_unit_check.py

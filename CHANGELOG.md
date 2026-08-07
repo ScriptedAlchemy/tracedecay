@@ -5,7 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.72...v0.0.73) (2026-08-04)
+
+
+### Bug Fixes
+
+* **cli:** retrieve truncated daemon JSON ([#503](https://github.com/ScriptedAlchemy/tracedecay/issues/503)) ([bfc2825](https://github.com/ScriptedAlchemy/tracedecay/commit/bfc2825c87dd4903538f2d2bede1f86bb4e1590f))
+
+## [0.0.72](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.71...v0.0.72) (2026-08-04)
+
+
+### Bug Fixes
+
+* **update:** quiesce daemon before lifecycle lock ([#501](https://github.com/ScriptedAlchemy/tracedecay/issues/501)) ([cfa22ae](https://github.com/ScriptedAlchemy/tracedecay/commit/cfa22aeb7b1fb7bbb5bdb3625f8d31df1f87ab23))
+
+## [0.0.71](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.70...v0.0.71) (2026-08-04)
+
+
+### Bug Fixes
+
+* **update:** reuse lifecycle lease for Hermes refresh ([#499](https://github.com/ScriptedAlchemy/tracedecay/issues/499)) ([19ff99a](https://github.com/ScriptedAlchemy/tracedecay/commit/19ff99a53ab20173027041967bb477b05a819a7e))
+
+## [0.0.70](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.69...v0.0.70) (2026-08-04)
+
+
+### Bug Fixes
+
+* **release:** tolerate missing release PR output ([b39adb8](https://github.com/ScriptedAlchemy/tracedecay/commit/b39adb812e7efaed33db9ff4f2cd22c5ecf849b0))
+
+## [0.0.69](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.68...v0.0.69) (2026-08-04)
+
+
+### Bug Fixes
+
+* address unresolved review and release issues ([#492](https://github.com/ScriptedAlchemy/tracedecay/issues/492)) ([f4510b4](https://github.com/ScriptedAlchemy/tracedecay/commit/f4510b453ff9b8d6a789e6ef8edfb0d6fbc3670d))
+* **daemon:** close startup readiness races ([#494](https://github.com/ScriptedAlchemy/tracedecay/issues/494)) ([b9b8c25](https://github.com/ScriptedAlchemy/tracedecay/commit/b9b8c252284652d7a1844bbcc29b48c4e1e080c1))
+* **release:** keep root lockfile version aligned ([8a2018e](https://github.com/ScriptedAlchemy/tracedecay/commit/8a2018e8743de8a2852a169ca8a11db7020d9792))
+* **release:** switch stable distribution to GitHub assets ([6217363](https://github.com/ScriptedAlchemy/tracedecay/commit/6217363f0bacf0b033f5ab456f645615f6e54484))
+* **release:** update root lockfile deterministically ([#493](https://github.com/ScriptedAlchemy/tracedecay/issues/493)) ([3ee78a8](https://github.com/ScriptedAlchemy/tracedecay/commit/3ee78a8c9c39874548c1bb9220a3c45958e71641))
+* **release:** use package-neutral GitHub tags ([#495](https://github.com/ScriptedAlchemy/tracedecay/issues/495)) ([bf78342](https://github.com/ScriptedAlchemy/tracedecay/commit/bf7834235968f952d0eb4dc897494eaec19fbe08))
+
 ## [Unreleased]
+
+## [0.0.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.67...v0.0.68) - 2026-08-03
+
+### Fixed
+
+- *(cargo)* isolate nested worktrees without dropping packaged dashboard assets
+- *(grep)* scope generated path glob traversal
+- *(grep)* honor generated directory path globs
+- *(grep)* bound filesystem scans
+- *(sessions)* preserve and retry uncertain worktree membership
+- *(sessions)* defer uncertain session routing
+- *(storage)* bound legacy worktree probing
+- *(worktrees)* avoid blocking Git discovery
+
+### Performance
+
+- *(sessions)* cache worktree metadata resolution
 
 ## [0.0.67](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.66...v0.0.67) - 2026-07-27
 
@@ -116,8 +173,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.59](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.58...v0.0.59) - 2026-07-12
 
+### Added
+
+- *(dev)* add stable dogfood install workflow
+
 ### Fixed
 
+- *(dev)* launch dogfood without nested cargo
 - *(hermes)* correlate turns across project scopes
 - *(hermes)* resolve session projects through registry
 - *(hermes)* route projectless compression to user store
@@ -920,7 +982,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tracedecay install --agent hermes` deploys the dashboard plugin page.** The Hermes wrapper (manifest, `plugin_api.py` reverse proxy, and the UI bundles — all embedded in the binary, no source checkout needed) is now written to `<hermes_home>/plugins/tracedecay/dashboard/` as part of the default install, where Hermes' dashboard-plugin discovery (stock and forked) picks it up as a "TraceDecay" tab with Memory / LCM / Code Graph / Savings sub-tabs. The deployed proxy bakes in the installing binary path and the profile's pinned `project_root` as spawn-mode defaults (`TRACEDECAY_BIN` / `TRACEDECAY_DASHBOARD_PROJECT` env vars still win); reinstalls preserve the pin, `--no-dashboard` opts out (and removes a previous deploy), and uninstall cleans the page up. The wrapper also gained the Savings sub-tab (`/savings/*` proxy to `/api/plugins/savings/*`). On Hermes versions without dashboard-plugin discovery the deployed directory is inert.
 - **Dashboard assets build themselves on fresh checkouts.** When the embedded `dashboard/*/dist` bundles are missing, `build.rs` now runs the frontend build automatically (`npm ci`, falling back to `npm install`, then `npm run build`) with progress reported as build warnings — so `cargo build` / `cargo install --path .` work from a clean clone. If npm is unavailable, the build still fails fast with actionable instructions. `Cargo.toml` switched to an explicit `package.include` whitelist that ships the prebuilt dist bundles inside the crate package, making `cargo package`/`cargo publish` verifiable and letting crates.io/docs.rs builds proceed with no Node.js toolchain. The release workflows (`release.yml` build + publish-crate jobs, `release-beta.yml`) gained the same dashboard prebuild step as CI.
 
-- **Tokenizer-backed cost tier for the Savings & Cost tab (`token-counting` feature, on by default).** When transcripts carry no usage counters (all Cursor stores — verified to contain none — plus cline/vibe and any Codex/Claude rows without usage), stored message text is now counted with a real BPE tokenizer (tiktoken-rs, `o200k_base`/`cl100k_base`) instead of the chars/4 heuristic: exact for OpenAI-family models, a labeled `≈` approximation for vendors without a public tokenizer (Claude/Gemini). The API gains a third `cost_basis` value `"tokenized"` (between `"actual"` and `"estimated"`; `"mixed"` semantics unchanged), additive `tokenized` token blocks, `tokenized_messages` counts, and per-model `tokenizer` provenance (`{"encoder", "exact"}`); the UI shows tier badges and an updated methodology note. Counts are cached per message in process and pre-warmed in the background at dashboard startup; the cache is derived acceleration and does not create an independent persistence authority. Disable the feature for a leaner binary (~4 MB embedded vocabularies, lazily decoded) — everything degrades to the chars/4 tier.
+- **Tokenizer-backed cost tier for the Savings & Cost tab (`token-counting` feature, on by default).** When transcripts carry no usage counters (all Cursor stores — verified to contain none — plus cline/vibe and any Codex/Claude rows without usage), stored message text is now counted with a real BPE tokenizer (tiktoken-rs, `o200k_base`/`cl100k_base`) instead of the chars/4 heuristic: exact for OpenAI-family models, a labeled `≈` approximation for vendors without a public tokenizer (Claude/Gemini). The API gains a third `cost_basis` value `"tokenized"` (between `"actual"` and `"estimated"`; `"mixed"` semantics unchanged), additive `tokenized` token blocks, `tokenized_messages` counts, and per-model `tokenizer` provenance (`{"encoder", "exact"}`); the UI shows tier badges and an updated methodology note. Counts are cached per message (in-process map + a `dashboard_token_counts` sidecar table in the global accounting DB, keyed by message identity with a text-length guard) and pre-warmed in the background at dashboard startup, so 15k+-message stores pay the BPE pass once instead of per request. Disable the feature for a leaner binary (~4 MB embedded vocabularies, lazily decoded) — everything degrades to the chars/4 tier.
 
 ### Fixed
 - **The savings ledger records by default again — the Savings tab is no longer empty while lifetime counters grow.** The holographic-fact-store commit made the MCP server's global accounting DB opt-in via `TRACEDECAY_ENABLE_GLOBAL_DB`, which silently disabled `savings_ledger` writes (and worldwide-counter flushes) for every default install: tool calls still printed `tracedecay_metrics` lines and CLI paths kept growing `projects.tokens_saved`, but the dashboard showed "ledger calls: 0 / no events yet". Global accounting is now **on by default**; opt out with `TRACEDECAY_DISABLE_GLOBAL_DB=1` (set automatically for cargo-launched processes via `.cargo/config.toml` so test runs stay hermetic) or `TRACEDECAY_ENABLE_GLOBAL_DB=0`, with an explicit `TRACEDECAY_ENABLE_GLOBAL_DB=1` always winning. The dashboard now also surfaces the gate verdict (`savings.recording` in the overview API, a `recording: on/off` badge, and an honest explanation when the ledger is empty — including the "restart your MCP server to pick this up" case) instead of an unconditional "no events yet". Covered by a default-on ledger regression test plus env-precedence unit tests; long-running MCP servers must be restarted/reloaded to pick up the fix.
@@ -1342,7 +1404,7 @@ The largest functional jump since 4.0: nine new MCP tools, a cross-session respo
 ## [4.3.13] - 2026-05-10
 
 ### Changed
-- **Switched to `tree-sitter-grammars/tree-sitter-markdown` (block + inline split parsers)** — the previously-vendored `ikatyang/tree-sitter-markdown` (last updated 2023, GLR-heavy without native frontmatter handling) hung the indexer on otherwise-fine markdown files containing YAML frontmatter. Specifically, the old grammar parsed `---\n…\n---` content as ordinary markdown, where 6/8/10-space-indented YAML lines were simultaneously valid as both deeply-nested list-item continuations and as indented code blocks; tree-sitter's GLR explored all alternatives in parallel, with the surviving-versions count growing exponentially per line. A real-world 18 KB resume.md hung the worker indefinitely; a 4.4 KB minimal reproducer was bisected and is now a regression fixture (`tests/fixtures/markdown_yaml_frontmatter_hang.md`). The new grammar emits an opaque `(minus_metadata)` / `(plus_metadata)` node for frontmatter, so the markdown rules never see the YAML — the same 4.4 KB reproducer parses in ~7 ms, the full 18 KB file in ~16 ms. The markdown extractor was rewritten for the new AST (block parser produces `(atx_heading … heading_content: (inline …))`, headings still become `Module` nodes; the inline parser is run over each `(inline)` byte range via `set_included_ranges` to extract `(inline_link)` for `Uses` edges). All 16 existing markdown extraction tests still pass; 3 new regression tests guard the migration.
+- **Switched to `tree-sitter-grammars/tree-sitter-markdown` (block + inline split parsers)** — the previously-vendored `ikatyang/tree-sitter-markdown` (last updated 2023, GLR-heavy without native frontmatter handling) hung the indexer on otherwise-fine markdown files containing YAML frontmatter. Specifically, the old grammar parsed `---\n…\n---` content as ordinary markdown, where 6/8/10-space-indented YAML lines were simultaneously valid as both deeply-nested list-item continuations and as indented code blocks; tree-sitter's GLR explored all alternatives in parallel, with the surviving-versions count growing exponentially per line. A real-world 18 KB resume.md hung the worker indefinitely; a 4.4 KB minimal reproducer was bisected and is now a regression fixture (`crates/tracedecay-code-extraction/tests/fixtures/markdown_yaml_frontmatter_hang.md`). The new grammar emits an opaque `(minus_metadata)` / `(plus_metadata)` node for frontmatter, so the markdown rules never see the YAML — the same 4.4 KB reproducer parses in ~7 ms, the full 18 KB file in ~16 ms. The markdown extractor was rewritten for the new AST (block parser produces `(atx_heading … heading_content: (inline …))`, headings still become `Module` nodes; the inline parser is run over each `(inline)` byte range via `set_included_ranges` to extract `(inline_link)` for `Uses` edges). All 16 existing markdown extraction tests still pass; 3 new regression tests guard the migration.
 
 ### Added
 - **Per-file extraction timeout** — every extractor round trip is now wrapped in a watchdog (configurable via `extraction_timeout_secs` in `~/.tracedecay/config.toml`, default 60 s). A file whose extractor doesn't respond in time has its worker subprocess killed via `Child::kill()` and is recorded in `SyncResult.skipped_paths` with reason `"extractor timed out (>Ns)"`. Worker crashes (the existing failure path) are now also recorded with reason `"extractor crashed (...)"` instead of disappearing silently. This bounds the worst case for any future grammar pathology — `tracedecay sync` can no longer hang forever on a single malformed file.

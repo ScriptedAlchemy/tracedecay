@@ -51,8 +51,10 @@ compiles.
 
 - Commits: `<type>(<scope>): <subject>` (subject ≤ 72 chars) with one of
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
-  `style`, `test`. Every non-merge commit subject must pass
-  `scripts/check-conventional-commits.sh`.
+  `style`, `test`. Every non-merge commit message must pass commitlint
+  (`npm run lint:commit`, configured in `commitlint.config.cjs`; the
+  `.githooks/commit-msg` hook runs it locally via
+  `scripts/install-git-hooks.sh`).
 - Integration branch is `master` (GitHub: ScriptedAlchemy/tracedecay); CI
   lives in `.github/workflows` (hidden — search with `rg --hidden`).
 - `.github/`, `.githooks/`, and nested `AGENTS.md` files may carry more
