@@ -60,11 +60,13 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
         ("hook-cursor-after-shell", cursor_edit.clone()),
         ("hook-cursor-workspace-open", cursor_edit.clone()),
         ("hook-cursor-stop", cursor_edit),
+        // `hook-codex-post-compact` is deliberately absent: like Claude's
+        // PostCompact it is a daemon-owned pressure probe rather than a
+        // native capture source.
         ("hook-codex-session-start", codex_stop.clone()),
         ("hook-codex-user-prompt-submit", codex_stop.clone()),
         ("hook-codex-subagent-start", codex_stop.clone()),
         ("hook-codex-post-tool-use", codex_stop.clone()),
-        ("hook-codex-post-compact", codex_stop.clone()),
         ("hook-codex-stop", codex_stop),
         ("hook-hermes-terminal-receipt", hermes_receipt),
         ("hook-kimi-event", kimi_edit),

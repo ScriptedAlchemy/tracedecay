@@ -103,6 +103,18 @@ impl DaemonLcmEffectService {
         &self,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
+        // Observation-projected sessions land raw rows without ingest
+        // protection; the verified raw loads inside compression reject them.
+        // Hydrate the canonical sanitization receipts first so the daemon
+        // journey consumes the same protected shape as transcript ingest.
+        let execution = self.control.execution_control();
+        self.control
+            .execute(
+                &execution,
+                self.db
+                    .lcm_protect_session_raw_messages(&request.provider, &request.session_id),
+            )
+            .await?;
         if matches!(
             &request.summarizer,
             LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()

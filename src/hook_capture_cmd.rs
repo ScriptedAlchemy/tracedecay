@@ -97,10 +97,6 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
         NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
     ),
     (
-        "hook-codex-post-compact",
-        NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
-    ),
-    (
         "hook-codex-stop",
         NativeHookCaptureSourceV1::Host(HookHostV1::Codex),
     ),
@@ -177,7 +173,6 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
         Commands::HookCodexUserPromptSubmit => Some("hook-codex-user-prompt-submit"),
         Commands::HookCodexSubagentStart => Some("hook-codex-subagent-start"),
         Commands::HookCodexPostToolUse => Some("hook-codex-post-tool-use"),
-        Commands::HookCodexPostCompact => Some("hook-codex-post-compact"),
         Commands::HookCodexStop => Some("hook-codex-stop"),
         Commands::HookHermesTerminalReceipt => Some("hook-hermes-terminal-receipt"),
         Commands::HookKimiEvent => Some("hook-kimi-event"),

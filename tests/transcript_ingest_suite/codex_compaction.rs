@@ -110,6 +110,20 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         .await
         .unwrap();
     drop(enrollment);
+    // The hook resolves the project root through the initialized-store gate,
+    // exactly like production installs; enrollment alone does not create the
+    // project graph database.
+    let init = tracedecay_command_with_home(&home)
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .expect("initialize codex compaction project");
+    assert!(
+        init.status.success(),
+        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
     let codex_bin = tmp.path().join("codex");
@@ -146,6 +160,7 @@ done
     let mut hook = tracedecay_command_with_home(&home);
     let mut child = hook
         .arg("hook-codex-post-compact")
+        .current_dir(&project)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -156,6 +171,11 @@ done
     assert!(
         output.status.success(),
         "Codex PostCompact hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("PostCompact daemon call failed"),
+        "the PostCompact hook must not fail open around the daemon effect: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     drop(daemon);
@@ -181,7 +201,10 @@ done
         .await
         .unwrap();
     assert_eq!(description.summary_nodes.len(), 1);
-    assert_eq!(description.summary_nodes[0].depth, 1);
+    // The daemon compression publishes a leaf summary over the session's raw
+    // backlog (depth 0); the retired host side channel used to publish its
+    // replacement-history summary at depth 1.
+    assert_eq!(description.summary_nodes[0].depth, 0);
     assert_eq!(description.summary_nodes[0].source_count, 2);
 
     let node_id = description.summary_nodes[0].node_id.clone();
@@ -229,14 +252,22 @@ done
             .summary_text,
         "Codex authoritative hook summary"
     );
-    assert!(
-        expansion
-            .content
-            .contains("Map the release automation state")
-    );
-    assert!(expansion.content.contains("Release automation is mapped"));
+    // The summary expansion returns the summary text as its content and the
+    // exact raw sources alongside; the encrypted native payload never lands.
     assert!(!expansion.content.contains("encrypted-codex-summary"));
     assert_eq!(expansion.summary_sources.len(), 2);
+    let source_contents = expansion
+        .summary_sources
+        .iter()
+        .map(|source| source.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(source_contents.contains(&"Map the release automation state"));
+    assert!(source_contents.contains(&"Release automation is mapped."));
+    assert!(
+        !source_contents
+            .iter()
+            .any(|content| content.contains("encrypted-codex-summary"))
+    );
 }
 
 #[cfg(not(unix))]

@@ -432,6 +432,87 @@ impl RegisteredGlobalDb {
         Ok(report)
     }
 
+    /// Upgrades a session's projection-landed raw messages to the canonical
+    /// ingest-protection shape before an LCM read or compression consumes
+    /// them.
+    ///
+    /// The observation projection lands `lcm_raw_messages` rows without a
+    /// sanitization receipt and deliberately preserves protected payloads on
+    /// replay, so this pass is the second phase of that design: each
+    /// unreceipted row is re-ingested from its canonical `session_messages`
+    /// projection through the privacy firewall, binding the receipt the
+    /// verified raw loads require. Already-protected rows are left untouched,
+    /// making the pass idempotent and bounded to one session.
+    pub async fn lcm_protect_session_raw_messages(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<u64, LcmError> {
+        let storage_root = self.lcm_storage_root()?.to_path_buf();
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let mut rows = transaction
+            .query(
+                "SELECT message.provider, message.message_id, message.session_id, message.role,
+                        message.timestamp, message.ordinal, message.text, message.kind,
+                        message.model, message.tool_names, message.source_path,
+                        message.source_offset, message.metadata_json
+                 FROM session_messages AS message
+                 JOIN lcm_raw_messages AS raw
+                   ON raw.provider = message.provider
+                  AND raw.message_id = message.message_id
+                 WHERE message.provider = ?1 AND message.session_id = ?2
+                   AND json_extract(
+                           raw.metadata_json,
+                           '$.ingest_protection.sanitization_receipt'
+                       ) IS NULL
+                 ORDER BY message.ordinal, message.message_id",
+                params![provider, session_id],
+            )
+            .await?;
+        let mut unprotected = Vec::new();
+        while let Some(row) = rows.next().await? {
+            unprotected.push(SessionMessageRecord {
+                provider: row.get(0)?,
+                message_id: row.get(1)?,
+                session_id: row.get(2)?,
+                role: row.get(3)?,
+                timestamp: row.get(4)?,
+                ordinal: row.get(5)?,
+                text: row.get(6)?,
+                kind: row.get(7)?,
+                model: row.get(8)?,
+                tool_names: row.get(9)?,
+                source_path: row.get(10)?,
+                source_offset: row.get(11)?,
+                metadata_json: row.get(12)?,
+            });
+        }
+        drop(rows);
+        if unprotected.is_empty() {
+            transaction.commit().await?;
+            return Ok(0);
+        }
+        let mut payload_rollback =
+            payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
+        let protected = u64::try_from(unprotected.len())
+            .map_err(|error| LcmError::Db(format!("invalid protection batch size: {error}")))?;
+        for message in &unprotected {
+            raw::upsert_raw_message_with_payload_tracked(
+                &transaction,
+                &storage_root,
+                message,
+                &mut payload_rollback,
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        Ok(protected)
+    }
+
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,

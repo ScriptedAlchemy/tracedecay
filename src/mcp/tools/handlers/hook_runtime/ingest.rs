@@ -10,6 +10,7 @@ use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
+use std::time::Duration;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
@@ -141,7 +142,7 @@ async fn drain_host_observation_projections(
 }
 
 pub(super) async fn codex_compact(
-    _cg: &TraceDecay,
+    cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
@@ -149,15 +150,13 @@ pub(super) async fn codex_compact(
     let Some(authority) = session_authorities.project_lcm else {
         return Ok(compaction_authority_unavailable("codex_compact"));
     };
-    let session_id = serde_json::from_str::<Value>(event_json)
-        .ok()
-        .as_ref()
-        .and_then(|value| {
-            ["session_id", "conversation_id", "thread_id"]
-                .iter()
-                .find_map(|key| value.get(*key).and_then(Value::as_str))
-                .map(str::to_string)
-        });
+    let parsed = serde_json::from_str::<Value>(event_json).ok();
+    let session_id = parsed.as_ref().and_then(|value| {
+        ["session_id", "conversation_id", "thread_id"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+    });
     let Some(session_id) = session_id else {
         return Ok(json!({
             "action": "codex_compact",
@@ -166,12 +165,23 @@ pub(super) async fn codex_compact(
             "messages_upserted": 0,
         }));
     };
+    // The daemon compaction compresses the session's durable history, so the
+    // rollout must land in the owning store through the canonical ingest
+    // route before pressure evidence is evaluated; compacting an unfilled
+    // store would report an empty success.
+    let messages_upserted = admit_codex_rollouts_for_compaction(cg, session_authorities).await?;
+    let current_tokens = parsed
+        .as_ref()
+        .and_then(|event| event_i64(event, &["context_tokens", "current_tokens", "tokens"]));
+    let context_length = parsed
+        .as_ref()
+        .and_then(|event| event_i64(event, &["context_window_size", "context_length"]));
     let Some(response) = authority
         .execute(pressure_only_command(
             "codex",
             &session_id,
-            None,
-            None,
+            current_tokens,
+            context_length,
             None,
             None,
             LcmHostProtocol::CodexContextCompacted {
@@ -184,7 +194,109 @@ pub(super) async fn codex_compact(
     else {
         return Ok(compaction_authority_unavailable("codex_compact"));
     };
-    Ok(compaction_response_json("codex_compact", &response))
+    let mut output = compaction_response_json("codex_compact", &response);
+    output["messages_upserted"] = json!(messages_upserted);
+    Ok(output)
+}
+
+/// The project-open catch-up scans the same Codex sources concurrently, so a
+/// compaction-time pass tolerates a bounded window of cursor CAS losses and
+/// still-mounting write authorities before treating the ingest as failed.
+const COMPACTION_INGEST_ATTEMPTS: usize = 10;
+const COMPACTION_INGEST_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// Typed reasons that mean a peer ingestor or the project-open sequence is
+/// advancing the same durable state: the source cursor CAS rejected this
+/// pass, the shared writer was saturated, or a write authority was still
+/// mounting. Each converges once the peer pass settles, so the bounded retry
+/// re-reads rather than surfacing a terminal failure.
+const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
+    "cursor_conflict",
+    "authority_write_failed",
+    "authority_unavailable",
+    "external_source_runtime_unavailable",
+    "external_source_commit_failed",
+];
+
+/// Lands the project's Codex rollouts in the owning store through the
+/// canonical ingest route ahead of a compaction, reporting the exact upserted
+/// message count. Admission failures stay typed instead of letting the
+/// compaction run against missing history.
+///
+/// Retries are bounded to typed retryable classifications: the project-open
+/// codex catch-up advances the same source cursors, so a CAS conflict (or the
+/// open sequence still mounting its write authorities) is peer progress this
+/// pass re-reads on the next attempt, never a terminal state.
+async fn admit_codex_rollouts_for_compaction(
+    cg: &TraceDecay,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<u64> {
+    let mut last_retryable = None;
+    for attempt in 0..COMPACTION_INGEST_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(COMPACTION_INGEST_RETRY_DELAY).await;
+        }
+        match admit_codex_rollouts_once(cg, session_authorities).await {
+            Ok(messages_upserted) => return Ok(messages_upserted),
+            Err(error) => {
+                let converging =
+                    error
+                        .hook_runtime_context()
+                        .is_some_and(|(reason, retryable, _)| {
+                            retryable || COMPACTION_INGEST_CONVERGING_REASONS.contains(&reason)
+                        });
+                if !converging {
+                    return Err(error);
+                }
+                last_retryable = Some(error);
+            }
+        }
+    }
+    Err(last_retryable.unwrap_or_else(|| {
+        config_error("codex compaction ingest kept racing past its retry budget")
+    }))
+}
+
+async fn admit_codex_rollouts_once(
+    cg: &TraceDecay,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<u64> {
+    let facade = host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
+    let admission = facade.accept_replay("codex", HostAdmissionScope::Project);
+    match admission.status {
+        HostAdmissionStatus::Unavailable => {
+            return Err(TraceDecayError::hook_runtime(
+                admission.reason_code.unwrap_or("authority_unavailable"),
+                true,
+                "daemon observation authority is unavailable for compaction ingest",
+            ));
+        }
+        HostAdmissionStatus::Unknown => {
+            return Err(TraceDecayError::hook_runtime(
+                admission.reason_code.unwrap_or("unknown_provider"),
+                admission.retryable,
+                "codex transcript provider is unsupported",
+            ));
+        }
+        _ => {}
+    }
+    let source = crate::sessions::codex::CodexSource::new()
+        .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
+    let project_id = project_observation_id(cg)?;
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let cancellation = ObservationCancellation::default();
+    admit_codex_project_rollouts(
+        &facade,
+        &source,
+        cg.project_root(),
+        project_id,
+        None,
+        &cancellation,
+    )
+    .await?;
+    drain_host_observation_projections(&facade, &scope, &cancellation).await
 }
 
 pub(super) async fn claude_compact(

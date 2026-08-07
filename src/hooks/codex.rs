@@ -280,7 +280,9 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 /// Codex `PostCompact` hook handler.
 ///
 /// Codex exposes a pressure boundary but no authenticated compacted payload.
-/// The daemon therefore returns typed unavailable without publishing state.
+/// The daemon lands the session's rollout through the canonical transcript
+/// ingest route and then runs the daemon-owned compression journey; the hook
+/// itself only forwards the boundary and fails open.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_with_identity_from_json(&event).await;

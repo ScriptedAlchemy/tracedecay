@@ -8,6 +8,15 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         exit_if_nonzero(tracedecay::hooks::hook_claude_post_compact().await);
         return Ok(());
     }
+    // Codex PostCompact is likewise a daemon-owned pressure probe rather than
+    // a native capture source: the daemon lands the session's rollout through
+    // the canonical transcript ingest route and runs the daemon-owned
+    // compression journey at the pressure boundary, which a deferred spool
+    // replay cannot honor.
+    if matches!(command, Commands::HookCodexPostCompact) {
+        exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
+        return Ok(());
+    }
     if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
         exit_if_nonzero(crate::hook_capture_cmd::run_native_capture(source));
         return Ok(());
