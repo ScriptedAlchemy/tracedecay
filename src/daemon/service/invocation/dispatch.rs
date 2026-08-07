@@ -501,7 +501,7 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
-                execute_work_application(
+                Box::pin(execute_work_application(
                     registered,
                     Arc::clone(&self.work_attempt_processes),
                     project_root.map(Path::to_path_buf),
@@ -510,7 +510,8 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
+                .await
             }
             DaemonInvocationPayload::WorkflowApplication {
                 request,
