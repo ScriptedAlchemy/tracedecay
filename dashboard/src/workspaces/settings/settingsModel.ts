@@ -665,7 +665,7 @@ function readLocation(
   value: unknown,
 ): { value: string; kind: 'path' | 'endpoint' } | null {
   if (isRecord(value)) {
-    const path = value['config_path'];
+    const path = value['config_path'] ?? value['legacy_config_path'];
     if (typeof path === 'string' && path.length > 0) return { value: path, kind: 'path' };
     const endpoint = value['config_endpoint'];
     if (typeof endpoint === 'string' && endpoint.length > 0) {

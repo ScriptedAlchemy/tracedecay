@@ -148,7 +148,7 @@ describe('SettingsPage authorized changes', () => {
     expect(methods).toEqual(['GET /api/settings', 'GET /api/settings', 'GET /api/settings']);
   });
 
-  it('withdraws only the scope the envelope stops authorizing', async () => {
+  it('withdraws both editable scopes when the configuration effect is gone', async () => {
     const calls: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -158,7 +158,6 @@ describe('SettingsPage authorized changes', () => {
         return jsonResponse(settingsWithout('configuration_batch'));
       }),
     );
-    const user = userEvent.setup();
     renderSettings();
 
     expect(
@@ -171,17 +170,19 @@ describe('SettingsPage authorized changes', () => {
     ).toBe(true);
     expect(screen.queryByRole('button', { name: 'Review project changes' })).toBeNull();
 
-    // The user scope keeps its own authority, so withdrawing the project
-    // action must not take the whole editor read-only with it.
+    // Both editable scopes settle through the one cataloged daemon
+    // configuration effect (a user write dispatches the same
+    // configuration_batch), so withdrawing it takes the user editor
+    // read-only as well — offering the form would promise a 503.
     expect(
-      screen.queryByText(
+      await screen.findByText(
         'Read-only · this dashboard is not authorized to apply user settings',
       ),
-    ).toBeNull();
+    ).toBeTruthy();
     expect(screen.getByLabelText('Watcher debounce').closest('fieldset')?.disabled).toBe(
-      false,
+      true,
     );
-    await user.click(screen.getByRole('button', { name: 'Review user changes' }));
+    expect(screen.queryByRole('button', { name: 'Review user changes' })).toBeNull();
     expect(calls).toEqual(['GET /api/settings']);
   });
 
@@ -317,6 +318,7 @@ describe('SettingsPage authorized changes', () => {
         url: '/api/settings/user',
         body: {
           expected_revision_id: 'user-rev-7',
+          idempotency_key: expect.stringMatching(/^idempotency\.dashboard-settings\./),
           watcher_debounce: '15s',
         },
       },
@@ -402,7 +404,9 @@ describe('Settings scope authority', () => {
         'Read-only · this dashboard is not authorized to apply project settings',
       ),
     ).toBeTruthy();
-    expect(fieldset('Watcher debounce').disabled).toBe(false);
+    // Both editable scopes settle through the one cataloged configuration
+    // effect, so its withdrawal takes the user editor read-only too.
+    expect(fieldset('Watcher debounce').disabled).toBe(true);
     expect(
       document.querySelector('[data-settings-gate="unauthorized"]')?.textContent,
     ).toContain('not authorized');

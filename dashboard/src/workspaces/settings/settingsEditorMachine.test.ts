@@ -237,7 +237,7 @@ describe('settings editor: each verdict is its own state', () => {
   });
 
   it('reuses the held caller key when a response-loss retry resubmits the same intent', () => {
-    const first = submitting();
+    const first = expectSubmitting(submitting());
     const failed = settle(first, {
       outcome: 'offline',
       detail: 'The response was lost after dispatch.',

@@ -1957,9 +1957,9 @@ const storageFindings = envelope({
 /* ==========================================================================
  * /api/settings (settings_api.rs::get_settings) and /api/capabilities
  * (mod.rs::capabilities). Settings answers a DashboardEnvelopeV1 whose
- * payload is `SettingsPayloadV1`, and whose legal actions name the two write
- * scopes separately: `configuration_batch` appears only when the daemon-owned
- * configuration control plane is mounted, `configuration_batch` always.
+ * payload is `SettingsPayloadV1`. Both editable scopes settle through the one
+ * cataloged daemon configuration effect: `configuration_batch` appears only
+ * when the daemon-owned configuration control plane is mounted.
  * ========================================================================== */
 
 const settingsPayload: Record<string, unknown> = {
@@ -1984,6 +1984,9 @@ const settingsPayload: Record<string, unknown> = {
   },
   user: {
     config_path: '/home/zack/.tracedecay/config.toml',
+    legacy_config_path: '/home/zack/.tracedecay/config.toml',
+    legacy_config_read_only: true,
+    configuration_snapshot_id: 'user-snap-7',
     configuration_revision_id: 'user-rev-7',
     upload_enabled: false,
     watcher_debounce: '2s',

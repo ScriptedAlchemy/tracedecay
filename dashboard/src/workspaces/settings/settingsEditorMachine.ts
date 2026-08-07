@@ -368,7 +368,7 @@ function startSubmit(state: SettingsEditorState): SettingsEditorState {
   const replanned = planFor(authority, draft, review.scope);
   if (
     replanned.outcome !== 'ready' ||
-    reviewOf(review.scope, replanned).reviewId !== review.reviewId
+    reviewOf(review.scope, replanned, review.idempotencyKey).reviewId !== review.reviewId
   ) {
     return superseded(authority, draft, review, settingsRevisionId(authority, review.scope));
   }

@@ -93,8 +93,11 @@ describe('Settings read model', () => {
     const project = model.sections.find((s) => s.id === 'project');
     expect(project?.notes).toContain('legacy config path is read-only');
     expect(project?.notes).toContain('config path and legacy path are the same file');
-    // `user` carries neither key, so it gets no notes.
-    expect(model.sections.find((s) => s.id === 'user')?.notes).toEqual([]);
+    // `user` carries `legacy_config_read_only` but not `config_path`, so only
+    // the read-only note is restated.
+    expect(model.sections.find((s) => s.id === 'user')?.notes).toEqual([
+      'legacy config path is read-only',
+    ]);
   });
 
   it('reads environment overrides verbatim, including explicit-vs-default state', () => {

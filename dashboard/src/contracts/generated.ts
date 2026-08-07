@@ -2048,6 +2048,7 @@ export const ProjectSettingsPatchSchema = z.object({
   expected_revision_id: z.string(),
   extract_docstrings: z.boolean().nullable().optional(),
   git_ignore: z.boolean().nullable().optional(),
+  idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
   max_file_size: z.number().int().nullable().optional(),
   sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]).optional(),
@@ -2832,17 +2833,20 @@ export type UserProfileId = z.infer<typeof UserProfileIdSchema>;
 export const UserSettingsPatchSchema = z.object({
   expected_revision_id: z.string(),
   extraction_timeout_secs: z.number().int().nullable().optional(),
+  idempotency_key: z.string(),
   upload_enabled: z.boolean().nullable().optional(),
   watcher_debounce: z.string().nullable().optional(),
 });
 export type UserSettingsPatch = z.infer<typeof UserSettingsPatchSchema>;
 
 export const UserSettingsPayloadV1Schema = z.object({
-  config_path: z.string(),
+  configuration_revision_id: z.string(),
+  configuration_snapshot_id: z.string(),
   extraction_timeout_secs: z.number().int(),
   installed_agents: z.array(z.string()),
+  legacy_config_path: z.string(),
+  legacy_config_read_only: z.boolean(),
   upload_enabled: z.boolean(),
-  user_settings_revision_id: z.string(),
   watcher_debounce: z.string(),
 });
 export type UserSettingsPayloadV1 = z.infer<typeof UserSettingsPayloadV1Schema>;

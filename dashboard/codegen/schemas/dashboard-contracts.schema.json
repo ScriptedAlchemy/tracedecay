@@ -9195,6 +9195,9 @@
             "null"
           ]
         },
+        "idempotency_key": {
+          "type": "string"
+        },
         "include": {
           "items": {
             "type": "string"
@@ -9240,7 +9243,8 @@
         }
       },
       "required": [
-        "expected_revision_id"
+        "expected_revision_id",
+        "idempotency_key"
       ],
       "type": "object"
     },
@@ -12071,6 +12075,9 @@
             "null"
           ]
         },
+        "idempotency_key": {
+          "type": "string"
+        },
         "upload_enabled": {
           "type": [
             "boolean",
@@ -12085,13 +12092,17 @@
         }
       },
       "required": [
-        "expected_revision_id"
+        "expected_revision_id",
+        "idempotency_key"
       ],
       "type": "object"
     },
     "UserSettingsPayloadV1": {
       "properties": {
-        "config_path": {
+        "configuration_revision_id": {
+          "type": "string"
+        },
+        "configuration_snapshot_id": {
           "type": "string"
         },
         "extraction_timeout_secs": {
@@ -12105,19 +12116,24 @@
           },
           "type": "array"
         },
-        "upload_enabled": {
+        "legacy_config_path": {
+          "type": "string"
+        },
+        "legacy_config_read_only": {
           "type": "boolean"
         },
-        "user_settings_revision_id": {
-          "type": "string"
+        "upload_enabled": {
+          "type": "boolean"
         },
         "watcher_debounce": {
           "type": "string"
         }
       },
       "required": [
-        "config_path",
-        "user_settings_revision_id",
+        "legacy_config_path",
+        "legacy_config_read_only",
+        "configuration_snapshot_id",
+        "configuration_revision_id",
         "upload_enabled",
         "watcher_debounce",
         "extraction_timeout_secs",

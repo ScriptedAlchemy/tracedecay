@@ -83,11 +83,12 @@ export function SettingsPage() {
 /**
  * Which settings scopes the server currently authorizes a write for.
  *
- * The two scopes have different authorities — a project batch is applied by
- * the daemon-owned configuration control plane, user settings by the profile
- * authority — so the envelope advertises them separately and a dashboard
- * without the control plane omits the project action. Offering the editor
- * anyway would put a control on screen whose only outcome is a 503.
+ * Both editable scopes settle through the one cataloged daemon configuration
+ * effect (`configuration_batch`) — a user write dispatches the same effect
+ * under the profile identity bound by the daemon handshake — so a dashboard
+ * without that control plane omits the action and both editors go read-only.
+ * Offering either editor anyway would put a control on screen whose only
+ * outcome is a 503.
  */
 function writableScopes(
   legalActions: readonly DashboardLegalActionRefV1[],
