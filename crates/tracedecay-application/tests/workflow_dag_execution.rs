@@ -2,11 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    WorkflowAdmissionSnapshot, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
-    WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
+    WorkflowAdmissionSnapshot, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
+    WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowHydratedInput,
+    WorkflowRunAppendOutcome, WorkflowRunAppendRequest, WorkflowRunService,
+    WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
     WorkflowStepEventContexts, WorkflowStepExecutionError, WorkflowStepExecutionOutcome,
     WorkflowStepExecutionPort, WorkflowStepExecutionRequest, WorkflowStepExecutionResult,
-    WorkflowStepExecutionService, work_executable_catalog_digest,
+    WorkflowStepExecutionService, WorkflowStepExecutionServiceError,
+    work_executable_catalog_digest, workflow_artifact_payload_digest,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -41,6 +44,51 @@ fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventCont
 
 fn artifact(name: &str, digest_byte: char, byte_length: u64) -> WorkArtifactRefV1 {
     WorkArtifactRefV1::new(id::<WorkArtifactId>(name), digest(digest_byte), byte_length).unwrap()
+}
+
+/// An artifact whose reference digest is true for `content`, plus its payload.
+fn content_artifact(name: &str, content: &[u8]) -> WorkflowArtifactPayload {
+    let reference = WorkArtifactRefV1::new(
+        id::<WorkArtifactId>(name),
+        workflow_artifact_payload_digest(content).unwrap(),
+        content.len() as u64,
+    )
+    .unwrap();
+    WorkflowArtifactPayload::new(reference, content.to_vec()).unwrap()
+}
+
+#[derive(Clone, Default)]
+struct MemoryArtifactStore {
+    payloads: Arc<Mutex<BTreeMap<String, WorkflowArtifactPayload>>>,
+}
+
+impl WorkflowArtifactStorePort for MemoryArtifactStore {
+    fn persist(
+        &self,
+        payload: &WorkflowArtifactPayload,
+    ) -> Result<WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError> {
+        let mut payloads = self.payloads.lock().unwrap();
+        let key = payload.artifact().digest().as_str().to_owned();
+        if let Some(existing) = payloads.get(&key) {
+            if existing == payload {
+                return Ok(WorkflowArtifactPersistOutcome::Replayed);
+            }
+            return Err(WorkflowArtifactStoreError::PayloadConflict);
+        }
+        payloads.insert(key, payload.clone());
+        Ok(WorkflowArtifactPersistOutcome::Persisted)
+    }
+
+    fn load(
+        &self,
+        artifact: &WorkArtifactRefV1,
+    ) -> Result<WorkflowArtifactPayload, WorkflowArtifactStoreError> {
+        let payloads = self.payloads.lock().unwrap();
+        let stored = payloads
+            .get(artifact.digest().as_str())
+            .ok_or(WorkflowArtifactStoreError::Missing)?;
+        WorkflowArtifactPayload::new(artifact.clone(), stored.bytes().to_vec())
+    }
 }
 
 fn placement(run_id: &RunId, step_id: &str) -> WorkflowPlacementReceipt {
@@ -139,9 +187,9 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
 
 #[derive(Clone)]
 struct RecordingExecutor {
-    prepared: WorkArtifactRefV1,
-    report: WorkArtifactRefV1,
-    requests: Arc<Mutex<Vec<WorkflowStepExecutionRequest>>>,
+    prepared: WorkflowArtifactPayload,
+    report: WorkflowArtifactPayload,
+    requests: Arc<Mutex<Vec<(WorkflowStepExecutionRequest, Vec<WorkflowHydratedInput>)>>>,
 }
 
 struct MalformedExecutor;
@@ -150,6 +198,7 @@ impl WorkflowStepExecutionPort for MalformedExecutor {
     fn execute(
         &self,
         request: &WorkflowStepExecutionRequest,
+        _hydrated: &[WorkflowHydratedInput],
     ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
         Ok(WorkflowStepExecutionResult {
             outputs: Vec::new(),
@@ -162,35 +211,24 @@ impl WorkflowStepExecutionPort for MalformedExecutor {
                 &[],
             )
             .unwrap(),
+            artifact_payloads: Vec::new(),
         })
     }
 }
 
-impl WorkflowStepExecutionPort for RecordingExecutor {
+/// Declares an output artifact but never supplies its payload bytes, so the
+/// runtime must refuse to journal the completion.
+struct PayloadWithholdingExecutor {
+    prepared: WorkflowArtifactPayload,
+}
+
+impl WorkflowStepExecutionPort for PayloadWithholdingExecutor {
     fn execute(
         &self,
         request: &WorkflowStepExecutionRequest,
+        _hydrated: &[WorkflowHydratedInput],
     ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
-        self.requests.lock().unwrap().push(request.clone());
-        let (output_name, artifact) = if request.step_id.as_str() == "prepare" {
-            ("context", self.prepared.clone())
-        } else {
-            ("report", self.report.clone())
-        };
-        let output = WorkflowStepOutput::new(
-            id::<WorkflowOutputName>(output_name),
-            vec![WorkflowOutputArtifact::new(
-                WorkAttemptIdentityV1::new(
-                    id::<TaskId>(&format!("task.workflow.{}", request.step_id.as_str())),
-                    request.run_id.clone(),
-                    id::<AttemptId>(&format!("attempt.workflow.{}", request.step_id.as_str())),
-                )
-                .unwrap(),
-                artifact,
-            )],
-        )
-        .unwrap();
-        let outputs = vec![output];
+        let outputs = vec![step_output(request, "context", &self.prepared)];
         Ok(WorkflowStepExecutionResult {
             effect_receipt: WorkflowStepEffectReceipt::new(
                 request.run_id.clone(),
@@ -202,6 +240,59 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
             )
             .unwrap(),
             outputs,
+            artifact_payloads: Vec::new(),
+        })
+    }
+}
+
+fn step_output(
+    request: &WorkflowStepExecutionRequest,
+    output_name: &str,
+    payload: &WorkflowArtifactPayload,
+) -> WorkflowStepOutput {
+    WorkflowStepOutput::new(
+        id::<WorkflowOutputName>(output_name),
+        vec![WorkflowOutputArtifact::new(
+            WorkAttemptIdentityV1::new(
+                id::<TaskId>(&format!("task.workflow.{}", request.step_id.as_str())),
+                request.run_id.clone(),
+                id::<AttemptId>(&format!("attempt.workflow.{}", request.step_id.as_str())),
+            )
+            .unwrap(),
+            payload.artifact().clone(),
+        )],
+    )
+    .unwrap()
+}
+
+impl WorkflowStepExecutionPort for RecordingExecutor {
+    fn execute(
+        &self,
+        request: &WorkflowStepExecutionRequest,
+        hydrated: &[WorkflowHydratedInput],
+    ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((request.clone(), hydrated.to_vec()));
+        let (output_name, payload) = if request.step_id.as_str() == "prepare" {
+            ("context", self.prepared.clone())
+        } else {
+            ("report", self.report.clone())
+        };
+        let outputs = vec![step_output(request, output_name, &payload)];
+        Ok(WorkflowStepExecutionResult {
+            effect_receipt: WorkflowStepEffectReceipt::new(
+                request.run_id.clone(),
+                request.step_id.clone(),
+                request.placement.placement_digest().clone(),
+                WorkflowStepEffectOutcome::Completed,
+                digest('9'),
+                &outputs,
+            )
+            .unwrap(),
+            outputs,
+            artifact_payloads: vec![payload],
         })
     }
 }
@@ -230,15 +321,16 @@ fn dag_passes_exact_artifact_refs_between_steps() {
         vec![id::<WorkflowStepId>("prepare")]
     );
 
-    let prepared = artifact("artifact.workflow.dag.context", 'd', 41);
-    let report = artifact("artifact.workflow.dag.report", 'e', 23);
+    let prepared = content_artifact("artifact.workflow.dag.context", b"prepared context bytes");
+    let report = content_artifact("artifact.workflow.dag.report", b"review report bytes");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let executor = RecordingExecutor {
         prepared: prepared.clone(),
         report,
         requests: Arc::clone(&requests),
     };
-    let execution = WorkflowStepExecutionService::new(storage, executor);
+    let artifacts = MemoryArtifactStore::default();
+    let execution = WorkflowStepExecutionService::new(storage, executor, artifacts.clone());
     let prepared_state = execution
         .execute_ready_step(
             &run_id,
@@ -274,9 +366,144 @@ fn dag_passes_exact_artifact_refs_between_steps() {
     };
     assert_eq!(final_state.status(), WorkflowRunStatus::Completed);
     let requests = requests.lock().unwrap();
-    assert!(requests[0].inputs.is_empty());
-    assert_eq!(requests[1].inputs.len(), 1);
-    assert_eq!(requests[1].inputs[0].artifacts()[0].artifact(), &prepared);
+    assert!(requests[0].0.inputs.is_empty());
+    assert!(requests[0].1.is_empty());
+    assert_eq!(requests[1].0.inputs.len(), 1);
+    assert_eq!(
+        requests[1].0.inputs[0].artifacts()[0].artifact(),
+        prepared.artifact()
+    );
+    // The review step saw the exact bytes the prepare step persisted, not a
+    // reference it had to trust.
+    assert_eq!(requests[1].1.len(), 1);
+    assert_eq!(requests[1].1[0].payloads, vec![prepared.clone()]);
+    // Both declared payloads are durably retained for later hydration.
+    assert!(artifacts.load(prepared.artifact()).is_ok());
+}
+
+#[test]
+fn review_step_refuses_before_start_when_input_payload_is_missing() {
+    let storage = MemoryRunStorage::default();
+    let run_id = id::<RunId>("run.workflow.dag.unhydratable");
+    let admitted = WorkflowRunService::new(storage.clone())
+        .admit(
+            run_id.clone(),
+            definition(),
+            WorkflowAdmissionSnapshot {
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                catalog_digest: work_executable_catalog_digest().unwrap(),
+                topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
+            },
+            context("command.workflow.unhydratable.admit", '1', 1),
+        )
+        .unwrap();
+    let prepared = content_artifact("artifact.workflow.dag.context", b"prepared context bytes");
+    let report = content_artifact("artifact.workflow.dag.report", b"review report bytes");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    // The prepare step persists through THIS store...
+    let prepare_store = MemoryArtifactStore::default();
+    let execution = WorkflowStepExecutionService::new(
+        storage.clone(),
+        RecordingExecutor {
+            prepared: prepared.clone(),
+            report: report.clone(),
+            requests: Arc::clone(&requests),
+        },
+        prepare_store,
+    );
+    execution
+        .execute_ready_step(
+            &run_id,
+            admitted.sequence(),
+            &id::<WorkflowStepId>("prepare"),
+            placement(&run_id, "prepare"),
+            WorkflowStepEventContexts {
+                started: context("command.workflow.unhydratable.start", '2', 2),
+                completed: context("command.workflow.unhydratable.complete", '3', 3),
+                failed: context("command.workflow.unhydratable.fail", '4', 3),
+            },
+        )
+        .unwrap();
+    // ...while the review step hydrates from an EMPTY store: a typed refusal
+    // before any run state changes, not a started-then-failed step.
+    let review = WorkflowStepExecutionService::new(
+        storage.clone(),
+        RecordingExecutor {
+            prepared,
+            report,
+            requests: Arc::clone(&requests),
+        },
+        MemoryArtifactStore::default(),
+    );
+    let sequence = WorkflowRunStoragePort::projection(&storage, &run_id)
+        .unwrap()
+        .sequence();
+    let error = review
+        .execute_ready_step(
+            &run_id,
+            sequence,
+            &id::<WorkflowStepId>("review"),
+            placement(&run_id, "review"),
+            WorkflowStepEventContexts {
+                started: context("command.workflow.unhydratable.review.start", '5', 4),
+                completed: context("command.workflow.unhydratable.review.complete", '6', 5),
+                failed: context("command.workflow.unhydratable.review.fail", '7', 5),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        WorkflowStepExecutionServiceError::InputArtifacts(WorkflowArtifactStoreError::Missing)
+    );
+    let after = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
+    assert_eq!(after.sequence(), sequence, "refusal must not journal events");
+    assert_eq!(after.status(), WorkflowRunStatus::Running);
+}
+
+#[test]
+fn withheld_output_payloads_fail_the_step_instead_of_completing_it() {
+    let storage = MemoryRunStorage::default();
+    let run_id = id::<RunId>("run.workflow.dag.withheld");
+    let admitted = WorkflowRunService::new(storage.clone())
+        .admit(
+            run_id.clone(),
+            definition(),
+            WorkflowAdmissionSnapshot {
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                catalog_digest: work_executable_catalog_digest().unwrap(),
+                topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
+            },
+            context("command.workflow.withheld.admit", '1', 1),
+        )
+        .unwrap();
+    let artifacts = MemoryArtifactStore::default();
+    let prepared = content_artifact("artifact.workflow.dag.context", b"prepared context bytes");
+    let outcome = WorkflowStepExecutionService::new(
+        storage.clone(),
+        PayloadWithholdingExecutor { prepared },
+        artifacts.clone(),
+    )
+    .execute_ready_step(
+        &run_id,
+        admitted.sequence(),
+        &id::<WorkflowStepId>("prepare"),
+        placement(&run_id, "prepare"),
+        WorkflowStepEventContexts {
+            started: context("command.workflow.withheld.start", '2', 2),
+            completed: context("command.workflow.withheld.complete", '3', 3),
+            failed: context("command.workflow.withheld.fail", '4', 3),
+        },
+    )
+    .unwrap();
+    let WorkflowStepExecutionOutcome::Failed(projection) = outcome else {
+        panic!("a completion whose artifacts were never supplied must fail the step");
+    };
+    assert_eq!(projection.status(), WorkflowRunStatus::Failed);
+    assert!(artifacts.payloads.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -432,7 +659,11 @@ fn malformed_provider_outputs_restart_as_failed_not_running() {
             context("command.workflow.malformed.admit", '1', 1),
         )
         .unwrap();
-    let outcome = WorkflowStepExecutionService::new(storage.clone(), MalformedExecutor)
+    let outcome = WorkflowStepExecutionService::new(
+        storage.clone(),
+        MalformedExecutor,
+        MemoryArtifactStore::default(),
+    )
         .execute_ready_step(
             &run_id,
             admitted.sequence(),

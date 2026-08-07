@@ -209,10 +209,12 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
             connection
                 .execute_batch(
                     "DROP TABLE workflow_handoffs;
+                 DROP TABLE workflow_artifact_payloads;
                  DROP TABLE workflow_definition_disposition;
                  DROP TABLE workflow_definition_source_journal;
                  DROP TABLE workflow_definition_transition_journal;
                  DROP TABLE workflow_effect_journal;
+                 DROP TABLE workflow_run_journal;
                  DROP TABLE workflow_schema;",
                 )
                 .unwrap();
@@ -260,7 +262,7 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
              ) VALUES (
                  2,
                  1,
-                 'sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f'
+                 'sha256:5bb8241c0964fa921f40ed8c4cc44887572bc3e2295fdee93622e1039e9e3bcd'
              );",
         ),
         (

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f";
+    "sha256:5bb8241c0964fa921f40ed8c4cc44887572bc3e2295fdee93622e1039e9e3bcd";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkflowColumnContractV1 {
@@ -20,6 +20,60 @@ pub struct WorkflowTableContractV1 {
     pub sql: &'static str,
     pub columns: &'static [WorkflowColumnContractV1],
 }
+
+const WORKFLOW_ARTIFACT_PAYLOAD_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+    WorkflowColumnContractV1 {
+        name: "payload_digest",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 1,
+    },
+    WorkflowColumnContractV1 {
+        name: "byte_length",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "payload",
+        sql_type: "BLOB",
+        not_null: 1,
+        primary_key: 0,
+    },
+];
+
+const WORKFLOW_RUN_JOURNAL_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+    WorkflowColumnContractV1 {
+        name: "run_id",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 1,
+    },
+    WorkflowColumnContractV1 {
+        name: "sequence",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 2,
+    },
+    WorkflowColumnContractV1 {
+        name: "command_id",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "event_payload",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "event_digest",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+];
 
 const WORKFLOW_DEFINITION_SOURCE_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     WorkflowColumnContractV1 {
@@ -261,6 +315,24 @@ const WORKFLOW_SCHEMA_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     },
 ];
 
+const WORKFLOW_ARTIFACT_PAYLOADS_SQL_V1: &str = "CREATE TABLE workflow_artifact_payloads (
+    payload_digest TEXT NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL CHECK (
+        byte_length = length(payload) AND byte_length <= 4194304
+    ),
+    payload BLOB NOT NULL
+) STRICT";
+
+const WORKFLOW_RUN_JOURNAL_SQL_V1: &str = "CREATE TABLE workflow_run_journal (
+    run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    command_id TEXT NOT NULL,
+    event_payload TEXT NOT NULL,
+    event_digest TEXT NOT NULL,
+    PRIMARY KEY (run_id, sequence),
+    UNIQUE (run_id, command_id)
+) STRICT";
+
 const WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1: &str =
     "CREATE TABLE workflow_definition_source_journal (
     definition_id TEXT NOT NULL,
@@ -335,10 +407,15 @@ pub const WORKFLOW_SCHEMA_IDENTITY_V1: &str =
 VALUES (
     1,
     1,
-    'sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f'
+    'sha256:5bb8241c0964fa921f40ed8c4cc44887572bc3e2295fdee93622e1039e9e3bcd'
 )";
 
 pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
+    WorkflowTableContractV1 {
+        name: "workflow_artifact_payloads",
+        sql: WORKFLOW_ARTIFACT_PAYLOADS_SQL_V1,
+        columns: WORKFLOW_ARTIFACT_PAYLOAD_COLUMNS_V1,
+    },
     WorkflowTableContractV1 {
         name: "workflow_definition_disposition",
         sql: WORKFLOW_DEFINITION_DISPOSITION_SQL_V1,
@@ -363,6 +440,11 @@ pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
         name: "workflow_handoffs",
         sql: WORKFLOW_HANDOFFS_SQL_V1,
         columns: WORKFLOW_HANDOFF_COLUMNS_V1,
+    },
+    WorkflowTableContractV1 {
+        name: "workflow_run_journal",
+        sql: WORKFLOW_RUN_JOURNAL_SQL_V1,
+        columns: WORKFLOW_RUN_JOURNAL_COLUMNS_V1,
     },
     WorkflowTableContractV1 {
         name: "workflow_schema",

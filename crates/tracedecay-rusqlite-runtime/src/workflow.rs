@@ -23,6 +23,7 @@ use crate::exact_sql::{
 };
 mod disposition;
 mod effect_mutation;
+mod run_journal;
 mod schema;
 
 pub use schema::{
@@ -300,11 +301,13 @@ fn require_workflow_schema(
                 "SELECT name, sql FROM sqlite_master
                  WHERE type = 'table'
                    AND name IN (
+                       'workflow_artifact_payloads',
                        'workflow_definition_disposition',
                        'workflow_definition_source_journal',
                        'workflow_definition_transition_journal',
                        'workflow_effect_journal',
                        'workflow_handoffs',
+                       'workflow_run_journal',
                        'workflow_schema'
                    )
                  ORDER BY name"
