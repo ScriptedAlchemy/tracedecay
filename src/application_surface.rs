@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, State};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -102,6 +102,7 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 mod configuration_wire;
 mod handoff;
+mod multi_root_http;
 mod workflow;
 
 use configuration_wire::{
@@ -109,6 +110,7 @@ use configuration_wire::{
     validate_configuration_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
+use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -1349,6 +1351,7 @@ pub fn http_application_router_with_executor(
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
     let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
+    let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1358,6 +1361,7 @@ pub fn http_application_router_with_executor(
         .merge(work_router)
         .merge(workflow_router)
         .merge(handoff_router)
+        .merge(multi_root_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,
@@ -1557,9 +1561,42 @@ impl Drop for SseDisconnectObserver {
 #[serde(deny_unknown_fields)]
 struct HttpOperationEventQuery {
     #[serde(default)]
-    next_sequence: u64,
+    next_sequence: Option<u64>,
     #[serde(default)]
     resume_token: Option<ResumeToken>,
+}
+
+fn operation_event_next_sequence(
+    explicit_next_sequence: Option<u64>,
+    headers: &HeaderMap,
+) -> Result<u64, OperationEventError> {
+    let invalid_cursor = || {
+        OperationEventError::InvalidContext(
+            "operation-event resume cursor is invalid or conflicting".to_owned(),
+        )
+    };
+    let mut last_event_ids = headers.get_all("last-event-id").iter();
+    let last_event_next_sequence = match last_event_ids.next() {
+        None => None,
+        Some(value) => {
+            if last_event_ids.next().is_some() {
+                return Err(invalid_cursor());
+            }
+            let value = value.to_str().map_err(|_| invalid_cursor())?;
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_cursor());
+            }
+            let event_id = value.parse::<u64>().map_err(|_| invalid_cursor())?;
+            Some(event_id.checked_add(1).ok_or_else(invalid_cursor)?)
+        }
+    };
+
+    match (explicit_next_sequence, last_event_next_sequence) {
+        (Some(explicit), Some(from_header)) if explicit != from_header => Err(invalid_cursor()),
+        (Some(explicit), _) => Ok(explicit),
+        (None, Some(from_header)) => Ok(from_header),
+        (None, None) => Ok(0),
+    }
 }
 
 #[derive(Serialize)]
@@ -1758,6 +1795,7 @@ async fn http_operation_events(
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
+    headers: HeaderMap,
     Query(query): Query<HttpOperationEventQuery>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
@@ -1780,6 +1818,10 @@ async fn http_operation_events(
         .await;
         return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
     };
+    let next_sequence = match operation_event_next_sequence(query.next_sequence, &headers) {
+        Ok(next_sequence) => next_sequence,
+        Err(error) => return operation_event_problem(&request_id, error),
+    };
     let observed_at = match current_micros() {
         Ok(observed_at) => observed_at,
         Err(error) => {
@@ -1797,7 +1839,7 @@ async fn http_operation_events(
             &operation_id,
             &request_id,
             &controls,
-            query.next_sequence,
+            next_sequence,
         )
         .await;
     }
@@ -1849,7 +1891,7 @@ async fn http_operation_events(
             &operation_id,
             &context,
             observed_at,
-            query.next_sequence,
+            next_sequence,
             query.resume_token.as_ref(),
         )
         .await
