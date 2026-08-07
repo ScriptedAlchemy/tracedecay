@@ -1471,7 +1471,22 @@ pub(super) async fn run_observability_analytics_retention(
     database: &crate::global_db::RegisteredGlobalDb,
     store: &'static str,
 ) -> bool {
-    match database.prune_observability_events(now_secs_i64()).await {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            // An unreadable clock must defer the pass, never fabricate a
+            // pruning horizon.
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_string()),
+                    ("failure", failure.to_string()),
+                ],
+            );
+            return false;
+        }
+    };
+    match database.prune_observability_events(now).await {
         Ok(receipt) => {
             if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
                 log_daemon_event(
