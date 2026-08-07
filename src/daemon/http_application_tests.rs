@@ -66,7 +66,7 @@ async fn request_path_body(
         authorization,
         origin,
         Some("application/json"),
-        body,
+        body.as_bytes(),
     )
     .await
 }
@@ -78,7 +78,7 @@ async fn request_path_with_body(
     authorization: Option<&str>,
     origin: Option<&str>,
     content_type: Option<&str>,
-    body: &str,
+    body: &[u8],
 ) -> String {
     let mut stream = tokio::net::TcpStream::connect(service.endpoint())
         .await
@@ -107,11 +107,14 @@ async fn request_path_with_body(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
-    request.push_str(body);
     stream
         .write_all(request.as_bytes())
         .await
         .expect("write HTTP request");
+    stream
+        .write_all(body)
+        .await
+        .expect("write HTTP request body");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
@@ -271,7 +274,7 @@ async fn remote_deletion_authority_unavailable_uses_the_typed_receipt_contract()
         Some(&authorization),
         Some(&origin),
         Some("application/json"),
-        r#"{"target":"account","tombstone_id":"tombstone.unavailable"}"#,
+        br#"{"target":"account","tombstone_id":"tombstone.unavailable"}"#,
     )
     .await;
 
@@ -319,7 +322,7 @@ async fn remote_deletion_malformed_body_and_content_type_use_typed_receipts() {
             Some(&authorization),
             Some(&origin),
             Some(content_type),
-            body,
+            body.as_bytes(),
         )
         .await;
 
@@ -381,6 +384,26 @@ async fn daemon_http_requires_bearer_before_application_dispatch() {
 }
 
 #[tokio::test]
+async fn daemon_http_rejects_unauthenticated_malformed_body_before_application_dispatch() {
+    let (service, calls) = service_with_probe().await;
+    let body = b"{not-json";
+    let response = request_path_with_body(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/tests/results"),
+        None,
+        Some(service.origin()),
+        Some("application/json"),
+        body,
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::UNAUTHORIZED);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
 async fn daemon_http_rejects_bearer_tokens_that_differ_by_content_or_length() {
     let (service, calls) = service_with_probe().await;
     let origin = service.origin().to_owned();
@@ -423,6 +446,25 @@ async fn daemon_http_dispatches_authenticated_project_route_to_canonical_router(
 
     assert_eq!(status(&response), StatusCode::NO_CONTENT);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_rejects_non_exact_application_route_without_dispatch() {
+    let (service, calls) = service_with_probe().await;
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let response = request_path(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/tests/results/extra"),
+        Some(&authorization),
+        Some(&origin),
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     service.shutdown().await.expect("shutdown HTTP service");
 }
 

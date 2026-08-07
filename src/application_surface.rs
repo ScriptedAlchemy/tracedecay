@@ -1466,7 +1466,8 @@ async fn application_http_context(
         },
         None => default_expires_at,
     };
-    let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at)) else {
+    let effective_expires_at = caller_expires_at.min(default_expires_at);
+    let Ok(deadline) = Deadline::new(UtcMicros(effective_expires_at)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     request.extensions_mut().insert(request_id.clone());

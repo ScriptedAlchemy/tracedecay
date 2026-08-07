@@ -27,9 +27,10 @@ use super::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
     HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
-    application_negotiated_features, application_surface_dispatch_input_with_controls,
-    current_micros, execute_application_surface, http_operation_event_router,
-    normalize_application_tool_args, parse_application_surface_request, feedback_sse_stream_event,
+    application_http_context, application_negotiated_features,
+    application_surface_dispatch_input_with_controls, current_micros,
+    execute_application_surface, feedback_sse_stream_event, http_operation_event_router,
+    normalize_application_tool_args, parse_application_surface_request,
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
@@ -145,6 +146,41 @@ fn dispatch_controls_retain_the_callers_deadline_and_live_cancellation_identity(
             requested_at: UtcMicros(41)
         }
     ));
+}
+
+#[tokio::test]
+async fn http_context_caps_caller_deadline_at_the_transport_budget() {
+    let before = current_micros().expect("time before request");
+    let app = axum::Router::new()
+        .route(
+            "/deadline",
+            axum::routing::get(
+                |axum::extract::Extension(controls): axum::extract::Extension<
+                    tracedecay_api::HttpApplicationControls,
+                >| async move { controls.deadline.expires_at.0.to_string() },
+            ),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+            application_http_context,
+        ));
+    let response = app
+        .oneshot(
+            Request::get("/deadline")
+                .header(super::HTTP_DEADLINE_HEADER, i64::MAX.to_string())
+                .body(Body::empty())
+                .expect("deadline request"),
+        )
+        .await
+        .expect("deadline response");
+    let after = current_micros().expect("time after request");
+    let expires_at = response_text(response)
+        .await
+        .parse::<i64>()
+        .expect("numeric effective deadline");
+
+    assert!(expires_at >= before.0.saturating_add(super::DEFAULT_DEADLINE_MICROS));
+    assert!(expires_at <= after.0.saturating_add(super::DEFAULT_DEADLINE_MICROS));
 }
 
 #[test]

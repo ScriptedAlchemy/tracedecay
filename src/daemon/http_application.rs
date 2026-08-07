@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock as SyncRwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -34,6 +35,7 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const MAX_HTTP_APPLICATION_PROJECT_ROUTERS: usize = 8;
 const MAX_HTTP_APPLICATION_COLD_RESOLUTIONS: usize = 8;
+const HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE: Duration = Duration::from_secs(5);
 
 type ProjectRouterResolverFuture =
     Pin<Box<dyn Future<Output = Result<Option<Router>>> + Send + 'static>>;
@@ -42,6 +44,7 @@ type ProjectRouterResolver =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectRouterResolutionError {
     Saturated,
+    TimedOut,
     Unavailable,
 }
 
@@ -248,10 +251,16 @@ impl DaemonHttpApplicationRegistry {
         let _permit = Arc::clone(&self.resolver_admission)
             .try_acquire_owned()
             .map_err(|_| ProjectRouterResolutionError::Saturated)?;
-        let Some(router) = resolver(project_id.clone())
-            .await
-            .map_err(|_| ProjectRouterResolutionError::Unavailable)?
-        else {
+        // A cold project route resolution can park on daemon project-open
+        // work; bound it so an HTTP caller never waits unboundedly.
+        let resolved = tokio::time::timeout(
+            HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
+            resolver(project_id.clone()),
+        )
+        .await
+        .map_err(|_| ProjectRouterResolutionError::TimedOut)?
+        .map_err(|_| ProjectRouterResolutionError::Unavailable)?;
+        let Some(router) = resolved else {
             return Ok(None);
         };
         self.routers
@@ -354,6 +363,9 @@ async fn dispatch_project_application(
                 retry: RetryDirective::AfterDelay,
                 legal_actions: vec![LegalAction::Retry],
             });
+        }
+        Err(ProjectRouterResolutionError::TimedOut) => {
+            return transport_problem_response(ApplicationProblem::timed_out_before_admission());
         }
         Err(ProjectRouterResolutionError::Unavailable) => {
             let Ok(diagnostic) = SafeDiagnostic::new(

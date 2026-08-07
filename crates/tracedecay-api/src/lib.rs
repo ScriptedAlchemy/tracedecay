@@ -242,6 +242,8 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
 pub enum HttpAdapterError {
     #[error("canonical SSE event could not be encoded")]
     EventEncoding,
+    #[error("canonical SSE stream ended before its terminal event")]
+    MissingTerminal,
 }
 
 #[cfg(test)]
