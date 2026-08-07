@@ -895,7 +895,10 @@ async fn observe_operation_state(
     tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            handle.abort();
+            // Aborting a spawn_blocking task cannot stop a closure that is
+            // already running. Join the deadline-bounded scan instead so no
+            // watcher-owned blocking scan survives phase-one cancellation.
+            let _ = (&mut handle).await;
             OperationObservation::Cancelled
         }
         result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut handle) => match result {
