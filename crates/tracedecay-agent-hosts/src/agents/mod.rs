@@ -24,6 +24,7 @@ pub mod gemini;
 pub mod hermes;
 pub mod host_bundle_registry;
 pub mod host_bundle_v2;
+pub(crate) mod host_cli;
 pub mod host_component_registration;
 pub mod kilo;
 pub mod kimi;

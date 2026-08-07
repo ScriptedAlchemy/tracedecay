@@ -522,3 +522,138 @@ fn managed_subagent_definitions_have_valid_frontmatter() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Host-CLI-driven lifecycle
+//
+// Claude Code owns marketplace registration, cache, and enabled state, so
+// TraceDecay drives `claude plugin ...` rather than writing those files. These
+// tests stand a fake `claude` launcher in an isolated HOME, assert the exact
+// argv TraceDecay issues, and assert that an absent binary refuses instead of
+// falling back to config surgery.
+// ---------------------------------------------------------------------------
+
+/// Install a fake `claude` that appends each invocation's argv to `log` and
+/// then performs `body` (so a test can have it "activate" the plugin the way
+/// the real CLI would).
+#[cfg(unix)]
+fn fake_claude_cli(bin: &Path, log: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n{body}\n",
+        log = shell_single_quote(&log.to_string_lossy()),
+    );
+    std::fs::write(bin, script).unwrap();
+    let mut permissions = std::fs::metadata(bin).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(bin, permissions).unwrap();
+}
+
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+#[cfg(unix)]
+fn recorded_invocations(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn activation_drives_the_hosts_own_marketplace_and_install_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let claude = bin_dir.path().join("claude");
+    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+    fake_claude_cli(&claude, &log, "exit 0");
+
+    claude_plugin_activate_with(&claude, home.path())
+        .expect("a clean host CLI run is a completed activation");
+
+    let deploy = plugin_deploy_dir(home.path());
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![
+            format!("plugin marketplace add {}", deploy.display()),
+            "plugin install tracedecay@tracedecay".to_string(),
+        ],
+        "activation must register the staged marketplace, then enable the plugin by \
+         <plugin>@<marketplace>"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn removal_drives_the_hosts_own_uninstall_by_plugin_selection_name() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let claude = bin_dir.path().join("claude");
+    fake_claude_cli(&claude, &log, "exit 0");
+
+    claude_plugin_deactivate_with(&claude, home.path())
+        .expect("a clean host CLI run is a completed removal");
+
+    assert_eq!(
+        recorded_invocations(&log),
+        vec![
+            "plugin uninstall tracedecay".to_string(),
+            "plugin marketplace remove tracedecay".to_string(),
+        ],
+        "uninstall addresses the plugin by selection name; only the marketplace entry \
+         is removed by marketplace name"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let claude = bin_dir.path().join("claude");
+    fake_claude_cli(&claude, &log, "echo 'plugin tracedecay is not installed' >&2\nexit 4");
+
+    let error = claude_plugin_deactivate_with(&claude, home.path())
+        .expect_err("a non-zero host CLI exit must fail the lifecycle");
+
+    let TraceDecayError::Config { message } = error else {
+        panic!("a failed host command must surface as a config error");
+    };
+    assert!(
+        message.contains("plugin tracedecay is not installed") && message.contains("exit code 4"),
+        "the host's own stderr and status must reach the operator: {message}"
+    );
+}
+
+#[test]
+fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
+    let before = std::fs::read(known_marketplaces_path(home.path())).ok();
+
+    let error = crate::agents::host_cli::require_host_cli(
+        "claude-definitely-absent",
+        CLAUDE_CLI_LIFECYCLE,
+    )
+    .expect_err("an absent host binary is a hard requirement failure");
+
+    let TraceDecayError::Config { message } = error else {
+        panic!("host CLI absence must surface as a config error");
+    };
+    assert!(
+        message.contains("binary required for claude plugin lifecycle"),
+        "the refusal must name the binary and what it was needed for: {message}"
+    );
+    assert_eq!(
+        std::fs::read(known_marketplaces_path(home.path())).ok(),
+        before,
+        "a refused lifecycle must not have touched host-owned registration state"
+    );
+}

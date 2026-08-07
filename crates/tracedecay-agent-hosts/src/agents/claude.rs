@@ -57,13 +57,11 @@ impl AgentIntegration for ClaudeIntegration {
         claude_non_interactive_install_state(&ctx.home, &ctx.tracedecay_bin, vec![deploy_dir])
     }
 
-    fn interactive_activation_guidance(&self) -> Option<String> {
-        Some(claude_native_install_action(None).remediation)
-    }
-
-    fn interactive_removal_guidance(&self) -> Option<String> {
-        Some(claude_native_remove_action().remediation)
-    }
+    // Claude Code exposes a first-party plugin lifecycle CLI, so TraceDecay
+    // drives that CLI rather than deferring to the operator. Reporting
+    // interactive activation/removal guidance here would re-enter the
+    // deferral arms in `host_component_registration::preflight` and block the
+    // very lifecycle this integration can complete on its own.
 
     fn activate_project_host_component_registration(
         &self,
@@ -111,20 +109,18 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
-            Ok(())
-        } else {
-            Err(deferred_user_action_error(claude_native_install_action(
-                Some(&plugin_deploy_dir(&ctx.home)),
-            )))
+            return Ok(());
         }
+        let claude = require_claude_cli()?;
+        claude_plugin_activate_with(&claude, &ctx.home)
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
-            Err(deferred_user_action_error(claude_native_remove_action()))
-        } else {
-            Ok(())
+        if !claude_plugin_registration_is_active(&ctx.home)? {
+            return Ok(());
         }
+        let claude = require_claude_cli()?;
+        claude_plugin_deactivate_with(&claude, &ctx.home)
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -428,20 +424,78 @@ fn claude_native_install_action(staged_dir: Option<&Path>) -> DeferredUserAction
     }
 }
 
-fn claude_native_remove_action() -> DeferredUserAction {
-    DeferredUserAction {
-        remediation: format!(
-            "Claude Code owns plugin removal. Run `claude plugin uninstall {PLUGIN_IDENTIFIER}`, then re-run TraceDecay to remove its staged source."
-        ),
-        staged_paths: Vec::new(),
-    }
+/// Name of Claude Code's lifecycle binary.
+const CLAUDE_CLI: &str = "claude";
+
+/// What the binary is required *for*, used in the typed absence error.
+const CLAUDE_CLI_LIFECYCLE: &str = "claude plugin lifecycle";
+
+/// Name Claude Code's CLI selects the plugin by (`claude plugin uninstall
+/// <plugin>`).
+///
+/// Deliberately distinct from [`MARKETPLACE_NAME`] even though the two spell
+/// the same string today: one names the plugin, the other the marketplace that
+/// carries it, and `PLUGIN_IDENTIFIER` is their `<plugin>@<marketplace>` join.
+/// Collapsing them would silently break the day either is renamed.
+const PLUGIN_SELECTION_NAME: &str = "tracedecay";
+
+/// Resolve Claude Code's own CLI, or fail with the typed requirement.
+///
+/// Claude Code owns marketplace registration, cache, and enabled state. Its
+/// CLI is therefore a hard requirement for this integration's lifecycle, not a
+/// preference with a config-editing fallback: emulating those writes is
+/// precisely what the host-capability doctrine forbids, and a half-emulated
+/// activation is indistinguishable on disk from a corrupt one.
+fn require_claude_cli() -> Result<PathBuf> {
+    super::host_cli::require_host_cli(CLAUDE_CLI, CLAUDE_CLI_LIFECYCLE)
 }
 
-fn deferred_user_action_error(action: DeferredUserAction) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: action.remediation,
-    }
+/// Drive Claude Code's own commands to register the staged marketplace and
+/// enable the plugin.
+///
+/// Split from the trait method so tests can supply a launcher and an isolated
+/// `HOME` without mutating the process environment.
+fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
+    let deploy_dir = plugin_deploy_dir(home);
+    let deploy_arg = deploy_dir.to_string_lossy().into_owned();
+    run_claude_plugin_step(
+        claude,
+        &["plugin", "marketplace", "add", deploy_arg.as_str()],
+        home,
+    )?;
+    run_claude_plugin_step(claude, &["plugin", "install", PLUGIN_IDENTIFIER], home)
 }
+
+/// Drive Claude Code's own commands to disable the plugin and drop the
+/// marketplace entry.
+///
+/// The plugin is addressed by its selection name (`tracedecay`) while the
+/// install side addresses `<plugin>@<marketplace>`; that asymmetry is Claude
+/// Code's own CLI contract, not a TraceDecay convention.
+fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
+    run_claude_plugin_step(claude, &["plugin", "uninstall", PLUGIN_SELECTION_NAME], home)?;
+    run_claude_plugin_step(
+        claude,
+        &["plugin", "marketplace", "remove", MARKETPLACE_NAME],
+        home,
+    )
+}
+
+/// Run one `claude plugin ...` step, converting a failed invocation into the
+/// host's own diagnosis.
+fn run_claude_plugin_step(claude: &Path, args: &[&str], home: &Path) -> Result<()> {
+    let outcome = super::host_cli::run_host_cli(claude, args, home)?;
+    if outcome.succeeded() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: outcome.failure_message(),
+    })
+}
+
+// `claude_native_remove_action` and `deferred_user_action_error` were removed
+// with the deferral they served: removal is no longer handed back to the
+// operator as prose, it is performed through `claude plugin uninstall`.
 
 fn read_optional_json(path: &Path) -> std::result::Result<Option<serde_json::Value>, ()> {
     match std::fs::read(path) {
