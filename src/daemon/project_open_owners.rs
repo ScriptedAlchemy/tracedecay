@@ -49,9 +49,10 @@ use super::{
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonAdvisoryCycleInvocationRequest, DaemonContextScoutRuntimeRegistrationError,
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationState,
-    DaemonPrimitiveRuntimeRegistrationError, HookOrchestrationPortV1, HookOrchestrationRequestV1,
+    DaemonPrimitiveRuntimeRegistrationError, HookOrchestrationRequestV1,
     HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
 };
+use super::service::invocation::HookOrchestrationPortV1;
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
