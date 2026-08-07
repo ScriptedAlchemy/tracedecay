@@ -7,20 +7,21 @@ pub struct AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
     pub ci_exact_evidence: CE,
     pub proximity_evidence: PE,
     pub github_source_access: Option<Arc<dyn GitHubSourceAccessAuthorityV1>>,
-    /// Canonical Plan 20 configuration authority. The proximity owner pins the
+    /// Canonical configuration authority. The proximity owner pins the
     /// effective threshold from this source and has no local default.
     pub configuration: PC,
 }
 
 pub struct AdvisoryRuntimeOpenV1 {
-    /// Clone of the project database used to open the feedback runtime.
+    /// Clone of the admitted project database used to open the feedback runtime.
     pub database: Database,
     pub project_root: PathBuf,
     pub resolved_scope: ResolvedScope,
     pub feedback_scope: FeedbackScopeV1,
     pub github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-    /// The already-open feedback Plan 09 owner. The advisory runtime uses its exact authorization,
-    /// diagnostics/impact ports, publication store, and durable dedupe path.
+    /// The already-open feedback owner. Advisory work uses its exact
+    /// authorization, diagnostics/impact ports, publication store, and durable
+    /// dedupe path.
     pub feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
@@ -42,7 +43,7 @@ pub enum AdvisoryProviderV1 {
 }
 
 /// No adapter-local lifecycle axes: source records retain their exact
-/// lifecycle/provenance/coverage and composition carries only Plan 09 state.
+/// lifecycle/provenance/coverage and composition carries only admitted state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdvisoryProviderStateV1 {
     pub provider: AdvisoryProviderV1,

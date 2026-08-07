@@ -67,8 +67,8 @@ use crate::agents::context_scout_v2::{
 };
 use crate::agents::host_bundle_v2::HostKindV1;
 use crate::application::advisory::github_runtime::{
-    ConfiguredGitHubSourceAccessAuthorityV1, GitHubExactCommitDiscoveryOutcomeV1,
-    GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
+    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
+    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
     ProfileGitHubReadOnlyCredentialMountOutcomeV1, discover_exact_commit_pull_request_v1,
     resolve_registered_github_read_only_credential_v1,
 };
@@ -2505,13 +2505,14 @@ async fn resolve_production_github_provider_config(
         Some((authorization_context, discovery_request)) => {
             discover_github_pull_request_after_authorization(
                 || source_access.authorize(authorization_context, discovery_request),
-                move || {
+                move |control| {
                     discover_exact_commit_pull_request_v1(
                         &owner,
                         &repository,
                         &head_commit_id,
                         &discovery_http,
                         &discovery_credential,
+                        &control,
                     )
                 },
             )
@@ -2558,6 +2559,11 @@ async fn resolve_production_github_provider_config(
     })
 }
 
+/// Wall-clock budget a single discovery owner may hold. Feedback never waits on
+/// a remote read, so the owner is bounded and its blocking clone is cancelled
+/// and joined before the budget is reported as unavailable.
+const GITHUB_DISCOVERY_BUDGET: Duration = Duration::from_secs(15);
+
 async fn discover_github_pull_request_after_authorization<A, AF, F>(
     authorize: A,
     discover: F,
@@ -2565,12 +2571,25 @@ async fn discover_github_pull_request_after_authorization<A, AF, F>(
 where
     A: FnOnce() -> AF,
     AF: std::future::Future<Output = GitHubProviderLifecycleV1>,
-    F: FnOnce() -> GitHubExactCommitDiscoveryOutcomeV1 + Send + 'static,
+    F: FnOnce(GitHubDiscoveryControlV1) -> GitHubExactCommitDiscoveryOutcomeV1 + Send + 'static,
 {
     if authorize().await != GitHubProviderLifecycleV1::Ready {
         return None;
     }
-    tokio::task::spawn_blocking(discover).await.ok()
+    let control = GitHubDiscoveryControlV1::bounded(Instant::now() + GITHUB_DISCOVERY_BUDGET);
+    let blocking_control = control.clone();
+    let mut task = tokio::task::spawn_blocking(move || discover(blocking_control));
+    tokio::select! {
+        result = &mut task => result.ok(),
+        () = tokio::time::sleep(GITHUB_DISCOVERY_BUDGET) => {
+            // Cancel first, then join: the blocking owner observes the flag at
+            // its next page boundary and returns, so no ureq call outlives the
+            // budget and no partial page escapes as a terminal result.
+            control.cancel();
+            let _ = task.await;
+            None
+        }
+    }
 }
 
 fn github_discovery_source_access_request(
@@ -3479,7 +3498,7 @@ mod tests {
 
             let discovery = discover_github_pull_request_after_authorization(
                 || async { lifecycle },
-                move || {
+                move |_control| {
                     calls_for_discovery.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     GitHubExactCommitDiscoveryOutcomeV1::Unavailable
                 },

@@ -1,4 +1,7 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tracedecay_application::now_micros;
@@ -14,6 +17,38 @@ use super::{
 const GITHUB_DISCOVERY_PAGE_SIZE_V1: usize = 100;
 const MAX_GITHUB_DISCOVERY_PAGES_V1: u32 = 20;
 const MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub struct GitHubDiscoveryControlV1 {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl GitHubDiscoveryControlV1 {
+    pub fn bounded(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        self.deadline.checked_duration_since(Instant::now())
+    }
+}
+
+impl Drop for GitHubDiscoveryControlV1 {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
 
 /// One pull request whose provider head is exactly the requested immutable
 /// commit. Repository identity comes from the fixed REST route, not response
@@ -71,22 +106,41 @@ pub fn discover_exact_commit_pull_request_v1(
     head_commit: &CommitId,
     config: &GitHubHttpReadConfigV1,
     credential: &GitHubReadOnlyCredentialV1,
+    control: &GitHubDiscoveryControlV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
-    let first =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    let first = scan_exact_commit_pull_request_v1(
+        owner,
+        repository,
+        head_commit,
+        config,
+        credential,
+        control,
+    );
     if !discovery_outcome_requires_consensus(&first) {
         return first;
     }
-    let second =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    let second = scan_exact_commit_pull_request_v1(
+        owner,
+        repository,
+        head_commit,
+        config,
+        credential,
+        control,
+    );
     if !discovery_outcome_requires_consensus(&second) {
         return second;
     }
     if let Some(agreed) = discovery_consensus(&first, &second, None) {
         return agreed;
     }
-    let third =
-        scan_exact_commit_pull_request_v1(owner, repository, head_commit, config, credential);
+    let third = scan_exact_commit_pull_request_v1(
+        owner,
+        repository,
+        head_commit,
+        config,
+        credential,
+        control,
+    );
     if !discovery_outcome_requires_consensus(&third) {
         return third;
     }
@@ -121,7 +175,11 @@ fn scan_exact_commit_pull_request_v1(
     head_commit: &CommitId,
     config: &GitHubHttpReadConfigV1,
     credential: &GitHubReadOnlyCredentialV1,
+    control: &GitHubDiscoveryControlV1,
 ) -> GitHubExactCommitDiscoveryOutcomeV1 {
+    let Some(_) = control.remaining() else {
+        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+    };
     if !valid_path_segment(owner)
         || !valid_path_segment(repository)
         || !valid_full_commit_id(head_commit.as_str())
@@ -133,16 +191,6 @@ fn scan_exact_commit_pull_request_v1(
         return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
     }
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(config.request_timeout))
-        .timeout_connect(Some(config.connect_timeout))
-        .timeout_recv_response(Some(config.socket_timeout))
-        .timeout_recv_body(Some(config.socket_timeout))
-        .https_only(true)
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into();
     let expected_repository = format!("{owner}/{repository}");
     let endpoint = format!(
         "{}/repos/{owner}/{repository}/commits/{}/pulls",
@@ -154,9 +202,26 @@ fn scan_exact_commit_pull_request_v1(
     let mut matches = Vec::new();
 
     loop {
+        let Some(remaining) = control.remaining() else {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        };
         if page > MAX_GITHUB_DISCOVERY_PAGES_V1 || !visited_pages.insert(page) {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         }
+        let request_timeout = config.request_timeout.min(remaining);
+        if request_timeout.is_zero() {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(request_timeout))
+            .timeout_connect(Some(config.connect_timeout.min(request_timeout)))
+            .timeout_recv_response(Some(config.socket_timeout.min(request_timeout)))
+            .timeout_recv_body(Some(config.socket_timeout.min(request_timeout)))
+            .https_only(true)
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build()
+            .into();
         let authorization =
             match credential.authorization_header_for(GitHubReadPermissionV1::PullRequests) {
                 Ok(authorization) => authorization,
@@ -173,6 +238,9 @@ fn scan_exact_commit_pull_request_v1(
             request = request.header("Authorization", authorization.as_str());
         }
         let response = request.call();
+        if control.remaining().is_none() {
+            return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+        }
         let Ok(mut response) = response else {
             return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
         };
@@ -439,5 +507,13 @@ mod tests {
         let second = found(8, "cccccccccccccccccccccccccccccccccccccccc");
         let third = found(9, "dddddddddddddddddddddddddddddddddddddddd");
         assert_eq!(discovery_consensus(&first, &second, Some(&third)), None);
+    }
+
+    #[test]
+    fn dropping_discovery_owner_cancels_retained_blocking_clones() {
+        let owner = GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
+        let retained = owner.clone();
+        drop(owner);
+        assert!(retained.remaining().is_none());
     }
 }

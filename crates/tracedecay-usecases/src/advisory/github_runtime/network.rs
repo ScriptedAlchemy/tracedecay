@@ -82,6 +82,7 @@ const MAX_REVIEW_ITEMS_V1: usize = 2_000;
 const MAX_NESTED_COMMENT_PAGES_V1: usize = 20;
 const MAX_REVIEW_SCAN_PAGES_V1: u32 = 20;
 const MAX_CI_RESPONSE_BYTES_V1: usize = 2 * 1024 * 1024;
+const MAX_GITHUB_READ_DURATION_V1: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GitHubReadPermissionV1 {
@@ -739,9 +740,9 @@ impl Default for GitHubHttpReadConfigV1 {
         Self {
             rest_base_uri: "https://api.github.com".to_owned(),
             graphql_uri: "https://api.github.com/graphql".to_owned(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: MAX_GITHUB_READ_DURATION_V1,
             connect_timeout: Duration::from_secs(10),
-            socket_timeout: Duration::from_secs(20),
+            socket_timeout: MAX_GITHUB_READ_DURATION_V1,
         }
     }
 }
@@ -761,6 +762,9 @@ impl GitHubHttpReadConfigV1 {
             && !self.request_timeout.is_zero()
             && !self.connect_timeout.is_zero()
             && !self.socket_timeout.is_zero()
+            && self.request_timeout <= MAX_GITHUB_READ_DURATION_V1
+            && self.connect_timeout <= MAX_GITHUB_READ_DURATION_V1
+            && self.socket_timeout <= MAX_GITHUB_READ_DURATION_V1
     }
 }
 
@@ -1689,11 +1693,14 @@ fn decode_ureq_response(
 
 async fn wait_for_read<T: Send + 'static>(
     context: &RequestContext,
-    task: tokio::task::JoinHandle<T>,
+    mut task: tokio::task::JoinHandle<T>,
 ) -> Option<T> {
     tokio::select! {
-        result = task => result.ok(),
-        () = wait_for_interruption(context) => None,
+        result = &mut task => result.ok(),
+        () = wait_for_interruption(context) => {
+            let _ = task.await;
+            None
+        },
     }
 }
 
@@ -1902,6 +1909,15 @@ mod tests {
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const THREAD_CAPTURE: &str =
         include_str!("../fixtures/provider_branch_review/review_thread.graphql.json");
+
+    #[test]
+    fn default_http_read_configuration_is_mountable_within_the_global_bound() {
+        let config = GitHubHttpReadConfigV1::default();
+        assert!(config.validate());
+        assert!(config.request_timeout <= MAX_GITHUB_READ_DURATION_V1);
+        assert!(config.connect_timeout <= MAX_GITHUB_READ_DURATION_V1);
+        assert!(config.socket_timeout <= MAX_GITHUB_READ_DURATION_V1);
+    }
 
     #[derive(Clone, Copy)]
     enum FixtureCredentialAuthorityModeV1 {
