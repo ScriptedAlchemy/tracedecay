@@ -60,10 +60,12 @@ describe('shared shell truthfulness', () => {
     expect(queryByText('Receipts')).toBeNull();
   });
 
-  it('does not present the milestone name as the running build version', () => {
-    const { queryByText } = render(<StatusStrip />);
+  it('does not present any milestone or PR label as the running build version', () => {
+    // The strip deliberately carries no build identity at all; the guard is
+    // against any PR- or plan-numbered label returning, not one stale literal.
+    const { container } = render(<StatusStrip />);
 
-    expect(queryByText('PR14')).toBeNull();
+    expect(container.textContent).not.toMatch(/\b(?:pr|plan|milestone|phase)[\s-]?\d+\b/i);
   });
 
   it('does not claim a local daemon when the backend is offline', async () => {
