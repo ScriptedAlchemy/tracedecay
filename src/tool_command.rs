@@ -47,7 +47,7 @@ use tracedecay::application_surface::{
     observe_surface_argument_rejection, parse_application_surface_request,
     resolve_catalog_tool_binding,
 };
-use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
+use tracedecay::daemon::{DaemonHandshake, call_default_tool_awaiting_project_open};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::internal_daemon_tool_definition;
@@ -467,7 +467,10 @@ impl DaemonToolDispatch {
 
     async fn call(&self, tool_name: &str, tool_args: Value, deadline: Instant) -> Result<Value> {
         let handshake = self.handshake()?;
-        call_default_tool_within(&handshake, tool_name, tool_args, deadline).await
+        // The interactive CLI wants the tool's answer, not the daemon's typed
+        // warming state: ride out a cold project open until the CLI deadline,
+        // the same transport behavior as the typed application-surface path.
+        call_default_tool_awaiting_project_open(&handshake, tool_name, tool_args, deadline).await
     }
 }
 
