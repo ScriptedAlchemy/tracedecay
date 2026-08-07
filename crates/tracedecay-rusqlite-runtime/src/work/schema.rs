@@ -62,6 +62,63 @@ CREATE TABLE IF NOT EXISTS work_attempts_v1 (
         task_id, run_id, attempt_id
     )
 ) STRICT;
+
+-- One durable run-control aggregate per admitted run (Plan 32, \"One runtime,
+-- run control, and effect budget\"). `authority_version` is the monotonic
+-- control authority: every publication is a compare-and-swap against the
+-- version the caller read, which is what makes a pause/resume race resolvable
+-- without a second store. The aggregate itself lives in `control_payload`; the
+-- columns beside it exist only so the fence can be evaluated in SQL.
+CREATE TABLE IF NOT EXISTS work_run_controls_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('running', 'paused')),
+    authority_version INTEGER NOT NULL CHECK (authority_version > 0),
+    control_payload TEXT NOT NULL,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest,
+        task_id, run_id
+    )
+) STRICT;
+
+-- One durable placement relation per admitted run (Plan 32, \"Placement,
+-- topology, and safe Git effects\"). `target_root` is denormalized out of the
+-- payload for exactly one reason: the partial unique index below is what makes
+-- linked and isolated placements *exclusive*, and an exclusivity rule enforced
+-- only in application code is one a crash can leave broken.
+CREATE TABLE IF NOT EXISTS work_placements_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (
+        kind IN ('no_managed_placement', 'clean_in_place', 'linked_worktree', 'isolated_clone')
+    ),
+    target_root TEXT,
+    state TEXT NOT NULL CHECK (state IN ('admitted', 'released', 'quarantined')),
+    authority_version INTEGER NOT NULL CHECK (authority_version > 0),
+    placement_payload TEXT NOT NULL,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest,
+        task_id, run_id
+    )
+) STRICT;
+
+-- A released placement no longer holds its root, so it is excluded: the index
+-- constrains holders, not history.
+CREATE UNIQUE INDEX IF NOT EXISTS work_placements_v1_exclusive_root
+    ON work_placements_v1 (
+        project_id, repository_id, worktree_id, actor_id, policy_digest, target_root
+    )
+    WHERE target_root IS NOT NULL AND state IN ('admitted', 'quarantined');
 ";
 
 /// The canonical Work product graph authority: its immutable event journal,

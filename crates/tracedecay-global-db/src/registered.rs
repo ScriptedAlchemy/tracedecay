@@ -154,6 +154,9 @@ pub struct RegisteredWorkApplicationServicesV1 {
     run_control: tracedecay_application::WorkRunControlService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    placement: tracedecay_application::WorkPlacementService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 /// The Work product graph authority: its verified reads and its journaled
@@ -239,6 +242,15 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.run_control
+    }
+
+    /// The placement preflight/admit/status/release authority.
+    pub const fn placement(
+        &self,
+    ) -> &tracedecay_application::WorkPlacementService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.placement
     }
 }
 
@@ -669,6 +681,7 @@ impl RegisteredGlobalDb {
                 tracedecay_application::WorkService::new(storage.clone()),
             ),
             run_control: tracedecay_application::WorkRunControlService::new(storage.clone()),
+            placement: tracedecay_application::WorkPlacementService::new(storage.clone()),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,

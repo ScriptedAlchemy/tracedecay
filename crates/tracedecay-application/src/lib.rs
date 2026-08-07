@@ -48,14 +48,17 @@ pub mod wire;
 pub mod work;
 pub mod work_attempt;
 pub mod work_catalog;
+pub mod work_placement;
 pub mod work_product;
 pub mod work_read;
+pub mod work_run_control;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
 pub mod workflow_effect;
 pub mod workflow_provider;
 pub mod workflow_run;
 pub mod workflow_runtime;
+pub mod workflow_synthesis;
 
 mod error;
 mod surface_binding;
@@ -92,15 +95,13 @@ pub use context_scout::{
     context_scout_surface_operation,
 };
 pub use dashboard_graph::{
-    DashboardGraphCallChainStepV1, DashboardGraphCallChainV1, DashboardGraphEdgeV1,
-    DashboardGraphKindCountV1, DashboardGraphLanguageCountV1, DashboardGraphLargestFileV1,
-    DashboardGraphNeighborsV1, DashboardGraphNodeV1, DashboardGraphOverviewV1,
-    DashboardGraphPathV1, DashboardGraphReadErrorV1, DashboardGraphReadFutureV1,
-    DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1, DashboardGraphReadPortV1,
-    DashboardGraphReadRequestV1, DashboardGraphReadV1, DashboardGraphSearchV1,
-    DashboardGraphSpanV1, DashboardGraphStrataClusterV1, DashboardGraphStrataFileV1,
-    DashboardGraphStrataV1, DashboardGraphSubgraphV1, DashboardGraphTestMapV1,
-    DashboardGraphTestV1, DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
+    DashboardGraphEdgeV1, DashboardGraphKindCountV1, DashboardGraphLanguageCountV1,
+    DashboardGraphLargestFileV1, DashboardGraphNeighborsV1, DashboardGraphNodeV1,
+    DashboardGraphOverviewV1, DashboardGraphPathV1, DashboardGraphReadErrorV1,
+    DashboardGraphReadFutureV1, DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1,
+    DashboardGraphReadPortV1, DashboardGraphReadRequestV1, DashboardGraphReadV1,
+    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1,
+    DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
 };
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
@@ -288,11 +289,14 @@ pub use wire::{
 pub use work::*;
 pub use work_attempt::*;
 pub use work_catalog::*;
+pub use work_placement::*;
 pub use work_product::*;
 pub use work_read::*;
+pub use work_run_control::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;
 pub use workflow_effect::*;
 pub use workflow_provider::*;
 pub use workflow_run::*;
 pub use workflow_runtime::*;
+pub use workflow_synthesis::*;
