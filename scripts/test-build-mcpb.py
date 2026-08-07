@@ -25,21 +25,25 @@ def main() -> None:
     assert "164 MCP tools" in registry["description"]
     assert "50+ languages" in registry["description"]
 
+    targets = json.loads(
+        (repository / ".github/release-targets.json").read_text(encoding="utf-8")
+    )
+    assert {entry["name"] for entry in targets["include"]} == {
+        "aarch64-macos",
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-windows",
+    }
+
     release = (repository / ".github/workflows/release.yml").read_text(encoding="utf-8")
     beta_release = (repository / ".github/workflows/release-beta.yml").read_text(
         encoding="utf-8"
     )
     for workflow in [release, beta_release]:
-        for platform in [
-            "aarch64-macos",
-            "x86_64-linux",
-            "aarch64-linux",
-            "x86_64-windows",
-        ]:
-            assert platform in workflow
-        assert "test -s" in workflow
+        assert "release-targets.json" in workflow
         assert "build-mcpb.py verify" in workflow
-    assert "test \"$(jq '.packages | length' server.json)\" -eq 4" in release
+    assert "test -s" in release
+    assert "test \"$(jq '.packages | length' server.json)\" -gt 0" in release
     assert 'test("^[0-9a-f]{64}$")' in release
 
     with tempfile.TemporaryDirectory() as directory:
