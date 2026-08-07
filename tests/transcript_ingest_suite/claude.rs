@@ -11,6 +11,7 @@ use tracedecay::sessions::git_correlation::{
 };
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
+use tracedecay::storage::PrivateStoreIo;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
@@ -212,7 +213,7 @@ async fn claude_user_scope_excludes_registered_project_rows() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&registered).unwrap();
     std::fs::create_dir_all(&general).unwrap();
-    std::fs::create_dir_all(&profile).unwrap();
+    PrivateStoreIo::create_dir_all(&profile).unwrap();
 
     write_claude_rows(
         &home,
@@ -327,7 +328,7 @@ async fn claude_user_scope_live_filter_only_ingests_requested_session() {
     let general = tmp.path().join("general-chat");
     let profile = tmp.path().join("profile");
     std::fs::create_dir_all(&general).unwrap();
-    std::fs::create_dir_all(&profile).unwrap();
+    PrivateStoreIo::create_dir_all(&profile).unwrap();
     for (session, content) in [("wanted", "wanted evidence"), ("other", "other evidence")] {
         write_claude_rows(
             &home,

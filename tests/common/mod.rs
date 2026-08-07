@@ -27,6 +27,7 @@ use tracedecay::application::host_admission::{
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
 
 /// Host-installer source and template assets that live in
@@ -333,6 +334,15 @@ fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    // The DB parent doubles as the profile store root; create it through the
+    // owner-private authority so production fail-closed permission
+    // validation accepts a root the fixture created first (any umask).
+    PrivateStoreIo::create_dir_all(parent).unwrap_or_else(|err| {
+        panic!(
+            "failed to create private test directory '{}': {err}",
+            parent.display()
+        )
+    });
     canonicalize_test_dir(parent).join(
         path.file_name()
             .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
@@ -736,7 +746,7 @@ pub fn spawn_tracedecay_daemon_with(
     configure: impl FnOnce(&mut Command),
 ) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
-    std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
+    PrivateStoreIo::create_dir_all(&profile_root).expect("daemon profile should be created");
     #[cfg(unix)]
     let socket_path = daemon_socket_path(home);
     let authority_path = daemon_authority_path(&profile_root);

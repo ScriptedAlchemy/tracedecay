@@ -52,6 +52,7 @@ use tracedecay::application_surface::http_application_router;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay_application::work_executable_binding_registry;
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
@@ -125,7 +126,7 @@ impl ProductionDaemon {
         let root = home.path().to_path_buf();
         let profile = root.join(".tracedecay");
         let project = root.join("project");
-        fs::create_dir_all(&profile).expect("isolated profile root");
+        PrivateStoreIo::create_dir_all(&profile).expect("isolated profile root");
         fs::create_dir_all(project.join("src")).expect("isolated project root");
         fs::write(
             project.join("Cargo.toml"),

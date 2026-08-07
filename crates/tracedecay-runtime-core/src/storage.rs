@@ -1162,7 +1162,25 @@ impl PrivateStoreIo {
 
     pub fn create_dir_all(path: &Path) -> io::Result<()> {
         reject_symlink_components(path, "private store directory")?;
+        // Record the ancestors this call is about to create so every one of
+        // them is re-permissioned to owner-private, not just the leaf. Under
+        // a permissive umask, `fs::create_dir_all` would otherwise leave
+        // intermediate store directories (e.g. the profile root created as a
+        // by-product of a deeper store path) group/world accessible, and
+        // fail-closed private-store validation later rejects them.
+        let mut created_ancestors = Vec::new();
+        let mut cursor = path.parent();
+        while let Some(current) = cursor {
+            if current.as_os_str().is_empty() || current.exists() {
+                break;
+            }
+            created_ancestors.push(current.to_path_buf());
+            cursor = current.parent();
+        }
         fs::create_dir_all(path)?;
+        for ancestor in created_ancestors.iter().rev() {
+            set_private_dir_permissions(ancestor)?;
+        }
         set_private_dir_permissions(path)
     }
 

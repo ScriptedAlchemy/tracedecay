@@ -546,6 +546,8 @@ class DormantThread:
         pass
     def start(self):
         pass
+    def join(self, timeout=None):
+        pass
 
 # plugin.threading is the shared real module; keep a handle to the real
 # Thread class before patching it out for the plugin's worker spawn.
@@ -554,48 +556,53 @@ plugin.threading.Thread = DormantThread
 plugin._HOST_RECEIPT_QUEUE.clear()
 plugin._HOST_RECEIPT_WORKER = None
 
-for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT):
-    plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
+# The plugin's atexit join spins until the worker slot clears, and the
+# dormant worker never clears it; guarantee cleanup even on assertion
+# failure so a failing run reports instead of hanging at interpreter exit.
+try:
+    for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT):
+        plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
 
-assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
 
-admitted = real_threading.Event()
+    admitted = real_threading.Event()
 
-def overflow_producer():
-    plugin._notify_host_receipt(
-        {"sequence": plugin._HOST_RECEIPT_QUEUE_LIMIT}, "test-native-hook"
+    def overflow_producer():
+        plugin._notify_host_receipt(
+            {"sequence": plugin._HOST_RECEIPT_QUEUE_LIMIT}, "test-native-hook"
+        )
+        admitted.set()
+
+    producer = RealThread(target=overflow_producer, daemon=True)
+    producer.start()
+
+    # A producer at capacity must block -- native events are never dropped and
+    # admitted events are never evicted while the queue is full.
+    assert not admitted.wait(0.5)
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
     )
-    admitted.set()
 
-producer = RealThread(target=overflow_producer, daemon=True)
-producer.start()
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        drained = plugin._HOST_RECEIPT_QUEUE.popleft()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+    assert drained["sequence"] == 0
 
-# A producer at capacity must block -- native events are never dropped and
-# admitted events are never evicted while the queue is full.
-assert not admitted.wait(0.5)
-assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
-assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
-    range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
-)
-
-with plugin._HOST_RECEIPT_QUEUE_CONDITION:
-    drained = plugin._HOST_RECEIPT_QUEUE.popleft()
-    plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
-assert drained["sequence"] == 0
-
-assert admitted.wait(5), "blocked producer must resume once capacity frees"
-producer.join(5)
-assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
-    range(1, plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
-)
-
-# Restore the real Thread and drop the dormant worker so the plugin's
-# atexit join sees a clean queue instead of the stub.
-plugin.threading.Thread = RealThread
-with plugin._HOST_RECEIPT_QUEUE_CONDITION:
-    plugin._HOST_RECEIPT_QUEUE.clear()
+    assert admitted.wait(5), "blocked producer must resume once capacity frees"
+    producer.join(5)
+    assert not producer.is_alive()
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(1, plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
+    )
+finally:
+    # Restore the real Thread and drop the dormant worker so the plugin's
+    # atexit join sees a clean queue instead of the stub.
+    plugin.threading.Thread = RealThread
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        plugin._HOST_RECEIPT_QUEUE.clear()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
     plugin._HOST_RECEIPT_WORKER = None
-    plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
 "#,
         "generated Hermes callback queue must block producers at capacity without dropping or evicting admitted events",
     );
