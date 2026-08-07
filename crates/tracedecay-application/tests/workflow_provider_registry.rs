@@ -129,3 +129,25 @@ fn placement_rejects_stale_configuration_and_topology() {
         );
     }
 }
+
+#[test]
+fn placement_denies_an_empty_or_route_colliding_registry() {
+    assert_eq!(
+        WorkflowProviderRegistry::new(digest('a'), Vec::new()).unwrap_err(),
+        WorkflowProviderPlacementError::InvalidRegistry
+    );
+
+    let duplicate = || {
+        registration(
+            "provider.work.codex-app-server",
+            "route.work.codex-app-server.v1",
+            WorkProviderBackendV1::CodexAppServer,
+            "gpt-5.6",
+            10,
+        )
+    };
+    assert_eq!(
+        WorkflowProviderRegistry::new(digest('a'), vec![duplicate(), duplicate()]).unwrap_err(),
+        WorkflowProviderPlacementError::InvalidRegistry
+    );
+}

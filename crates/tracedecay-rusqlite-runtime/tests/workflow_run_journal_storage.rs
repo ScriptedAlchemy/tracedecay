@@ -2,16 +2,19 @@
 //! registered Work writer.
 //!
 //! Falsifiable claims: journaled runs and pause transitions survive a full
-//! store restart; command replay is idempotent while divergent reuse and
-//! stale sequences are typed conflicts; artifact payloads are digest-verified
-//! on every hydration so a corrupted row can never re-enter execution.
+//! store restart; cancellation settles terminal, refuses premature
+//! reconciliation, and stays final after restart; command replay is
+//! idempotent while divergent reuse and stale sequences are typed conflicts;
+//! artifact payloads are digest-verified on every hydration so a corrupted
+//! row can never re-enter execution.
 
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
     WorkflowAdmissionSnapshot, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
     WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowRunAppendOutcome,
-    WorkflowRunAppendRequest, WorkflowRunService, WorkflowRunStorageError, WorkflowRunStoragePort,
+    WorkflowRunAppendRequest, WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError,
+    WorkflowRunStoragePort,
     work_executable_catalog_digest, workflow_artifact_payload_digest,
 };
 use tracedecay_domain::{
@@ -135,6 +138,72 @@ fn paused_run_survives_restart_and_resumes_from_durable_state() {
         )
         .unwrap();
     assert_eq!(resumed.status(), WorkflowRunStatus::Running);
+}
+
+#[test]
+fn cancellation_settles_terminal_and_premature_reconcile_is_refused() {
+    let store = RegisteredWorkflowStore::start("run-journal-cancellation");
+    let authority = attach(&store);
+    let run_id = id::<RunId>("run.workflow.journal.cancel");
+    let service = WorkflowRunService::new(authority.clone());
+    let admitted = service
+        .admit(
+            run_id.clone(),
+            definition(),
+            admission(),
+            context("command.journal.admit", '1', 1),
+        )
+        .unwrap();
+
+    // Reconciling a run that never entered Cancelling is a typed state
+    // refusal, not a silent terminal write.
+    assert!(matches!(
+        service
+            .apply(
+                &run_id,
+                admitted.sequence(),
+                WorkflowRunCommand::ReconcileCancelled,
+                context("command.journal.reconcile.early", '2', 2),
+            )
+            .unwrap_err(),
+        WorkflowRunServiceError::State(_)
+    ));
+
+    let cancelling = service
+        .apply(
+            &run_id,
+            admitted.sequence(),
+            WorkflowRunCommand::RequestCancellation,
+            context("command.journal.cancel", '3', 3),
+        )
+        .unwrap();
+    assert_eq!(cancelling.status(), WorkflowRunStatus::Cancelling);
+    let cancelled = service
+        .apply(
+            &run_id,
+            cancelling.sequence(),
+            WorkflowRunCommand::ReconcileCancelled,
+            context("command.journal.reconcile", '4', 4),
+        )
+        .unwrap();
+    assert_eq!(cancelled.status(), WorkflowRunStatus::Cancelled);
+
+    // The terminal state is durable across a full restart and refuses resume.
+    let store = store.restart("run-journal-cancellation-restarted");
+    let reopened = attach(&store);
+    let recovered = WorkflowRunStoragePort::projection(&reopened, &run_id).unwrap();
+    assert_eq!(recovered.status(), WorkflowRunStatus::Cancelled);
+    assert!(matches!(
+        WorkflowRunService::new(reopened)
+            .apply(
+                &run_id,
+                recovered.sequence(),
+                WorkflowRunCommand::Resume,
+                context("command.journal.resume.after-cancel", '5', 5),
+            )
+            .unwrap_err(),
+        WorkflowRunServiceError::State(_)
+    ));
 }
 
 #[test]
