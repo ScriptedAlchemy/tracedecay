@@ -63,6 +63,7 @@ dashboard_work_routes!(
     CancelAttempt,
     ResumeAttempts,
     ListAttempts,
+    Views,
 );
 
 pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContractV1] {

@@ -11,7 +11,8 @@ use tracedecay_application::{
     ObservatoryReadModelV1, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
     ReviewProposalCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
@@ -120,6 +121,8 @@ struct DashboardContractCatalogV1 {
     work_attempt_recovery_report: WorkAttemptRecoveryReportV1,
     work_attempt_list_request: WorkAttemptListRequestV1,
     work_attempt_list: WorkAttemptListV1,
+    work_graph_read_request: WorkGraphReadRequestV1,
+    work_graph_read: WorkGraphReadV1,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -244,6 +247,8 @@ mod tests {
             ),
             ("work_attempt_list_request", "WorkAttemptListRequestV1"),
             ("work_attempt_list", "WorkAttemptListV1"),
+            ("work_graph_read_request", "WorkGraphReadRequestV1"),
+            ("work_graph_read", "WorkGraphReadV1"),
         ] {
             assert!(
                 definitions.contains_key(contract),

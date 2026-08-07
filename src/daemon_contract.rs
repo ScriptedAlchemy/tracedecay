@@ -32,11 +32,13 @@ use tracedecay_application::{
     RetrieverContribution, ReviewProposalRequestV1, StartWorkAttemptCommand, TaskHandoffGrant,
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -291,6 +293,7 @@ pub(crate) enum WorkApplicationInvocationV1 {
     CancelAttempt(CancelWorkAttemptCommand),
     ResumeAttempts(ResumeWorkAttemptsCommand),
     ListAttempts(WorkAttemptListRequestV1),
+    Views(WorkGraphReadRequestV1),
 }
 
 impl WorkApplicationInvocationV1 {
@@ -311,6 +314,7 @@ impl WorkApplicationInvocationV1 {
             Self::CancelAttempt(_) => "cancel_attempt",
             Self::ResumeAttempts(_) => "resume_attempts",
             Self::ListAttempts(_) => "list_attempts",
+            Self::Views(_) => "views",
         }
     }
 }
@@ -319,6 +323,9 @@ impl WorkApplicationInvocationV1 {
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationInvocation {
     RegisterDefinition(WorkflowDefinitionRegisterRequest),
+    ActivateDefinition(WorkflowDefinitionActivateRequest),
+    RetireDefinition(WorkflowDefinitionRetireRequest),
+    RejectDefinition(WorkflowDefinitionRejectRequest),
     ValidateDefinition(WorkflowDefinitionValidateRequest),
     GetDefinition(WorkflowDefinitionGetRequest),
     ListDefinitions(WorkflowDefinitionListRequest),
@@ -332,6 +339,9 @@ impl WorkflowApplicationInvocation {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
+            Self::ActivateDefinition(_) => "activate_definition",
+            Self::RetireDefinition(_) => "retire_definition",
+            Self::RejectDefinition(_) => "reject_definition",
             Self::ValidateDefinition(_) => "validate_definition",
             Self::GetDefinition(_) => "get_definition",
             Self::ListDefinitions(_) => "list_definitions",
@@ -2339,12 +2349,16 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
+    Views(ApplicationOutcome<WorkGraphReadV1>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
 pub(crate) enum WorkflowApplicationOutcome {
     RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ActivateDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
+    RetireDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
+    RejectDefinition(ApplicationOutcome<WorkflowDefinitionDisposition>),
     ValidateDefinition(ApplicationOutcome<WorkflowDefinitionValidation>),
     GetDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
     ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),

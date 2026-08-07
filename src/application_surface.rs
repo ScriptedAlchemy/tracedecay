@@ -1026,6 +1026,11 @@ async fn invoke_work_operation(
             ListAttempts,
             tracedecay_application::WorkAttemptListV1
         ),
+        WorkOperation::Views => core!(
+            tracedecay_application::WorkGraphReadRequestV1,
+            Views,
+            tracedecay_application::WorkGraphReadV1
+        ),
     }
 }
 

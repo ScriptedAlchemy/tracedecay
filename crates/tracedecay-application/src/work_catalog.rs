@@ -22,12 +22,12 @@ use crate::{
     CancelWorkAttemptCommand, CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal,
     ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ReviewProposalRequestV1,
     StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 15] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 16] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -95,6 +95,7 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 15] = [
         "capability.work.list_attempts",
         "use-case.work.list_attempts",
     ),
+    ("views", "capability.work.views", "use-case.work.views"),
 ];
 
 pub fn work_executable_binding_registry()
@@ -173,6 +174,11 @@ pub fn work_executable_binding_registry()
         available::<WorkAttemptListRequestV1, WorkAttemptListV1>(
             "list_attempts",
             "/application/work/list-attempts",
+            EffectClass::Read,
+        )?,
+        available::<WorkGraphReadRequestV1, WorkGraphReadV1>(
+            "views",
+            "/application/work/views",
             EffectClass::Read,
         )?,
     ];
@@ -384,5 +390,28 @@ mod tests {
             delta.result_schema().body()["title"],
             "WorkProjectionDeltaV1"
         );
+    }
+
+    #[test]
+    fn the_graph_views_binding_reads_the_work_product_graph_contract() {
+        let registry = work_executable_binding_registry().unwrap();
+        let views = registry
+            .get(&tracedecay_tool_catalog::OperationId::new("operation.work.views").unwrap())
+            .unwrap()
+            .binding()
+            .unwrap();
+        // The views route serves the durable work-product graph authority, so it
+        // must carry that authority's own request and result contracts rather
+        // than a page-shaped mirror of the attempt list.
+        assert_eq!(
+            views.request_schema().body()["title"],
+            "WorkGraphReadRequestV1"
+        );
+        assert_eq!(views.result_schema().body()["title"], "WorkGraphReadV1");
+        let RouteExposureV1::Public { route_path, .. } = views.exposure() else {
+            panic!("the Work views binding must be publicly routed");
+        };
+        assert_eq!(route_path, "/application/work/views");
+        assert!(views.effect().is_read_only());
     }
 }
