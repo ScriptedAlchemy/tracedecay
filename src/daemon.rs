@@ -362,7 +362,8 @@ pub(crate) use service::invocation::{
     DaemonInvocationService, DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
-    HookOrchestrationAdmissionV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
+    HookOrchestrationAdmissionV1, HookOrchestrationPortV1, HookOrchestrationRequestV1,
+    HookOrchestrationTriggerV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     daemon_operation_event_authority,
 };
