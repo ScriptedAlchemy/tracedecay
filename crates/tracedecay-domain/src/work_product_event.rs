@@ -179,7 +179,7 @@ impl<'de> Deserialize<'de> for WorkProductSourceWatermarkV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkProductEventPayloadV1 {
     Created { graph: crate::WorkProductGraphV1 },
-    Changed { change: WorkGraphChangeV1 },
+    Changed { change: Box<WorkGraphChangeV1> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -244,13 +244,11 @@ impl WorkProductEventV1 {
         if !valid_progression {
             return Err(WorkProductEventContractError::InvalidVersionProgression);
         }
-        if let WorkProductEventPayloadV1::Changed {
-            change: WorkGraphChangeV1::RelationReplanDecided { proposal, .. },
-        } = &input.payload
+        if let WorkProductEventPayloadV1::Changed { change } = &input.payload
+            && let WorkGraphChangeV1::RelationReplanDecided { proposal, .. } = change.as_ref()
+            && proposal.validate().is_err()
         {
-            if proposal.validate().is_err() {
-                return Err(WorkProductEventContractError::InvalidPayload);
-            }
+            return Err(WorkProductEventContractError::InvalidPayload);
         }
         if input.causation_event_id.as_ref() == Some(&input.event_id) {
             return Err(WorkProductEventContractError::SelfCausation);
@@ -376,7 +374,7 @@ impl<'de> Deserialize<'de> for WorkProductEventV1 {
 }
 
 fn canonicalize_unique<T: Ord>(
-    values: &mut Vec<T>,
+    values: &mut [T],
     maximum: usize,
     too_many: WorkProductEventContractError,
     duplicate: WorkProductEventContractError,

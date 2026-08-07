@@ -148,7 +148,7 @@ pub struct WorkRelationReplanDecisionV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkGraphChangeV1 {
     TaskAdded {
-        item: WorkItemV1,
+        item: Box<WorkItemV1>,
     },
     RelationReplanDecided {
         proposal: WorkRelationReplanProposalV1,
@@ -221,17 +221,7 @@ impl<'de> Deserialize<'de> for WorkProductGraphV1 {
         D: Deserializer<'de>,
     {
         let unchecked = UncheckedWorkProductGraphV1::deserialize(deserializer)?;
-        Self::from_parts(
-            unchecked.version,
-            unchecked.initiatives,
-            unchecked.plans,
-            unchecked.milestones,
-            unchecked.items,
-            unchecked.proposal_decisions,
-            unchecked.relation_replan_decisions,
-            unchecked.evidence,
-        )
-        .map_err(serde::de::Error::custom)
+        Self::from_parts(unchecked).map_err(serde::de::Error::custom)
     }
 }
 
@@ -243,16 +233,16 @@ impl WorkProductGraphV1 {
         milestones: Vec<WorkMilestoneV1>,
         items: Vec<WorkItemV1>,
     ) -> Result<Self, WorkProductContractError> {
-        Self::from_parts(
+        Self::from_parts(UncheckedWorkProductGraphV1 {
             version,
             initiatives,
             plans,
             milestones,
             items,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+            proposal_decisions: Vec::new(),
+            relation_replan_decisions: Vec::new(),
+            evidence: Vec::new(),
+        })
     }
 
     pub const fn version(&self) -> WorkGraphVersionV1 {
@@ -363,7 +353,7 @@ impl WorkProductGraphV1 {
 
     pub fn apply(mut self, change: WorkGraphChangeV1) -> Result<Self, WorkProductContractError> {
         match change {
-            WorkGraphChangeV1::TaskAdded { item } => self.items.push(item),
+            WorkGraphChangeV1::TaskAdded { item } => self.items.push(*item),
             WorkGraphChangeV1::RelationReplanDecided {
                 proposal,
                 disposition,
@@ -755,16 +745,17 @@ impl WorkProductGraphV1 {
         validate_acyclic(&self.items)
     }
 
-    fn from_parts(
-        version: WorkGraphVersionV1,
-        mut initiatives: Vec<WorkInitiativeV1>,
-        mut plans: Vec<WorkPlanV1>,
-        mut milestones: Vec<WorkMilestoneV1>,
-        mut items: Vec<WorkItemV1>,
-        mut proposal_decisions: Vec<WorkProposalDecisionV1>,
-        mut relation_replan_decisions: Vec<WorkRelationReplanDecisionV1>,
-        mut evidence: Vec<TaskEvidenceLinkV1>,
-    ) -> Result<Self, WorkProductContractError> {
+    fn from_parts(parts: UncheckedWorkProductGraphV1) -> Result<Self, WorkProductContractError> {
+        let UncheckedWorkProductGraphV1 {
+            version,
+            mut initiatives,
+            mut plans,
+            mut milestones,
+            mut items,
+            mut proposal_decisions,
+            mut relation_replan_decisions,
+            mut evidence,
+        } = parts;
         initiatives.sort_by(|left, right| left.id.cmp(&right.id));
         plans.sort_by(|left, right| left.id.cmp(&right.id));
         milestones.sort_by(|left, right| left.id.cmp(&right.id));

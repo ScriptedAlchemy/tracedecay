@@ -455,7 +455,7 @@ where
         change: WorkGraphChangeV1,
     ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
         let payload = WorkProductEventPayloadV1::Changed {
-            change: change.clone(),
+            change: Box::new(change.clone()),
         };
         let (port_context, mutation, digest) =
             self.prepare(context, binding, &selection, mutation, &payload)?;

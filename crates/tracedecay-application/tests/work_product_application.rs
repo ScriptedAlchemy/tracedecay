@@ -687,11 +687,11 @@ fn same_command_replays_with_reordered_canonical_evidence_before_head_read() {
     let context = context(true);
     let selection = WorkProductSelectionScopeV1::ProfileOwnedNoGit;
     let payload = WorkProductEventPayloadV1::Changed {
-        change: WorkGraphChangeV1::TaskAccepted {
+        change: Box::new(WorkGraphChangeV1::TaskAccepted {
             task_id: id("task.work.fixture"),
             evidence_by_criterion: BTreeMap::new(),
             accepted_at: UtcMicros(100),
-        },
+        }),
     };
     let evidence = [
         WorkProductEventEvidenceV1 {
@@ -784,11 +784,11 @@ fn changed_replay_with_different_payload_is_an_idempotency_conflict() {
         verified_version: verified_version(1),
     });
     let replayed_payload = WorkProductEventPayloadV1::Changed {
-        change: WorkGraphChangeV1::TaskAccepted {
+        change: Box::new(WorkGraphChangeV1::TaskAccepted {
             task_id: id("task.work.different"),
             evidence_by_criterion: BTreeMap::new(),
             accepted_at: UtcMicros(100),
-        },
+        }),
     };
     let graph_port = RecordingGraphPort::default();
     let owner = RegisteredOwner::default();

@@ -122,21 +122,21 @@ fn deny_rules_union_before_allow_rules_intersect() {
 
 #[test]
 fn credential_metadata_has_no_plaintext_value_surface() {
-    let reference = CredentialReferenceMetadataV1::new(
-        id::<CredentialReferenceId>("credential.reference"),
-        CredentialKindV1::ApiToken,
-        digest('c'),
-        digest('d'),
-        ConfigurationSettlementAuthorityV1 {
+    let reference = CredentialReferenceMetadataV1 {
+        reference_id: id::<CredentialReferenceId>("credential.reference"),
+        kind: CredentialKindV1::ApiToken,
+        reference_digest: digest('c'),
+        operation_digest: digest('d'),
+        settlement_authority: ConfigurationSettlementAuthorityV1 {
             policy_epoch: 1,
             policy_digest: id::<AccessPolicyDigest>(&format!("sha256:{}", "e".repeat(64))),
             revalidated_at: UtcMicros(42),
         },
-        UtcMicros(42),
-        UtcMicros(84),
-        1,
-    )
-    .unwrap();
+        created_at: UtcMicros(42),
+        effective_deadline_at: UtcMicros(84),
+        rotation: 1,
+    };
+    reference.validate().unwrap();
 
     let encoded = serde_json::to_value(reference).unwrap();
     assert!(encoded.get("value").is_none());

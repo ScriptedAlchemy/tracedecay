@@ -465,7 +465,7 @@ fn relation_replanning_rejects_stale_unknown_duplicate_self_and_cyclic_proposals
     );
     let advanced = accepted
         .apply(WorkGraphChangeV1::TaskAdded {
-            item: item("task.d", &[], 1),
+            item: Box::new(item("task.d", &[], 1)),
         })
         .unwrap();
     assert_eq!(
@@ -579,9 +579,9 @@ fn work_product_event_rejects_created_and_changed_payload_version_substitution()
     let mut changed =
         work_product_event_input("event.work-product.changed-mismatch", "task.event.changed");
     changed.payload = WorkProductEventPayloadV1::Changed {
-        change: WorkGraphChangeV1::TaskAdded {
-            item: item("task.event.changed.next", &[], 1),
-        },
+        change: Box::new(WorkGraphChangeV1::TaskAdded {
+            item: Box::new(item("task.event.changed.next", &[], 1)),
+        }),
     };
     assert_eq!(
         WorkProductEventV1::new(changed.clone()).unwrap_err(),
@@ -605,11 +605,11 @@ fn work_product_event_rejects_created_and_changed_payload_version_substitution()
     relation_event.expected_graph_version = Some(WorkGraphVersionV1::initial());
     relation_event.result_graph_version = WorkGraphVersionV1::new(2).unwrap();
     relation_event.payload = WorkProductEventPayloadV1::Changed {
-        change: WorkGraphChangeV1::RelationReplanDecided {
+        change: Box::new(WorkGraphChangeV1::RelationReplanDecided {
             proposal: relation_proposal,
             disposition: WorkProposalDispositionV1::Accepted,
             decided_at: UtcMicros(1),
-        },
+        }),
     };
     let mut mismatched_digest =
         serde_json::to_value(WorkProductEventV1::new(relation_event).unwrap()).unwrap();
@@ -619,7 +619,7 @@ fn work_product_event_rejects_created_and_changed_payload_version_substitution()
 
     let version_two_graph = graph(vec![item("task.event.graph", &[], 1)])
         .apply(WorkGraphChangeV1::TaskAdded {
-            item: item("task.event.graph.next", &[], 1),
+            item: Box::new(item("task.event.graph.next", &[], 1)),
         })
         .unwrap();
     let mut wrong_created =

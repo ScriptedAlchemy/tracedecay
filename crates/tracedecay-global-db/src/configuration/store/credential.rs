@@ -76,12 +76,12 @@ pub(super) async fn credential_reference_from_transaction(
             .map_err(|_| ConfigurationError::Unavailable)?,
     )
     .map_err(|_| ConfigurationError::validation_message("stored credential rotation is invalid"))?;
-    let metadata = CredentialReferenceMetadataV1::new(
-        reference_id.clone(),
+    let metadata = CredentialReferenceMetadataV1 {
+        reference_id: reference_id.clone(),
         kind,
         reference_digest,
         operation_digest,
-        tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1 {
+        settlement_authority: tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1 {
             policy_epoch,
             policy_digest,
             revalidated_at,
@@ -89,8 +89,8 @@ pub(super) async fn credential_reference_from_transaction(
         created_at,
         effective_deadline_at,
         rotation,
-    )
-    .map_err(ConfigurationError::validation)?;
+    };
+    metadata.validate().map_err(ConfigurationError::validation)?;
     if rows
         .next()
         .await
@@ -184,21 +184,22 @@ impl CredentialWritePort for GlobalDbConfigurationControlStore<'_> {
                 } else {
                     0
                 };
-                let metadata = CredentialReferenceMetadataV1::new(
-                    reference_id.clone(),
-                    write.kind.clone(),
+                let metadata = CredentialReferenceMetadataV1 {
+                    reference_id: reference_id.clone(),
+                    kind: write.kind.clone(),
                     reference_digest,
-                    operation_digest.clone(),
-                    tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1 {
-                        policy_epoch: authority.receipt.policy_epoch,
-                        policy_digest: authority.receipt.policy_digest.clone(),
-                        revalidated_at: authority.receipt.issued_at,
-                    },
-                    authority.receipt.issued_at,
-                    authority.receipt.expires_at,
+                    operation_digest: operation_digest.clone(),
+                    settlement_authority:
+                        tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1 {
+                            policy_epoch: authority.receipt.policy_epoch,
+                            policy_digest: authority.receipt.policy_digest.clone(),
+                            revalidated_at: authority.receipt.issued_at,
+                        },
+                    created_at: authority.receipt.issued_at,
+                    effective_deadline_at: authority.receipt.expires_at,
                     rotation,
-                )
-                .map_err(ConfigurationError::validation)?;
+                };
+                metadata.validate().map_err(ConfigurationError::validation)?;
                 let current = current_state_from_transaction(&transaction).await?;
                 if current.revision_id != expected_revision {
                     return Err(ConfigurationError::RevisionConflict);

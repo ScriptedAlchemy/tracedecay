@@ -851,30 +851,6 @@ pub struct CredentialReferenceMetadataV1 {
 }
 
 impl CredentialReferenceMetadataV1 {
-    pub fn new(
-        reference_id: CredentialReferenceId,
-        kind: CredentialKindV1,
-        reference_digest: ManifestDigest,
-        operation_digest: ManifestDigest,
-        settlement_authority: ConfigurationSettlementAuthorityV1,
-        created_at: UtcMicros,
-        effective_deadline_at: UtcMicros,
-        rotation: u64,
-    ) -> Result<Self, DomainError> {
-        let metadata = Self {
-            reference_id,
-            kind,
-            reference_digest,
-            operation_digest,
-            settlement_authority,
-            created_at,
-            effective_deadline_at,
-            rotation,
-        };
-        metadata.validate()?;
-        Ok(metadata)
-    }
-
     pub fn validate(&self) -> Result<(), DomainError> {
         self.reference_id.validate()?;
         self.reference_digest.validate()?;

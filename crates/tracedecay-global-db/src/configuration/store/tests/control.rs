@@ -185,21 +185,21 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
             .await,
         Err(ConfigurationError::PolicyWideningForbidden)
     );
-    let credential_reference = CredentialReferenceMetadataV1::new(
-        id("credential.reference.direct-rejection"),
-        CredentialKindV1::ApiToken,
-        digest('f'),
-        digest('e'),
-        ConfigurationSettlementAuthorityV1 {
+    let credential_reference = CredentialReferenceMetadataV1 {
+        reference_id: id("credential.reference.direct-rejection"),
+        kind: CredentialKindV1::ApiToken,
+        reference_digest: digest('f'),
+        operation_digest: digest('e'),
+        settlement_authority: ConfigurationSettlementAuthorityV1 {
             policy_epoch: 7,
             policy_digest: policy_digest('b'),
             revalidated_at: UtcMicros(1),
         },
-        UtcMicros(1),
-        UtcMicros(2),
-        0,
-    )
-    .unwrap();
+        created_at: UtcMicros(1),
+        effective_deadline_at: UtcMicros(2),
+        rotation: 0,
+    };
+    credential_reference.validate().unwrap();
     assert_eq!(
         store
             .commit_direct(
