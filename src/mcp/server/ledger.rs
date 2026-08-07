@@ -23,7 +23,7 @@ fn upload_enabled_from_desired_configuration(
     };
 
     let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
-        .map_err(|error| configuration_authority_unavailable(error))?;
+        .map_err(configuration_authority_unavailable)?;
     match desired.effective_values.get(&key) {
         Some(ConfigurationValueV1::Boolean(enabled)) => Ok(*enabled),
         Some(_) => Err(configuration_authority_unavailable(

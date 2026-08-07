@@ -86,12 +86,10 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::RepositoryUnavailable) => {
             ("repository_unavailable", true)
         }
-        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::ReferenceUnavailable {
-            ..
-        })
-        | BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::EnumerationUnavailable) => {
-            ("branch_refs_unavailable", true)
-        }
+        BranchRouteReadErrorV1::Ref(
+            LocalBranchSnapshotErrorV1::ReferenceUnavailable { .. }
+            | LocalBranchSnapshotErrorV1::EnumerationUnavailable,
+        ) => ("branch_refs_unavailable", true),
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidLimit) => {
             ("invalid_request", false)
         }

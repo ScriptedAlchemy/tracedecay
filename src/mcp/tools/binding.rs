@@ -346,9 +346,10 @@ fn application_capability_for_tool(
 pub(crate) fn canonical_tool_dispatch_ceiling(
     tool_name: &str,
 ) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
-    Ok(application_capability_for_tool(tool_name)?
-        .map(|capability| std::time::Duration::from_millis(capability.deadline().maximum_millis()))
-        .unwrap_or_else(|| super::handlers::tool_dispatch_ceiling(tool_name)))
+    Ok(application_capability_for_tool(tool_name)?.map_or_else(
+        || super::handlers::tool_dispatch_ceiling(tool_name),
+        |capability| std::time::Duration::from_millis(capability.deadline().maximum_millis()),
+    ))
 }
 
 pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
@@ -555,20 +556,19 @@ fn build_mcp_dispatch_catalog()
                 }
             },
             effect,
-            deadline: McpDeadlineContractV1::new(
-                contract_capability
-                    .map(|capability| capability.deadline().maximum_millis())
-                    .unwrap_or_else(|| {
-                        super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64
-                    }),
-            )?,
+            deadline: McpDeadlineContractV1::new(contract_capability.map_or_else(
+                || super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
+                |capability| capability.deadline().maximum_millis(),
+            ))?,
             idempotency: multi_root_capability.as_ref().map_or_else(
                 || idempotency_for_tool(binding.name, application_capability),
                 |capability| match capability.idempotency() {
                     tracedecay_tool_catalog::IdempotencyContract::Required => {
                         McpIdempotencyContract::KeyRequired
                     }
-                    _ => McpIdempotencyContract::NotProvided,
+                    tracedecay_tool_catalog::IdempotencyContract::NotRequired => {
+                        McpIdempotencyContract::NotProvided
+                    }
                 },
             ),
             inverse: inverse_for_tool(binding.name, effect),

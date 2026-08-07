@@ -119,7 +119,7 @@ pub(super) async fn handle_grep(
                 cancelled.load(std::sync::atomic::Ordering::Acquire)
                     || transport_cancellation
                         .as_ref()
-                        .is_some_and(|signal| signal.is_cancelled())
+                        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
             })
         },
     )

@@ -72,22 +72,23 @@ pub(super) fn retain_codex_stop(
             .ok()
             .and_then(|result| result.get("messages_upserted").and_then(Value::as_u64))
             .is_some_and(|count| count > 0);
-            if ingested && !cancellation.is_cancelled() {
-                if let Some(session_id) = ingest_args.get("session_id").cloned() {
-                    let _ = await_terminal_operation(
-                        &cancellation,
-                        user_review(
-                            &json!({
-                                "action": "user_review",
-                                "provider": "codex",
-                                "session_id": session_id,
-                            }),
-                            &profile_root,
-                            &session_runtime_registry,
-                        ),
-                    )
-                    .await;
-                }
+            if ingested
+                && !cancellation.is_cancelled()
+                && let Some(session_id) = ingest_args.get("session_id").cloned()
+            {
+                let _ = await_terminal_operation(
+                    &cancellation,
+                    user_review(
+                        &json!({
+                            "action": "user_review",
+                            "provider": "codex",
+                            "session_id": session_id,
+                        }),
+                        &profile_root,
+                        &session_runtime_registry,
+                    ),
+                )
+                .await;
             }
         },
     );

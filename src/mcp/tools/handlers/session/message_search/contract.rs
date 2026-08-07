@@ -588,18 +588,6 @@ pub(crate) enum SessionRetrievalSweepSkipReason {
     StoreMountFailed,
 }
 
-impl SessionRetrievalSweepSkipReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::RegistryContextMissing => "registry_context_missing",
-            Self::StoreIdentityMissing => "store_identity_missing",
-            Self::StoreIdentityAmbiguous => "store_identity_ambiguous",
-            Self::StoreIdentityMismatch => "store_identity_mismatch",
-            Self::StoreMountFailed => "store_mount_failed",
-        }
-    }
-}
-
 /// A registered project the sweep could not serve, with the typed reason.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct SessionRetrievalSweepSkipView {

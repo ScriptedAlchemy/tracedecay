@@ -602,7 +602,7 @@ mod tests {
                 .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_search",
-            deadline_after(std::time::Duration::from_secs(60)),
+            deadline_after(std::time::Duration::from_mins(1)),
             cancellation.clone(),
         )
         .expect("control");
@@ -647,7 +647,7 @@ mod tests {
                 .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_configuration_set",
-            deadline_after(std::time::Duration::from_secs(60)),
+            deadline_after(std::time::Duration::from_mins(1)),
             cancellation.clone(),
         )
         .expect("control");
@@ -693,7 +693,7 @@ mod tests {
                 .expect("cancellation");
         let control = DispatchControl::new(
             "tracedecay_str_replace",
-            deadline_after(std::time::Duration::from_secs(60)),
+            deadline_after(std::time::Duration::from_mins(1)),
             cancellation.clone(),
         )
         .expect("control");

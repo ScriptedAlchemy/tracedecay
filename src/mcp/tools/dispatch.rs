@@ -85,29 +85,6 @@ pub(crate) fn attach_dispatch_metadata(
     Ok(())
 }
 
-#[cfg(test)]
-mod metadata_tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn missing_dispatch_contract_fails_closed() {
-        let mut definitions = [ToolDefinition {
-            name: "tracedecay_not_cataloged".to_owned(),
-            description: "test".to_owned(),
-            input_schema: json!({"type": "object"}),
-            annotations: None,
-            meta: None,
-        }];
-        assert!(matches!(
-            attach_dispatch_metadata(&mut definitions),
-            Err(McpDispatchMetadataError::MissingContract(name))
-                if name == "tracedecay_not_cataloged"
-        ));
-    }
-}
-
 /// Reports an argument rejection to the executor and hands the error back so the
 /// caller can return it unchanged.
 async fn reject_surface_argument(
@@ -218,4 +195,27 @@ pub fn resolve_mcp_application_surface_dispatch(
         request,
         requested_format,
     )
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn missing_dispatch_contract_fails_closed() {
+        let mut definitions = [ToolDefinition {
+            name: "tracedecay_not_cataloged".to_owned(),
+            description: "test".to_owned(),
+            input_schema: json!({"type": "object"}),
+            annotations: None,
+            meta: None,
+        }];
+        assert!(matches!(
+            attach_dispatch_metadata(&mut definitions),
+            Err(McpDispatchMetadataError::MissingContract(name))
+                if name == "tracedecay_not_cataloged"
+        ));
+    }
 }

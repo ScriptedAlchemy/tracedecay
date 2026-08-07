@@ -160,10 +160,10 @@ impl DaemonSessionRetrievalSweep {
 }
 
 impl SessionRetrievalSweepPort for DaemonSessionRetrievalSweep {
-    fn execute_registered<'a>(
-        &'a self,
+    fn execute_registered(
+        &self,
         command: SessionRetrievalCommand,
-    ) -> SessionRetrievalSweepFuture<'a> {
+    ) -> SessionRetrievalSweepFuture<'_> {
         Box::pin(async move {
             if command.store_scope() != SessionRetrievalStoreScope::Project
                 || command.project_selector().is_some()

@@ -24,6 +24,7 @@ static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
 pub(super) struct CancelSearchOnDrop(Arc<AtomicBool>);
 
 impl CancelSearchOnDrop {
+    #[cfg(test)]
     pub(super) fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self(cancelled)
     }
@@ -84,7 +85,7 @@ where
 {
     if cancellation
         .as_ref()
-        .is_some_and(|signal| signal.is_cancelled())
+        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
     {
         return Err(search_cancelled_error(tool_name));
     }
@@ -119,7 +120,7 @@ where
         Ok(result) => {
             if cancellation
                 .as_ref()
-                .is_some_and(|signal| signal.is_cancelled())
+                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
             {
                 Err(search_cancelled_error(tool_name))
             } else {

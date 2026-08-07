@@ -718,7 +718,7 @@ mod tests {
             }
             "child_idle" => {
                 fs::write(&marker, std::process::id().to_string()).expect("fixture marker write");
-                thread::sleep(Duration::from_secs(60));
+                thread::sleep(Duration::from_mins(1));
             }
             "child_limited_output" => {
                 fs::write(&marker, std::process::id().to_string()).expect("fixture marker write");

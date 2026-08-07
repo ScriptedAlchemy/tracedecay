@@ -50,7 +50,7 @@ async fn search_tree_off_thread(
                     cancelled.load(std::sync::atomic::Ordering::Acquire)
                         || transport_cancellation
                             .as_ref()
-                            .is_some_and(|signal| signal.is_cancelled())
+                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
                 },
             )
         },

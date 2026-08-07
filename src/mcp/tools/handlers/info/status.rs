@@ -394,6 +394,79 @@ fn render_status_md(value: &Value) -> String {
     md.render()
 }
 
+fn active_project_context(
+    cg: &TraceDecay,
+    branch: &BranchDiagnostics,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+) -> Value {
+    let project_root = cg.project_root();
+    let layout = cg.store_layout();
+    let graph_db_path = cg.db_path();
+    let mut output = json!({
+        "project_root": display_path(project_root),
+        "resolution_source": "active_project",
+        "storage": {
+            "class": store_kind_name(&layout.store_kind),
+            "mode": storage_mode_name(&layout.storage_mode),
+            "data_root": display_path(&layout.data_root),
+            "config_path": display_path(&layout.config_path),
+            "graph_db_path": display_path(&graph_db_path),
+            "graph_db_exists": graph_db_path.exists(),
+            "graph_db_size_bytes": graph_db_path.metadata().map_or(0, |metadata| metadata.len()),
+            "sessions_db_path": display_path(&layout.sessions_db_path),
+            "response_handle_root": display_path(&layout.response_handle_root),
+            "lcm_payload_root": display_path(&layout.lcm_payload_root),
+        },
+        "branch": {
+            "current_branch": branch.current_branch.clone(),
+            "open_active_branch": branch.open_active_branch.clone(),
+            "serving_branch": branch.serving_branch.clone(),
+            "serving_db_path": display_path(&branch.serving_db_path),
+            "serving_db_exists": branch.serving_db_exists,
+            "branch_resolution": branch.branch_resolution.clone(),
+            "branch_drifted": branch.branch_drifted,
+            "is_fallback": branch.is_fallback,
+            "fallback_target": branch.fallback_target.clone(),
+            "fallback_warning": branch.fallback_warning.clone(),
+            "tracked_branch_count": branch.tracked_branch_count,
+            "warnings": branch.warnings.clone(),
+        }
+    });
+    if let Some(prefix) = scope_prefix {
+        output["scope_prefix"] = json!(prefix);
+    }
+    if let Some(stats) = server_stats {
+        output["server"] = stats;
+    }
+    output
+}
+
+fn storage_mode_name(mode: &StorageMode) -> &'static str {
+    match mode {
+        StorageMode::ProjectLocal => "project_local",
+        StorageMode::ProfileSharded => "profile_sharded",
+    }
+}
+
+fn store_kind_name(kind: &StoreKind) -> &'static str {
+    match kind {
+        StoreKind::CodeProject => "code_project",
+    }
+}
+
+/// Handles `tracedecay_active_project` tool calls.
+pub(crate) fn handle_active_project(
+    cg: &TraceDecay,
+    args: &Value,
+    server_stats: Option<Value>,
+    scope_prefix: Option<&str>,
+) -> ToolResult {
+    let branch = cg.branch_diagnostics();
+    let output = active_project_context(cg, &branch, server_stats, scope_prefix);
+    generic_tool_result(Some(cg.project_root()), args, &output, vec![])
+}
+
 #[cfg(test)]
 mod tests {
     use crate::global_db::{
@@ -503,76 +576,4 @@ mod tests {
         assert_eq!(state["coverage"], "partial");
         assert!(state["providers"].as_array().unwrap().is_empty());
     }
-}
-fn active_project_context(
-    cg: &TraceDecay,
-    branch: &BranchDiagnostics,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-) -> Value {
-    let project_root = cg.project_root();
-    let layout = cg.store_layout();
-    let graph_db_path = cg.db_path();
-    let mut output = json!({
-        "project_root": display_path(project_root),
-        "resolution_source": "active_project",
-        "storage": {
-            "class": store_kind_name(&layout.store_kind),
-            "mode": storage_mode_name(&layout.storage_mode),
-            "data_root": display_path(&layout.data_root),
-            "config_path": display_path(&layout.config_path),
-            "graph_db_path": display_path(&graph_db_path),
-            "graph_db_exists": graph_db_path.exists(),
-            "graph_db_size_bytes": graph_db_path.metadata().map_or(0, |metadata| metadata.len()),
-            "sessions_db_path": display_path(&layout.sessions_db_path),
-            "response_handle_root": display_path(&layout.response_handle_root),
-            "lcm_payload_root": display_path(&layout.lcm_payload_root),
-        },
-        "branch": {
-            "current_branch": branch.current_branch.clone(),
-            "open_active_branch": branch.open_active_branch.clone(),
-            "serving_branch": branch.serving_branch.clone(),
-            "serving_db_path": display_path(&branch.serving_db_path),
-            "serving_db_exists": branch.serving_db_exists,
-            "branch_resolution": branch.branch_resolution.clone(),
-            "branch_drifted": branch.branch_drifted,
-            "is_fallback": branch.is_fallback,
-            "fallback_target": branch.fallback_target.clone(),
-            "fallback_warning": branch.fallback_warning.clone(),
-            "tracked_branch_count": branch.tracked_branch_count,
-            "warnings": branch.warnings.clone(),
-        }
-    });
-    if let Some(prefix) = scope_prefix {
-        output["scope_prefix"] = json!(prefix);
-    }
-    if let Some(stats) = server_stats {
-        output["server"] = stats;
-    }
-    output
-}
-
-fn storage_mode_name(mode: &StorageMode) -> &'static str {
-    match mode {
-        StorageMode::ProjectLocal => "project_local",
-        StorageMode::ProfileSharded => "profile_sharded",
-    }
-}
-
-fn store_kind_name(kind: &StoreKind) -> &'static str {
-    match kind {
-        StoreKind::CodeProject => "code_project",
-    }
-}
-
-/// Handles `tracedecay_active_project` tool calls.
-pub(crate) fn handle_active_project(
-    cg: &TraceDecay,
-    args: &Value,
-    server_stats: Option<Value>,
-    scope_prefix: Option<&str>,
-) -> ToolResult {
-    let branch = cg.branch_diagnostics();
-    let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    generic_tool_result(Some(cg.project_root()), args, &output, vec![])
 }
