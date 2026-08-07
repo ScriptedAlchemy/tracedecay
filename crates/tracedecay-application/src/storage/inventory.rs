@@ -119,6 +119,47 @@ impl CodeGenerationRetentionRecordV1 {
     }
 }
 
+/// Bounded semantic-vector lifecycle census retained by daemon maintenance.
+///
+/// `observed_non_configured_published_generation_count` excludes the
+/// configuration-selected active/rollback roots. It is not a collectability
+/// claim: verified heads, bases, inbound dependencies, and reader leases may
+/// truthfully retain a non-configured generation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticVectorRetentionRecordV1 {
+    pub store: StoreKeyV1,
+    pub pending_generation_count: u64,
+    pub ready_generation_count: u64,
+    pub observed_non_configured_published_generation_count: u64,
+    pub cancelled_generation_count: u64,
+}
+
+impl SemanticVectorRetentionRecordV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.pending_generation_count
+            .checked_add(self.ready_generation_count)
+            .and_then(|total| {
+                total.checked_add(self.observed_non_configured_published_generation_count)
+            })
+            .and_then(|total| total.checked_add(self.cancelled_generation_count))
+            .ok_or(ApplicationContractError::InvalidRange {
+                field: "semantic vector retention totals",
+            })?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has_backlog(&self) -> bool {
+        self.cancelled_generation_count > 0
+    }
+
+    #[must_use]
+    pub fn has_in_flight_generations(&self) -> bool {
+        self.pending_generation_count > 0 || self.ready_generation_count > 0
+    }
+}
+
 /// A retention-eligible slice of a store: rows or tables past their configured
 /// window awaiting offload/collection (Plan 38 §3).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

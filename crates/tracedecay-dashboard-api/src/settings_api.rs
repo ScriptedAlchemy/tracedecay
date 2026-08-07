@@ -7,14 +7,15 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, PROJECT_SETTINGS_APPLY_OPERATION,
-    SETTINGS_REFRESH_OPERATION, USER_SETTINGS_APPLY_OPERATION,
-    configuration_application_problem_error, configuration_authority_unavailable_error,
-    configuration_revision_conflict_error, parse_project_settings_patch, parse_user_settings_patch,
-    settings_validation_error, validate_user_settings_patch,
+    SETTINGS_REFRESH_OPERATION, configuration_application_problem_error,
+    configuration_authority_unavailable_error, configuration_revision_conflict_error,
+    parse_project_settings_patch, parse_user_settings_patch, settings_validation_error,
+    validate_user_settings_patch,
 };
+use tracedecay_application::ApplicationOutcome;
 
 use super::DashboardState;
 use super::read_model::{
@@ -22,8 +23,8 @@ use super::read_model::{
     DashboardLegalActionRefV1, scope_from_state,
 };
 use crate::application::configuration::{
-    DirectConfigurationMutation, UserSettingsAuthorityError, UserSettingsMutationV1,
-    UserSettingsSnapshotV1,
+    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    parse_duration_millis, plan_user_settings_mutation,
 };
 use crate::application::settings_control::{
     ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
@@ -31,8 +32,8 @@ use crate::application::settings_control::{
 };
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::user_config;
 use tracedecay_agent_hosts::automation::config as automation_config;
+use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 
 pub use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
 
@@ -40,6 +41,8 @@ type ApiResult = std::result::Result<
     Json<DashboardEnvelopeV1<SettingsPayloadV1>>,
     DashboardConfigurationRouteErrorV1,
 >;
+type ProjectSettingsPatchResult =
+    std::result::Result<Json<ProjectSettingsPatchResponseV1>, DashboardConfigurationRouteErrorV1>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
 
@@ -55,6 +58,14 @@ pub struct SettingsPayloadV1 {
     resync_recommended: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_recommended: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ProjectSettingsPatchResponseV1 {
+    /// Exact application settlement returned by the configuration binding.
+    /// `None` means the submitted patch was already the current state.
+    application_outcome: Option<ApplicationOutcome<Value>>,
+    current: DashboardEnvelopeV1<SettingsPayloadV1>,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
@@ -114,8 +125,10 @@ struct SyncSettingsV1 {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 struct UserSettingsPayloadV1 {
-    config_path: String,
-    user_settings_revision_id: String,
+    legacy_config_path: String,
+    legacy_config_read_only: bool,
+    configuration_snapshot_id: String,
+    configuration_revision_id: String,
     upload_enabled: bool,
     watcher_debounce: String,
     extraction_timeout_secs: u64,
@@ -226,8 +239,15 @@ pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
 pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
-) -> ApiResult {
+) -> ProjectSettingsPatchResult {
     let patch = parse_project_settings_patch(patch)?;
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
     let current = crate::config::cached_runtime_configuration(&state.project_root)
         .map_err(|_| configuration_authority_unavailable_error())?;
     let project_id = state
@@ -259,7 +279,7 @@ pub async fn patch_project_settings(
         },
     )
     .map_err(project_preview_error)?;
-    if preview.changed {
+    let application_outcome = if preview.changed {
         let runtime = state
             .application_invocation_executor
             .as_deref()
@@ -269,17 +289,26 @@ pub async fn patch_project_settings(
         };
         let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
             .map_err(|_| configuration_authority_unavailable_error())?;
-        if let Err(problem) = runtime
-            .apply_configuration_batch(request_id, mutations, preview.expected_revision)
+        match runtime
+            .apply_configuration_batch(
+                request_id,
+                mutations,
+                preview.expected_revision,
+                idempotency_key,
+            )
             .await
         {
-            return Err(configuration_application_problem_error(problem));
+            Ok(outcome) => Some(outcome),
+            Err(problem) => return Err(configuration_application_problem_error(problem)),
         }
-    }
+    } else {
+        None
+    };
 
-    Ok(Json(
-        settings_envelope(&state, Some(preview.resync_recommended), None).await?,
-    ))
+    Ok(Json(ProjectSettingsPatchResponseV1 {
+        application_outcome,
+        current: settings_envelope(&state, Some(preview.resync_recommended), None).await?,
+    }))
 }
 
 pub async fn patch_user_settings(
@@ -287,36 +316,62 @@ pub async fn patch_user_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
-    validate_user_settings_patch(&patch, |value| user_config::parse_duration(value).is_some())?;
-
-    let mutation = match state
+    validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
+    let idempotency_key =
+        ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "idempotency_key",
+                "message": "idempotency_key must be one non-empty canonical caller-stable value"
+            }]))
+        })?;
+    let expected_revision =
+        ConfigurationRevisionId::new(patch.expected_revision_id).map_err(|_| {
+            settings_validation_error(json!([{
+                "field": "expected_revision_id",
+                "message": "expected_revision_id must name one canonical configuration revision"
+            }]))
+        })?;
+    let runtime = state
+        .application_invocation_executor
+        .as_deref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let profile_id = runtime
+        .user_profile_id()
+        .cloned()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let current = state
         .user_settings
-        .mutate(
-            patch.expected_revision_id,
-            UserSettingsMutationV1 {
-                upload_enabled: patch.upload_enabled,
-                watcher_debounce: patch.watcher_debounce,
-                extraction_timeout_secs: patch.extraction_timeout_secs,
-            },
-        )
+        .read()
         .await
-    {
-        Ok(mutation) => mutation,
-        Err(UserSettingsAuthorityError::RevisionConflict { expected, actual }) => {
-            return Err(configuration_revision_conflict_error(
-                "user settings changed after this edit began; refresh and retry",
-                &expected,
-                &actual,
-            ));
+        .map_err(|_| configuration_authority_unavailable_error())?;
+    let plan = plan_user_settings_mutation(
+        &current,
+        profile_id,
+        UserSettingsMutationV1 {
+            upload_enabled: patch.upload_enabled,
+            watcher_debounce: patch.watcher_debounce,
+            extraction_timeout_secs: patch.extraction_timeout_secs,
+        },
+    )
+    .map_err(|_| configuration_authority_unavailable_error())?;
+    if !plan.mutations.is_empty() {
+        let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
+            .map_err(|_| configuration_authority_unavailable_error())?;
+        if let Err(problem) = runtime
+            .apply_configuration_batch(
+                request_id,
+                plan.mutations,
+                expected_revision,
+                idempotency_key,
+            )
+            .await
+        {
+            return Err(configuration_application_problem_error(problem));
         }
-        Err(_) => return Err(configuration_authority_unavailable_error()),
-    };
-    if let Some(backup) = mutation.recovered_backup_path {
-        tracing::warn!(backup, "corrupt user config backed up before regeneration");
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(mutation.restart_recommended)).await?,
+        settings_envelope(&state, None, Some(plan.restart_recommended)).await?,
     ))
 }
 
@@ -382,10 +437,9 @@ async fn settings_envelope(
         resync_recommended,
         restart_recommended,
     };
-    // Project configuration writes are performed by the daemon-owned
-    // configuration control plane; user settings are written through the
-    // always-mounted profile authority. Advertising a project apply without
-    // that control plane would offer a control that can only fail.
+    // Both editable scopes settle through the one cataloged daemon
+    // configuration effect. A profile write additionally requires the exact
+    // profile identity bound by the daemon handshake.
     let mut legal_actions = Vec::new();
     if state.application_invocation_executor.is_some() {
         legal_actions.push(DashboardLegalActionRefV1::new(
@@ -394,17 +448,13 @@ async fn settings_envelope(
         ));
     }
     legal_actions.push(DashboardLegalActionRefV1::new(
-        DashboardLegalActionKindV1::RequestApply,
-        USER_SETTINGS_APPLY_OPERATION,
-    ));
-    legal_actions.push(DashboardLegalActionRefV1::new(
         DashboardLegalActionKindV1::Refresh,
         SETTINGS_REFRESH_OPERATION,
     ));
 
     Ok(DashboardEnvelopeV1::ready(
         scope_from_state(state),
-        DashboardCoverageV1::complete(2, "configuration_authorities"),
+        DashboardCoverageV1::complete(1, "configuration_control_plane"),
         payload,
     )
     .with_legal_actions(legal_actions))
@@ -412,8 +462,10 @@ async fn settings_envelope(
 
 fn user_settings_payload(user: &UserSettingsSnapshotV1) -> UserSettingsPayloadV1 {
     UserSettingsPayloadV1 {
-        config_path: user.config_path.clone(),
-        user_settings_revision_id: user.revision_id.clone(),
+        legacy_config_path: user.legacy_config_path.clone(),
+        legacy_config_read_only: true,
+        configuration_snapshot_id: user.configuration_snapshot_id.clone(),
+        configuration_revision_id: user.configuration_revision_id.clone(),
         upload_enabled: user.upload_enabled,
         watcher_debounce: user.watcher_debounce.clone(),
         extraction_timeout_secs: user.extraction_timeout_secs,
@@ -592,13 +644,19 @@ mod tests {
         let project_canonical =
             serialization_schema::<tracedecay_api::configuration::ProjectSettingsPatch>();
         assert_eq!(project_route, project_canonical);
-        assert_eq!(project_route["required"], json!(["expected_revision_id"]));
+        assert_eq!(
+            project_route["required"],
+            json!(["expected_revision_id", "idempotency_key"])
+        );
 
         let user_route = serialization_schema::<UserSettingsPatch>();
         let user_canonical =
             serialization_schema::<tracedecay_api::configuration::UserSettingsPatch>();
         assert_eq!(user_route, user_canonical);
-        assert_eq!(user_route["required"], json!(["expected_revision_id"]));
+        assert_eq!(
+            user_route["required"],
+            json!(["expected_revision_id", "idempotency_key"])
+        );
     }
 
     #[test]

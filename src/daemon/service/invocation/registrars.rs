@@ -19,8 +19,10 @@ impl DaemonConfigurationGrantAuthority {
     pub(super) fn issue_direct(
         &self,
         request_id: &str,
+        idempotency_key: ConfigurationIdempotencyKey,
         mutation: &DirectConfigurationMutation,
         expected_revision: ConfigurationRevisionId,
+        effective_deadline_at: UtcMicros,
         issued_at: UtcMicros,
     ) -> Result<ConfigurationMutationAuthority, DaemonInvocationProblem> {
         let layer = mutation
@@ -39,6 +41,8 @@ impl DaemonConfigurationGrantAuthority {
             expected_revision,
             ConfigurationMutationSinkV1::ConfigurationStore,
             ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            Some(idempotency_key),
+            effective_deadline_at,
             issued_at,
         )
     }
@@ -76,9 +80,12 @@ impl DaemonConfigurationGrantAuthority {
         expected_revision: ConfigurationRevisionId,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
+        idempotency_key: Option<ConfigurationIdempotencyKey>,
+        effective_deadline_at: UtcMicros,
         issued_at: UtcMicros,
     ) -> Result<ConfigurationMutationAuthority, DaemonInvocationProblem> {
-        if issued_at >= self.expires_at {
+        let expires_at = UtcMicros(self.expires_at.0.min(effective_deadline_at.0));
+        if issued_at >= expires_at {
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
         let grant_id = ConfigurationGrantId::new(format!("configuration.grant.{request_id}"))
@@ -101,7 +108,7 @@ impl DaemonConfigurationGrantAuthority {
             self.policy_epoch,
             &self.policy_digest,
             issued_at,
-            self.expires_at,
+            expires_at,
         ))
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         let receipt = ConfigurationMutationGrantReceiptV1::issue(
@@ -115,8 +122,9 @@ impl DaemonConfigurationGrantAuthority {
             self.policy_digest.clone(),
             sink,
             effect,
+            idempotency_key,
             issued_at,
-            self.expires_at,
+            expires_at,
         )
         .map_err(|_| DaemonInvocationProblem::Unavailable)?;
         let snapshot = ConfigurationMutationGrantSnapshotV1 {
@@ -131,7 +139,7 @@ impl DaemonConfigurationGrantAuthority {
             policy_epoch: self.policy_epoch,
             policy_digest: self.policy_digest.clone(),
             issued_at,
-            expires_at: self.expires_at,
+            expires_at,
             state: ConfigurationMutationGrantStateV1::Active,
         };
         if !snapshot.is_valid() {
@@ -401,13 +409,8 @@ impl DaemonFeedbackRuntimeRegistrar {
                 #[cfg(test)]
                 producer_constructions.fetch_add(1, Ordering::SeqCst);
                 let runtime = Arc::new(
-                    open_feedback_runtime(
-                        database,
-                        runtime_root.clone(),
-                        scope.clone(),
-                        access,
-                    )
-                    .await?,
+                    open_feedback_runtime(database, runtime_root.clone(), scope.clone(), access)
+                        .await?,
                 );
                 let publications = runtime.publication_store();
                 let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
@@ -668,6 +671,9 @@ impl DaemonConfigurationRuntimeRegistrar {
                     actor: grants.actor.clone(),
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
+                    semantic_evaluation_workers: Arc::new(
+                        crate::daemon::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::default(),
+                    ),
                 },
             )
             .await?;
@@ -694,6 +700,22 @@ impl DaemonConfigurationRuntimeRegistrar {
                 message: "semantic configuration operation requires a registered Plan 20 runtime"
                     .to_owned(),
             })?
+    }
+
+    pub(crate) async fn install_semantic_activation_reconciler(
+        &self,
+        project_root: &Path,
+        reconciler: Arc<
+            crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1,
+        >,
+    ) -> Result<(), TraceDecayError> {
+        self.service
+            .project_runtimes
+            .register(project_root.to_path_buf(), reconciler)
+            .await
+            .map_err(|_| TraceDecayError::Config {
+                message: "semantic activation reconciler is already registered".to_owned(),
+            })
     }
 }
 
@@ -915,10 +937,8 @@ impl DaemonAdvisoryRuntimeRegistrar {
         input: AdvisoryRuntimeOpenV1,
         production: AdvisoryProductionOpenV1,
         lsp_session_factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<
-        Arc<AdvisoryProductionStartupRegistrationV1>,
-        DaemonAdvisoryRuntimeRegistrationError,
-    > {
+    ) -> Result<Arc<AdvisoryProductionStartupRegistrationV1>, DaemonAdvisoryRuntimeRegistrationError>
+    {
         let authorities = open_advisory_production_authorities(production)?;
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
         self.register(

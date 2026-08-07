@@ -1,11 +1,7 @@
-//! Code graph dashboard API, backed by tracedecay's indexed graph tables.
+//! Code graph dashboard API over the daemon/application graph read authority.
 //!
-//! The explorer reads the resolved project graph `nodes`, `edges`, and
-//! `files` tables directly and returns compact payloads suitable for search,
-//! inspection, progressive subgraph expansion, and shortest-path queries.
-//! Every endpoint is bounded: subgraphs cap node/edge counts, search is
-//! paginated, and the path BFS caps depth and visited-set size, so responses
-//! stay interactive even on graphs with tens of thousands of nodes.
+//! Every result is bound to one exact recovered-state-verified generation.
+//! The adapter receives no graph store path, connection, or query handle.
 
 use axum::extract::State;
 use axum::response::Json;
@@ -13,8 +9,12 @@ use serde::Deserialize;
 
 use super::DashboardState;
 use super::graph_service;
-use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
+use super::read_model::{
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    DashboardVersionV1, scope_from_state,
+};
 use super::util::{JsonPath, JsonQuery, coerce_limit};
+use tracedecay_application::DashboardGraphReadErrorV1;
 
 #[derive(Deserialize)]
 pub struct SearchParams {
@@ -73,12 +73,15 @@ pub async fn node(
     JsonPath(node_id): JsonPath<String>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNodePayloadV1>>> {
     match graph_service::node_payload(&state, &node_id).await {
-        Ok(Some(payload)) => graph_ready(&state, payload),
-        Ok(None) => Json(DashboardEnvelopeV1::complete_zero_findings(
+        Ok(read) if read.payload.is_some() => {
+            graph_ready(&state, read.payload, read.generation.graph_generation_id)
+        }
+        Ok(read) => Json(DashboardEnvelopeV1::complete_zero_findings(
             scope_from_state(&state),
             DashboardCoverageV1::complete(1, "nodes"),
             None,
-        )),
+        )
+        .with_version(graph_version(read.generation.graph_generation_id))),
         Err(error) => graph_read_failed(&state, error),
     }
 }
@@ -89,22 +92,19 @@ pub async fn neighbors(
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
 ) -> Json<DashboardEnvelopeV1<Option<graph_service::GraphNeighborsPayloadV1>>> {
-    match graph_service::node_exists(&state, &node_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return Json(DashboardEnvelopeV1::complete_zero_findings(
-                scope_from_state(&state),
-                DashboardCoverageV1::complete(1, "nodes"),
-                None,
-            ));
-        }
-        Err(error) => return graph_read_failed(&state, error),
-    }
     let limit = coerce_limit(params.limit, 50, 200);
-    graph_response(
-        &state,
-        graph_service::neighbors_payload(&state, &node_id, limit).await,
-    )
+    match graph_service::neighbors_payload(&state, &node_id, limit).await {
+        Ok(read) if read.payload.is_some() => {
+            graph_ready(&state, read.payload, read.generation.graph_generation_id)
+        }
+        Ok(read) => Json(DashboardEnvelopeV1::complete_zero_findings(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(1, "nodes"),
+            None,
+        )
+        .with_version(graph_version(read.generation.graph_generation_id))),
+        Err(error) => graph_read_failed(&state, error),
+    }
 }
 
 /// `GET /api/plugins/graph/subgraph?node_id=...&limit_nodes=80&limit_edges=120`
@@ -146,29 +146,70 @@ pub async fn path(
 
 fn graph_response<T>(
     state: &DashboardState,
-    result: Result<T, String>,
+    result: Result<graph_service::GraphServiceReadV1<T>, DashboardGraphReadErrorV1>,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
     match result {
-        Ok(payload) => graph_ready(state, payload),
+        Ok(read) => graph_ready(state, Some(read.payload), read.generation.graph_generation_id),
         Err(error) => graph_read_failed(state, error),
     }
 }
 
-fn graph_ready<T>(state: &DashboardState, payload: T) -> Json<DashboardEnvelopeV1<Option<T>>> {
+fn graph_ready<T>(
+    state: &DashboardState,
+    payload: Option<T>,
+    generation: String,
+) -> Json<DashboardEnvelopeV1<Option<T>>> {
     Json(DashboardEnvelopeV1::ready(
         scope_from_state(state),
         DashboardCoverageV1::unknown(),
-        Some(payload),
-    ))
+        payload,
+    )
+    .with_version(graph_version(generation)))
 }
 
 fn graph_read_failed<T>(
     state: &DashboardState,
-    error: String,
+    error: DashboardGraphReadErrorV1,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
-    Json(DashboardEnvelopeV1::error(
-        scope_from_state(state),
-        None,
-        error,
-    ))
+    let scope = scope_from_state(state);
+    let envelope = match error {
+        DashboardGraphReadErrorV1::MissingRegistry => {
+            DashboardEnvelopeV1::unavailable(scope, None, "missing_registry")
+        }
+        DashboardGraphReadErrorV1::Unavailable { detail } => {
+            DashboardEnvelopeV1::unavailable(scope, None, detail)
+        }
+        DashboardGraphReadErrorV1::Stale { detail } => {
+            let mut coverage = DashboardCoverageV1::unknown();
+            coverage.omission_reasons.push(detail);
+            DashboardEnvelopeV1::stale(scope, coverage, None)
+        }
+        DashboardGraphReadErrorV1::Cancelled => DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::Cancelled,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            None,
+        ),
+        DashboardGraphReadErrorV1::TimedOut => DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::TimedOut,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            None,
+        ),
+        DashboardGraphReadErrorV1::Denied => DashboardEnvelopeV1::denied(scope, None),
+        DashboardGraphReadErrorV1::InvalidRequest { detail }
+        | DashboardGraphReadErrorV1::Corrupt { detail } => {
+            DashboardEnvelopeV1::error(scope, None, detail)
+        }
+    };
+    Json(envelope)
+}
+
+fn graph_version(generation: String) -> DashboardVersionV1 {
+    DashboardVersionV1 {
+        entity_version: None,
+        graph_version: Some(generation),
+    }
 }

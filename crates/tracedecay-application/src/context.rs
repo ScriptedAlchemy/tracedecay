@@ -505,7 +505,10 @@ mod tests {
             let committed = commit.join().expect("commit contender");
             assert_ne!(cancelled, committed);
             assert_eq!(signal.commit_started(), committed);
-            assert_eq!(signal.cancelled_at(), cancelled.then_some(UtcMicros(attempt)));
+            assert_eq!(
+                signal.cancelled_at(),
+                cancelled.then_some(UtcMicros(attempt))
+            );
         }
     }
 }

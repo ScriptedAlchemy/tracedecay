@@ -31,8 +31,7 @@ use tracedecay_domain::{
 /// Domain separator for the canonical projection-batch-request digest.
 pub const PROJECTION_REQUEST_SEPARATOR: &str = "tracedecay.projection-batch-request.v1";
 
-/// Domain separator for the canonical projection-batch publication digest.
-pub const PROJECTION_PUBLICATION_SEPARATOR: &str = "tracedecay.projection-batch-receipt.v1";
+pub use tracedecay_domain::PROJECTION_PUBLICATION_SEPARATOR;
 
 /// Receipt construction/verification failures (Plan 25: publication rejects
 /// duplicate, missing, extra, cross-generation, wrong-digest, or
@@ -103,15 +102,7 @@ pub fn expected_request_digest(
 pub fn expected_publication_digest(
     batch: &ProjectionBatchReceiptV1,
 ) -> Result<ManifestDigest, DomainError> {
-    canonical_sha256(&(
-        PROJECTION_PUBLICATION_SEPARATOR,
-        &batch.target_projection_key,
-        &batch.request_digest,
-        &batch.source_generation,
-        &batch.source_manifest_digest,
-        &batch.receipts,
-        batch.reused_count,
-    ))
+    tracedecay_domain::projection_batch_publication_digest(batch)
 }
 
 /// Whether the changed-chunk set requests no projection work: empty

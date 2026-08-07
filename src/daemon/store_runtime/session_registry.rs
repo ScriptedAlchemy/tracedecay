@@ -29,6 +29,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 
 mod code_graph;
+mod code_graph_manifest;
 mod code_reads;
 mod maintenance;
 mod mounts;
@@ -37,6 +38,8 @@ mod retained_hook_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
 use retained_hook_tasks::RetainedHookTasks;
+
+pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
@@ -71,6 +74,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     resolver: Arc<LocalStoreRuntimeResolverV1>,
     registry: StoreRuntimeRegistry,
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    graph_manifest_provider: Arc<code_graph_manifest::DaemonCodeGraphManifestProviderV1>,
     graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
     profile_runtime: StoreRuntimeHandle,

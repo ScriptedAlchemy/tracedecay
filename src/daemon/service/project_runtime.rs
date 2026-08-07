@@ -118,6 +118,9 @@ pub(crate) struct ProjectRuntime {
     external_acquisition:
         Option<Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
+    semantic_activation_reconciler: Option<
+        Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1>,
+    >,
     reservations: Vec<TypeId>,
     #[cfg(test)]
     test_first: Option<TestFirst>,
@@ -146,6 +149,7 @@ impl ProjectRuntime {
             || self.advisory_hook_orchestrator.is_some()
             || self.external_acquisition.is_some()
             || self.semantic.is_some()
+            || self.semantic_activation_reconciler.is_some()
             || {
                 #[cfg(test)]
                 {
@@ -203,6 +207,7 @@ project_runtime_components!(
     Arc<dyn HookOrchestrationPortV1> => advisory_hook_orchestrator,
     Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1> => external_acquisition,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
+    Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1> => semantic_activation_reconciler,
 );
 
 #[cfg(test)]

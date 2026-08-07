@@ -24,15 +24,27 @@ impl ProjectRuntimeRegistryV1 {
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
-            let task = tokio::task::spawn_blocking(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    registry.drain_all_blocking();
-                }));
-                let state = if result.is_ok() {
-                    ShutdownState::Complete
-                } else {
-                    registry.shutdown_started.store(false, Ordering::Release);
-                    ShutdownState::Failed
+            let task = tokio::spawn(async move {
+                let drain_registry = registry.clone();
+                let drained = tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        drain_registry.take_all_blocking()
+                    }))
+                })
+                .await;
+                let state = match drained {
+                    Ok(Ok(runtimes)) => {
+                        if registry.finish_drained_runtimes(runtimes).await {
+                            ShutdownState::Complete
+                        } else {
+                            registry.shutdown_started.store(false, Ordering::Release);
+                            ShutdownState::Failed
+                        }
+                    }
+                    _ => {
+                        registry.shutdown_started.store(false, Ordering::Release);
+                        ShutdownState::Failed
+                    }
                 };
                 registry.shutdown_complete.send_replace(state);
             });
@@ -74,8 +86,8 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
-    fn drain_all_blocking(&self) {
-        let runtimes = loop {
+    fn take_all_blocking(&self) -> BTreeMap<PathBuf, ProjectRuntime> {
+        loop {
             let (version, changed) = &*self.reservation_blocking_changed;
             let observed_version = *version
                 .lock()
@@ -105,8 +117,35 @@ impl ProjectRuntimeRegistryV1 {
                     .wait(current_version)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
-        };
+        }
+    }
 
+    async fn finish_drained_runtimes(
+        &self,
+        mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
+    ) -> bool {
+        let deadline =
+            tokio::time::Instant::now() + crate::daemon::core_lifecycle::DAEMON_SHUTDOWN_DEADLINE;
+        let mut clean = true;
+        for runtime in runtimes.values_mut() {
+            if let Some(reconciler) = runtime.semantic_activation_reconciler.take() {
+                reconciler.cancel_and_join().await;
+            }
+            if let Some(configuration) = runtime.configuration.as_ref() {
+                clean &= configuration
+                    .semantic_evaluation_workers()
+                    .cancel_and_join_until(deadline)
+                    .await
+                    .is_clean();
+            }
+            if let Some(semantic) = runtime.semantic.as_ref() {
+                clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
+            }
+        }
+        if !clean {
+            self.lock_runtimes().extend(runtimes);
+            return false;
+        }
         for runtime in runtimes.values() {
             let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
             else {
@@ -122,9 +161,6 @@ impl ProjectRuntimeRegistryV1 {
             if let Some(external_acquisition) = runtime.external_acquisition {
                 external_acquisition.cancel();
             }
-            crate::daemon::code_index_scheduler::semantic_vector_graph::unregister_project_semantic_vector_graph_provider(
-                &project_root,
-            );
             if let Some(semantic) = runtime.semantic {
                 crate::application::semantic_runtime::unregister_project_semantic_runtime(
                     &project_root,
@@ -132,5 +168,6 @@ impl ProjectRuntimeRegistryV1 {
                 semantic.cancel();
             }
         }
+        clean
     }
 }

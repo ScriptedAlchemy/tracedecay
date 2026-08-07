@@ -4,8 +4,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1, FactCompatibilityStoreError, FactProposalStoreError,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalStateV1, FactCompatibilityStoreError, FactProposalStoreError,
     FactStoreError,
 };
 
@@ -170,14 +170,14 @@ fn cli_reviewer() -> Result<ActorId> {
     })
 }
 
-fn parse_fact_proposal_state(value: &str) -> Result<CompatibilityFactProposalStateV1> {
+fn parse_fact_proposal_state(value: &str) -> Result<ProjectMemoryFactProposalStateV1> {
     let normalized = value.trim().replace('-', "_");
     match normalized.as_str() {
-        "pending" | "pending_approval" => Ok(CompatibilityFactProposalStateV1::PendingApproval),
-        "applying" => Ok(CompatibilityFactProposalStateV1::Applying),
-        "applied" => Ok(CompatibilityFactProposalStateV1::Applied),
-        "rejected" | "rejected_validation" => Ok(CompatibilityFactProposalStateV1::Rejected),
-        "quarantined" => Ok(CompatibilityFactProposalStateV1::Quarantined),
+        "pending" | "pending_approval" => Ok(ProjectMemoryFactProposalStateV1::PendingApproval),
+        "applying" => Ok(ProjectMemoryFactProposalStateV1::Applying),
+        "applied" => Ok(ProjectMemoryFactProposalStateV1::Applied),
+        "rejected" | "rejected_validation" => Ok(ProjectMemoryFactProposalStateV1::Rejected),
+        "quarantined" => Ok(ProjectMemoryFactProposalStateV1::Quarantined),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "invalid fact proposal state `{value}`; expected pending_approval, applying, applied, rejected, or quarantined"
@@ -186,17 +186,17 @@ fn parse_fact_proposal_state(value: &str) -> Result<CompatibilityFactProposalSta
     }
 }
 
-fn fact_proposal_state_name(state: CompatibilityFactProposalStateV1) -> &'static str {
+fn fact_proposal_state_name(state: ProjectMemoryFactProposalStateV1) -> &'static str {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval => "pending_approval",
-        CompatibilityFactProposalStateV1::Applying => "applying",
-        CompatibilityFactProposalStateV1::Applied => "applied",
-        CompatibilityFactProposalStateV1::Rejected => "rejected",
-        CompatibilityFactProposalStateV1::Quarantined => "quarantined",
+        ProjectMemoryFactProposalStateV1::PendingApproval => "pending_approval",
+        ProjectMemoryFactProposalStateV1::Applying => "applying",
+        ProjectMemoryFactProposalStateV1::Applied => "applied",
+        ProjectMemoryFactProposalStateV1::Rejected => "rejected",
+        ProjectMemoryFactProposalStateV1::Quarantined => "quarantined",
     }
 }
 
-fn fact_proposal_json(proposal: &CompatibilityFactProposalRecordV1) -> Value {
+fn fact_proposal_json(proposal: &ProjectMemoryFactProposalRecordV1) -> Value {
     let request = proposal.request();
     let mut value = Map::from_iter([
         (
@@ -424,7 +424,7 @@ pub(super) async fn handle_admin_project(
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "fact proposal not found".to_string(),
                 })?;
-            let promotion = CompatibilityFactProposalPromotionV1::new(
+            let promotion = ProjectMemoryFactProposalPromotionV1::new(
                 memory.owner().clone(),
                 proposal_id,
                 proposal.revision(),
@@ -601,9 +601,9 @@ mod tests {
         cg: &TraceDecay,
         proposal_id: &str,
         content: &str,
-    ) -> CompatibilityFactProposalRecordV1 {
+    ) -> ProjectMemoryFactProposalRecordV1 {
         use tracedecay_domain::{Confidence, FactCategoryV1};
-        use tracedecay_store::CompatibilityFactAddCommandV1;
+        use tracedecay_store::ProjectMemoryFactAddCommandV1;
 
         let owner = cg.project_memory_owner().unwrap();
         let db = cg.open_project_store_db().await.unwrap();
@@ -625,7 +625,7 @@ mod tests {
                 panic!("fixture proposal should sanitize")
             }
         };
-        let request = CompatibilityFactAddCommandV1::new(
+        let request = ProjectMemoryFactAddCommandV1::new(
             owner,
             ProvenanceId::new(format!("automation.operation.{proposal_id}")).unwrap(),
             content.to_owned(),
@@ -933,15 +933,15 @@ mod tests {
         assert!(matches!(fact, AdminProjectAction::FactApply { id } if id == "fact_1"));
         assert_eq!(
             parse_fact_proposal_state("pending_approval").unwrap(),
-            CompatibilityFactProposalStateV1::PendingApproval
+            ProjectMemoryFactProposalStateV1::PendingApproval
         );
         assert_eq!(
             parse_fact_proposal_state("rejected_validation").unwrap(),
-            CompatibilityFactProposalStateV1::Rejected
+            ProjectMemoryFactProposalStateV1::Rejected
         );
         assert_eq!(
             parse_fact_proposal_state(" rejected-validation ").unwrap(),
-            CompatibilityFactProposalStateV1::Rejected
+            ProjectMemoryFactProposalStateV1::Rejected
         );
 
         let run = serde_json::from_value::<AdminProjectAction>(json!({

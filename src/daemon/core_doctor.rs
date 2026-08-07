@@ -26,7 +26,10 @@ enum DoctorGraphSchemaState {
 fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
     match actual {
         18 => DoctorGraphSchemaState::ReleasedV0067,
-        24 => DoctorGraphSchemaState::PreviousV2Candidate,
+        // V2 development builds stamped 24 through 26 before the final shape
+        // settled; they are refused at open but diagnosed distinctly from
+        // stores no supported binary ever produced.
+        24..=26 => DoctorGraphSchemaState::PreviousV2Candidate,
         actual if actual == i64::from(crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION) => {
             DoctorGraphSchemaState::Current
         }

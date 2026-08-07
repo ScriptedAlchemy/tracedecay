@@ -18,9 +18,7 @@ use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::tracedecay::{TraceDecay, current_timestamp};
-
-const DEFAULT_SURFACE_DEADLINE_MICROS: i64 = 30_000_000;
+use crate::tracedecay::TraceDecay;
 
 fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -29,36 +27,43 @@ fn request_id() -> Result<RequestId> {
 }
 
 fn complete_protocol_controls(
+    operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    match (deadline, cancellation) {
-        (None, None) => Ok(None),
-        (deadline, cancellation) => {
-            // Match the canonical application dispatch's 30-second default
-            // when protocol cancellation exists without a deadline.
-            let deadline = match deadline {
-                Some(deadline) => deadline,
-                None => Deadline::new(UtcMicros(
-                    current_timestamp()
-                        .saturating_mul(1_000_000)
-                        .saturating_add(DEFAULT_SURFACE_DEADLINE_MICROS),
-                ))
-                .map_err(|error| TraceDecayError::Config {
-                    message: error.to_string(),
-                })?,
-            };
-            let cancellation = match cancellation {
-                Some(cancellation) => cancellation,
-                None => CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))
-                    .map_err(|error| TraceDecayError::Config {
-                        message: error.to_string(),
-                    })?,
-            };
-            Ok(Some((deadline, cancellation)))
-        }
-    }
+    let tool_name = format!("tracedecay_{}", operation.as_str());
+    let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool_name).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("could not resolve application surface deadline: {error}"),
+        },
+    )?;
+    let ceiling_micros =
+        i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
+            message: "application surface deadline exceeds the domain clock".to_owned(),
+        })?;
+    let maximum_deadline_at = UtcMicros(
+        tracedecay_application::clock::now_micros()
+            .0
+            .saturating_add(ceiling_micros),
+    );
+    let effective_deadline_at = deadline
+        .as_ref()
+        .map(|deadline| deadline.expires_at)
+        .filter(|expires_at| *expires_at <= maximum_deadline_at)
+        .unwrap_or(maximum_deadline_at);
+    let deadline =
+        Deadline::new(effective_deadline_at).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    let cancellation = match cancellation {
+        Some(cancellation) => cancellation,
+        None => CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?,
+    };
+    Ok(Some((deadline, cancellation)))
 }
 
 pub(super) async fn handle_application_surface(
@@ -94,8 +99,12 @@ pub(super) async fn handle_application_surface(
             ));
         }
     };
-    let controls =
-        complete_protocol_controls(&request_id, protocol_deadline, protocol_cancellation)?;
+    let controls = complete_protocol_controls(
+        operation,
+        &request_id,
+        protocol_deadline,
+        protocol_cancellation,
+    )?;
     let result = match controls {
         Some((deadline, cancellation)) => {
             resolve_mcp_application_surface_with_controls_for_target(
@@ -225,16 +234,21 @@ mod tests {
     use tracedecay_tool_catalog::{BindingId, SchemaId};
 
     use super::{complete_protocol_controls, render_canonical_markdown};
+    use crate::application_surface::ApplicationSurfaceOperation;
 
     #[test]
     fn preserves_a_supplied_deadline_when_cancellation_is_missing() {
         let request_id = RequestId::new("request.mcp.controls.deadline").unwrap();
         let deadline = Deadline::new(UtcMicros(91)).unwrap();
 
-        let (actual_deadline, cancellation) =
-            complete_protocol_controls(&request_id, Some(deadline.clone()), None)
-                .unwrap()
-                .unwrap();
+        let (actual_deadline, cancellation) = complete_protocol_controls(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            &request_id,
+            Some(deadline.clone()),
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(actual_deadline, deadline);
         assert_eq!(
@@ -249,10 +263,14 @@ mod tests {
         let cancellation = CancellationSignal::active("cancel.protocol.exact").unwrap();
         let observer = cancellation.clone();
 
-        let (_deadline, actual_cancellation) =
-            complete_protocol_controls(&request_id, None, Some(cancellation))
-                .unwrap()
-                .unwrap();
+        let (_deadline, actual_cancellation) = complete_protocol_controls(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            &request_id,
+            None,
+            Some(cancellation),
+        )
+        .unwrap()
+        .unwrap();
         actual_cancellation.cancel(UtcMicros(41));
 
         assert_eq!(
@@ -263,12 +281,22 @@ mod tests {
     }
 
     #[test]
-    fn leaves_default_controls_to_the_canonical_dispatch_when_both_are_missing() {
+    fn derives_default_deadline_from_the_exact_catalog_capability() {
         let request_id = RequestId::new("request.mcp.controls.default").unwrap();
+        let before = tracedecay_application::clock::now_micros();
+        let (deadline, _) = complete_protocol_controls(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            &request_id,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let after = tracedecay_application::clock::now_micros();
         assert!(
-            complete_protocol_controls(&request_id, None, None)
-                .unwrap()
-                .is_none()
+            deadline.expires_at.0 >= before.0.saturating_add(15_000_000)
+                && deadline.expires_at.0 <= after.0.saturating_add(15_000_000),
+            "configuration_set must inherit its exact 15-second catalog ceiling"
         );
     }
 

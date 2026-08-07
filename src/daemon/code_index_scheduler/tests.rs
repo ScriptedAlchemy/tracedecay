@@ -400,11 +400,102 @@ fn seeded_scope(
     scope
 }
 
+fn execute_scope_retention_with_test_binding_cleanup(
+    store_root: &Path,
+    live_roots: &BTreeSet<PathBuf>,
+    minimum_stranding_age_secs: i64,
+    mode: crate::retention::code_index_generations::CodeGenerationRetentionModeV1,
+    now_secs: i64,
+    completed_at: UtcMicros,
+) -> Result<
+    crate::retention::code_index_generations::ScopeRootRetentionReportV1,
+    crate::retention::code_index_generations::CodeGenerationRetentionErrorV1,
+> {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, ScopeRootAuthorityReceiptV1,
+        ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
+        complete_scope_root_binding_cleanup, execute_scope_root_retention,
+        plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
+        prepare_scope_root_binding_cleanup, recover_scope_root_retention,
+    };
+
+    if mode == CodeGenerationRetentionModeV1::Apply {
+        recover_scope_root_retention(store_root)?;
+    }
+    let observed =
+        plan_scope_root_retention(store_root, live_roots, minimum_stranding_age_secs, now_secs)?;
+    let source_scope = tracedecay_store::StoreShardIdV1::project(
+        tracedecay_domain::BrainId::new("brain.scope-test").expect("test brain"),
+        tracedecay_domain::UserProfileId::new("profile.scope-test").expect("test profile"),
+        tracedecay_domain::ProjectId::new("project.scope-test").expect("test project"),
+    );
+    let candidate = observed
+        .collectable_scopes
+        .first()
+        .map(|scope| scope.scope_hash.clone())
+        .unwrap_or_else(|| "0".repeat(64));
+    let receipt = |revision: &str, digit: char| ScopeRootAuthorityReceiptV1 {
+        revision: revision.to_owned(),
+        terminal_count: 1,
+        digest: format!("sha256:{}", digit.to_string().repeat(64)),
+    };
+    let proof = ScopeRootLivenessProofV1::new(
+        live_roots
+            .iter()
+            .map(|root| crate::retention::code_index_generations::code_index_scope_hash(root))
+            .collect(),
+        receipt("registry", '1'),
+        receipt("git", '2'),
+        receipt("mount", '3'),
+        receipt("config", '4'),
+        receipt("vector", '5'),
+        receipt("dependency", '6'),
+        ScopeRootCandidateBindingV1 {
+            scope_hash: candidate.clone(),
+            source_scope: source_scope.clone(),
+            vector_census_revision: "vector".to_owned(),
+            live: false,
+        },
+    )?;
+    let plan = if observed.collectable_scopes.is_empty() {
+        observed
+    } else {
+        plan_scope_root_retention_with_liveness_proof(
+            store_root,
+            proof.clone(),
+            minimum_stranding_age_secs,
+            now_secs,
+        )?
+    };
+    if !plan.collectable_scopes.is_empty() {
+        prepare_scope_root_binding_cleanup(
+            store_root,
+            &plan,
+            &candidate,
+            &source_scope,
+            &proof,
+            completed_at,
+        )?;
+    }
+    let report =
+        execute_scope_root_retention(store_root, plan, &proof, mode, now_secs, completed_at)?;
+    if !report.collected_scopes.is_empty() {
+        complete_scope_root_binding_cleanup(
+            store_root,
+            &ScopeRootBindingCleanupReplayV1 {
+                scope_hash: candidate,
+                source_scope,
+                liveness_proof: proof,
+            },
+        )?;
+    }
+    Ok(report)
+}
+
 #[test]
 fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        run_scope_root_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -416,7 +507,7 @@ fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() 
     let stranded_scope = seeded_scope(&fixture, code_index.path(), &deleted_worktree, 2);
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = run_scope_root_retention(
+    let report = execute_scope_retention_with_test_binding_cleanup(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -488,7 +579,7 @@ fn code_index_scope_matching_a_live_worktree_is_never_collected() {
 fn code_index_scope_with_a_pending_generation_journal_is_refused() {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        StrandedScopeRefusalV1, run_scope_root_retention,
+        StrandedScopeRefusalV1,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -508,7 +599,7 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
     .expect("seed pending generation journal");
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = run_scope_root_retention(
+    let report = execute_scope_retention_with_test_binding_cleanup(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -542,7 +633,6 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
 fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        run_scope_root_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -554,7 +644,7 @@ fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
     let stranded_scope = seeded_scope(&fixture, code_index.path(), &just_removed, 1);
     let live_roots = BTreeSet::from([live_root]);
 
-    let report = run_scope_root_retention(
+    let report = execute_scope_retention_with_test_binding_cleanup(
         code_index.path(),
         &live_roots,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -581,7 +671,7 @@ fn freshly_stranded_code_index_scope_is_retained_until_the_age_gate_passes() {
 fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-        plan_scope_root_retention, run_scope_root_retention,
+        plan_scope_root_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -598,7 +688,7 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
         unix_now_secs() + EIGHT_DAYS_SECS,
     );
-    let applied = run_scope_root_retention(
+    let applied = execute_scope_retention_with_test_binding_cleanup(
         code_index.path(),
         &unproven,
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
@@ -910,7 +1000,6 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
     for (state, reason) in [
         (
             crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
-                target_generation: vector.clone(),
                 completed_units: 1,
                 total_units: 2,
             },
@@ -3272,93 +3361,54 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
     registry.shutdown().await;
 }
 
-/// In-process semantic-vector graph fixture: one shared memory graph stands
-/// in for the daemon-retained code-graph runtime, so publish/restore flows
-/// exercise the same graph store the production provider resolves.
+/// In-process semantic-vector graph fixture: the canonical isolated semantic
+/// evaluation graph stands in for the daemon-retained code-graph runtime, so
+/// publish/restore flows exercise the same verified staging/publication
+/// machinery the production provider resolves.
 #[cfg(feature = "semantic-fastembed")]
-struct MemorySemanticVectorGraphFixtureV1 {
-    graph: Arc<GraphDb>,
-    authority: Arc<dyn RetainedGraphStoreLeaseV1>,
+struct IsolatedSemanticVectorGraphProviderV1 {
+    graph: Arc<tracedecay_usecases::store::vector_generations::IsolatedSemanticEvaluationGraphV1>,
+    current: tracedecay_domain::CodeGenerationId,
 }
 
 #[cfg(feature = "semantic-fastembed")]
-#[derive(Debug)]
-struct MemorySemanticVectorGraphLeaseV1 {
-    binding: StoreRuntimeBindingV1,
-    verified_locator: VerifiedStoreLocatorV1,
-    canonical_path: PathBuf,
-}
-
-#[cfg(feature = "semantic-fastembed")]
-impl RetainedGraphStoreLeaseV1 for MemorySemanticVectorGraphLeaseV1 {
-    fn binding(&self) -> &StoreRuntimeBindingV1 {
-        &self.binding
-    }
-
-    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
-        &self.verified_locator
-    }
-
-    fn canonical_path(&self) -> &Path {
-        &self.canonical_path
+impl IsolatedSemanticVectorGraphProviderV1 {
+    fn new(
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    ) -> Arc<Self> {
+        let graph = tracedecay_usecases::store::vector_generations::
+            isolated_semantic_evaluation_graph(&[generation], Arc::new(NeverCancelled))
+                .expect("open isolated semantic evaluation graph");
+        Arc::new(Self {
+            graph,
+            current: generation.manifest().generation_id.clone(),
+        })
     }
 }
 
 #[cfg(feature = "semantic-fastembed")]
-impl MemorySemanticVectorGraphFixtureV1 {
-    fn new(store_root: &Path) -> Arc<Self> {
-        let binding = StoreRuntimeBindingV1::new(
-            StoreShardIdV1::project(
-                BrainId::try_from("brain-semantic-vector-test".to_owned()).expect("brain id"),
-                UserProfileId::try_from("profile-semantic-vector-test".to_owned())
-                    .expect("profile id"),
-                ProjectId::try_from("project-semantic-vector-test".to_owned())
-                    .expect("project id"),
-            ),
-            StoreIncarnationV1::new(1).expect("incarnation"),
-            StoreAuthorityEpochV1::new(1).expect("epoch"),
-        );
-        let canonical_path = store_root.join("graph.grafeo");
-        let authority: Arc<dyn RetainedGraphStoreLeaseV1> =
-            Arc::new(MemorySemanticVectorGraphLeaseV1 {
-                verified_locator: VerifiedStoreLocatorV1::new(
-                    binding.shard_id.clone(),
-                    binding.incarnation,
-                    canonical_store_locator_digest(&canonical_path).expect("locator digest"),
-                ),
-                binding,
-                canonical_path,
-            });
-        let graph = GraphDbOwner::memory(Arc::new(NeverCancelled))
-            .expect("memory graph")
-            .handle();
-        Arc::new(Self { graph, authority })
-    }
-
-    fn retained(&self) -> RetainedSemanticVectorGraphV1 {
-        RetainedSemanticVectorGraphV1::new(
-            Arc::clone(&self.graph),
-            Arc::new(NeverCancelled),
-            Arc::clone(&self.authority),
-        )
-    }
-}
-
-#[cfg(feature = "semantic-fastembed")]
-impl SemanticVectorGraphProviderV1 for MemorySemanticVectorGraphFixtureV1 {
+impl SemanticVectorGraphProviderV1 for IsolatedSemanticVectorGraphProviderV1 {
     fn graph_for_generation<'a>(
         &'a self,
-        _generation: &'a tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+        generation: &'a tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> SemanticRuntimeFuture<'a, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
     {
-        Box::pin(async move { Ok(self.retained()) })
+        Box::pin(async move {
+            self.graph
+                .retained(&generation.manifest().generation_id)
+                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
+        })
     }
 
     fn graph_for_current(
         &self,
     ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
     {
-        Box::pin(async move { Ok(self.retained()) })
+        Box::pin(async move {
+            self.graph
+                .retained(&self.current)
+                .map_err(|error| SemanticVectorGraphErrorV1::Rejected(error.to_string()))
+        })
     }
 }
 
@@ -3444,7 +3494,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .0,
     );
     let handle = DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("semantic handle");
-    let vector_graph = MemorySemanticVectorGraphFixtureV1::new(database_root.path());
+    let vector_graph = IsolatedSemanticVectorGraphProviderV1::new(&latest.generation);
     let runtime = ProductionSemanticRuntimeV1::new(
         handle.clone(),
         Arc::clone(&database),
@@ -3475,14 +3525,6 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     .expect("Jina projection became atomically current");
     let current = handle.current().expect("current semantic pointer");
     assert!(current_query_factory(&handle).is_some());
-    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(&vector_graph.graph));
-    assert_eq!(
-        store
-            .active_generation_id(Arc::new(NeverCancelled))
-            .await
-            .expect("active vector"),
-        Some(current.generation.clone())
-    );
 
     let restarted_handle =
         DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("restarted handle");
@@ -3504,7 +3546,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     );
     assert!(
         restarted
-            .restore_current(&latest.generation)
+            .restore_current(&latest.generation, &current.generation)
             .await
             .expect("restore current generation")
     );

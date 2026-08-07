@@ -21,12 +21,14 @@ use super::code_index_scheduler::query_runtime::{
 use crate::application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
-    register_project_semantic_redundancy_authority,
-    unregister_project_semantic_redundancy_authority,
+    prepare_project_semantic_redundancy_authority, project_committed_semantic_pins,
+    project_semantic_production_runtime, project_semantic_retained_code_generation,
+    project_semantic_retained_vector_generations,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
 };
+use tracedecay_query::retrieval::QueryAuthorityV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueryAuthorityUnavailableReasonV1 {
@@ -86,6 +88,35 @@ struct ActivatedQueryStateV1 {
     cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
 }
 
+pub(crate) struct PreparedQueryActivationV1 {
+    scope: ResolvedScope,
+    activated: RetrievalProfileStateV1,
+    cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+    query_authority: Arc<QueryAuthorityV1>,
+}
+
+impl PreparedQueryActivationV1 {
+    pub(crate) fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
+    pub(crate) fn configuration_revision(
+        &self,
+    ) -> &tracedecay_domain::configuration::ConfigurationRevisionId {
+        self.activated.configuration_revision()
+    }
+
+    pub(crate) fn base_configuration_revision(
+        &self,
+    ) -> Option<&tracedecay_domain::configuration::ConfigurationRevisionId> {
+        current_transition(&self.activated).map(|event| &event.base_revision)
+    }
+
+    pub(crate) fn query_authority(&self) -> &Arc<QueryAuthorityV1> {
+        &self.query_authority
+    }
+}
+
 /// Daemon owner for the current accepted query profile and the
 /// durable project cursor-key authority loaded from its registered store.
 #[derive(Clone)]
@@ -129,51 +160,149 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
         Box::pin(async move {
             let scope = committed.scope.clone();
             let semantic_enabled = committed.state.active().compatibility().semantic.is_some();
-            unregister_project_semantic_redundancy_authority(&project_root);
-            registry
-                .clear_semantic_query_authority(&scope)
-                .await
-                .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
-            registry
-                .clear_query_authority(&scope)
-                .await
-                .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
-            let cursor_keys = Arc::new(
-                session_db
-                    .load_session_cursor_key_provider_result()
-                    .await
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?,
-            );
-            provider
-                .update_after_successful_activation(
-                    scope.clone(),
-                    committed.state.clone(),
-                    cursor_keys,
+            let committed_epoch = committed.epoch;
+            let transition_digest = committed.transition_digest.clone();
+            let result_revision = committed.state.configuration_revision().clone();
+            let active_semantic_generation = committed
+                .state
+                .active()
+                .compatibility()
+                .semantic
+                .as_ref()
+                .map(|pins| pins.vector_generation_id.clone());
+            let rollback_semantic_generation = committed
+                .state
+                .rollback_profile()
+                .and_then(|profile| profile.compatibility().semantic.as_ref())
+                .map(|pins| pins.vector_generation_id.clone());
+            let prepared_redundancy = prepare_project_semantic_redundancy_authority(&committed);
+            let failed_redundancy = prepared_redundancy.clone();
+            let attempt = registry
+                .begin_committed_query_activation(
+                    &project_root,
+                    &scope,
+                    committed_epoch,
+                    &result_revision,
+                    &transition_digest,
+                    &prepared_redundancy,
                 )
-                .map_err(map_update_observer_error)?;
-            super::code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
-                &registry,
-                &project_root,
-                &scope,
-                &provider,
-            )
-            .await
-            .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
-            if semantic_enabled {
+                .await
+                .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+            let observed = async {
+                let redundancy_ready = prepared_redundancy.has_active_authority();
+                let prepared_cache = if semantic_enabled {
+                    let pins = committed
+                        .current_activation
+                        .as_ref()
+                        .map(|activation| &activation.compatibility)
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Rejected)?;
+                    if !redundancy_ready {
+                        return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
+                    }
+                    let runtime = project_semantic_production_runtime(&project_root)
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    let vectors = runtime
+                        .active_vector_generation(pins)
+                        .await
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                    let source_generation = vectors.source_generation().clone();
+                    if !runtime.cache_ready_for(pins, &source_generation) {
+                        let code = project_semantic_retained_code_generation(
+                            &project_root,
+                            &source_generation,
+                        )
+                        .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                        Some(
+                            runtime
+                                .prepare_restore_current(&code, &pins.vector_generation_id)
+                                .await
+                                .map_err(|_| {
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable
+                                })?
+                                .ok_or(
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
+                                )?,
+                        )
+                    } else {
+                        Some(
+                            runtime
+                                .prepare_current_cache_observation(pins, &source_generation)
+                                .ok_or(
+                                    RetrievalProfileActivationObserverErrorV1::Unavailable,
+                                )?,
+                        )
+                    }
+                } else {
+                    None
+                };
+                let serving = registry
+                    .serving_code_scope(&project_root)
+                    .await
+                    .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                if serving.repository_id != scope.repository_id
+                    || serving.worktree_id != scope.worktree_id
+                {
+                    return Err(RetrievalProfileActivationObserverErrorV1::Rejected);
+                }
+                let generation = serving
+                    .serving_generation
+                    .ok_or(RetrievalProfileActivationObserverErrorV1::Unavailable)?;
+                let cursor_keys = Arc::new(
+                    session_db
+                        .load_session_cursor_key_provider_result()
+                        .await
+                        .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?,
+                );
+                let prepared = provider
+                    .prepare_after_successful_activation(
+                        scope.clone(),
+                        committed.state.clone(),
+                        cursor_keys,
+                        &generation.manifest().privacy_domain,
+                    )
+                    .map_err(map_update_observer_error)?;
+                let semantic_authority = semantic_enabled
+                    .then(|| {
+                        super::code_index_scheduler::semantic_query_runtime::SemanticQueryAuthorityV1::from_committed(
+                            committed.clone(),
+                        )
+                    })
+                    .transpose()
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Rejected)?
+                    .map(Arc::new);
                 registry
-                    .mount_semantic_query_authority_from_committed(
+                    .install_committed_query_authorities(
                         &project_root,
                         &scope,
-                        committed.clone(),
+                        &provider,
+                        prepared,
+                        semantic_authority,
+                        prepared_cache,
+                        rollback_semantic_generation.as_ref(),
+                        prepared_redundancy,
+                        &attempt,
                     )
                     .await
-                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Unavailable)?;
-                let _ = register_project_semantic_redundancy_authority(
-                    project_root.clone(),
-                    &committed,
-                );
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+                Ok(())
             }
-            Ok(())
+            .await;
+            if observed.is_err() {
+                let cache_generation = active_semantic_generation
+                    .as_ref()
+                    .or(rollback_semantic_generation.as_ref());
+                registry
+                    .clear_failed_query_activation(
+                        &project_root,
+                        &scope,
+                        cache_generation,
+                        failed_redundancy,
+                        &attempt,
+                    )
+                    .await
+                    .map_err(|_| RetrievalProfileActivationObserverErrorV1::Conflict)?;
+            }
+            observed
         })
     }
 }
@@ -204,6 +333,80 @@ impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
 }
 
 impl DaemonQueryAuthorityProviderV1 {
+    pub(crate) fn prepare_after_successful_activation(
+        &self,
+        scope: ResolvedScope,
+        activated: RetrievalProfileStateV1,
+        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
+        privacy_domain: &PrivacyDomainId,
+    ) -> Result<PreparedQueryActivationV1, QueryAuthorityUpdateErrorV1> {
+        scope
+            .validate()
+            .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
+        let current = self
+            .activated
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !current
+            .get(&scope.scope_digest)
+            .is_some_and(|installed| installed.scope == scope && installed.state == activated)
+        {
+            validate_successful_activation_update(&current, &scope, &activated)?;
+        }
+        let candidate = ActivatedQueryStateV1 {
+            scope: scope.clone(),
+            state: activated.clone(),
+            cursor_keys: Arc::clone(&cursor_keys),
+        };
+        let material = query_material_for_activated(&candidate, privacy_domain)
+            .map_err(map_unavailable_update_error)?;
+        let query_authority = Arc::new(
+            QueryAuthorityV1::new(
+                material.profile,
+                material.diversity,
+                material.ranking_revision,
+                material
+                    .keyring
+                    .ok_or(QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?,
+            )
+            .map_err(|_| QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?,
+        );
+        Ok(PreparedQueryActivationV1 {
+            scope,
+            activated,
+            cursor_keys,
+            query_authority,
+        })
+    }
+
+    pub(crate) fn commit_prepared_activation(
+        &self,
+        prepared: &PreparedQueryActivationV1,
+    ) -> Result<(), QueryAuthorityUpdateErrorV1> {
+        let mut current = self
+            .activated
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .get(&prepared.scope.scope_digest)
+            .is_some_and(|installed| {
+                installed.scope == prepared.scope && installed.state == prepared.activated
+            })
+        {
+            return Ok(());
+        }
+        validate_successful_activation_update(&current, &prepared.scope, &prepared.activated)?;
+        current.insert(
+            prepared.scope.scope_digest.clone(),
+            ActivatedQueryStateV1 {
+                scope: prepared.scope.clone(),
+                state: prepared.activated.clone(),
+                cursor_keys: Arc::clone(&prepared.cursor_keys),
+            },
+        );
+        Ok(())
+    }
+
     /// Restore the evaluated fallback installed as the configuration store's
     /// initial state. Initial installation has no mutation audit event, so it
     /// is admitted only while the exact query profile is active with no rollback
@@ -260,20 +463,11 @@ impl DaemonQueryAuthorityProviderV1 {
         scope
             .validate()
             .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
-        let event = current_transition(&activated)
-            .ok_or(QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?;
         let mut current = self
             .activated
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(prior) = current.get(&scope.scope_digest) {
-            if prior.scope != scope {
-                return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
-            }
-            if prior.state.active().profile_digest() != &event.prior_active_digest {
-                return Err(QueryAuthorityUpdateErrorV1::CasConflict);
-            }
-        }
+        validate_successful_activation_update(&current, &scope, &activated)?;
         current.insert(
             scope.scope_digest.clone(),
             ActivatedQueryStateV1 {
@@ -340,27 +534,75 @@ impl DaemonQueryAuthorityProviderV1 {
         if !has_current_query_authority(&activated.state) {
             return Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
         }
-        let query = exact_query_profile(&activated.state)?;
-        let ranking_revision =
-            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
-                .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
-        let keyring = activated
-            .cursor_keys
-            .retrieval_keyring(privacy_domain.clone())
-            .map_err(|_| QueryAuthorityUnavailableReasonV1::KeyUnavailable)?;
-        Ok(QueryAuthorityMaterialV1 {
-            scope: activated.scope.clone(),
-            evaluation: AcceptedQueryEvaluationV1 {
-                status: crate::search_eval::DirectEvaluationStatusV1::Pass,
-                scope_digest: activated.scope.scope_digest.clone(),
-                profile_id: query.profile().profile_id.clone(),
-                evaluation_result_anchor: query.profile().evaluation_result_anchor.clone(),
-            },
-            profile: query.profile().clone(),
-            diversity: query.diversity().clone(),
-            ranking_revision,
-            keyring: Some(keyring),
-        })
+        query_material_for_activated(activated, privacy_domain)
+    }
+}
+
+fn validate_successful_activation_update(
+    current: &BTreeMap<ManifestDigest, ActivatedQueryStateV1>,
+    scope: &ResolvedScope,
+    activated: &RetrievalProfileStateV1,
+) -> Result<(), QueryAuthorityUpdateErrorV1> {
+    let event =
+        current_transition(activated).ok_or(QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?;
+    if activated.configuration_revision() != &event.result_revision {
+        return Err(QueryAuthorityUpdateErrorV1::ActivationNotCurrent);
+    }
+    if let Some(prior) = current.get(&scope.scope_digest) {
+        if prior.scope != *scope {
+            return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
+        }
+        if prior.state.configuration_revision() != &event.base_revision
+            || prior.state.active().profile_digest() != &event.prior_active_digest
+        {
+            return Err(QueryAuthorityUpdateErrorV1::CasConflict);
+        }
+    }
+    Ok(())
+}
+
+fn query_material_for_activated(
+    activated: &ActivatedQueryStateV1,
+    privacy_domain: &PrivacyDomainId,
+) -> Result<QueryAuthorityMaterialV1, QueryAuthorityUnavailableReasonV1> {
+    let query = exact_query_profile(&activated.state)?;
+    let ranking_revision =
+        ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+            .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
+    let keyring = activated
+        .cursor_keys
+        .retrieval_keyring(privacy_domain.clone())
+        .map_err(|_| QueryAuthorityUnavailableReasonV1::KeyUnavailable)?;
+    Ok(QueryAuthorityMaterialV1 {
+        scope: activated.scope.clone(),
+        evaluation: AcceptedQueryEvaluationV1 {
+            status: crate::search_eval::DirectEvaluationStatusV1::Pass,
+            scope_digest: activated.scope.scope_digest.clone(),
+            profile_id: query.profile().profile_id.clone(),
+            evaluation_result_anchor: query.profile().evaluation_result_anchor.clone(),
+        },
+        profile: query.profile().clone(),
+        diversity: query.diversity().clone(),
+        ranking_revision,
+        keyring: Some(keyring),
+    })
+}
+
+fn map_unavailable_update_error(
+    reason: QueryAuthorityUnavailableReasonV1,
+) -> QueryAuthorityUpdateErrorV1 {
+    match reason {
+        QueryAuthorityUnavailableReasonV1::ScopeMismatch => {
+            QueryAuthorityUpdateErrorV1::ScopeMismatch
+        }
+        QueryAuthorityUnavailableReasonV1::ActivationUnavailable
+        | QueryAuthorityUnavailableReasonV1::ActivationNotCurrent
+        | QueryAuthorityUnavailableReasonV1::ScopeRequired
+        | QueryAuthorityUnavailableReasonV1::KeyUnavailable
+        | QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile
+        | QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile => {
+            QueryAuthorityUpdateErrorV1::ActivationNotCurrent
+        }
     }
 }
 
@@ -467,797 +709,5 @@ fn map_update_observer_error(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::application::semantic_runtime::{
-        CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
-        SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
-    };
-    use crate::config::retrieval::{
-        PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1, RetrievalProfileAuditEventV1,
-        RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1,
-        SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
-    };
-    use crate::search_eval::{
-        DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
-        DirectQualityMetricsV1, DirectRatioMetricV1, EvaluationExecutionContractV1,
-        OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
-    };
-    use std::{collections::BTreeMap, path::Path, process::Command};
-    use tempfile::TempDir;
-    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
-    use tracedecay_domain::{
-        CalibrationProfileId, ChunkerRevision, CodeGenerationId, ComponentRevision,
-        DiversityPolicy, EmbeddingDeviceClassV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-        EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1,
-        EmbeddingTruncationSideV1, FreshnessVectorDigest, FusionProfile, ManifestDigest, ProjectId,
-        RetrievalBudget, UtcMicros, VectorGenerationIdV1, canonical_sha256,
-    };
-    use tracedecay_domain::{
-        EphemeralSanitizedQueryViewV1, PrincipalId, QueryNormalizationRevision, RepositoryId,
-        RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch, RetrieverOutcome,
-        SanitizerRevision, SingleRootScopeV1, TemporalModeV1, VectorWatermark, WorktreeId,
-    };
-    use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id")
-    }
-
-    fn passing_report(evaluated_profile_id: &str) -> DirectEvaluationReportV1 {
-        let empty_ratio = || DirectRatioMetricV1 {
-            numerator: 0,
-            denominator: 0,
-            ppm: 0,
-        };
-        let row = |partition: &str| DirectProfileEvaluationV1 {
-            profile_id: evaluated_profile_id.to_owned(),
-            partition: partition.to_owned(),
-            query_count: 0,
-            failed_queries: 0,
-            fallback_stable: true,
-            fallback_matches_expected: true,
-            cancellation_bounded: true,
-            offline: true,
-            resource_status: DirectEvaluationStatusV1::Pass,
-            optional_stages: OptionalStageMeasurementsV1 {
-                semantic: OptionalStageMeasurementV1::NotRequested,
-                rerank: OptionalStageMeasurementV1::NotRequested,
-            },
-            quality: DirectQualityMetricsV1 {
-                relevant_query_count: 0,
-                recall_at_10: empty_ratio(),
-                precision_at_10: empty_ratio(),
-                mean_reciprocal_rank_ppm: 0,
-                ndcg_at_10_ppm: 0,
-                duplicate_rate: empty_ratio(),
-                protected_recall_at_10: empty_ratio(),
-                strata: Vec::new(),
-                worst_stratum: None,
-            },
-            status: DirectEvaluationStatusV1::Pass,
-            queries: Vec::new(),
-        };
-        DirectEvaluationReportV1 {
-            command: "compare".to_owned(),
-            status: DirectEvaluationStatusV1::Pass,
-            workload_digest: "workload".to_owned(),
-            corpus_digest: "corpus".to_owned(),
-            fixture_source_repository_commit: "commit".to_owned(),
-            fixture_source_repository_tree: "tree".to_owned(),
-            execution_contract: EvaluationExecutionContractV1 {
-                exact_file_count: 0,
-                exact_corpus_bytes: 0,
-                exact_eligible_chunks_current: 0,
-                exact_eligible_chunks_10x: 0,
-                exact_query_count: 0,
-                model_revision: "model.aggregate-only-test.v1".to_owned(),
-                projection_revision: "projection.aggregate-only-test.v1".to_owned(),
-                fusion_revision: "fusion.aggregate-only-test.v1".to_owned(),
-                runtime_revision: "runtime.aggregate-only-test.v1".to_owned(),
-                cache_state: "empty".to_owned(),
-                concurrency:
-                    crate::search_eval::candidate_output::EvaluationConcurrencyContractV1 {
-                        query_workers: 1,
-                        projection_workers: 1,
-                        query_execution: "serial".to_owned(),
-                    },
-            },
-            profile_material_digests: BTreeMap::new(),
-            raw_output_digest: "sha256:aggregate-only-test".to_owned(),
-            raw_outputs: Vec::new(),
-            profiles: vec![row("train"), row("validation")],
-        }
-    }
-
-    pub(crate) fn accepted_profile(
-        evaluated_profile_id: &str,
-        lanes: &[RetrieverKind],
-    ) -> AcceptedRetrievalProfileV1 {
-        accepted_profile_with_compatibility(
-            evaluated_profile_id,
-            lanes,
-            RetrievalCompatibilityPinsV1::default(),
-        )
-    }
-
-    fn accepted_profile_with_compatibility(
-        evaluated_profile_id: &str,
-        lanes: &[RetrieverKind],
-        compatibility: RetrievalCompatibilityPinsV1,
-    ) -> AcceptedRetrievalProfileV1 {
-        let evaluation = PassingRetrievalEvaluationV1::from_report(
-            &passing_report(evaluated_profile_id),
-            evaluated_profile_id,
-        )
-        .expect("passing evaluation");
-        let profile = FusionProfile {
-            profile_id: id(&format!("profile.{evaluated_profile_id}")),
-            evaluation_result_anchor: evaluation.evaluation_anchor().clone(),
-            calibrations: lanes
-                .iter()
-                .copied()
-                .map(|lane| {
-                    (
-                        lane,
-                        id::<CalibrationProfileId>(&format!(
-                            "calibration.{}.{}",
-                            lane.as_str(),
-                            evaluated_profile_id
-                        )),
-                    )
-                })
-                .collect(),
-            score_domain_calibrations: BTreeMap::new(),
-            weights_micros: lanes.iter().copied().map(|lane| (lane, 1)).collect(),
-            diversity_policy_id: id(&format!("diversity.{evaluated_profile_id}")),
-            rerank_policy_id: None,
-            retrieval_budget: RetrievalBudget {
-                max_candidates_per_lane: 8,
-                max_fused_candidates: 8,
-                max_hydrated_results: 4,
-                max_hydration_bytes: 4096,
-                deadline_micros: None,
-            },
-        };
-        let diversity = DiversityPolicy {
-            policy_id: profile.diversity_policy_id.clone(),
-            evaluation_result_anchor: Some(profile.evaluation_result_anchor.clone()),
-            per_source_namespace: None,
-            per_source_instance: None,
-            per_repository: None,
-            per_file: None,
-            per_session_or_thread: None,
-            per_copy_cluster: None,
-            per_evidence_role: None,
-        };
-        AcceptedRetrievalProfileV1::new(profile, diversity, None, compatibility, evaluation)
-            .expect("accepted profile")
-    }
-
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
-
-    fn semantic_pins() -> SemanticCompatibilityPinsV1 {
-        let artifact = digest('a');
-        let projection = EmbeddingProjectionKeyV1 {
-            model_artifact_digest: artifact.clone(),
-            tokenizer_digest: digest('b'),
-            config_digest: digest('c'),
-            query_instruction_digest: None,
-            document_instruction_digest: None,
-            pooling: EmbeddingPoolingV1::Mean,
-            truncation_side: EmbeddingTruncationSideV1::Right,
-            truncation_length: 128,
-            runtime_backend: "fastembed-ort".to_owned(),
-            runtime_build_revision: "runtime.query-activation-test.v1".to_owned(),
-            device_class: EmbeddingDeviceClassV1::Cpu,
-            dimensions: 4,
-            metric: EmbeddingMetricV1::Cosine,
-            normalization: EmbeddingNormalizationV1::L2,
-            precision: EmbeddingPrecisionV1::Fp32,
-            chunk_schema_revision: "code-search-chunk.v1".to_owned(),
-            chunker_revision: id::<ChunkerRevision>("chunker.query-activation-test.v1"),
-            privacy_domain: id("privacy.query-activation-test"),
-            privacy_key_epoch: 1,
-        }
-        .admit()
-        .expect("admitted semantic projection");
-        let vector_generation_id = VectorGenerationIdV1::new(digest('d'));
-        SemanticCompatibilityPinsV1 {
-            implementation_revision: ComponentRevision::new("semantic.query-activation-test.v1")
-                .expect("implementation revision"),
-            fusion_revision: ComponentRevision::new("fusion.query-activation-test.v1")
-                .expect("fusion revision"),
-            artifact_manifest_digest: artifact,
-            runtime_compatibility_digest: digest('e'),
-            search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
-                .and_then(|profile| profile.index_key())
-                .expect("search index key"),
-            calibration: SemanticCalibrationProfileV1 {
-                calibration_profile_id: id("calibration.semantic.semantic-active"),
-                cohort_digest: digest('f'),
-                projection_key: projection.projection_key().clone(),
-                vector_generation: vector_generation_id.clone(),
-                capability_manifest_digest: digest('1'),
-                maximum_distance_micros: 2_000_000,
-                minimum_margin_micros: 0,
-            },
-            projection,
-            vector_generation_id,
-            resources: SemanticResourceRequirementV1 {
-                model_bytes: 10,
-                tokenizer_bytes: 5,
-                resident_bytes: 20,
-                threads: 2,
-                batch_size: 4,
-                sequence_length: 128,
-                load_deadline_ms: 1_000,
-            },
-        }
-    }
-
-    fn semantic_committed_state(scope: ResolvedScope) -> CommittedRetrievalProfileStateV1 {
-        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let pins = semantic_pins();
-        let semantic = accepted_profile_with_compatibility(
-            "semantic-active",
-            &[
-                RetrieverKind::ExactLiteral,
-                RetrieverKind::Lexical,
-                RetrieverKind::Graph,
-                RetrieverKind::Semantic,
-            ],
-            RetrievalCompatibilityPinsV1 {
-                semantic: Some(pins.clone()),
-                rerank: None,
-            },
-        );
-        let base_revision = id::<ConfigurationRevisionId>("configuration.query-activation-test.1");
-        let result_revision =
-            id::<ConfigurationRevisionId>("configuration.query-activation-test.2");
-        let actor_id = id("actor.query-activation-test");
-        let operation = RetrievalProfileAuditOperationV1::Activate;
-        let freshness_vector_digest = digest('2');
-        let occurred_at = UtcMicros(20);
-        let audit = RetrievalProfileAuditEventV1 {
-            event_id: canonical_sha256(&(
-                "tracedecay.retrieval.profile-audit.v1",
-                &actor_id,
-                &operation,
-                &query.profile().profile_id,
-                &semantic.profile().profile_id,
-                query.profile_digest(),
-                semantic.profile_digest(),
-                &semantic.profile().evaluation_result_anchor,
-                &freshness_vector_digest,
-                &base_revision,
-                &result_revision,
-                occurred_at,
-            ))
-            .expect("audit digest"),
-            actor_id,
-            operation,
-            prior_active_profile_id: query.profile().profile_id.clone(),
-            resulting_active_profile_id: semantic.profile().profile_id.clone(),
-            prior_active_digest: query.profile_digest().clone(),
-            resulting_active_digest: semantic.profile_digest().clone(),
-            evaluation_anchor: semantic.profile().evaluation_result_anchor.clone(),
-            freshness_vector_digest,
-            base_revision,
-            result_revision: result_revision.clone(),
-            occurred_at,
-        };
-        let state = serde_json::from_value::<RetrievalProfileStateSnapshotV1>(serde_json::json!({
-            "configuration_revision": result_revision,
-            "active": semantic,
-            "rollback": query,
-            "audit": [audit],
-        }))
-        .expect("persisted semantic retrieval state")
-        .into_state()
-        .expect("semantic retrieval state");
-        let configuration = SemanticConfigurationPinV1 {
-            revision_id: state.configuration_revision().clone(),
-            snapshot_id: id::<ConfigurationSnapshotId>(
-                "configuration.snapshot.query-activation-test",
-            ),
-            effective_behavior_digest: digest('3'),
-        };
-        let command = SemanticActivationCommandV1::new(
-            configuration,
-            SemanticActivationRequestV1::new(pins.vector_generation_id.clone(), None, None)
-                .expect("semantic activation request"),
-        )
-        .expect("semantic activation command");
-        let receipt = SemanticActivationReceiptV1::issue(&command, UtcMicros(30))
-            .expect("semantic activation receipt");
-        CommittedRetrievalProfileStateV1 {
-            scope,
-            state,
-            current_activation: Some(
-                SemanticCurrentLinkedActivationV1::new(receipt, pins)
-                    .expect("current semantic activation"),
-            ),
-        }
-    }
-
-    fn git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run git fixture command");
-        assert!(status.success(), "git fixture command failed: {args:?}");
-    }
-
-    #[test]
-    fn unavailable_provider_status_contains_no_key_material() {
-        let provider = DaemonQueryAuthorityProviderV1::default();
-
-        assert_eq!(
-            provider.status(None),
-            QueryAuthorityProviderStatusV1::Unavailable {
-                reason: QueryAuthorityUnavailableReasonV1::ActivationUnavailable,
-            }
-        );
-        assert!(format!("{provider:?}").contains("REDACTED"));
-    }
-
-    #[test]
-    fn semantic_activation_selects_exact_query_rollback_profile() {
-        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let semantic_active = accepted_profile(
-            "semantic-active",
-            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
-        );
-
-        let selected = exact_query_profile_from_slots(&semantic_active, Some(&query))
-            .expect("rollback query profile");
-
-        assert_eq!(selected.profile().profile_id, query.profile().profile_id);
-    }
-
-    #[tokio::test]
-    async fn evaluated_initial_query_state_is_available_without_a_fake_activation_event() {
-        let provider = DaemonQueryAuthorityProviderV1::default();
-        let scope = ResolvedScope::new(
-            id("project.initial"),
-            id("repository.initial"),
-            id("worktree.initial"),
-            Some(id("refs/heads/main")),
-        )
-        .expect("scope");
-        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let state = RetrievalProfileStateV1::new(
-            id::<ConfigurationRevisionId>("configuration.query-initial.1"),
-            query.clone(),
-            &RetrievalRuntimeCompatibilityV1 {
-                retrieval_ceiling: RetrievalBudget {
-                    max_candidates_per_lane: 32,
-                    max_fused_candidates: 32,
-                    max_hydrated_results: 16,
-                    max_hydration_bytes: 65_536,
-                    deadline_micros: None,
-                },
-                semantic: None,
-                semantic_ceiling: None,
-                rerank: None,
-                rerank_ceiling: None,
-            },
-        )
-        .expect("initial state");
-
-        let directory = TempDir::new().expect("temporary cursor store");
-        let profile_root = directory.path().join("profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let _scope_guard =
-            crate::db::enter_daemon_database_scope(&profile_root, 1, "query-initial")
-                .expect("database scope");
-        let session_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("session registry");
-        let database = session_registry
-            .profile_sessions()
-            .await
-            .expect("session database");
-        let cursor_keys = Arc::new(
-            database
-                .load_session_cursor_key_provider_result()
-                .await
-                .expect("cursor keys"),
-        );
-        let status = provider
-            .install_evaluated_initial_state(scope.clone(), state, cursor_keys)
-            .expect("evaluated initial state");
-
-        assert!(matches!(
-            status,
-            QueryAuthorityProviderStatusV1::Available { profile_id, .. }
-                if profile_id == query.profile().profile_id
-        ));
-    }
-
-    #[test]
-    fn semantic_rollback_selects_restored_exact_query_active_profile() {
-        let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let prior_semantic = accepted_profile(
-            "semantic-prior",
-            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
-        );
-
-        let selected = exact_query_profile_from_slots(&query, Some(&prior_semantic))
-            .expect("active query profile");
-
-        assert_eq!(selected.profile().profile_id, query.profile().profile_id);
-    }
-
-    #[test]
-    fn zero_or_multiple_exact_query_profiles_fail_closed() {
-        let non_query = accepted_profile(
-            "semantic-active",
-            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
-        );
-        assert!(matches!(
-            exact_query_profile_from_slots(&non_query, None),
-            Err(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)
-        ));
-
-        let first = accepted_profile("query-first", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let second = accepted_profile("query-second", &RetrieverKind::QUERY_FALLBACK_LANES);
-        assert!(matches!(
-            exact_query_profile_from_slots(&first, Some(&second)),
-            Err(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile)
-        ));
-    }
-
-    #[tokio::test]
-    async fn semantic_activation_keeps_the_exact_query_fallback_available() {
-        let project = TempDir::new().expect("project root");
-        git(project.path(), &["init", "-q", "-b", "main"]);
-        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
-        git(
-            project.path(),
-            &["config", "user.email", "tracedecay@example.invalid"],
-        );
-        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
-        std::fs::write(project.path().join("src/lib.rs"), "pub fn indexed() {}\n")
-            .expect("source file");
-        git(project.path(), &["add", "."]);
-        git(project.path(), &["commit", "-qm", "fixture"]);
-
-        let project_id = ProjectId::new("project.query-semantic-activation").expect("project id");
-        let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
-            project.path(),
-            &project_id,
-        )
-        .expect("resolved scope");
-        let store = TempDir::new().expect("store root");
-        let registry = super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
-        registry
-            .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
-            .await
-            .expect("mount code index");
-        let cursor_store = TempDir::new().expect("cursor store");
-        let profile_root = cursor_store.path().join("profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let _cursor_scope =
-            crate::db::enter_daemon_database_scope(&profile_root, 2, "query-semantic-activation")
-                .expect("database scope");
-        let session_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("session registry");
-        let session_db = session_registry
-            .profile_sessions()
-            .await
-            .expect("session database");
-        let provider = DaemonQueryAuthorityProviderV1::default();
-        let registrar = DaemonQueryActivationRegistrarV1::new(
-            provider.clone(),
-            registry.clone(),
-            project.path().to_path_buf(),
-            session_db,
-        );
-
-        registrar
-            .activation_committed(semantic_committed_state(scope.clone()))
-            .await
-            .expect("semantic activation registration");
-
-        assert!(matches!(
-            provider.status(Some(&scope)),
-            QueryAuthorityProviderStatusV1::Available { profile_id, .. }
-                if profile_id.as_str() == "profile.query-baseline"
-        ));
-        assert!(
-            registry.has_query_authority_for_scope(&scope).await,
-            "semantic activation must keep the mounted query fallback query authority"
-        );
-        registry.shutdown().await;
-    }
-
-    fn restart_request(profile: &tracedecay_domain::FusionProfile) -> RetrievalRequest {
-        RetrievalRequest {
-            principal: PrincipalId::new("principal.query-restart").expect("principal"),
-            scope: RetrievalScope {
-                privacy_domain: PrivacyDomainId::new("privacy.query-restart")
-                    .expect("privacy domain"),
-                root: SingleRootScopeV1 {
-                    repository: RepositoryId::new("repository.query-restart").expect("repository"),
-                    worktree: Some(WorktreeId::new("worktree.query-restart").expect("worktree")),
-                    reference: None,
-                },
-            },
-            temporal_mode: TemporalModeV1::Current,
-            snapshot: RetrievalSnapshot {
-                watermarks: VectorWatermark::default(),
-                freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "7".repeat(64)))
-                    .expect("freshness digest"),
-                authorization_revision: id("authorization.query-restart"),
-                captured_at: UtcMicros(100),
-            },
-            profile_id: profile.profile_id.clone(),
-            budget: profile.retrieval_budget,
-        }
-    }
-
-    fn empty_restart_lanes() -> Vec<tracedecay_query::retrieval::fusion::CompositionLaneInput> {
-        RetrieverKind::QUERY_FALLBACK_LANES
-            .into_iter()
-            .map(|lane| {
-                tracedecay_query::retrieval::fusion::CompositionLaneInput::new(
-                    lane,
-                    RetrieverOutcome::Complete(RetrieverBatch {
-                        candidates: Vec::new(),
-                        evidence_by_occurrence: BTreeMap::<_, ()>::new(),
-                        coverage: tracedecay_domain::retrieval::RetrieverCoverage::default(),
-                        continuation: None,
-                    }),
-                )
-                .expect("empty lane")
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
-        let directory = TempDir::new().expect("temporary profile");
-        let profile_root = directory.path().join("profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let project_root = directory.path().join("project");
-        std::fs::create_dir_all(&project_root).expect("project root");
-        let project_id = ProjectId::new("project.query-restart").expect("project id");
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("production project enrollment");
-        let profile_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
-        let _scope_guard =
-            crate::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
-                .expect("daemon database scope");
-        let session_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity.clone(),
-            )
-            .await
-            .expect("session registry");
-        let database = session_registry
-            .project_sessions(project_id.clone(), [project_root.clone()])
-            .await
-            .expect("project session database");
-        assert_ne!(database.db_path(), profile_sessions_path);
-        assert!(
-            !profile_sessions_path.exists(),
-            "profile session shard must remain absent"
-        );
-        let cursor_keys = Arc::new(
-            database
-                .load_session_cursor_key_provider_result()
-                .await
-                .expect("durable cursor key provider"),
-        );
-        let scope = ResolvedScope::new(
-            project_id.clone(),
-            id("repository.query-restart"),
-            id("worktree.query-restart"),
-            None,
-        )
-        .expect("resolved scope");
-        let accepted = accepted_profile("query-restart", &RetrieverKind::QUERY_FALLBACK_LANES);
-        let state = RetrievalProfileStateV1::new(
-            id::<ConfigurationRevisionId>("configuration.query-restart.1"),
-            accepted.clone(),
-            &RetrievalRuntimeCompatibilityV1 {
-                retrieval_ceiling: accepted.profile().retrieval_budget,
-                semantic: None,
-                semantic_ceiling: None,
-                rerank: None,
-                rerank_ceiling: None,
-            },
-        )
-        .expect("initial state");
-        let provider = DaemonQueryAuthorityProviderV1::default();
-        provider
-            .install_evaluated_initial_state(scope.clone(), state.clone(), cursor_keys)
-            .expect("install first production authority");
-        let authority = super::super::code_index_scheduler::query_runtime::prepare_query_authority(
-            &scope,
-            &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
-            &provider,
-        )
-        .expect("first production query authority");
-        let request = restart_request(accepted.profile());
-        let query = EphemeralSanitizedQueryViewV1::sanitize(
-            "restart-stable query",
-            SanitizerRevision::new("query-sanitizer.query-restart").expect("sanitizer"),
-            QueryNormalizationRevision::new("query-normalization.query-restart")
-                .expect("normalization"),
-        )
-        .expect("query view");
-        let bindings = tracedecay_query::retrieval::PreparedQueryBindingsV1::new(
-            "code_symbol_search",
-            scope.scope_digest.clone(),
-            CodeGenerationId::new("generation.query-restart").expect("generation"),
-            digest('8'),
-        )
-        .expect("prepared bindings");
-        let prepared_cursor = tracedecay_query::retrieval::PreparedQueryV1::prepare(
-            Arc::clone(&authority),
-            request.clone(),
-            None,
-        )
-        .expect("prepare first page")
-        .paginate(
-            &bindings,
-            vec!["first".to_owned(), "second".to_owned()],
-            1,
-            UtcMicros(100),
-        )
-        .expect("issue prepared cursor")
-        .next_cursor
-        .expect("prepared continuation");
-        let composed = authority
-            .compose(&request, &query, empty_restart_lanes(), 1, None)
-            .expect("compose first fusion page");
-        let fusion_cursor = authority
-            .continuation_cursor_at(&request, &query, &composed.composition, 0)
-            .expect("issue fusion cursor");
-
-        drop(authority);
-        drop(provider);
-        drop(database);
-        drop(session_registry);
-        let reopened_registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("reopened session registry");
-        let reopened = reopened_registry
-            .project_sessions(project_id.clone(), [project_root])
-            .await
-            .expect("reopened durable project session database");
-        assert!(
-            !profile_sessions_path.exists(),
-            "reopen must not provision or consult the profile session shard"
-        );
-        let reopened_keys = Arc::new(
-            reopened
-                .load_session_cursor_key_provider_result()
-                .await
-                .expect("reopened durable cursor key provider"),
-        );
-        let reopened_provider = DaemonQueryAuthorityProviderV1::default();
-        reopened_provider
-            .install_evaluated_initial_state(
-                scope.clone(),
-                state.clone(),
-                Arc::clone(&reopened_keys),
-            )
-            .expect("install reopened production authority");
-        let reopened_authority =
-            super::super::code_index_scheduler::query_runtime::prepare_query_authority(
-                &scope,
-                &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
-                &reopened_provider,
-            )
-            .expect("reopened production query authority");
-
-        let resumed = tracedecay_query::retrieval::PreparedQueryV1::prepare(
-            Arc::clone(&reopened_authority),
-            request.clone(),
-            Some(&prepared_cursor),
-        )
-        .expect("authenticate prepared continuation after reopen")
-        .paginate(
-            &bindings,
-            vec!["first".to_owned(), "second".to_owned()],
-            1,
-            UtcMicros(101),
-        )
-        .expect("resume prepared continuation after reopen");
-        assert_eq!(resumed.items, vec!["second"]);
-        reopened_authority
-            .compose(
-                &request,
-                &query,
-                empty_restart_lanes(),
-                1,
-                Some(&fusion_cursor),
-            )
-            .expect("resume fusion continuation after reopen");
-
-        let foreign_root = directory.path().join("foreign-project");
-        std::fs::create_dir_all(&foreign_root).expect("foreign project root");
-        let foreign_project_id =
-            ProjectId::new("project.query-restart-foreign").expect("foreign project id");
-        crate::storage::write_enrollment_marker(
-            &foreign_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: foreign_project_id.as_str().to_owned(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .expect("foreign production project enrollment");
-        let foreign_database = reopened_registry
-            .project_sessions(foreign_project_id, [foreign_root])
-            .await
-            .expect("foreign project session database");
-        let foreign_keys = Arc::new(
-            foreign_database
-                .load_session_cursor_key_provider_result()
-                .await
-                .expect("foreign durable cursor key provider"),
-        );
-        let mismatched_provider = DaemonQueryAuthorityProviderV1::default();
-        mismatched_provider
-            .install_evaluated_initial_state(scope.clone(), state, foreign_keys)
-            .expect("install mismatched production authority");
-        let mismatched_authority =
-            super::super::code_index_scheduler::query_runtime::prepare_query_authority(
-                &scope,
-                &PrivacyDomainId::new("privacy.query-restart").expect("privacy domain"),
-                &mismatched_provider,
-            )
-            .expect("mismatched production query authority");
-        assert!(
-            tracedecay_query::retrieval::PreparedQueryV1::prepare(
-                Arc::clone(&mismatched_authority),
-                request.clone(),
-                Some(&prepared_cursor),
-            )
-            .is_err(),
-            "a foreign project's durable key must not authenticate the prepared cursor"
-        );
-        assert!(
-            mismatched_authority
-                .compose(
-                    &request,
-                    &query,
-                    empty_restart_lanes(),
-                    1,
-                    Some(&fusion_cursor),
-                )
-                .is_err(),
-            "a foreign project's durable key must not authenticate the fusion cursor"
-        );
-    }
-}
+#[path = "query_authority_provider_tests.rs"]
+pub(crate) mod tests;

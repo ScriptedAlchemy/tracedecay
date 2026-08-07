@@ -868,6 +868,7 @@ pub(crate) async fn dashboard_state_fixture(
             &project_root,
             Some(project_identity.as_str()),
         ),
+        graph_read_authority: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: FactOwnerV1::Project {
@@ -893,7 +894,7 @@ pub(crate) async fn dashboard_state_fixture(
         config_path: project.path().join("config.json"),
         dashboard_root,
         retention_config: crate::config::RetentionConfig::default(),
-        user_settings: Arc::new(ProductionUserSettingsDaemonClient),
+        user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,

@@ -5,6 +5,10 @@ use std::{
 
 use tracedecay_code_index::{
     chunks::content_digest,
+    graph_projection::{
+        CODE_GRAPH_PROJECTOR_REVISION_V2, build_published_code_graph_manifest_checked,
+        code_graph_projection_identity,
+    },
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
@@ -27,6 +31,7 @@ use tracedecay_domain::{
     SnapshotFileDispositionV1, StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros,
     WorktreeId, canonical_sha256,
 };
+use tracedecay_graph_db::{GraphNamespace, GraphProjectorRevision};
 
 use crate::support::{RUST_SOURCE, id};
 
@@ -453,6 +458,79 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .admitted_chunks()
             .expect("carry-forward retains parser-backed exact authority")
             .is_empty()
+    );
+}
+
+#[test]
+fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_identically() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
+        .expect("generation publishes");
+    let projector_revision =
+        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())
+            .expect("projector revision");
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph-test").expect("namespace"))
+            .expect("projection identity");
+    let manifest = build_published_code_graph_manifest_checked(
+        projection.clone(),
+        &generation,
+        &projector_revision,
+        &|| Ok(()),
+    )
+    .expect("published generation projects");
+
+    let label_count = |label: &str| {
+        manifest
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity
+                    .labels
+                    .iter()
+                    .any(|candidate| candidate.as_str() == label)
+            })
+            .count()
+    };
+    assert_eq!(label_count("CodeFile"), generation.snapshot().files.len());
+    assert_eq!(label_count("CodeChunk"), generation.chunks().chunks().len());
+    assert_eq!(
+        label_count("CodeSymbol"),
+        generation.symbols().symbols.len()
+    );
+    assert!(
+        manifest
+            .relations
+            .iter()
+            .any(|relation| { relation.kind.as_str() == "CodeFileContainsSymbol" })
+    );
+    assert!(
+        manifest
+            .relations
+            .iter()
+            .any(|relation| { relation.kind.as_str() == "CodeChunkDescribesSymbol" })
+    );
+
+    let sealed = generation.encode_sealed().expect("generation seals");
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("generation restores");
+    let replayed = build_published_code_graph_manifest_checked(
+        projection,
+        &restored,
+        &projector_revision,
+        &|| Ok(()),
+    )
+    .expect("restored generation projects");
+    assert_eq!(
+        manifest
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("original projection digest"),
+        replayed
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("replayed projection digest")
     );
 }
 

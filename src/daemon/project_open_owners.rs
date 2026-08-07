@@ -113,6 +113,7 @@ use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 
 mod advisory_upgrade;
 mod lsp_registration;
+mod query_authority_upgrade;
 
 use lsp_registration::production_lsp_registration;
 
@@ -1411,6 +1412,7 @@ async fn register_semantic_activation_owner(
             );
             invocation
                 .restore_initial_query_authority_for_project(
+                    project_root,
                     scope.clone(),
                     current_state,
                     cursor_keys,
@@ -1447,6 +1449,17 @@ async fn register_semantic_activation_owner(
                 reason = %error,
                 "query search authority unavailable; non-search project surfaces remain mounted"
             );
+            if matches!(
+                error,
+                crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
+            ) {
+                query_authority_upgrade::spawn_deferred_query_authority_mount(
+                    invocation.clone(),
+                    project_root.to_path_buf(),
+                    scope.clone(),
+                    query_authority_upgrade::DeferredQueryAuthorityMountV1::Configured,
+                );
+            }
         }
         if let Err(error) = crate::daemon::code_index_scheduler::semantic_query_runtime::
             mount_current_semantic_query_authority_on_project_open(
@@ -1481,6 +1494,19 @@ async fn register_semantic_activation_owner(
                         reason = %error,
                         "core query fallback is unavailable; project admission continues"
                     );
+                    if matches!(
+                        error,
+                        crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1::GenerationUnavailable
+                    ) {
+                        query_authority_upgrade::spawn_deferred_query_authority_mount(
+                            invocation.clone(),
+                            project_root.to_path_buf(),
+                            scope.clone(),
+                            query_authority_upgrade::DeferredQueryAuthorityMountV1::CoreFallback {
+                                session_db: Arc::clone(&session_db),
+                            },
+                        );
+                    }
                     false
                 } else {
                     true
@@ -1510,6 +1536,7 @@ async fn register_semantic_activation_owner(
     else {
         return Ok(());
     };
+    let lifecycle_events = inspector.verified_ready_events();
     let owner = Arc::new(
         crate::application::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
             configuration_store,
@@ -1520,7 +1547,17 @@ async fn register_semantic_activation_owner(
     );
     graph
         .configuration_runtime()
-        .install_semantic_runtime(owner)?;
+        .install_semantic_runtime(Arc::clone(&owner))?;
+    let reconciler = Arc::new(
+        crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1::spawn(
+            owner,
+            lifecycle_events,
+        ),
+    );
+    invocation
+        .configuration_runtime_registrar()
+        .install_semantic_activation_reconciler(project_root, reconciler)
+        .await?;
     let operation = Arc::new(
         crate::application::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
             Arc::clone(graph.configuration_runtime()),
@@ -2944,6 +2981,12 @@ fn production_owner_capabilities()
         "capability.application.code-query.exact-occurrence",
         "capability.application.code-query.phrase-search",
         "capability.application.code-query.callees",
+        "capability.application.code-query.facets",
+        "capability.application.code-query.timeline",
+        "capability.application.code-query.declaration",
+        "capability.application.code-query.definition",
+        "capability.application.code-query.type-definition",
+        "capability.application.code-query.references",
         "capability.retrieval.symbol-search",
         "capability.application.primitive.code-signature-search",
         "capability.application.primitive.code-implementations",
@@ -2962,6 +3005,7 @@ fn production_owner_capabilities()
         "capability.application.primitive.module-api",
         "capability.application.primitive.file-metadata",
         "capability.application.primitive.health-read",
+        "capability.application.primitive.health-delta",
         "capability.application.primitive.storage-status",
         "capability.application.primitive.diagnostics-read",
         "capability.application.git.status",

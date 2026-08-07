@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeNavigationRequest,
@@ -57,6 +57,9 @@ use tracedecay_query::retrieval::{
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
 const MAX_GENERATION_RESOLUTION_WAIT: Duration = Duration::from_secs(30);
 
+mod graph_control;
+use graph_control::{CallableGraphExecutionControl, current_utc_micros, graph_budget_for_request};
+
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
 /// (unpinned) search: it pins no specific immutable generation, so the serving
 /// generation is resolved through the three-tier freshness ladder to the latest
@@ -94,8 +97,8 @@ pub(super) fn semantic_mcp_reason(
 ) -> &'static str {
     if let Some(source_generation) = current_source {
         return if source_generation == latest_code_generation {
-            // Plan 15 has not published an accepted calibration authority. A
-            // current vector generation alone cannot authorize influence.
+            // A current vector generation alone cannot authorize influence
+            // without an accepted calibration authority.
             "calibration_unavailable"
         } else {
             "semantic_generation_stale"
@@ -360,15 +363,6 @@ pub(in crate::daemon) fn maximum_retrieval_budget() -> RetrievalBudget {
 }
 
 type CallableCodeCursorError = PreparedQueryErrorV1;
-
-fn current_utc_micros() -> Result<UtcMicros, CallableCodeCursorError> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| CallableCodeCursorError::Unavailable)?;
-    i64::try_from(elapsed.as_micros())
-        .map(UtcMicros)
-        .map_err(|_| CallableCodeCursorError::Unavailable)
-}
 
 fn query_finished_at() -> UtcMicros {
     current_utc_micros().unwrap_or(UtcMicros(0))
@@ -1600,7 +1594,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 seed_anchors: vec![seed],
                 edge_kinds: vec![RelationEdgeKindV1::Calls],
                 max_depth: request.maximum_depth,
-                budget: base.budget,
+                budget: graph_budget_for_request(base.budget, context.request),
                 base: base.clone(),
             };
             let Ok(owners) = latest.production_query_owners() else {
@@ -1612,7 +1606,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.graph.retrieve_graph(&lane_request);
+            let graph_control = CallableGraphExecutionControl::for_request(context.request);
+            let outcome = owners.graph.retrieve_graph(&lane_request, graph_control);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.graph(outcome, |path| {

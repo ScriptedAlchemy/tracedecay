@@ -489,7 +489,7 @@ pub(super) fn code_index_search_executor(
                                 &execution_project_root,
                                 &execution_scope,
                                 execution_request,
-                                execution_control.as_ref(),
+                                execution_control,
                                 semantic_mode,
                             )
                             .await

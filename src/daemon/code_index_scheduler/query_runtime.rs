@@ -25,7 +25,9 @@ use tracedecay_query::retrieval::exact::{
     ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::fusion::{CompositionLaneInput, RetrievalCursorKeyringV1};
-use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::graph::{
+    GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
+};
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
@@ -331,11 +333,35 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Execute exact, lexical, and graph independently against the newest
     /// complete generation for one exact scope, then pass their typed outcomes
     /// unchanged into the authenticated query composition authority.
+    #[cfg(test)]
     pub(in crate::daemon) async fn execute_query_search(
         &self,
         scope: &ResolvedScope,
         input: QuerySearchExecutionRequestV1,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
+        struct TestGraphControlV1;
+        impl GraphExecutionControl for TestGraphControlV1 {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+
+            fn elapsed_micros(&self) -> u64 {
+                0
+            }
+        }
+        self.execute_controlled_query(scope, input, Arc::new(TestGraphControlV1))
+            .await
+    }
+
+    pub(in crate::daemon) async fn execute_controlled_query<C>(
+        &self,
+        scope: &ResolvedScope,
+        input: QuerySearchExecutionRequestV1,
+        graph_control: Arc<C>,
+    ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
+    where
+        C: GraphExecutionControl + 'static,
+    {
         scope
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
@@ -450,14 +476,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 detail: "exact and lexical lanes produced no graph seed".to_owned(),
             })
         } else {
-            owners.graph.retrieve_graph(&GraphLaneRequest {
-                base: request.clone(),
-                generation: generation.clone(),
-                seed_anchors: graph_seeds,
-                edge_kinds: input.graph_edge_kinds,
-                max_depth: input.graph_max_depth,
-                budget: request.budget,
-            })?
+            owners.graph.retrieve_graph(
+                &GraphLaneRequest {
+                    base: request.clone(),
+                    generation: generation.clone(),
+                    seed_anchors: graph_seeds,
+                    edge_kinds: input.graph_edge_kinds,
+                    max_depth: input.graph_max_depth,
+                    budget: request.budget,
+                },
+                graph_control,
+            )?
         };
         let lanes = vec![
             CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)

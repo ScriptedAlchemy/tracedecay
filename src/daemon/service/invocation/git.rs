@@ -191,7 +191,10 @@ pub(super) async fn execute_git_read(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return concealed_application_problem(wire_request_id);
+        // The route reaching here already passed project resolution and an
+        // admitted project open; the git transaction owner registers behind
+        // the core publication, so a miss here is a retryable mounting state.
+        return runtime_mounting_problem(wire_request_id);
     };
     let Some(project_root) = project_root.map(Path::to_path_buf) else {
         return concealed_application_problem(wire_request_id);
@@ -479,7 +482,7 @@ pub(super) async fn execute_git_preview(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return concealed_application_problem(wire_request_id);
+        return runtime_mounting_problem(wire_request_id);
     };
     let service = Arc::clone(&owner.service);
     let operation = request.operation;
@@ -663,7 +666,7 @@ pub(super) async fn execute_git_apply(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
-        return concealed_application_problem(wire_request_id);
+        return runtime_mounting_problem(wire_request_id);
     };
     let service = Arc::clone(&owner.service);
     let preview_id = request.preview_id.clone();

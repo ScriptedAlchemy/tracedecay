@@ -25,7 +25,6 @@ use tracedecay_code_extraction::LanguageRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
 use tracedecay_usecases::config::{
-    install_configuration_daemon_client_for_project,
     open_runtime_configuration_for_registered_database,
     open_runtime_configuration_for_registered_database_read_only,
 };
@@ -296,10 +295,6 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        install_configuration_daemon_client_for_project(
-            &configuration.target,
-            configuration_runtime.client(),
-        );
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
@@ -617,10 +612,6 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        install_configuration_daemon_client_for_project(
-            &configuration.target,
-            configuration_runtime.client(),
-        );
         let mut ts = Self {
             db,
             profile_database,
@@ -793,10 +784,6 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        install_configuration_daemon_client_for_project(
-            &configuration.target,
-            configuration_runtime.client(),
-        );
         Ok(Self {
             db,
             profile_database,

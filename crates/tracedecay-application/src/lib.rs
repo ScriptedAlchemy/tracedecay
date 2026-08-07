@@ -13,6 +13,7 @@ pub mod context;
 pub mod context_scout;
 pub mod diagnostics;
 pub mod doctor;
+pub mod dashboard_graph;
 pub mod external_source;
 pub mod feedback;
 /// Compatibility re-export: the framed-log primitives moved down into
@@ -67,15 +68,17 @@ pub use authorization::{
 };
 pub use clock::now_micros;
 pub use configuration::{
+    ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
     ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
-    ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
-    ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
-    ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
-    ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
-    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
-    ConfigurationWriteCredentialRequestV1, configuration_surface_catalog_contribution,
-    configuration_surface_handler_descriptors, configuration_surface_operation,
-    configuration_surface_request_schema, configuration_surface_result_schema,
+    ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationMutationReceipt,
+    ConfigurationObservedStateRequestV1, ConfigurationProtectedApplyRequestV1,
+    ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackApplyRequestV1,
+    ConfigurationRollbackPreviewRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
+    ConfigurationWireRequestV1, ConfigurationWriteCredentialRequestV1, ResolvedSetting,
+    SettingSummary, configuration_executable_binding_registry,
+    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
+    configuration_surface_operation, configuration_surface_request_schema,
+    configuration_surface_result_schema,
 };
 pub use context::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
@@ -112,6 +115,17 @@ pub use doctor::{
     advisory_feedback_findings, code_index_finding, configuration_finding,
     doctor_finding_family_label, host_integration_finding, language_server_finding,
     observability_finding, operational_audit_findings, runtime_health_finding,
+};
+pub use dashboard_graph::{
+    DashboardGraphCallChainStepV1, DashboardGraphCallChainV1, DashboardGraphEdgeV1,
+    DashboardGraphKindCountV1, DashboardGraphLargestFileV1, DashboardGraphLanguageCountV1,
+    DashboardGraphNeighborsV1, DashboardGraphNodeV1, DashboardGraphOverviewV1,
+    DashboardGraphPathV1, DashboardGraphReadErrorV1, DashboardGraphReadFutureV1,
+    DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1, DashboardGraphReadPortV1,
+    DashboardGraphReadRequestV1, DashboardGraphReadV1, DashboardGraphSearchV1,
+    DashboardGraphSpanV1, DashboardGraphStrataClusterV1, DashboardGraphStrataFileV1,
+    DashboardGraphStrataV1, DashboardGraphSubgraphV1, DashboardGraphTestMapV1,
+    DashboardGraphTestV1, DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
@@ -228,9 +242,7 @@ pub use retrieval::{
 pub use sdk_catalog::sdk_executable_binding_registry;
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
-    UserSettingsPatchInputV1, UserSettingsPreviewErrorV1, UserSettingsPreviewV1,
-    UserSettingsValuesV1, parse_duration_label, prepare_user_settings_preview,
-    validate_project_settings_patch, validate_user_settings_values,
+    validate_project_settings_patch,
 };
 pub use source_edit::{
     RenameFileEditV1, RenameResult, RenameSymbolBindingV1, RenameTextOnlyMatchV1,
@@ -244,10 +256,11 @@ pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
     QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1, RelativeArtifactPathV1,
-    RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1,
-    StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1, StoreSizeSampleV1,
-    StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1, incident_debris_finding,
-    orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    RetentionBacklogRecordV1, SemanticVectorRetentionRecordV1, StorageByteSizeV1,
+    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
+    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    semantic_vector_retention_finding,
 };
 pub use tracedecay_domain::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len,

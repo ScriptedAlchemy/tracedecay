@@ -4,7 +4,7 @@
 //! - `definitions`: JSON Schema tool descriptors (`def_*` functions)
 //! - `handlers`: tool call implementations (`handle_*` functions)
 
-mod binding;
+pub(crate) mod binding;
 mod definitions;
 pub mod dispatch;
 pub(crate) mod handlers;

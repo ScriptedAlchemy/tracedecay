@@ -11,7 +11,7 @@ use crate::user_config::UserConfig;
 use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, apply_project_config_patch,
-    clear_project_config, effective_config, load_project_config, merge_project_config,
+    effective_config, load_project_config, merge_project_config,
 };
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -49,24 +49,6 @@ pub async fn patch_config(
                 Some(&project),
                 &effective,
             ))
-        },
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    Ok(Json(payload))
-}
-
-pub async fn reset_config(State(state): State<DashboardState>) -> ApiResult {
-    let global = UserConfig::load().automation;
-    let payload = super::automation_run_service::execute_dashboard_automation_write(
-        &state,
-        move |state| async move {
-            clear_project_config(&state.dashboard_root)
-                .await
-                .map_err(|err| err.to_string())?;
-            state.reconcile_automation_scheduler();
-            let effective = effective_config(&global, None).map_err(|err| err.to_string())?;
-            Ok(config_payload_value(&state, &global, None, &effective))
         },
     )
     .await

@@ -18,10 +18,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StoreLayout;
 use tracedecay_code_extraction::LanguageRegistry;
-use tracedecay_usecases::config::{
-    install_configuration_daemon_client_for_project,
-    open_runtime_configuration_for_registered_database_read_only,
-};
+use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 
 use super::recovery::active_graph_layout;
 use super::{TraceDecay, TraceDecayOpenOptions};
@@ -535,10 +532,6 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        install_configuration_daemon_client_for_project(
-            &configuration.target,
-            configuration_runtime.client(),
-        );
         let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
             .as_deref()
             == Some(branch_name);

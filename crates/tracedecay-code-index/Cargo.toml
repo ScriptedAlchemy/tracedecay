@@ -16,6 +16,8 @@ default = [
 lite = ["tracedecay-code-extraction/lite"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
+test-helpers = ["tracedecay-graph-db/test-helpers"]
+eval-helpers = ["tracedecay-graph-db/eval-helpers"]
 lang-dart = ["tracedecay-code-extraction/lang-dart"]
 lang-pascal = ["tracedecay-code-extraction/lang-pascal"]
 lang-php = ["tracedecay-code-extraction/lang-php"]
@@ -71,6 +73,7 @@ tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 [dev-dependencies]
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
 tree-sitter = "0.26"
 
 [[bench]]

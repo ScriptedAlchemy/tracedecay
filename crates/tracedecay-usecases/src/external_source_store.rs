@@ -845,6 +845,7 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, RuntimeExternal
 struct ExternalSourceRuntimeProbe {
     cancellation: tracedecay_store::RuntimeCancellationIdentityV1,
     deadline: tracedecay_store::RuntimeDeadlineV1,
+    commit_started: std::sync::atomic::AtomicBool,
 }
 
 impl ExternalSourceRuntimeProbe {
@@ -852,6 +853,7 @@ impl ExternalSourceRuntimeProbe {
         Self {
             cancellation: control.cancellation.clone(),
             deadline: control.deadline.clone(),
+            commit_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -867,6 +869,17 @@ impl tracedecay_store::RuntimeRequestProbeV1 for ExternalSourceRuntimeProbe {
 
     fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
         None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.commit_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 

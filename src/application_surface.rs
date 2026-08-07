@@ -52,7 +52,6 @@ pub use tracedecay_application::{
     ConfigurationObservedStateRequestV1 as ConfigurationObservedStateSurfaceRequest,
     ConfigurationProtectedApplyRequestV1 as ConfigurationProtectedApplySurfaceRequest,
     ConfigurationProtectedPreviewRequestV1 as ConfigurationProtectedPreviewSurfaceRequest,
-    ConfigurationResetOutcomeV1, ConfigurationResetRequestV1 as ConfigurationResetSurfaceRequest,
     ConfigurationRollbackApplyRequestV1 as ConfigurationRollbackApplySurfaceRequest,
     ConfigurationRollbackPreviewRequestV1 as ConfigurationRollbackPreviewSurfaceRequest,
     ConfigurationSetRequestV1 as ConfigurationSetSurfaceRequest,
@@ -60,7 +59,7 @@ pub use tracedecay_application::{
     ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
     ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
-use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
     ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId,
@@ -124,7 +123,7 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 67] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -575,6 +574,7 @@ const fn default_context_scout_recent_limit() -> usize {
 pub struct ContextScoutControlSurfaceRequest {
     pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
     pub expected_revision: ConfigurationRevisionId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1253,10 +1253,12 @@ where
         Err(DaemonInvocationError::TimedOut { .. }) => {
             ApplicationProblem::timed_out_before_admission()
         }
-        Err(DaemonInvocationError::Unavailable) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: problem_code("transport_unavailable"),
-            message: format!("The {family} application transport is unavailable"),
-        }),
+        Err(DaemonInvocationError::Unavailable) => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: problem_code("transport_unavailable"),
+                message: format!("The {family} application transport is unavailable"),
+            })
+        }
     };
     CanonicalInvocationResult::<T>::new(
         binding_id,
@@ -2552,10 +2554,6 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Reset(_)),
-                    ApplicationSurfaceOperation::ConfigurationReset
-                )
-                | (
                     Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
                     ApplicationSurfaceOperation::ContextScoutStatus
                 )
@@ -2978,10 +2976,6 @@ pub fn parse_application_surface_request(
             .map(ConfigurationSurfaceRequest::Audit)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-        ApplicationSurfaceOperation::ConfigurationReset => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Reset)
-            .map(ApplicationSurfaceRequest::Configuration)
-            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
             .map(ContextScoutSurfaceRequest::Status)
             .map(ApplicationSurfaceRequest::ContextScout)
@@ -3059,16 +3053,47 @@ pub async fn execute_application_surface(
     let delivery_route = plan26_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
-    let deadline = invocation.deadline.unwrap_or(Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS),
-    ))?);
+    let (
+        deadline_ceiling_micros,
+        cancellation_contract,
+        terminal_states,
+        receipt_contract,
+        reconciliation_contract,
+        catalog_effect,
+    ) = {
+        let catalog = application_surface_catalog_ref()?;
+        let capability = catalog
+            .capabilities()
+            .find(|capability| capability.binding_ids().contains(&binding_id))
+            .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+        (
+            i64::try_from(capability.deadline().maximum_millis())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+                .saturating_mul(1_000),
+            capability.cancellation().clone(),
+            capability.terminal_states().clone(),
+            capability.receipt(),
+            capability.reconciliation(),
+            capability.effect().is_effect(),
+        )
+    };
+    let maximum_deadline_at = UtcMicros(observed_at.0.saturating_add(deadline_ceiling_micros));
+    let effective_deadline_at = invocation
+        .deadline
+        .as_ref()
+        .map(|deadline| deadline.expires_at)
+        .filter(|expires_at| *expires_at <= maximum_deadline_at)
+        .unwrap_or(maximum_deadline_at);
+    let deadline = Deadline::new(effective_deadline_at)?;
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();
     let migrated_payload = match (&operation, &invocation.request) {
         (
             ApplicationSurfaceOperation::ConfigurationGet
-            | ApplicationSurfaceOperation::ConfigurationSet,
+            | ApplicationSurfaceOperation::ConfigurationSet
+            | ApplicationSurfaceOperation::ConfigurationUnset
+            | ApplicationSurfaceOperation::ConfigurationBatch,
             ApplicationSurfaceRequest::Configuration(request),
         ) => Some(
             serde_json::to_value(request)
@@ -3119,16 +3144,30 @@ pub async fn execute_application_surface(
         )
         .await
         {
-            Ok(response) => response.envelope().cloned().ok_or_else(|| {
-                ApplicationProblemEnvelope::new(
-                    result_contract.clone(),
-                    request_id.clone(),
-                    ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "application.surface.invalid_response".to_owned(),
-                        message: "The daemon returned an invalid application response".to_owned(),
-                    }),
-                )
-            }),
+            Ok(response) => response
+                .envelope()
+                .filter(|envelope| {
+                    validate_configuration_outcome(
+                        operation,
+                        &envelope.outcome,
+                        &cancellation_contract,
+                        &terminal_states,
+                        receipt_contract,
+                        reconciliation_contract,
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    ApplicationProblemEnvelope::new(
+                        result_contract.clone(),
+                        request_id.clone(),
+                        ApplicationProblem::unavailable(SafeDiagnostic {
+                            code: "application.surface.invalid_response".to_owned(),
+                            message: "The daemon returned an invalid application response"
+                                .to_owned(),
+                        }),
+                    )
+                }),
             Err(error) => Err(ApplicationProblemEnvelope::new(
                 result_contract,
                 request_id,
@@ -3291,22 +3330,17 @@ pub async fn execute_application_surface(
             requested_format,
         });
     };
-    let policy = if matches!(
-        operation,
-        ApplicationSurfaceOperation::GitApply
-            | ApplicationSurfaceOperation::ConfigurationSet
-            | ApplicationSurfaceOperation::ConfigurationUnset
-            | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
-            | ApplicationSurfaceOperation::ConfigurationProtectedApply
-            | ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | ApplicationSurfaceOperation::ContextScoutPause
-            | ApplicationSurfaceOperation::ContextScoutResume
-            | ApplicationSurfaceOperation::ContextScoutCancel
-            | ApplicationSurfaceOperation::ContextScoutClaim
-            | ApplicationSurfaceOperation::ContextScoutDelivery
-            | ApplicationSurfaceOperation::ContextScoutFeedback
-    ) {
+    let policy = if (is_configuration_operation(operation) && catalog_effect)
+        || matches!(
+            operation,
+            ApplicationSurfaceOperation::GitApply
+                | ApplicationSurfaceOperation::ContextScoutPause
+                | ApplicationSurfaceOperation::ContextScoutResume
+                | ApplicationSurfaceOperation::ContextScoutCancel
+                | ApplicationSurfaceOperation::ContextScoutClaim
+                | ApplicationSurfaceOperation::ContextScoutDelivery
+                | ApplicationSurfaceOperation::ContextScoutFeedback
+        ) {
         InvocationCancellationPolicy::AuthoritativeEffect
     } else {
         InvocationCancellationPolicy::ReadOnly
@@ -3406,7 +3440,14 @@ pub async fn execute_application_surface(
             ))
         }
         crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            if validate_configuration_outcome(operation, &outcome) {
+            if validate_configuration_outcome(
+                operation,
+                &outcome,
+                &cancellation_contract,
+                &terminal_states,
+                receipt_contract,
+                reconciliation_contract,
+            ) {
                 Ok(ApplicationEnvelope {
                     contract: result_contract.clone(),
                     request_id: request_id.clone(),
@@ -3532,7 +3573,6 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ConfigurationRollbackPreview
         | ApplicationSurfaceOperation::ConfigurationRollbackApply
         | ApplicationSurfaceOperation::ConfigurationAudit
-        | ApplicationSurfaceOperation::ConfigurationReset
         | ApplicationSurfaceOperation::ContextScoutStatus
         | ApplicationSurfaceOperation::ContextScoutRecent
         | ApplicationSurfaceOperation::ContextScoutExplain

@@ -11,7 +11,7 @@ use tracedecay_application::{
     OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId,
     ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
-use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
@@ -155,43 +155,21 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
-    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
-    )
-    .expect("administrative profile");
-
     for name in tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
         let operation = ApplicationSurfaceOperation::from_tool_name(name)
             .unwrap_or_else(|| panic!("{name} must be a canonical surface operation"));
         assert_eq!(operation.as_str(), name);
-        // The destructive reset journey binds only to the CLI surface and is
-        // eligible only under the administrative profile; its catalog
-        // contribution never publishes MCP or HTTP bindings.
-        let (resolution_profile, surfaces): (
-            &tracedecay_tool_catalog::ProfileId,
-            &[tracedecay_tool_catalog::BindingSurface],
-        ) = if operation == ApplicationSurfaceOperation::ConfigurationReset {
-            (
-                &administrative_profile_id,
-                &[tracedecay_tool_catalog::BindingSurface::Cli],
-            )
-        } else {
-            (
-                &profile_id,
-                &[
-                    tracedecay_tool_catalog::BindingSurface::Cli,
-                    tracedecay_tool_catalog::BindingSurface::Mcp,
-                    tracedecay_tool_catalog::BindingSurface::Http,
-                ],
-            )
-        };
-        for &surface in surfaces {
+        for surface in [
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            tracedecay_tool_catalog::BindingSurface::Mcp,
+            tracedecay_tool_catalog::BindingSurface::Http,
+        ] {
             assert!(
                 crate::daemon_client::BindingResolver::resolve_binding(
                     &resolver,
                     surface,
                     &crate::daemon_client::BindingResolution {
-                        profile_id: resolution_profile.clone(),
+                        profile_id: profile_id.clone(),
                         operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
                             .expect("operation"),
                         protocol_revision: APPLICATION_PROTOCOL_REVISION,
@@ -262,30 +240,11 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
-    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
-    )
-    .expect("administrative profile");
-
-    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
-        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
-    )
-    .expect("administrative profile");
-
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
-        // The destructive reset journey is eligible only under the
-        // administrative profile.
-        let resolution_profile = if operation == ApplicationSurfaceOperation::ConfigurationReset {
-            &administrative_profile_id
-        } else {
-            &profile_id
-        };
-        let expected_surfaces = if operation == ApplicationSurfaceOperation::ConfigurationReset {
-            // The destructive reset journey is CLI-only by catalog design.
-            &[(tracedecay_tool_catalog::BindingSurface::Cli, "cli")][..]
-        } else if matches!(
+        let resolution_profile = &profile_id;
+        let expected_surfaces = if matches!(
             operation,
             ApplicationSurfaceOperation::GitPreview | ApplicationSurfaceOperation::GitApply
         ) {
@@ -697,6 +656,10 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
             address,
             expected_revision: ConfigurationRevisionId::new("revision.scout.surface")
                 .expect("revision"),
+            idempotency_key: ConfigurationIdempotencyKey::new(
+                "configuration.idempotency.scout.surface",
+            )
+            .expect("idempotency key"),
         })
         .expect("pause request"),
     )
@@ -705,6 +668,8 @@ fn context_scout_controls_and_claims_preserve_the_exact_address() {
         pause,
         ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequest::Pause(request))
             if request.address == address
+                && request.idempotency_key.as_str()
+                    == "configuration.idempotency.scout.surface"
     ));
 
     let claim_body = serde_json::to_value(ContextScoutClaimSurfaceRequest {

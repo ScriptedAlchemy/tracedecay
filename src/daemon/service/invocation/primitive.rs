@@ -16,19 +16,24 @@ pub(super) async fn execute_primitive(
     let Some(project_root) = project_root else {
         return concealed_application_problem(wire_request_id);
     };
+    // The route reaching here already passed project resolution and an
+    // admitted project open, so a missing per-project runtime is the
+    // registration still mounting behind the core publication — a retryable
+    // unavailable state. Concealing it as not-found would misreport an
+    // authenticated project the caller is standing in.
     let dispatch = service
         .project_runtimes
         .read(project_root, PrimitiveProjectRuntime::dispatch)
         .await;
     let Some(dispatch) = dispatch else {
-        return concealed_application_problem(wire_request_id);
+        return runtime_mounting_problem(wire_request_id);
     };
     let registered = service
         .project_runtimes
         .get::<RegisteredCallableCodeRuntime>(project_root)
         .await;
     let Some(registered) = registered else {
-        return concealed_application_problem(wire_request_id);
+        return runtime_mounting_problem(wire_request_id);
     };
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) if access.scope == registered.scope => access,
@@ -130,7 +135,9 @@ pub(super) async fn execute_callable_code(
         .get::<RegisteredCallableCodeRuntime>(project_root)
         .await;
     let Some(registered) = registered else {
-        return concealed_application_problem(wire_request_id);
+        // Same admitted-route contract as `execute_primitive`: the runtime is
+        // still mounting, which is retryable rather than concealment-worthy.
+        return runtime_mounting_problem(wire_request_id);
     };
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) => access,
@@ -471,10 +478,20 @@ pub(super) async fn execute_context_scout(
         );
     };
     let address = request.address();
-    if !registry
-        .authorize_current_exact_address(address, &configuration, &registered.scope)
-        .await
-    {
+    let is_state_control = matches!(
+        &request,
+        ContextScoutSurfaceRequest::Pause(_) | ContextScoutSurfaceRequest::Resume(_)
+    );
+    let address_authorized = if is_state_control {
+        registry
+            .authorize_control_exact_address(address, &registered.scope)
+            .await
+    } else {
+        registry
+            .authorize_current_exact_address(address, &configuration, &registered.scope)
+            .await
+    };
+    if !address_authorized {
         return DaemonInvocationResponse::problem(
             wire_request_id,
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -484,9 +501,11 @@ pub(super) async fn execute_context_scout(
     for candidate in crate::agents::context_scout_owner::lookup_registered_context_scout_owners(
         address.project_id,
     ) {
-        if candidate.configured_status().await.is_ok_and(|status| {
-            status.configuration_revision == configuration.control().configuration_revision
-        }) {
+        if is_state_control
+            || candidate.configured_status().await.is_ok_and(|status| {
+                status.configuration_revision == configuration.control().configuration_revision
+            })
+        {
             if owner.is_some() {
                 return DaemonInvocationResponse::problem(
                     wire_request_id,
@@ -518,6 +537,7 @@ pub(super) async fn execute_context_scout(
             wire_request_id,
             registered,
             owner,
+            registry,
             control,
             target,
             current,
@@ -684,6 +704,7 @@ async fn execute_context_scout_state_transition(
     wire_request_id: String,
     registered: RegisteredConfigurationRuntime,
     owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    registry: Arc<ProjectContextScoutAddressRegistryV1>,
     control: &crate::application_surface::ContextScoutControlSurfaceRequest,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
     current: crate::application::configuration::ConfigurationCurrentStateV1,
@@ -691,15 +712,6 @@ async fn execute_context_scout_state_transition(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    if control.expected_revision != current.revision_id {
-        return application_problem(
-            wire_request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "context_scout.configuration_stale".to_owned(),
-                message: "The Context Scout configuration revision is stale".to_owned(),
-            }),
-        );
-    }
     let Some(key) = tracedecay_domain::configuration::SettingKey::new(
         tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     )
@@ -718,25 +730,6 @@ async fn execute_context_scout_state_transition(
             DaemonInvocationProblem::NotFoundOrNotAuthorized,
         );
     };
-    let valid_transition = matches!(
-        (settings.state, target),
-        (
-            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
-            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
-        ) | (
-            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused,
-            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
-        )
-    );
-    if !valid_transition {
-        return application_problem(
-            wire_request_id,
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "context_scout.invalid_state_transition".to_owned(),
-                message: "The Context Scout state transition is unavailable".to_owned(),
-            }),
-        );
-    }
     settings.state = target;
     let response = execute_configuration(
         wire_request_id,
@@ -751,7 +744,8 @@ async fn execute_context_scout_state_transition(
                 value: tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
                     settings,
                 ),
-                expected_revision: current.revision_id,
+                expected_revision: control.expected_revision.clone(),
+                idempotency_key: control.idempotency_key.clone(),
             },
         ),
         observed_at,
@@ -773,37 +767,122 @@ async fn execute_context_scout_state_transition(
             outcome,
         };
     };
-    let refreshed = registered
-        .runtime
-        .client()
-        .current()
-        .await
-        .ok()
-        .map(
-            |current| crate::application::configuration::ConfigurationCurrentStateV1 {
-                revision_id: current.revision_id,
-                snapshot: current.snapshot,
-            },
-        )
-        .and_then(|current| {
-            crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(
-                &current,
-            )
-        });
-    if let Some(refreshed) = refreshed {
-        if owner.install_state_transition(refreshed).await.is_err() {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
+    if let Err(error) = reconcile_context_scout_configuration(
+        &registered.runtime,
+        &owner,
+        &registry,
+        control.address,
+        &registered.scope,
+        current_micros(),
+    )
+    .await
+    {
+        let runtime = Arc::clone(&registered.runtime);
+        let reconciliation_owner = Arc::clone(&owner);
+        let reconciliation_registry = Arc::clone(&registry);
+        let reconciliation_scope = registered.scope.clone();
+        let reconciliation_address = control.address;
+        let error_code = error.code().to_owned();
+        if let Err(observation_error) = runtime
+            .record_runtime_activation(None, Some(error_code), current_micros())
+            .await
+        {
+            tracing::warn!(
+                %observation_error,
+                "Context Scout activation degradation could not be recorded"
             );
         }
-    } else {
-        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+        tokio::spawn(async move {
+            if let Err(reconciliation_error) = reconcile_context_scout_configuration(
+                &runtime,
+                &reconciliation_owner,
+                &reconciliation_registry,
+                reconciliation_address,
+                &reconciliation_scope,
+                current_micros(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    %reconciliation_error,
+                    "Context Scout configuration activation remains pending reconciliation"
+                );
+            }
+        });
     }
     DaemonInvocationResponse::with_outcome(
         request_id,
         DaemonInvocationOutcome::ContextScout { scope, outcome },
     )
+}
+
+#[derive(Clone, Copy, Debug, Error)]
+enum ContextScoutActivationReconciliationError {
+    #[error("the committed Context Scout configuration could not be read")]
+    ConfigurationUnavailable,
+    #[error("the committed Context Scout configuration is invalid")]
+    InvalidConfiguration,
+    #[error("the Context Scout owner rejected committed configuration activation")]
+    ActivationRejected,
+    #[error("the Context Scout exact-address pin could not be advanced")]
+    AddressActivationRejected,
+    #[error("the Context Scout activation observation could not be recorded")]
+    ObservationUnavailable,
+}
+
+impl ContextScoutActivationReconciliationError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ConfigurationUnavailable => "context_scout.activation.configuration_unavailable",
+            Self::InvalidConfiguration => "context_scout.activation.configuration_invalid",
+            Self::ActivationRejected => "context_scout.activation.reconciliation_pending",
+            Self::AddressActivationRejected => {
+                "context_scout.activation.address_reconciliation_pending"
+            }
+            Self::ObservationUnavailable => "context_scout.activation.observation_unavailable",
+        }
+    }
+}
+
+async fn reconcile_context_scout_configuration(
+    runtime: &Arc<ProjectConfigurationRuntime>,
+    owner: &Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    registry: &Arc<ProjectContextScoutAddressRegistryV1>,
+    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    scope: &ResolvedScope,
+    observed_at: UtcMicros,
+) -> Result<(), ContextScoutActivationReconciliationError> {
+    let current = runtime
+        .client()
+        .current()
+        .await
+        .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
+    let current = crate::application::configuration::ConfigurationCurrentStateV1 {
+        revision_id: current.revision_id,
+        snapshot: current.snapshot,
+    };
+    let refreshed =
+        crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+            .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
+    if !registry
+        .advance_control_exact_address(address, scope, &refreshed)
+        .await
+    {
+        return Err(ContextScoutActivationReconciliationError::AddressActivationRejected);
+    }
+    let installed = owner.configured_status().await.is_ok_and(|status| {
+        status.configuration_revision == refreshed.control().configuration_revision
+    });
+    if !installed {
+        owner
+            .install_state_transition(refreshed)
+            .await
+            .map_err(|_| ContextScoutActivationReconciliationError::ActivationRejected)?;
+    }
+    runtime
+        .record_runtime_activation(Some(current.revision_id), None, observed_at)
+        .await
+        .map_err(|_| ContextScoutActivationReconciliationError::ObservationUnavailable)
 }
 
 const fn context_scout_store_outcome(

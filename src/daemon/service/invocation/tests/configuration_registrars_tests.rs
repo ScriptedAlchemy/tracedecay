@@ -35,15 +35,23 @@ fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
             key: tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
                 .expect("setting"),
         };
-        assert!(
-            authority
-                .issue_direct(
-                    &format!("request.configuration.exact.{index}"),
-                    &mutation,
-                    expected_revision.clone(),
-                    UtcMicros(1),
-                )
-                .is_ok()
+        let grant = authority
+            .issue_direct(
+                &format!("request.configuration.exact.{index}"),
+                ConfigurationIdempotencyKey::new(format!(
+                    "configuration.idempotency.exact-{index}"
+                ))
+                .expect("idempotency key"),
+                &mutation,
+                expected_revision.clone(),
+                UtcMicros(50),
+                UtcMicros(1),
+            )
+            .expect("exact layer grant");
+        assert_eq!(
+            grant.receipt.expires_at,
+            UtcMicros(50),
+            "the accepted execution deadline must cap the registrar lifetime"
         );
     }
 
@@ -73,8 +81,13 @@ fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
         assert!(matches!(
             authority.issue_direct(
                 &format!("request.configuration.foreign.{index}"),
+                ConfigurationIdempotencyKey::new(format!(
+                    "configuration.idempotency.foreign-{index}"
+                ))
+                .expect("idempotency key"),
                 &foreign,
                 expected_revision.clone(),
+                UtcMicros(50),
                 UtcMicros(1),
             ),
             Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)

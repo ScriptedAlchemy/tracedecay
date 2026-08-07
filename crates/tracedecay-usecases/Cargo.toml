@@ -21,7 +21,7 @@ semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
 # when this crate is built standalone with the feature.
-test-helpers = ["tracedecay-sessions/test-helpers"]
+test-helpers = ["tracedecay-graph-db/test-helpers", "tracedecay-sessions/test-helpers"]
 # Mirrors the root crate's `test-transport`: enables the in-process transport
 # seams used by integration harnesses.
 test-transport = [
@@ -80,6 +80,7 @@ static_assertions = "1.1.0"
 # Test-only helper surfaces reached across crate boundaries by this crate's
 # test targets. Feature unification supplies them to the test build only.
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }

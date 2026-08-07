@@ -16,5 +16,5 @@ pub use gain::handle_gain;
 pub(crate) use index::{handle_init, handle_no_command, handle_sync};
 pub(crate) use memory::handle_memory_action;
 pub(crate) use migrate::handle_migrate_action;
-pub(crate) use settings::{handle_gitignore, handle_upload_counter};
+pub(crate) use settings::{canonical_upload_enabled, handle_gitignore, handle_upload_counter};
 pub(crate) use storage::{handle_list, handle_wipe};

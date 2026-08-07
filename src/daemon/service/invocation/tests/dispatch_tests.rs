@@ -464,7 +464,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
     assert_eq!(response["error"]["code"], -32602);
     assert_eq!(
         response["error"]["data"]["detail"],
-        "root is not the daemon-admitted root"
+        "workspace roots differ from the daemon-admitted set"
     );
 
     let response = service

@@ -5,8 +5,20 @@
 
 use std::path::{Path, PathBuf};
 
+use tracedecay_application::{ApplicationOutcome, ResolvedSetting};
+use tracedecay_domain::configuration::{
+    ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
+};
+use tracedecay_tool_catalog::BindingSurface;
+
 use crate::agents::{self, DoctorCounters};
+use crate::application_surface::{
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationKeySurfaceRequest,
+    ConfigurationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
+};
+use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use crate::display::format_token_count;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other
 // targets only the module's tests reference it.
@@ -113,7 +125,8 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
         }
     };
     check_watcher(&mut dc);
-    check_user_config(&mut dc);
+    let upload_enabled = configured_upload_enabled(&project_path).await;
+    check_user_config(&mut dc, upload_enabled.as_ref());
     check_external_tools(&mut dc);
 
     if let Some(ref home) = agents::home_dir() {
@@ -124,7 +137,7 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
         dc.fail("Could not determine home directory");
     }
 
-    check_network(&mut dc);
+    check_network(&mut dc, upload_enabled.as_ref());
     print_summary(&dc);
 
     doctor_result(&dc, &storage_health)
@@ -666,7 +679,6 @@ fn daemon_health_reports_sqlite_corruption(detail: &str) -> bool {
         || detail.contains("database is corrupt")
 }
 
-#[allow(deprecated)]
 fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> bool {
     match error {
         crate::errors::TraceDecayError::Io(error) => matches!(
@@ -694,7 +706,6 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }
-        | crate::errors::TraceDecayError::DatabaseOperation { .. }
         | crate::errors::TraceDecayError::Search { .. }
         | crate::errors::TraceDecayError::ProfileResetRequired { .. }
         | crate::errors::TraceDecayError::ResetRequired { .. }
@@ -1043,26 +1054,94 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// Check user config file.
-fn check_user_config(dc: &mut DoctorCounters) {
+async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result<bool> {
+    let operation = ApplicationSurfaceOperation::ConfigurationGet;
+    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })?;
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|error| {
+            crate::errors::TraceDecayError::Config {
+                message: format!("could not create Doctor configuration request: {error}"),
+            }
+        })?;
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.to_path_buf()),
+        None,
+        false,
+        false,
+    )?;
+    let client = DaemonInvocationClient::for_current(handshake)?;
+    let dispatched = resolve_application_surface_dispatch(
+        BindingSurface::Cli,
+        operation,
+        request_id.clone(),
+        ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::Get(
+            ConfigurationKeySurfaceRequest { key: key.clone() },
+        )),
+        RequestedOutputFormat::Json,
+    )
+    .map_err(|error| crate::errors::TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    let result = execute_application_surface(operation, dispatched, Some(&client))
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    let envelope = result
+        .result
+        .map_err(|problem| crate::errors::TraceDecayError::Config {
+            message: format!("{}: {}", problem.problem.code, problem.problem.message),
+        })?;
+    let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "configuration get returned a non-evidence outcome".to_owned(),
+        });
+    };
+    let setting: ResolvedSetting = serde_json::from_value(evidence.payload.ok_or_else(|| {
+        crate::errors::TraceDecayError::Config {
+            message: "configuration get omitted its payload".to_owned(),
+        }
+    })?)
+    .map_err(|error| crate::errors::TraceDecayError::Config {
+        message: format!("configuration get returned an invalid setting: {error}"),
+    })?;
+    if setting.key != key {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "configuration get returned the wrong setting".to_owned(),
+        });
+    }
+    match setting.effective_value {
+        ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
+        _ => Err(crate::errors::TraceDecayError::Config {
+            message: "worldwide counter upload setting is not boolean".to_owned(),
+        }),
+    }
+}
+
+/// Check canonical user configuration and pending upload state.
+fn check_user_config(
+    dc: &mut DoctorCounters,
+    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
+) {
     eprintln!("\n\x1b[1mUser config\x1b[0m");
+    match upload_enabled {
+        Ok(true) => dc.pass("Worldwide counter upload enabled"),
+        Ok(false) => dc.info("Worldwide counter upload disabled (default)"),
+        Err(error) => dc.warn(&format!(
+            "Worldwide counter upload setting unavailable from canonical configuration: {error}"
+        )),
+    }
     if let Some(config_path) = crate::user_config::config_path() {
         if config_path.exists() {
             let config = crate::user_config::UserConfig::load();
-            dc.pass(&format!("Config: {}", config_path.display()));
-            if config.upload_enabled {
-                dc.pass("Worldwide counter upload enabled");
-            } else {
-                dc.info("Worldwide counter upload disabled (default)");
-            }
             if config.pending_upload > 0 {
                 dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
             }
-        } else {
-            dc.warn("Config not yet created (created on first sync)");
         }
-    } else {
-        dc.fail("Could not determine home directory for config");
     }
 }
 
@@ -1112,19 +1191,26 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 }
 
 /// Check network connectivity.
-fn check_network(dc: &mut DoctorCounters) {
+fn check_network(
+    dc: &mut DoctorCounters,
+    upload_enabled: Result<&bool, &crate::errors::TraceDecayError>,
+) {
     eprintln!("\n\x1b[1mNetwork\x1b[0m");
-    if crate::user_config::UserConfig::load().upload_enabled {
-        if let Some(total) = crate::cloud::fetch_worldwide_total() {
-            dc.pass(&format!(
-                "Worldwide counter reachable (total: {})",
-                format_token_count(total)
-            ));
-        } else {
-            dc.warn("Worldwide counter unreachable (offline or timeout)");
+    match upload_enabled {
+        Ok(true) => {
+            if let Some(total) = crate::cloud::fetch_worldwide_total() {
+                dc.pass(&format!(
+                    "Worldwide counter reachable (total: {})",
+                    format_token_count(total)
+                ));
+            } else {
+                dc.warn("Worldwide counter unreachable (offline or timeout)");
+            }
         }
-    } else {
-        dc.info("Worldwide counter skipped (upload disabled)");
+        Ok(false) => dc.info("Worldwide counter skipped (upload disabled)"),
+        Err(error) => dc.warn(&format!(
+            "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
+        )),
     }
     if crate::cloud::fetch_latest_version().is_some() {
         dc.pass("GitHub releases API reachable");

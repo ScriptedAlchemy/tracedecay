@@ -8,7 +8,7 @@
 //! registry map lock.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock, Weak,
@@ -17,6 +17,7 @@ use std::{
 };
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
 
@@ -35,19 +36,13 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
 #[derive(Clone)]
 enum CodeGraphActivationAuthorityV1 {
-    Persistent(Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>),
+    Persistent {
+        runtime:
+            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        project_database: Arc<crate::db::Database>,
+    },
     #[cfg(test)]
     Memory,
-}
-
-pub(super) struct SchedulerGraphCancellationV1 {
-    pub(super) shutting_down: Arc<AtomicBool>,
-}
-
-impl tracedecay_graph_db::GraphCancellation for SchedulerGraphCancellationV1 {
-    fn is_cancelled(&self) -> bool {
-        self.shutting_down.load(Ordering::Acquire)
-    }
 }
 
 mod resident_memory;
@@ -101,6 +96,12 @@ pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub observation_time_micros: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::daemon) struct QueryActivationAttemptV1 {
+    revision: ConfigurationRevisionId,
+    token: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CodeIndexSchedulerMemoryStatsV1 {
     pub mounted_worktrees: u64,
@@ -119,6 +120,14 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         ManifestDigest,
         Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
     )>,
+    pub(super) query_activation_revision: Option<ConfigurationRevisionId>,
+    pub(super) query_activation_epoch: Option<i64>,
+    pub(super) query_activation_transition_digest: Option<ManifestDigest>,
+    pub(super) query_activation_attempt: u64,
+    pub(super) query_activation_redundancy:
+        Option<crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1>,
+    pub(super) semantic_vector_graph_provider:
+        Option<Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     hints: Arc<Mutex<PendingHintsV1>>,
@@ -599,13 +608,17 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
         >,
+        project_database: Arc<crate::db::Database>,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
             project_id,
             project_root,
             store_root,
             semantic_schedule,
-            CodeGraphActivationAuthorityV1::Persistent(graph_runtime),
+            CodeGraphActivationAuthorityV1::Persistent {
+                runtime: graph_runtime,
+                project_database,
+            },
         )
         .await
     }
@@ -772,20 +785,36 @@ impl CodeIndexSchedulerRegistryV1 {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let result = scheduler.activate_or_reconcile();
+                    let mut result = scheduler.activate_or_reconcile();
                     // A retained seal can decode even when source-authority
                     // verification fails. Only a terminal activation/reconcile
                     // outcome may mint serving state from it.
-                    let latest = result
+                    let mut latest = result
                         .as_ref()
                         .ok()
                         .and_then(|_| scheduler.latest_complete());
-                    (result, latest)
+                    let replay_binding = latest.as_ref().map(|latest| {
+                        scheduler.code_graph_replay_binding(
+                            &latest.generation().manifest().generation_id,
+                        )
+                    });
+                    let replay_binding = match replay_binding.transpose() {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            result = Err(error);
+                            latest = None;
+                            None
+                        }
+                    };
+                    (result, latest, replay_binding)
                 })
                 .await;
-                if let Ok((Ok(_), Some(latest))) = &result {
+                if let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
                     let activation = match &worker_graph_activation {
-                        CodeGraphActivationAuthorityV1::Persistent(runtime) => {
+                        CodeGraphActivationAuthorityV1::Persistent {
+                            runtime,
+                            project_database,
+                        } => {
                             let generation_id =
                                 latest.generation().manifest().generation_id.clone();
                             let retained = runtime
@@ -795,30 +824,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                     worker_worktree_id.clone(),
                                     latest.generation().snapshot().reference.clone(),
                                     generation_id.clone(),
-                                    Arc::clone(&worker_shutting_down),
+                                    Arc::clone(project_database),
+                                    replay_binding.clone(),
                                 )
                                 .await;
                             match retained {
                                 Ok(retained) => {
-                                    let namespace = retained.authority.namespace().clone();
-                                    let store =
-                                        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_graph_db(
-                                            retained.database,
-                                            namespace,
-                                            generation_id,
-                                        );
                                     let latest = latest.clone();
-                                    let cancellation: Arc<
-                                        dyn tracedecay_graph_db::GraphCancellation,
-                                    > = Arc::new(SchedulerGraphCancellationV1 {
-                                        shutting_down: Arc::clone(&worker_shutting_down),
-                                    });
+                                    let cancellation = Arc::clone(&worker_shutting_down);
                                     tokio::task::spawn_blocking(move || {
-                                        latest.activate_persistent_graph(
-                                            store,
-                                            retained.authority,
-                                            cancellation,
-                                        )
+                                        latest.activate_persistent_graph(retained, cancellation)
                                     })
                                     .await
                                     .map_err(|error| {
@@ -840,15 +855,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     };
                     if let Err(error) = activation {
-                        result = Ok((Err(error), None));
+                        result = Ok((Err(error), None, None));
                     }
                 }
-                if let Ok((Ok(_), Some(latest))) = &result {
+                if let Ok((Ok(_), Some(latest), _)) = &result {
                     *worker_serving_generation
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
                 }
-                if let Ok((Ok(outcome), _)) = &result {
+                if let Ok((Ok(outcome), _, _)) = &result {
                     if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
                         Self::publish_generation(
                             &worker_generation_publications,
@@ -870,7 +885,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // used to be entirely silent. Surface it: bounded, redacted,
                     // no project path beyond what cadence events already carry.
                     match &result {
-                        Ok((Err(error), _)) => tracing::warn!(
+                        Ok((Err(error), _, _)) => tracing::warn!(
                             event = "code_index_reconcile_failed",
                             path = "background_worker",
                             error = %error,
@@ -882,7 +897,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             error = %error,
                             "code-index background reconcile task did not complete"
                         ),
-                        Ok((Ok(_), _)) => {}
+                        Ok((Ok(_), _, _)) => {}
                     }
                     // No terminal outcome, so no receipt is owed. Give the
                     // arrival back or the next pass would measure from its own
@@ -915,6 +930,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id,
                 query_authority: None,
                 semantic_query_authority: None,
+                query_activation_revision: None,
+                query_activation_epoch: None,
+                query_activation_transition_digest: None,
+                query_activation_attempt: 0,
+                query_activation_redundancy: None,
+                semantic_vector_graph_provider: None,
                 scheduler,
                 serving_generation,
                 hints,
@@ -967,8 +988,238 @@ impl CodeIndexSchedulerRegistryV1 {
                 "query authority scope does not match the mounted worktree".to_owned(),
             ));
         }
+        if worktree.query_activation_revision.is_some() {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "standalone query authority cannot replace a committed authority pair".to_owned(),
+            ));
+        }
         worktree.query_authority = Some((scope.scope_digest.clone(), authority));
         Ok(())
+    }
+
+    /// Install the core and optional semantic query routes as one committed
+    /// configuration observation. The provider CAS is repeated while the
+    /// mounted-worktree lock is held, so a delayed observer cannot publish a
+    /// stale authority pair after a newer committed revision.
+    pub(in crate::daemon) async fn begin_committed_query_activation(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        epoch: i64,
+        result_revision: &ConfigurationRevisionId,
+        transition_digest: &ManifestDigest,
+        prepared_redundancy: &crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+    ) -> Result<QueryActivationAttemptV1, CodeIndexSchedulerErrorV1> {
+        if epoch <= 0 || prepared_redundancy.configuration_revision() != result_revision {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "prepared redundancy revision does not match query activation".to_owned(),
+            ));
+        }
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot begin query activation before its worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "query activation scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        if let Some(desired_epoch) = worktree.query_activation_epoch {
+            let advances = epoch > desired_epoch;
+            let exact_retry = epoch == desired_epoch
+                && worktree.query_activation_revision.as_ref() == Some(result_revision)
+                && worktree.query_activation_transition_digest.as_ref() == Some(transition_digest)
+                && worktree.query_activation_redundancy.as_ref() == Some(prepared_redundancy);
+            if !advances && !exact_retry {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "query activation is older than the desired configuration fence".to_owned(),
+                ));
+            }
+        }
+        let activation =
+            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        worktree.query_activation_attempt = worktree
+            .query_activation_attempt
+            .checked_add(1)
+            .ok_or_else(|| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "query activation attempt sequence is exhausted".to_owned(),
+                )
+            })?;
+        worktree.query_activation_revision = Some(result_revision.clone());
+        worktree.query_activation_epoch = Some(epoch);
+        worktree.query_activation_transition_digest = Some(transition_digest.clone());
+        worktree.query_activation_redundancy = Some(prepared_redundancy.clone());
+        worktree.semantic_query_authority = None;
+        crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+            project_root,
+            prepared_redundancy,
+            false,
+        );
+        Ok(QueryActivationAttemptV1 {
+            revision: result_revision.clone(),
+            token: worktree.query_activation_attempt,
+        })
+    }
+
+    pub(in crate::daemon) async fn install_committed_query_authorities(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        provider: &crate::daemon::query_authority_provider::DaemonQueryAuthorityProviderV1,
+        prepared: crate::daemon::query_authority_provider::PreparedQueryActivationV1,
+        semantic_authority: Option<Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>>,
+        prepared_cache: Option<
+            crate::application::semantic_runtime::PreparedProductionSemanticCacheCommitV1,
+        >,
+        disabled_cache_generation: Option<&tracedecay_domain::VectorGenerationIdV1>,
+        prepared_redundancy: crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+        attempt: &QueryActivationAttemptV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        if prepared.scope() != scope {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "prepared query activation scope does not match the committed scope".to_owned(),
+            ));
+        }
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot install query authorities before their worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "query authority scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        let activation =
+            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if worktree.query_activation_revision.as_ref() != Some(&attempt.revision)
+            || worktree.query_activation_attempt != attempt.token
+            || prepared.configuration_revision() != &attempt.revision
+            || prepared_redundancy.configuration_revision() != &attempt.revision
+            || worktree.query_activation_redundancy.as_ref() != Some(&prepared_redundancy)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "prepared query activation attempt is no longer desired".to_owned(),
+            ));
+        }
+        if let Some(prepared_cache) = prepared_cache {
+            if !prepared_cache.commit() {
+                worktree.semantic_query_authority = None;
+                worktree.query_activation_revision =
+                    Some(prepared.configuration_revision().clone());
+                crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                    project_root.clone(),
+                    &prepared_redundancy,
+                    false,
+                );
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "prepared semantic cache became stale before coherent installation".to_owned(),
+                ));
+            }
+        } else if semantic_authority.is_none()
+            && let Some(generation) = disabled_cache_generation
+        {
+            crate::application::semantic_runtime::unbind_project_semantic_cache_if_current(
+                &project_root,
+                generation,
+            );
+        }
+        if let Err(error) = provider.commit_prepared_activation(&prepared) {
+            worktree.semantic_query_authority = None;
+            worktree.query_activation_revision = Some(prepared.configuration_revision().clone());
+            crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                project_root.clone(),
+                &prepared_redundancy,
+                false,
+            );
+            return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
+        }
+        crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+            project_root.clone(),
+            &prepared_redundancy,
+            semantic_authority.is_some(),
+        );
+        worktree.query_authority = Some((
+            scope.scope_digest.clone(),
+            Arc::clone(prepared.query_authority()),
+        ));
+        worktree.semantic_query_authority =
+            semantic_authority.map(|authority| (scope.scope_digest.clone(), authority));
+        worktree.query_activation_revision = Some(prepared.configuration_revision().clone());
+        Ok(())
+    }
+
+    /// Revoke a failed committed transition without letting a delayed observer
+    /// erase a different revision that already installed coherently.
+    pub(in crate::daemon) async fn clear_failed_query_activation(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        cache_generation: Option<&tracedecay_domain::VectorGenerationIdV1>,
+        failed_redundancy: crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+        attempt: &QueryActivationAttemptV1,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        let project_root = project_root.canonicalize()?;
+        let mut mounted = self.mounted.lock().await;
+        let worktree = mounted.get_mut(&project_root).ok_or_else(|| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "cannot clear query authorities before their worktree".to_owned(),
+            )
+        })?;
+        if worktree.repository_id != scope.repository_id
+            || worktree.worktree_id != scope.worktree_id
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "failed query activation scope does not match the mounted worktree".to_owned(),
+            ));
+        }
+        let activation =
+            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+        let _activation = activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if worktree.query_activation_revision.as_ref() == Some(&attempt.revision)
+            && worktree.query_activation_attempt == attempt.token
+            && failed_redundancy.configuration_revision() == &attempt.revision
+            && worktree.query_activation_redundancy.as_ref() == Some(&failed_redundancy)
+        {
+            worktree.semantic_query_authority = None;
+            crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                project_root.clone(),
+                &failed_redundancy,
+                false,
+            );
+            if let Some(generation) = cache_generation {
+                crate::application::semantic_runtime::unbind_project_semantic_cache_if_current(
+                    &project_root,
+                    generation,
+                );
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Revoke the live query authority for one exact admitted scope before a
@@ -1004,6 +1255,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 .query_authority
                 .as_ref()
                 .is_some_and(|(digest, _)| digest != &scope.scope_digest);
+            if worktree.query_activation_revision.is_some() {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "standalone query clear cannot reset a committed authority pair".to_owned(),
+                ));
+            }
             worktree.query_authority = None;
         }
         if roots.len() != 1 {
@@ -1051,6 +1307,33 @@ impl CodeIndexSchedulerRegistryV1 {
         self.query_authority_for_scope(scope).await.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn query_authority_installation_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<(bool, bool, Option<ConfigurationRevisionId>)> {
+        let mounted = self.mounted.lock().await;
+        let mut matches = mounted.values().filter(|worktree| {
+            worktree.repository_id == scope.repository_id
+                && worktree.worktree_id == scope.worktree_id
+        });
+        let worktree = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some((
+            worktree
+                .query_authority
+                .as_ref()
+                .is_some_and(|(digest, _)| digest == &scope.scope_digest),
+            worktree
+                .semantic_query_authority
+                .as_ref()
+                .is_some_and(|(digest, _)| digest == &scope.scope_digest),
+            worktree.query_activation_revision.clone(),
+        ))
+    }
+
     /// Whether a worktree is currently mounted for `project_root`. Read-only
     /// map membership used by the Doctor code-index mount adapter to distinguish
     /// an unmounted worktree from a mounted-but-still-indexing one. Returns
@@ -1061,6 +1344,19 @@ impl CodeIndexSchedulerRegistryV1 {
             return false;
         };
         self.mounted.lock().await.contains_key(&project_root)
+    }
+
+    /// Complete bounded snapshot of roots protected by a live mounted
+    /// scheduler lease. Scope retention folds this into its revision-bound
+    /// proof; returning every profile mount is deliberately conservative.
+    pub(in crate::daemon) async fn scope_retention_mounted_roots(
+        &self,
+    ) -> Result<BTreeSet<PathBuf>, &'static str> {
+        let mounted = self.mounted.lock().await;
+        if mounted.len() > self.max_worktrees {
+            return Err("mounted_root_inventory_exceeds_bound");
+        }
+        Ok(mounted.keys().cloned().collect())
     }
 
     pub async fn notify_path(&self, project_root: &Path, path: PathBuf) -> bool {
@@ -1201,6 +1497,53 @@ impl CodeIndexSchedulerRegistryV1 {
             shutting_down,
             serving_generation,
         })
+    }
+
+    pub(in crate::daemon) async fn install_semantic_vector_graph_provider(
+        &self,
+        project_root: &Path,
+        provider: Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mut mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get_mut(&project_root) else {
+            return false;
+        };
+        worktree.semantic_vector_graph_provider = Some(provider);
+        true
+    }
+
+    pub(in crate::daemon) async fn semantic_vector_graph_provider(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>> {
+        let project_root = project_root.canonicalize().ok()?;
+        self.mounted
+            .lock()
+            .await
+            .get(&project_root)?
+            .semantic_vector_graph_provider
+            .clone()
+    }
+
+    pub(in crate::daemon) async fn code_graph_replay_binding(
+        &self,
+        project_root: &Path,
+        generation: &CodeGenerationId,
+    ) -> Option<Result<super::CodeGraphReplayBindingV1, CodeIndexSchedulerErrorV1>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&project_root)?.scheduler)
+        };
+        Some(
+            scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .code_graph_replay_binding(generation),
+        )
     }
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {

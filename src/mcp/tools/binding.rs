@@ -301,6 +301,14 @@ fn application_capability_for_tool(
     }))
 }
 
+pub(crate) fn canonical_tool_dispatch_ceiling(
+    tool_name: &str,
+) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
+    Ok(application_capability_for_tool(tool_name)?
+        .map(|capability| std::time::Duration::from_millis(capability.deadline().maximum_millis()))
+        .unwrap_or_else(|| super::handlers::tool_dispatch_ceiling(tool_name)))
+}
+
 pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
     matches!(
         binding(tool_name).and_then(|binding| binding.group),
@@ -312,7 +320,15 @@ pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 }
 
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
-    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+    application_capability_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|capability| {
+            matches!(
+                capability.cancellation(),
+                CancellationContract::Cooperative { .. }
+            )
+        })
         || tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
@@ -320,11 +336,33 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
         )
 }
 
+pub(crate) fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
+    application_capability_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|capability| {
+            capability.effect() != EffectClass::Read
+                && *capability.cancellation() == CancellationContract::NotCancellable
+        })
+}
+
 fn verified_effect_journey(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "tracedecay_dashboard"
             | "tracedecay_fact_store"
+            | "tracedecay_fact_feedback"
+            | "tracedecay_memory_status"
+            | "tracedecay_session_refresh"
+            | "tracedecay_run_affected_tests"
+            | "tracedecay_configuration_set"
+            | "tracedecay_configuration_unset"
+            | "tracedecay_configuration_batch"
+            | "tracedecay_configuration_write_credential"
+            | "tracedecay_configuration_protected_apply"
+            | "tracedecay_configuration_rollback_apply"
+            | "tracedecay_context_scout_pause"
+            | "tracedecay_context_scout_resume"
             | "tracedecay_session_start"
             | "tracedecay_session_end"
             | "tracedecay_str_replace"
@@ -454,7 +492,11 @@ fn build_mcp_dispatch_catalog()
             },
             effect,
             deadline: McpDeadlineContractV1::new(
-                super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
+                application_capability
+                    .map(|capability| capability.deadline().maximum_millis())
+                    .unwrap_or_else(|| {
+                        super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64
+                    }),
             )?,
             idempotency: idempotency_for_tool(binding.name, application_capability),
             inverse: inverse_for_tool(binding.name, effect),
@@ -554,8 +596,9 @@ mod tests {
                 application_capability_for_tool(contract.tool_name()).unwrap();
             assert_eq!(
                 contract.deadline().maximum_millis(),
-                super::super::handlers::tool_dispatch_ceiling(contract.tool_name()).as_millis()
-                    as u64
+                canonical_tool_dispatch_ceiling(contract.tool_name())
+                    .unwrap()
+                    .as_millis() as u64
             );
             assert_eq!(
                 contract.availability().is_available(),
@@ -606,6 +649,47 @@ mod tests {
                 .availability()
                 .is_available()
         );
+    }
+
+    #[test]
+    fn configuration_effects_are_available_after_their_canonical_journeys_ship() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        for tool_name in [
+            "tracedecay_configuration_set",
+            "tracedecay_configuration_unset",
+            "tracedecay_configuration_batch",
+            "tracedecay_configuration_write_credential",
+            "tracedecay_configuration_protected_apply",
+            "tracedecay_configuration_rollback_apply",
+        ] {
+            let contract = catalog.contract(tool_name).unwrap();
+            assert_eq!(contract.effect(), EffectClass::ConfigurationWrite);
+            assert_eq!(contract.deadline().maximum_millis(), 15_000);
+            assert!(contract.availability().is_available());
+            assert_eq!(contract.idempotency(), McpIdempotencyContract::KeyRequired);
+            assert!(matches!(
+                contract.cancellation(),
+                CancellationContract::NotCancellable
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_administrative_effects_are_available_after_their_canonical_journeys_ship() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        for tool_name in [
+            "tracedecay_fact_feedback",
+            "tracedecay_memory_status",
+            "tracedecay_session_refresh",
+            "tracedecay_run_affected_tests",
+        ] {
+            let contract = catalog.contract(tool_name).unwrap();
+            assert_eq!(contract.effect(), EffectClass::Administrative);
+            assert!(
+                contract.availability().is_available(),
+                "{tool_name} must stay callable once its retained MCP journey ships"
+            );
+        }
     }
 
     #[test]

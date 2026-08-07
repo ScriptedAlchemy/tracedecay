@@ -443,3 +443,12 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     shutdown_detached_project_servers(servers).await;
     drop(resources);
 }
+
+#[cfg(test)]
+mod generation_retention_test;
+
+#[cfg(test)]
+mod configuration_idempotency_journey_test;
+
+#[cfg(test)]
+mod semantic_activation_journey_test;

@@ -31,7 +31,6 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
 
-use crate::daemon::code_index_scheduler::semantic_vector_graph::project_vector_readable_sources;
 
 use super::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -311,8 +310,9 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
                 .get::<String>(1)
                 .map_err(|error| report_error("decode canonical root", error))?;
             registered_ids.insert(project_id.clone());
-            let vector_readable_sources =
-                project_vector_readable_sources(Path::new(&canonical_root)).await;
+            // Offline reports have no mounted scheduler identity authority, so
+            // vector pins are unavailable rather than inferred from a path.
+            let vector_readable_sources = None;
             append_project_report(
                 profile_root,
                 &project_id,
@@ -379,8 +379,7 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
         // each project with its protection set before the blocking census.
         let mut projects_with_sources = Vec::with_capacity(projects.len());
         for project in projects {
-            let vector_readable_sources =
-                project_vector_readable_sources(Path::new(&project.canonical_root)).await;
+            let vector_readable_sources = None;
             projects_with_sources.push((project, vector_readable_sources));
         }
         return tokio::task::spawn_blocking(move || {
@@ -483,7 +482,7 @@ pub async fn build_project_storage_report_from_daemon(
 ) -> crate::errors::Result<StorageReport> {
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
-    let vector_readable_sources = project_vector_readable_sources(canonical_root).await;
+    let vector_readable_sources = None;
     let canonical_root = canonical_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         build_project_storage_report(

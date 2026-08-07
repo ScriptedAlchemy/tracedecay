@@ -28,6 +28,7 @@ use super::debris::IncidentDebrisScanV1;
 use super::identity::StoreKeyV1;
 use super::inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
+    SemanticVectorRetentionRecordV1,
 };
 use super::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, TableGrowthDoctorEvidenceV1,
@@ -441,6 +442,57 @@ pub fn retention_backlog_finding(
     DoctorStorageFindingV1::new(kind, finding)
 }
 
+/// Report semantic-vector lifecycle backlog without materializing generation
+/// identities. Maintenance supplies fixed-size counts from its bounded census.
+pub fn semantic_vector_retention_finding(
+    record: &SemanticVectorRetentionRecordV1,
+    completeness: DoctorCoverageCompletenessV1,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    record.validate()?;
+    let kind = DoctorStorageFindingKindV1::RetentionBacklog;
+    let finding = if record.has_backlog() {
+        problem_finding(
+            kind,
+            &record.store,
+            DoctorEvidenceStateV1::Stale,
+            completeness,
+            &format!(
+                "semantic-vector.pending-{}.ready-{}.nonconfigured-published-{}.cancelled-{}",
+                record.pending_generation_count,
+                record.ready_generation_count,
+                record.observed_non_configured_published_generation_count,
+                record.cancelled_generation_count,
+            ),
+            "cancelled semantic-vector generations await cleanup",
+        )?
+    } else if record.has_in_flight_generations() {
+        unobservable_finding(
+            kind,
+            &record.store,
+            DoctorEvidenceStateV1::Unknown,
+            &format!(
+                "semantic-vector.in-flight.pending-{}.ready-{}.nonconfigured-published-{}",
+                record.pending_generation_count,
+                record.ready_generation_count,
+                record.observed_non_configured_published_generation_count,
+            ),
+            "semantic-vector generations are in flight, but no durable age evidence exists to classify them as stale retention backlog",
+        )?
+    } else {
+        clean_finding(
+            kind,
+            &record.store,
+            completeness,
+            &format!(
+                "semantic-vector.no-cleanup-backlog.nonconfigured-published-{}",
+                record.observed_non_configured_published_generation_count,
+            ),
+            "no semantic-vector publication or cleanup backlog; non-configured published generations remain subject to exact liveness gates",
+        )?
+    };
+    DoctorStorageFindingV1::new(kind, finding)
+}
+
 /// Report immutable code-generation retention with the total superseded
 /// footprint, the exact liveness-based collectable subset, and the disjoint
 /// stranded-scope class one level up.
@@ -768,6 +820,44 @@ mod tests {
         let finding = retention_backlog_finding(&record, DoctorCoverageCompletenessV1::Complete)
             .expect("finding");
         assert!(finding.finding().state().is_healthy_complete());
+    }
+
+    #[test]
+    fn nonconfigured_published_head_is_observed_without_false_stale_backlog() {
+        let record = SemanticVectorRetentionRecordV1 {
+            store: StoreKeyV1::new("semantic-vector-graph").expect("valid"),
+            pending_generation_count: 0,
+            ready_generation_count: 0,
+            observed_non_configured_published_generation_count: 1,
+            cancelled_generation_count: 0,
+        };
+        assert!(!record.has_backlog());
+
+        let finding =
+            semantic_vector_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+
+        assert!(finding.finding().state().is_healthy_complete());
+        assert!(only_evidence(&finding).contains("nonconfigured-published-1"));
+    }
+
+    #[test]
+    fn in_flight_vector_generation_without_age_is_unknown_not_stale() {
+        let record = SemanticVectorRetentionRecordV1 {
+            store: StoreKeyV1::new("semantic-vector-graph").expect("valid"),
+            pending_generation_count: 1,
+            ready_generation_count: 1,
+            observed_non_configured_published_generation_count: 0,
+            cancelled_generation_count: 0,
+        };
+        assert!(!record.has_backlog());
+        assert!(record.has_in_flight_generations());
+
+        let finding =
+            semantic_vector_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Unknown);
     }
 
     #[test]

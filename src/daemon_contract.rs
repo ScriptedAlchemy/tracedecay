@@ -482,6 +482,9 @@ pub(crate) enum DaemonInvocationPayload {
     },
     SemanticEvaluateAndPublish {
         candidate: Box<crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     },
     LspOpen {
         client_revision: String,
@@ -696,8 +699,7 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset => {
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
                 unreachable!("configuration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
@@ -1049,6 +1051,9 @@ impl DaemonInvocationRequest {
     pub(crate) fn semantic_evaluate_and_publish(
         request_id: impl Into<String>,
         candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
     ) -> Self {
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -1057,6 +1062,9 @@ impl DaemonInvocationRequest {
             delivery_route: None,
             payload: DaemonInvocationPayload::SemanticEvaluateAndPublish {
                 candidate: Box::new(candidate),
+                observed_at,
+                deadline,
+                cancellation,
             },
         }
     }
@@ -1456,20 +1464,6 @@ impl DaemonInvocationRequest {
         )
     }
 
-    pub(crate) fn is_configuration_reset(&self) -> bool {
-        self.delivery_route == Some(Plan26DeliveryRouteV1::Cli)
-            && matches!(
-                &self.payload,
-                DaemonInvocationPayload::Configuration {
-                    surface_operation:
-                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset,
-                    request: crate::application_surface::ConfigurationSurfaceRequest::Reset(_),
-                    resolved_scope: None,
-                    ..
-                }
-            )
-    }
-
     pub(crate) fn is_workflow_application(&self) -> bool {
         matches!(
             &self.payload,
@@ -1598,42 +1592,16 @@ impl DaemonInvocationRequest {
                 }
             }
             DaemonInvocationPayload::Configuration {
-                surface_operation,
-                request,
-                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             } => {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
-                }
-                let reset_operation = *surface_operation
-                    == crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset;
-                let reset_request = matches!(
-                    request,
-                    crate::application_surface::ConfigurationSurfaceRequest::Reset(_)
-                );
-                if reset_operation || reset_request {
-                    if !reset_operation
-                        || !reset_request
-                        || resolved_scope.is_some()
-                        || self.delivery_route != Some(Plan26DeliveryRouteV1::Cli)
-                    {
-                        return Err(DaemonInvocationProblem::InvalidRequest);
-                    }
-                    if let crate::application_surface::ConfigurationSurfaceRequest::Reset(request) =
-                        request
-                        && request
-                            .confirmation
-                            .as_ref()
-                            .is_some_and(|confirmation| confirmation.validate().is_err())
-                    {
-                        return Err(DaemonInvocationProblem::InvalidRequest);
-                    }
                 }
             }
             DaemonInvocationPayload::PrimitiveCode {
@@ -1674,9 +1642,17 @@ impl DaemonInvocationRequest {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
-            DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
+            DaemonInvocationPayload::SemanticEvaluateAndPublish {
+                candidate,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
                 if candidate.evaluated_profile_id.trim() != candidate.evaluated_profile_id
                     || candidate.evaluated_profile_id.is_empty()
+                    || observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2216,9 +2192,6 @@ pub(crate) enum DaemonInvocationOutcome {
     Configuration {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
-    },
-    ConfigurationReset {
-        outcome: tracedecay_application::ConfigurationResetOutcomeV1,
     },
     ContextScout {
         scope: ResolvedScope,

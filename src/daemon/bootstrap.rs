@@ -69,15 +69,16 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let lifecycle = DaemonLifecycle::default();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = store_administration.registered_profile_database().await?;
+    let invocation = DaemonInvocationState::default();
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
         profile_database,
         store_administration.clone(),
+        invocation.code_index_schedulers.clone(),
         sync_config.retention,
     )
     .await;
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
-    let invocation = DaemonInvocationState::default();
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
@@ -259,6 +260,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         profile_root.clone(),
         Arc::clone(&profile_database),
         engine.store_administration.clone(),
+        engine.invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
     )
     .await;

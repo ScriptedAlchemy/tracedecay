@@ -9,6 +9,32 @@ use super::*;
 /// shutdown drains) indefinitely as the previous unbounded loop allowed.
 const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn configuration_authority_unavailable(detail: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("configuration authority unavailable: {detail}"),
+    }
+}
+
+fn upload_enabled_from_desired_configuration(
+    desired: &tracedecay_domain::configuration::ConfigurationSnapshotV1,
+) -> Result<bool> {
+    use tracedecay_domain::configuration::{
+        ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
+    };
+
+    let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY)
+        .map_err(|error| configuration_authority_unavailable(error))?;
+    match desired.effective_values.get(&key) {
+        Some(ConfigurationValueV1::Boolean(enabled)) => Ok(*enabled),
+        Some(_) => Err(configuration_authority_unavailable(
+            "desired upload setting is not boolean",
+        )),
+        None => Err(configuration_authority_unavailable(
+            "desired upload setting is missing",
+        )),
+    }
+}
+
 // Global accounting (savings ledger + worldwide-counter flushes) is enabled
 // by default; see `crate::global_db::global_accounting_mode` for the env
 // override precedence.
@@ -57,6 +83,24 @@ impl McpServer {
     /// than discovering the gap as an absent row much later.
     pub fn ledger_sink_is_mounted(&self) -> bool {
         matches!(self.ledger_sink(), LedgerSink::Mounted(_))
+    }
+
+    /// Reads the upload policy from the daemon-retained desired configuration
+    /// snapshot. There is deliberately no `config.toml` fallback: without the
+    /// canonical authority, the upload decision is unavailable.
+    pub(super) async fn canonical_upload_enabled(&self) -> Result<bool> {
+        let cg = self.cg_snapshot().await;
+        let desired = cg
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|error| {
+                configuration_authority_unavailable(format!(
+                    "cannot read desired upload setting: {error}"
+                ))
+            })?;
+        upload_enabled_from_desired_configuration(&desired.snapshot)
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -203,11 +247,21 @@ impl McpServer {
             return;
         }
 
+        let upload_enabled = match self.canonical_upload_enabled().await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "worldwide counter upload skipped because configuration authority is unavailable"
+                );
+                return;
+            }
+        };
+
         let success = tokio::task::spawn_blocking(move || {
             let mut config = crate::user_config::UserConfig::load();
             config.pending_upload += delta;
-            if config.upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some()
-            {
+            if upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some() {
                 config.pending_upload = 0;
                 config.last_upload_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -437,5 +491,64 @@ impl McpServer {
             finished.fetch_add(1, Ordering::SeqCst);
             notify.notify_waiters();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::configuration::{
+        ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
+    };
+
+    use super::*;
+
+    fn desired_configuration() -> ConfigurationSnapshotV1 {
+        let registry =
+            crate::config::registry::ConfigurationRegistry::core().expect("configuration registry");
+        crate::config::resolver::resolve_configuration(&registry, &[])
+            .expect("default desired configuration")
+            .snapshot
+    }
+
+    #[test]
+    fn upload_setting_comes_from_the_desired_configuration_snapshot() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired
+            .effective_values
+            .insert(key, ConfigurationValueV1::Boolean(true));
+
+        assert!(
+            upload_enabled_from_desired_configuration(&desired)
+                .expect("desired boolean setting must be readable")
+        );
+    }
+
+    #[test]
+    fn missing_desired_upload_setting_is_typed_unavailable() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired.effective_values.remove(&key);
+
+        assert!(matches!(
+            upload_enabled_from_desired_configuration(&desired),
+            Err(TraceDecayError::Config { message })
+                if message.starts_with("configuration authority unavailable")
+        ));
+    }
+
+    #[test]
+    fn non_boolean_desired_upload_setting_is_typed_unavailable() {
+        let mut desired = desired_configuration();
+        let key = SettingKey::new(USER_UPLOAD_ENABLED_SETTING_KEY).expect("canonical setting key");
+        desired
+            .effective_values
+            .insert(key, ConfigurationValueV1::Unsigned(1));
+
+        assert!(matches!(
+            upload_enabled_from_desired_configuration(&desired),
+            Err(TraceDecayError::Config { message })
+                if message.starts_with("configuration authority unavailable")
+        ));
     }
 }

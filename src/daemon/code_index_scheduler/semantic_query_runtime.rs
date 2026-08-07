@@ -1,9 +1,7 @@
 //! Exact-scope activation and execution for optional semantic augmentation.
 //!
-//! This owner is deliberately separate from the query fallback authority. QUERY
-//! remains an exact three-lane profile; semantic influence requires a second,
-//! independently activated PASS profile carrying exact calibration and vector
-//! compatibility pins.
+//! Query fallback remains an exact three-lane profile. Semantic influence is
+//! separately activated with exact calibration and vector compatibility pins.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -42,6 +40,7 @@ use tracedecay_query::retrieval::semantic::{
 #[derive(Clone)]
 pub(in crate::daemon) struct SemanticQueryAuthorityV1 {
     activation: SemanticCurrentLinkedActivationV1,
+    query_profile_id: tracedecay_domain::FusionProfileId,
     profile_digest: tracedecay_domain::ManifestDigest,
     execution: SemanticCompositionExecutionAuthorityV1,
     rerank: Option<ConfiguredRerankAuthorityV1>,
@@ -54,7 +53,7 @@ struct ConfiguredRerankAuthorityV1 {
 }
 
 impl SemanticQueryAuthorityV1 {
-    fn from_committed(
+    pub(in crate::daemon) fn from_committed(
         committed: CommittedRetrievalProfileStateV1,
     ) -> Result<Self, SemanticQueryAuthorityErrorV1> {
         let activation = committed
@@ -77,6 +76,33 @@ impl SemanticQueryAuthorityV1 {
         let rerank_policy = accepted.rerank().cloned();
         let rerank_pins = accepted.compatibility().rerank.clone();
         let profile_digest = accepted.profile_digest().clone();
+        let query_lanes = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
+        let mut query_profiles = [
+            Some(committed.state.active()),
+            committed.state.rollback_profile(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|profile| {
+            profile
+                .profile()
+                .calibrations
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                == query_lanes
+                && profile
+                    .profile()
+                    .weights_micros
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    == query_lanes
+        });
+        let query_profile_id = query_profiles
+            .next()
+            .map(|profile| profile.profile().profile_id.clone())
+            .ok_or(SemanticQueryAuthorityErrorV1::IncompatibleActivation)?;
         if activation.receipt.activated_generation != pins.vector_generation_id
             || pins.calibration.projection_key != *pins.projection.projection_key()
             || pins.calibration.vector_generation != pins.vector_generation_id
@@ -96,6 +122,7 @@ impl SemanticQueryAuthorityV1 {
                 policy.evaluation_result_anchor != accepted.profile().evaluation_result_anchor
             })
             || accepted.compatibility().semantic.as_ref() != Some(pins)
+            || query_profiles.next().is_some()
         {
             return Err(SemanticQueryAuthorityErrorV1::IncompatibleActivation);
         }
@@ -113,6 +140,7 @@ impl SemanticQueryAuthorityV1 {
         .map_err(|error| SemanticQueryAuthorityErrorV1::Mount(error.to_string()))?;
         Ok(Self {
             activation,
+            query_profile_id,
             profile_digest,
             execution,
             rerank,
@@ -284,6 +312,12 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return Err(SemanticQueryAuthorityErrorV1::ScopeMismatch);
         }
+        if worktree.query_activation_revision.is_some() {
+            return Err(SemanticQueryAuthorityErrorV1::Mount(
+                "standalone semantic authority cannot replace a committed authority pair"
+                    .to_owned(),
+            ));
+        }
         worktree.semantic_query_authority = Some((scope.scope_digest.clone(), authority));
         Ok(())
     }
@@ -297,6 +331,12 @@ impl CodeIndexSchedulerRegistryV1 {
             if worktree.repository_id == scope.repository_id
                 && worktree.worktree_id == scope.worktree_id
             {
+                if worktree.query_activation_revision.is_some() {
+                    return Err(SemanticQueryAuthorityErrorV1::Mount(
+                        "standalone semantic clear cannot reset a committed authority pair"
+                            .to_owned(),
+                    ));
+                }
                 worktree.semantic_query_authority = None;
             }
         }
@@ -309,12 +349,18 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Option<Arc<SemanticQueryAuthorityV1>> {
         let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
-        for worktree in mounted.values() {
+        for (project_root, worktree) in mounted.iter() {
             if worktree.repository_id != scope.repository_id
                 || worktree.worktree_id != scope.worktree_id
             {
                 continue;
             }
+            let activation = crate::application::semantic_runtime::project_semantic_activation_gate(
+                project_root,
+            );
+            let _activation = activation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (scope_digest, authority) = worktree.semantic_query_authority.as_ref()?;
             if scope_digest != &scope.scope_digest || matched.is_some() {
                 return None;
@@ -331,13 +377,15 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &ResolvedScope,
         input: QuerySearchExecutionRequestV1,
-        control: &C,
+        control: Arc<C>,
         mode: SemanticQueryModeV1,
     ) -> Result<ExecutedQuerySemanticSearchV1, QuerySemanticSearchExecutionErrorV1>
     where
-        C: SemanticExecutionControl + Sync,
+        C: SemanticExecutionControl + Send + Sync + 'static,
     {
-        let query = self.execute_query_search(scope, input).await?;
+        let query = self
+            .execute_controlled_query(scope, input, control.clone())
+            .await?;
         let Some(latest) = self.generation_for(scope, &query.generation).await else {
             let semantic = semantic_abstention(
                 mode,
@@ -355,7 +403,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 query.sanitized.request(),
                 query.sanitized.query_view(),
                 &query.authorized,
-                control,
+                control.as_ref(),
                 mode,
             )
             .await
@@ -388,6 +436,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&authorized_query.fallback),
             );
         };
+        if authorized_query.composition.profile_id != authority.query_profile_id {
+            return semantic_abstention(
+                mode,
+                SemanticAbstentionV1::Stale,
+                Arc::clone(&authorized_query.fallback),
+            );
+        }
         let pins = authority.pins();
         if !semantic_cursor_matches_activation(
             authorized_query.request_cursor.as_ref(),

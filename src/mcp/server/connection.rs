@@ -923,20 +923,27 @@ impl McpServer {
         if (self.accounting_db.is_some() || self.global_db.is_some()) && tokens_saved > last_flushed
         {
             let delta = tokens_saved - last_flushed;
-            let mut config = crate::user_config::UserConfig::load();
-            config.pending_upload += delta;
-            if config.upload_enabled
-                && let Some(_total) = crate::cloud::flush_pending(config.pending_upload)
-            {
-                config.pending_upload = 0;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                config.last_upload_at = now;
-            }
-            if let Err(err) = config.save() {
-                tracing::warn!(error = %err, "could not save upload config during shutdown");
+            match self.canonical_upload_enabled().await {
+                Ok(upload_enabled) => {
+                    let mut config = crate::user_config::UserConfig::load();
+                    config.pending_upload += delta;
+                    if upload_enabled
+                        && let Some(_total) = crate::cloud::flush_pending(config.pending_upload)
+                    {
+                        config.pending_upload = 0;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        config.last_upload_at = now;
+                    }
+                    if let Err(err) = config.save() {
+                        tracing::warn!(error = %err, "could not save upload config during shutdown");
+                    }
+                }
+                Err(error) => failures.push(format!(
+                    "worldwide counter upload configuration unavailable: {error}"
+                )),
             }
         }
 

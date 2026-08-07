@@ -111,17 +111,8 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::mcp::tools::tool_supports_live_cancellation(tool_name)
 }
 
-pub(super) fn dispatch_deadline_horizon_micros(
-    application_surface: bool,
-    thirty_second_operation: bool,
-) -> Option<i64> {
-    if thirty_second_operation {
-        Some(30_000_000)
-    } else if application_surface {
-        Some(10_000_000)
-    } else {
-        None
-    }
+pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Option<i64> {
+    bounded_operation.then_some(30_000_000)
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
@@ -1814,7 +1805,7 @@ mod git_read_control_tests {
             let controlled_read = is_controlled_read_tool(tool_name);
             assert!(controlled_read);
             assert_eq!(
-                dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
+                dispatch_deadline_horizon_micros(controlled_read),
                 Some(30_000_000)
             );
         }
@@ -1830,10 +1821,7 @@ mod git_read_control_tests {
         ] {
             assert!(is_source_edit_tool(tool_name));
             assert!(tool_supports_live_cancellation(tool_name));
-            assert_eq!(
-                dispatch_deadline_horizon_micros(true, true),
-                Some(30_000_000)
-            );
+            assert_eq!(dispatch_deadline_horizon_micros(true), Some(30_000_000));
         }
 
         let request_id = "request.git-read-controls".to_owned();
@@ -1881,7 +1869,6 @@ mod git_read_control_tests {
             );
             assert_eq!(
                 dispatch_deadline_horizon_micros(
-                    false,
                     is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
                 ),
                 Some(30_000_000),

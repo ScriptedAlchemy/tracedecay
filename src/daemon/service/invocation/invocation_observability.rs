@@ -110,7 +110,6 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26Fee
         | DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
-        | DaemonInvocationOutcome::ConfigurationReset { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }

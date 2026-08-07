@@ -609,6 +609,95 @@ impl ProjectContextScoutAddressRegistryV1 {
         matches.next().is_some() && matches.next().is_none()
     }
 
+    /// Authorizes a control request by its opaque exact address and registered
+    /// scope without treating the address ledger's configuration pin as the
+    /// mutation CAS authority. This permits a caller-stable idempotent retry
+    /// after the configuration commit advanced the current revision; the
+    /// configuration control plane still decides replay versus conflict.
+    pub async fn authorize_control_exact_address(
+        &self,
+        address: ContextScoutAddressV1,
+        scope: &ResolvedScope,
+    ) -> bool {
+        if scope.project_id != self.project_id {
+            return false;
+        }
+        let Ok(Some(ledger)) = self.read_ledger().await else {
+            return false;
+        };
+        let mut matches = ledger.bindings.iter().filter(|binding| {
+            binding.address == address
+                && binding.lifecycle.project_id == scope.project_id
+                && binding.lifecycle.worktree_id == scope.worktree_id
+                && binding.scope_digest == scope.scope_digest
+        });
+        matches.next().is_some() && matches.next().is_none()
+    }
+
+    /// Advances the exact control address to the committed configuration pin.
+    /// The opaque address is preserved so response-loss retry reaches the
+    /// durable configuration receipt instead of requiring a new host event.
+    pub async fn advance_control_exact_address(
+        &self,
+        address: ContextScoutAddressV1,
+        scope: &ResolvedScope,
+        configuration: &ContextScoutConfigurationPinV1,
+    ) -> bool {
+        if scope.project_id != self.project_id {
+            return false;
+        }
+        let transaction = match self
+            .database
+            .begin_write_transaction("advance Context Scout control address")
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(_) => return false,
+        };
+        let mut ledger = match load_address_ledger(&transaction, &self.project_id).await {
+            Some(ledger) => ledger,
+            None => return false,
+        };
+        let matches = ledger
+            .bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                binding.address == address
+                    && binding.lifecycle.project_id == scope.project_id
+                    && binding.lifecycle.worktree_id == scope.worktree_id
+                    && binding.scope_digest == scope.scope_digest
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let [index] = matches.as_slice() else {
+            let _ = transaction.rollback().await;
+            return false;
+        };
+        let binding = &mut ledger.bindings[*index];
+        binding.configuration_revision = configuration.revision_id.clone();
+        binding.configuration_digest = configuration.configuration_digest.clone();
+        if !ledger.validate(&self.project_id) {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        let Ok(encoded) = serde_json::to_string(&ledger) else {
+            let _ = transaction.rollback().await;
+            return false;
+        };
+        if encoded.len() > MAX_ADDRESS_LEDGER_BYTES_V1
+            || self
+                .database
+                .set_metadata_unguarded(&transaction, ADDRESS_LEDGER_KEY_V1, &encoded)
+                .await
+                .is_err()
+        {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        transaction.commit().await.is_ok()
+    }
+
     async fn read_ledger(&self) -> Result<Option<StoredContextScoutAddressLedgerV1>, ()> {
         let encoded = self
             .database
@@ -1098,6 +1187,16 @@ mod tests {
         }
     }
 
+    fn scope() -> ResolvedScope {
+        ResolvedScope::new(
+            id("project.scout.fixture"),
+            id("repository.scout.fixture"),
+            id("worktree.scout.fixture"),
+            None,
+        )
+        .unwrap()
+    }
+
     fn pin(revision: &str) -> ContextScoutAuthorityPinV1 {
         let current = configuration(revision, ContextScoutSettingsV1::disabled());
         ContextScoutAuthorityPinV1 {
@@ -1108,7 +1207,7 @@ mod tests {
                 branch_ref: "refs/heads/main".to_owned(),
                 head_commit_id: id("commit.scout.fixture"),
             },
-            scope_digest: ManifestDigest::new(format!("sha256:{}", "1".repeat(64))).unwrap(),
+            scope_digest: scope().scope_digest,
             configuration: ContextScoutConfigurationPinV1::from_current(&current).unwrap(),
         }
     }
@@ -1298,6 +1397,77 @@ mod tests {
         assert_eq!(
             restarted.resolve(&hook, &next_revision).await,
             ContextScoutAddressResolveOutcomeV1::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn control_address_advances_in_place_and_authorizes_receipt_replay_after_restart() {
+        let (_temporary, database) = database().await;
+        let registry = ProjectContextScoutAddressRegistryV1::new(
+            database.clone(),
+            id("project.scout.fixture"),
+        )
+        .unwrap();
+        let hook = admitted_hook();
+        let base = pin("revision.scout.control.base");
+        let address = match registry.bind(&hook, &base, lifecycle()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected bound control address, got {other:?}"),
+        };
+        let scope = scope();
+        assert!(
+            registry
+                .authorize_control_exact_address(address, &scope)
+                .await
+        );
+        let wrong_scope = ResolvedScope::new(
+            id("project.scout.fixture"),
+            id("repository.scout.fixture"),
+            id("worktree.scout.other"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !registry
+                .authorize_control_exact_address(address, &wrong_scope)
+                .await
+        );
+        assert!(
+            registry
+                .authorize_current_exact_address(address, &base.configuration, &scope)
+                .await
+        );
+
+        let committed = pin("revision.scout.control.committed");
+        assert!(
+            registry
+                .advance_control_exact_address(address, &scope, &committed.configuration)
+                .await
+        );
+        assert!(
+            !registry
+                .authorize_current_exact_address(address, &base.configuration, &scope)
+                .await
+        );
+        assert!(
+            registry
+                .authorize_current_exact_address(address, &committed.configuration, &scope)
+                .await
+        );
+
+        drop(registry);
+        let restarted =
+            ProjectContextScoutAddressRegistryV1::new(database, id("project.scout.fixture"))
+                .unwrap();
+        assert!(
+            restarted
+                .authorize_control_exact_address(address, &scope)
+                .await
+        );
+        assert!(
+            restarted
+                .authorize_current_exact_address(address, &committed.configuration, &scope)
+                .await
         );
     }
 

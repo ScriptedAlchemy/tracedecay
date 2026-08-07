@@ -339,25 +339,43 @@ async fn handle_branch_autotrack_action(
 
     match action {
         BranchAutotrackAction::Status { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let configuration = tracedecay::config::cached_runtime_configuration(&project_path)?;
-            let sync = &configuration.config.sync;
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+            let enabled = super::settings::current_project_setting(
+                &resolved.project_path,
+                tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+            )
+            .await?;
+            let poll_secs = super::settings::current_project_setting(
+                &resolved.project_path,
+                tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+            )
+            .await?;
+            let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(enabled) = enabled
+            else {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "PR auto-tracking setting is not boolean".to_owned(),
+                });
+            };
+            let tracedecay_domain::configuration::ConfigurationValueV1::Unsigned(poll_secs) =
+                poll_secs
+            else {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "PR auto-tracking poll interval is not unsigned".to_owned(),
+                });
+            };
             eprintln!(
                 "PR auto-tracking: {}",
-                if sync.auto_track_pr_branches {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
+                if enabled { "enabled" } else { "disabled" }
             );
             eprintln!(
                 "Poll interval: {}s (effective {}s)",
-                sync.auto_track_pr_poll_secs,
-                sync.effective_auto_track_pr_poll_secs()
+                poll_secs,
+                poll_secs.max(MIN_AUTO_TRACK_PR_POLL_SECS)
             );
             #[cfg(unix)]
             {
-                let data_root = resolve_branch_data_root(&project_path).await?;
+                let data_root = resolve_branch_data_root(&resolved.project_path).await?;
                 let managed = tracedecay::daemon::pr_autotrack::managed_summary(&data_root);
                 if managed.is_empty() {
                     eprintln!("Tracked PR branches: none");
@@ -373,29 +391,105 @@ async fn handle_branch_autotrack_action(
             }
         }
         BranchAutotrackAction::Enable { poll_secs, path } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
-            let mut config = current.config.clone();
-            config.sync.auto_track_pr_branches = true;
-            if let Some(secs) = poll_secs {
-                config.sync.auto_track_pr_poll_secs = secs.max(MIN_AUTO_TRACK_PR_POLL_SECS);
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+            let expected_revision =
+                super::settings::current_configuration_revision(&resolved.project_path).await?;
+            let current_enabled = super::settings::current_project_setting(
+                &resolved.project_path,
+                tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+            )
+            .await?;
+            let current_poll_secs = super::settings::current_project_setting(
+                &resolved.project_path,
+                tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+            )
+            .await?;
+            let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(current_enabled) =
+                current_enabled
+            else {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "PR auto-tracking setting is not boolean".to_owned(),
+                });
+            };
+            let tracedecay_domain::configuration::ConfigurationValueV1::Unsigned(current_poll_secs) =
+                current_poll_secs
+            else {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "PR auto-tracking poll interval is not unsigned".to_owned(),
+                });
+            };
+            let effective_poll_secs = poll_secs
+                .map(|secs| secs.max(MIN_AUTO_TRACK_PR_POLL_SECS))
+                .unwrap_or(current_poll_secs);
+            let mut mutations = Vec::new();
+            if !current_enabled {
+                mutations.push(super::settings::project_configuration_set(
+                    &resolved.project_id,
+                    tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+                    tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+                )?);
             }
-            let updated =
-                tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
+            if effective_poll_secs != current_poll_secs {
+                mutations.push(super::settings::project_configuration_set(
+                    &resolved.project_id,
+                    tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+                    tracedecay_domain::configuration::ConfigurationValueV1::Unsigned(
+                        effective_poll_secs,
+                    ),
+                )?);
+            }
+            let receipt = super::settings::mutate_project_configuration(
+                &resolved.project_path,
+                &resolved.project_id,
+                expected_revision,
+                mutations,
+            )
+            .await?;
             eprintln!(
                 "\x1b[32m✔\x1b[0m PR auto-tracking enabled (poll every {}s). Restart the daemon (`tracedecay daemon restart`) to apply.",
-                updated.config.sync.effective_auto_track_pr_poll_secs()
+                effective_poll_secs.max(MIN_AUTO_TRACK_PR_POLL_SECS)
             );
+            super::settings::report_configuration_receipt(receipt.as_ref());
         }
         BranchAutotrackAction::Disable { path } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let current = tracedecay::config::cached_runtime_configuration(&project_path)?;
-            let mut config = current.config.clone();
-            config.sync.auto_track_pr_branches = false;
-            tracedecay::config::mutate_pinned_runtime_configuration(&current, config).await?;
+            let resolved =
+                super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+            let expected_revision =
+                super::settings::current_configuration_revision(&resolved.project_path).await?;
+            let current = super::settings::current_project_setting(
+                &resolved.project_path,
+                tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+            )
+            .await?;
+            let tracedecay_domain::configuration::ConfigurationValueV1::Boolean(current) = current
+            else {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "PR auto-tracking setting is not boolean".to_owned(),
+                });
+            };
+            let mutations = current
+                .then(|| {
+                    super::settings::project_configuration_set(
+                        &resolved.project_id,
+                        tracedecay_domain::configuration::SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+                        tracedecay_domain::configuration::ConfigurationValueV1::Boolean(false),
+                    )
+                })
+                .transpose()?
+                .into_iter()
+                .collect();
+            let receipt = super::settings::mutate_project_configuration(
+                &resolved.project_path,
+                &resolved.project_id,
+                expected_revision,
+                mutations,
+            )
+            .await?;
             eprintln!(
                 "\x1b[32m✔\x1b[0m PR auto-tracking disabled. The daemon tears down any managed PR worktrees, refs, synthetic branches and stores on its next poll cycle."
             );
+            super::settings::report_configuration_receipt(receipt.as_ref());
         }
     }
     Ok(())

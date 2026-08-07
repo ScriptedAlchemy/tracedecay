@@ -552,9 +552,21 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
-            DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
-                self.execute_semantic_evaluation(project_root, request_id, *candidate)
-                    .await
+            DaemonInvocationPayload::SemanticEvaluateAndPublish {
+                candidate,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                self.execute_semantic_evaluation(
+                    project_root,
+                    request_id,
+                    *candidate,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
             }
             DaemonInvocationPayload::LspOpen {
                 client_revision,

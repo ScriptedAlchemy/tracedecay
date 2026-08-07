@@ -12,7 +12,9 @@ use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
 };
 use tracedecay_domain::ProjectId;
-use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::configuration::{
+    ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
+};
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::errors::{Result, TraceDecayError};
@@ -34,10 +36,14 @@ use crate::dashboard::{
 struct DashboardInvocationExecutorAdapter {
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     configuration_batch_contract: tracedecay_application::ResultContractRef,
+    user_profile_id: Option<UserProfileId>,
 }
 
 impl DashboardInvocationExecutorAdapter {
-    fn new(executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>) -> Result<Self> {
+    fn new(
+        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+        user_profile_id: Option<UserProfileId>,
+    ) -> Result<Self> {
         let operation =
             tracedecay_application::configuration_surface_operation("configuration_batch")
                 .map_err(|error| TraceDecayError::Config {
@@ -53,11 +59,16 @@ impl DashboardInvocationExecutorAdapter {
         Ok(Self {
             executor,
             configuration_batch_contract: operation.result_contract().clone(),
+            user_profile_id,
         })
     }
 }
 
 impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
+    fn user_profile_id(&self) -> Option<&UserProfileId> {
+        self.user_profile_id.as_ref()
+    }
+
     fn routers(
         &self,
         active_project_id: ProjectId,
@@ -95,6 +106,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         request_id: RequestId,
         mutations: Vec<DirectConfigurationMutation>,
         expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
     ) -> DashboardConfigurationApplyFuture<'_> {
         let executor = Arc::clone(&self.executor);
         let configuration_batch_contract = self.configuration_batch_contract.clone();
@@ -112,6 +124,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                         crate::application_surface::ConfigurationBatchSurfaceRequest {
                             mutations: direct_mutations,
                             expected_revision,
+                            idempotency_key,
                         },
                     ),
                 ),
@@ -120,7 +133,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
             )
             .await
             {
-                Ok(result) => result.result.map(|_| ()),
+                Ok(result) => result.result.map(|envelope| envelope.outcome),
                 Err(_) => Err(dashboard_configuration_unavailable(
                     configuration_batch_contract,
                     error_request_id,
@@ -390,9 +403,12 @@ pub(super) async fn handle_dashboard(
             })?;
             let dashboard_project_graph_resolver = retained_project_graph_resolver
                 .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
+            let dashboard_profile_id = registered_project_session_db
+                .as_ref()
+                .map(|database| database.binding().shard_id.profile_id.clone());
             let application_invocation_executor = application_invocation_executor
                 .map(|executor| {
-                    DashboardInvocationExecutorAdapter::new(executor)
+                    DashboardInvocationExecutorAdapter::new(executor, dashboard_profile_id)
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
@@ -407,6 +423,7 @@ pub(super) async fn handle_dashboard(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
                     project_graph_resolver: dashboard_project_graph_resolver,
+                    graph_read_authority: None,
                     registered_project_session_db,
                     lcm_read_authority,
                     registered_savings_db,

@@ -9,8 +9,9 @@ use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
-    SearchEvalError, compare_direct, generate_candidate_outputs, root_admitted_corpus_scope,
-    validate_default_activation_workload, validate_direct_workload, write_generate_outputs,
+    SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
+    root_admitted_corpus_scope, validate_default_activation_workload, validate_direct_workload,
+    write_generate_outputs,
 };
 
 #[derive(Debug, Parser)]
@@ -78,11 +79,16 @@ fn main() -> ExitCode {
             repo_root,
             workload,
             profiles,
-        } => match compare_direct(
-            &repo_root,
-            workload.as_deref(),
-            profiles.as_deref(),
-            root_admitted_corpus_scope,
+        } => match workload.as_deref().map_or_else(
+            || compare_default_direct(&repo_root, profiles.as_deref()),
+            |workload| {
+                compare_direct(
+                    &repo_root,
+                    Some(workload),
+                    profiles.as_deref(),
+                    root_admitted_corpus_scope,
+                )
+            },
         ) {
             Ok(report) => {
                 let exit = if report.status == DirectEvaluationStatusV1::Pass {

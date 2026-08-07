@@ -371,8 +371,21 @@ async fn run_startup_preamble(command: &Commands) {
     // makes a synchronous HTTP call (#84) which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the
     // MCP client's 30 s `initialize` timeout.
-    if startup_policy.runs_startup_maintenance() {
-        global::try_flush(&mut user_config, is_force_flush);
+    if startup_policy.runs_startup_maintenance()
+        && let Ok(cwd) = std::env::current_dir()
+        && let Some(project_root) =
+            tracedecay::config::discover_project_root_with_identity(&cwd).await
+    {
+        match commands::canonical_upload_enabled(&project_root).await {
+            Ok(upload_enabled) => {
+                global::try_flush(&mut user_config, is_force_flush, upload_enabled);
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: canonical worldwide-counter upload setting is unavailable: {error}"
+                );
+            }
+        }
     }
     if !is_local_install_command(command)
         && let Err(err) = user_config.save_if_exists()
@@ -607,8 +620,7 @@ impl CommandFamily {
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. }
-            | Commands::Config { .. } => Self::Configuration,
+            | Commands::Gitignore { .. } => Self::Configuration,
             Commands::Doctor
             | Commands::Cost { .. }
             | Commands::Bench { .. }
@@ -1227,52 +1239,13 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {
-            commands::handle_upload_counter(false);
+            commands::handle_upload_counter(false).await?;
         }
         Commands::EnableUploadCounter => {
-            commands::handle_upload_counter(true);
+            commands::handle_upload_counter(true).await?;
         }
         Commands::Gitignore { path, action } => {
             commands::handle_gitignore(path, action).await?;
-        }
-        Commands::Config {
-            action: ConfigurationAction::Reset { path, confirmation },
-        } => {
-            let project_path = tracedecay::config::resolve_path(path);
-            let (outcome, token) =
-                tracedecay::daemon_client::DaemonInvocationClient::reset_configuration(
-                    project_path,
-                    confirmation.as_deref(),
-                )
-                .await?;
-            match outcome {
-                tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired {
-                    confirmation,
-                } => {
-                    let token =
-                        token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                            message: "daemon omitted the configuration reset confirmation token"
-                                .to_owned(),
-                        })?;
-                    eprintln!(
-                        "Configuration reset required for project {} (profile {}, store {}).",
-                        confirmation.project_id,
-                        confirmation.profile_id,
-                        confirmation.runtime_binding_digest
-                    );
-                    println!("{token}");
-                }
-                tracedecay_application::ConfigurationResetOutcomeV1::Completed {
-                    project_id,
-                    profile_id,
-                    runtime_binding_digest,
-                    ..
-                } => {
-                    eprintln!(
-                        "Reset configuration for project {project_id} (profile {profile_id}, store {runtime_binding_digest})."
-                    );
-                }
-            }
         }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
@@ -1356,9 +1329,7 @@ impl CommandStartupPolicy {
             // Tool calls are the documented MCP fallback and must remain a local,
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
-            Commands::Tool { .. } | Commands::Workflow { .. } | Commands::Config { .. } => {
-                Self::SkipAll
-            }
+            Commands::Tool { .. } | Commands::Workflow { .. } => Self::SkipAll,
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.

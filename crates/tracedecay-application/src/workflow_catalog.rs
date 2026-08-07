@@ -78,12 +78,10 @@ fn workflow_binding(
     operation: &str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError> {
     match operation {
-        "register_definition" => {
-            available::<
-                WorkflowDefinitionRegisterRequest,
-                tracedecay_domain::WorkflowDefinition,
-            >(operation, "/application/workflow/register-definition")
-        }
+        "register_definition" => available::<
+            WorkflowDefinitionRegisterRequest,
+            tracedecay_domain::WorkflowDefinition,
+        >(operation, "/application/workflow/register-definition"),
         "validate_definition" => available::<
             WorkflowDefinitionValidateRequest,
             WorkflowDefinitionValidation,
@@ -100,10 +98,10 @@ fn workflow_binding(
             WorkflowDefinitionHistoryRequest,
             Vec<tracedecay_domain::WorkflowDefinition>,
         >(operation, "/application/workflow/definition-history"),
-        "diff_definition" => available::<
-            WorkflowDefinitionDiffRequest,
-            WorkflowDefinitionDiff,
-        >(operation, "/application/workflow/diff-definition"),
+        "diff_definition" => available::<WorkflowDefinitionDiffRequest, WorkflowDefinitionDiff>(
+            operation,
+            "/application/workflow/diff-definition",
+        ),
         "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
             operation,
             "/application/workflow/handoff-issue",

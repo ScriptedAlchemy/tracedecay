@@ -15,9 +15,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
-    ApplicationResponse, CancellationSignal, CancellationStage, Deadline, InvocationError,
-    InvocationTarget, OpaqueCursor, PageRequest, RequestId, SafeDiagnostic, StreamEvent,
-    StreamEventKind, StreamTermination,
+    ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
+    InvocationError, InvocationTarget, LegalAction, OpaqueCursor, PageRequest, RequestId,
+    RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_lsp::{FramePoll, FrameSend};
@@ -341,12 +341,8 @@ impl InvocationCancellationPolicy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DaemonInvocationError {
-    Cancelled {
-        stage: CancellationStage,
-    },
-    TimedOut {
-        stage: CancellationStage,
-    },
+    Cancelled { stage: CancellationStage },
+    TimedOut { stage: CancellationStage },
     Unavailable,
 }
 
@@ -418,106 +414,6 @@ impl DaemonInvocationClient {
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
         })
-    }
-
-    /// Runs the CLI-only configuration reset journey through the authenticated
-    /// daemon. An omitted token inspects the exact refused store and returns
-    /// the token that must be echoed by a later invocation.
-    pub async fn reset_configuration(
-        project_root: std::path::PathBuf,
-        confirmation_token: Option<&str>,
-    ) -> crate::errors::Result<(
-        tracedecay_application::ConfigurationResetOutcomeV1,
-        Option<String>,
-    )> {
-        let confirmation = confirmation_token
-            .map(
-                |token| -> crate::errors::Result<
-                    tracedecay_application::ConfigurationResetConfirmationV1,
-                > {
-                    let bytes =
-                        hex::decode(token).map_err(|_| crate::errors::TraceDecayError::Config {
-                            message: "configuration reset confirmation is not a valid token"
-                                .to_owned(),
-                        })?;
-                    let confirmation = serde_json::from_slice::<
-                        tracedecay_application::ConfigurationResetConfirmationV1,
-                    >(&bytes)
-                    .map_err(|_| crate::errors::TraceDecayError::Config {
-                        message: "configuration reset confirmation is not a valid token".to_owned(),
-                    })?;
-                    confirmation.validate().map_err(|error| {
-                        crate::errors::TraceDecayError::Config {
-                            message: format!(
-                                "configuration reset confirmation is invalid: {error}"
-                            ),
-                        }
-                    })?;
-                    Ok(confirmation)
-                },
-            )
-            .transpose()?;
-        let handshake = crate::daemon::DaemonHandshake::for_current_client(
-            Some(project_root),
-            None,
-            false,
-            false,
-        )?;
-        let client = Self::for_current(handshake)?;
-        let request_id = mint_global_request_id(GlobalRequestSurface::Cli).map_err(|error| {
-            crate::errors::TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })?;
-        let observed_at = invocation_now_micros();
-        let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000))).map_err(
-            |error| crate::errors::TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )?;
-        let cancellation = CancellationSignal::active(format!(
-            "cancel.configuration-reset.{}",
-            request_id.as_str()
-        ))
-        .map_err(|error| crate::errors::TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        let request = crate::daemon_contract::DaemonInvocationRequest::configuration(
-            request_id.as_str(),
-            crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset,
-            crate::application_surface::ConfigurationSurfaceRequest::Reset(
-                tracedecay_application::ConfigurationResetRequestV1 { confirmation },
-            ),
-            observed_at,
-            deadline.clone(),
-            cancellation.context(),
-        )
-        .with_delivery_route(Plan26DeliveryRouteV1::Cli);
-        let response = client
-            .invoke_controlled(
-                request,
-                deadline,
-                cancellation,
-                InvocationCancellationPolicy::AuthoritativeEffect,
-            )
-            .await
-            .map_err(|error| crate::errors::TraceDecayError::Config {
-                message: format!("configuration reset daemon invocation failed: {error:?}"),
-            })?;
-        let crate::daemon_contract::DaemonInvocationOutcome::ConfigurationReset { outcome } =
-            response.outcome
-        else {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: "daemon refused the configuration reset request".to_owned(),
-            });
-        };
-        let token = match &outcome {
-            tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired {
-                confirmation,
-            } => Some(hex::encode(serde_json::to_vec(confirmation)?)),
-            tracedecay_application::ConfigurationResetOutcomeV1::Completed { .. } => None,
-        };
-        Ok((outcome, token))
     }
 
     #[cfg(test)]
@@ -637,11 +533,35 @@ impl DaemonInvocationClient {
                     message: error.to_string(),
                 }
             })?;
+        let observed_at =
+            current_system_micros().ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "semantic evaluation clock is unavailable".to_owned(),
+            })?;
+        let deadline = Deadline::new(UtcMicros(
+            observed_at.0.checked_add(300_000_000).ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
+                    message: "semantic evaluation deadline is unavailable".to_owned(),
+                }
+            })?,
+        ))
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let cancellation = CancellationContext::active(format!(
+            "cancellation.semantic-evaluation.{}",
+            request_id.as_str()
+        ))
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
         let response = self
             .invoke(
                 crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                     request_id.as_str(),
                     candidate,
+                    observed_at,
+                    deadline,
+                    cancellation,
                 ),
             )
             .await?;
@@ -665,6 +585,9 @@ impl DaemonInvocationClient {
                 Err(crate::errors::TraceDecayError::Config {
                     message: format!("semantic evaluation publication rejected: {problem:?}"),
                 })
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                Err(semantic_evaluation_application_problem(problem))
             }
             _ => Err(crate::errors::TraceDecayError::Config {
                 message: "daemon returned an invalid semantic evaluation response".to_owned(),
@@ -792,9 +715,12 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                         InvocationTarget::CurrentProject => None,
                         InvocationTarget::Resolved(scope) => Some(scope),
                     };
-                    let policy = if operation
-                        == crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                    {
+                    let policy = if matches!(
+                        operation,
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch
+                    ) {
                         InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
                         InvocationCancellationPolicy::ReadOnly
@@ -802,7 +728,9 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     let request = match (operation, typed) {
                         (
                             crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
                             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                                 request,
                             ),
@@ -857,9 +785,11 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
     }
 }
 
-/// Retained name for its nine call sites across the daemon and application
-/// surface; the saturating clamp is the one shared definition.
-pub(crate) fn invocation_now_micros() -> UtcMicros {
+/// Retained name for its call sites across the daemon, application surface,
+/// and CLI commands (the bin target is a separate crate, so `pub(crate)`
+/// would hide it from `src/commands`); the saturating clamp is the one
+/// shared definition.
+pub fn invocation_now_micros() -> UtcMicros {
     tracedecay_application::clock::now_micros()
 }
 
@@ -942,6 +872,50 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
     }
 }
 
+fn semantic_evaluation_application_problem(
+    problem: ApplicationProblem,
+) -> crate::errors::TraceDecayError {
+    let retryable = problem.retry() != RetryDirective::Never;
+    match problem.kind() {
+        ApplicationProblemKind::Cancelled => crate::errors::TraceDecayError::project_route(
+            "semantic_evaluation_cancelled",
+            retryable,
+            "Semantic evaluation was cancelled",
+        ),
+        ApplicationProblemKind::TimedOut => crate::errors::TraceDecayError::project_route(
+            "semantic_evaluation_deadline_exceeded",
+            retryable,
+            "Semantic evaluation exceeded its deadline",
+        ),
+        ApplicationProblemKind::Unavailable | ApplicationProblemKind::Saturated => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_evaluation_unavailable",
+                retryable,
+                "Semantic evaluation publication is unavailable",
+            )
+        }
+        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_evaluation_conflict",
+                retryable,
+                "Semantic evaluation publication conflicted with newer state",
+            )
+        }
+        ApplicationProblemKind::NotFoundOrNotAuthorized => {
+            crate::errors::TraceDecayError::project_route(
+                "semantic_evaluation_denied",
+                retryable,
+                "Semantic evaluation publication was not found or not authorized",
+            )
+        }
+        ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
+            crate::errors::TraceDecayError::Config {
+                message: format!("semantic evaluation publication rejected: {problem:?}"),
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
@@ -953,13 +927,17 @@ pub struct SemanticEvaluationPublicationResultV1 {
 }
 
 pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
-    let now = SystemTime::now()
+    let now = current_system_micros().map(|now| now.0).unwrap_or(i64::MAX);
+    let remaining = deadline.expires_at.0.checked_sub(now)?;
+    (remaining > 0).then(|| Duration::from_micros(remaining as u64))
+}
+
+fn current_system_micros() -> Option<UtcMicros> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-        .unwrap_or(i64::MAX);
-    let remaining = deadline.expires_at.0.checked_sub(now)?;
-    (remaining > 0).then(|| Duration::from_micros(remaining as u64))
+        .map(UtcMicros)
 }
 
 pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
@@ -1229,8 +1207,11 @@ fn invocation_outcome_error(
 mod tests {
     use super::{
         DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
+        semantic_evaluation_application_problem,
     };
-    use tracedecay_application::{ApplicationProblemKind, CancellationStage};
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
+    };
 
     #[test]
     fn daemon_invocation_errors_keep_canonical_problem_categories() {
@@ -1253,6 +1234,27 @@ mod tests {
             ),
         ] {
             assert_eq!(error.into_application_problem().kind(), expected);
+        }
+    }
+
+    #[test]
+    fn semantic_evaluation_client_maps_typed_application_problems() {
+        for (problem, expected_reason) in [
+            (
+                ApplicationProblem::cancelled_before_admission(),
+                "semantic_evaluation_cancelled",
+            ),
+            (
+                ApplicationProblem::timed_out_before_admission(),
+                "semantic_evaluation_deadline_exceeded",
+            ),
+        ] {
+            let error = semantic_evaluation_application_problem(problem);
+            let (reason, retryable, _) = error
+                .project_route_context()
+                .expect("typed semantic evaluation error");
+            assert_eq!(reason, expected_reason);
+            assert!(!retryable);
         }
     }
 

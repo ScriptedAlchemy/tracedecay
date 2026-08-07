@@ -450,15 +450,21 @@ pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
             "pause",
             "Pause Context Scout",
             "Persist a paused Scout state through the canonical configuration authority.",
-            json!({"expected_revision": string_property("Exact configuration revision for CAS.")}),
-            &["address", "expected_revision"],
+            json!({
+                "expected_revision": string_property("Exact configuration revision for CAS."),
+                "idempotency_key": string_property("Caller-stable idempotency key for replay.")
+            }),
+            &["address", "expected_revision", "idempotency_key"],
         ),
         context_scout_control_definition(
             "resume",
             "Resume Context Scout",
             "Persist an active Scout state through the canonical configuration authority.",
-            json!({"expected_revision": string_property("Exact configuration revision for CAS.")}),
-            &["address", "expected_revision"],
+            json!({
+                "expected_revision": string_property("Exact configuration revision for CAS."),
+                "idempotency_key": string_property("Caller-stable idempotency key for replay.")
+            }),
+            &["address", "expected_revision", "idempotency_key"],
         ),
         context_scout_control_definition(
             "cancel",
@@ -1136,7 +1142,7 @@ fn configuration_definition(
     writes: bool,
 ) -> ToolDefinition {
     let name = format!("tracedecay_configuration_{operation}");
-    let schema = required_object_schema(properties, required);
+    let schema = closed_object_schema(properties, required);
     if writes {
         def_rw(&name, title, description, schema)
     } else {
@@ -1147,6 +1153,11 @@ fn configuration_definition(
 pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
     let key = || string_property("Canonical typed configuration setting key.");
     let revision = || string_property("Exact expected configuration revision for CAS.");
+    let idempotency_key = || {
+        string_property(
+            "Caller-stable key for exact durable receipt replay; reusing it with different input conflicts.",
+        )
+    };
     vec![
         configuration_definition(
             "list",
@@ -1180,9 +1191,16 @@ pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
                 "layer": {"description": "Canonical configuration layer identity."},
                 "key": key(),
                 "value": {"description": "Typed configuration value."},
-                "expected_revision": revision()
+                "expected_revision": revision(),
+                "idempotency_key": idempotency_key()
             }),
-            &["layer", "key", "value", "expected_revision"],
+            &[
+                "layer",
+                "key",
+                "value",
+                "expected_revision",
+                "idempotency_key",
+            ],
             true,
         ),
         configuration_definition(
@@ -1192,9 +1210,10 @@ pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
             json!({
                 "layer": {"description": "Canonical configuration layer identity."},
                 "key": key(),
-                "expected_revision": revision()
+                "expected_revision": revision(),
+                "idempotency_key": idempotency_key()
             }),
-            &["layer", "key", "expected_revision"],
+            &["layer", "key", "expected_revision", "idempotency_key"],
             true,
         ),
         configuration_definition(
@@ -1203,9 +1222,10 @@ pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
             "Apply one authorized atomic batch with exact revision CAS.",
             json!({
                 "mutations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-                "expected_revision": revision()
+                "expected_revision": revision(),
+                "idempotency_key": idempotency_key()
             }),
-            &["mutations", "expected_revision"],
+            &["mutations", "expected_revision", "idempotency_key"],
             true,
         ),
         configuration_definition(
@@ -1216,9 +1236,15 @@ pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
                 "expected_reference_id": {"type": ["string", "null"]},
                 "kind": {"description": "Typed credential kind."},
                 "write_handle": string_property("Opaque credential write handle; never plaintext credential material."),
-                "expected_revision": revision()
+                "expected_revision": revision(),
+                "idempotency_key": idempotency_key()
             }),
-            &["kind", "write_handle", "expected_revision"],
+            &[
+                "kind",
+                "write_handle",
+                "expected_revision",
+                "idempotency_key",
+            ],
             true,
         ),
         configuration_definition(
@@ -1304,6 +1330,71 @@ pub(super) fn configuration_definitions() -> Vec<ToolDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_configuration_writes_require_caller_idempotency_keys() {
+        for definition in configuration_definitions()
+            .into_iter()
+            .filter(|definition| {
+                matches!(
+                    definition.name.as_str(),
+                    "tracedecay_configuration_set"
+                        | "tracedecay_configuration_unset"
+                        | "tracedecay_configuration_batch"
+                        | "tracedecay_configuration_write_credential"
+                )
+            })
+        {
+            assert!(
+                definition.input_schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.contains(&json!("idempotency_key"))),
+                "{} must require its caller-stable idempotency key",
+                definition.name
+            );
+            assert_eq!(
+                definition.input_schema["properties"]["idempotency_key"]["type"],
+                json!("string")
+            );
+        }
+    }
+
+    #[test]
+    fn context_scout_pause_and_resume_require_caller_idempotency_keys() {
+        for definition in context_scout_control_definitions()
+            .into_iter()
+            .filter(|definition| {
+                matches!(
+                    definition.name.as_str(),
+                    "tracedecay_context_scout_pause" | "tracedecay_context_scout_resume"
+                )
+            })
+        {
+            assert!(
+                definition.input_schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.contains(&json!("idempotency_key"))),
+                "{} must require its caller-stable idempotency key",
+                definition.name
+            );
+            assert_eq!(
+                definition.input_schema["properties"]["idempotency_key"]["type"],
+                json!("string")
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_definitions_expose_closed_typed_request_schemas() {
+        for definition in configuration_definitions() {
+            assert_eq!(
+                definition.input_schema["additionalProperties"],
+                json!(false),
+                "{} must reject fields denied by its typed configuration DTO",
+                definition.name
+            );
+        }
+    }
 
     #[test]
     fn primitive_definitions_expose_closed_typed_request_schemas() {

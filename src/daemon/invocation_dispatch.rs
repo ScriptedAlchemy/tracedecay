@@ -4,13 +4,87 @@
 //! resolves the roots they name, and runs the invocation on the Unix and
 //! portable executors.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
+//! Semantic evaluation controls are admitted before project routing and bound
+//! around project-open waits so route failures cannot hide cancellation or
+//! deadline expiry.
 
 use super::*;
 #[cfg(any(not(unix), test))]
 use crate::daemon_contract::DaemonInvocationProblem;
+use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
+use std::future::Future;
+
+fn semantic_invocation_interruption_response(
+    request_id: &str,
+    control: Option<&SemanticInvocationControlV1>,
+) -> Option<DaemonInvocationResponse> {
+    control
+        .and_then(|control| control.interruption(tracedecay_application::clock::now_micros()))
+        .map(|problem| {
+            DaemonInvocationResponse::application_problem(request_id.to_owned(), problem)
+        })
+}
+
+async fn await_project_open_with_semantic_control<Output>(
+    control: Option<&SemanticInvocationControlV1>,
+    project_open: impl Future<Output = Output>,
+) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
+    let Some(control) = control else {
+        return Ok(project_open.await);
+    };
+    if let Some(problem) = control.interruption(tracedecay_application::clock::now_micros()) {
+        return Err(problem);
+    }
+    let remaining = control.remaining(tracedecay_application::clock::now_micros())?;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(remaining)
+        .ok_or_else(
+            || tracedecay_application::ApplicationProblem::InvalidRequest {
+                diagnostic: tracedecay_application::SafeDiagnostic {
+                    code: "semantic_evaluation_deadline_out_of_range".to_owned(),
+                    message: "The semantic evaluation deadline is outside the supported range"
+                        .to_owned(),
+                },
+                retry: tracedecay_application::RetryDirective::Never,
+                legal_actions: Vec::new(),
+            },
+        )?;
+    tokio::pin!(project_open);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(deadline) => {
+            Err(tracedecay_application::ApplicationProblem::TimedOut {
+                retry: tracedecay_application::RetryDirective::Never,
+                legal_actions: Vec::new(),
+            })
+        }
+        output = &mut project_open => {
+            if let Some(problem) =
+                control.interruption(tracedecay_application::clock::now_micros())
+            {
+                Err(problem)
+            } else {
+                Ok(output)
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn await_unix_project_open<Output>(
+    control: Option<&SemanticInvocationControlV1>,
+    project_open: impl Future<Output = Output>,
+) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
+    await_project_open_with_semantic_control(control, project_open).await
+}
+
+#[cfg(any(not(unix), test))]
+async fn await_portable_project_open<Output>(
+    control: Option<&SemanticInvocationControlV1>,
+    project_open: impl Future<Output = Output>,
+) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
+    await_project_open_with_semantic_control(control, project_open).await
+}
 
 /// Multi-root payloads are routed by `invoke_for_project`, which reaches the
 /// executor without passing through `DaemonInvocationService::invoke`'s own
@@ -50,13 +124,19 @@ pub(super) async fn execute_portable_daemon_invocation(
         return response;
     }
     let request_id = request.request_id.clone();
+    let semantic_control = SemanticInvocationControlV1::from_request(&request);
+    if let Some(response) =
+        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
+    {
+        return response;
+    }
     let git_operation = invocation_is_git_operation(request.operation());
-    let configuration_reset = request.is_configuration_reset();
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if !configuration_reset {
-            let project_server = Box::pin(portable_project_server_for_request(
+        let project_server = await_portable_project_open(
+            semantic_control.as_ref(),
+            Box::pin(portable_project_server_for_request(
                 lifecycle,
                 store_administration.clone(),
                 project_open_gates,
@@ -66,24 +146,40 @@ pub(super) async fn execute_portable_daemon_invocation(
                 ProjectServerRequirement::Core,
                 #[cfg(test)]
                 project_open_attempts,
-            ))
-            .await;
-            if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
-                );
+            )),
+        )
+        .await;
+        let project_server = match project_server {
+            Ok(project_server) => project_server,
+            Err(problem) => {
+                return DaemonInvocationResponse::application_problem(request_id, problem);
             }
+        };
+        if let Err(error) = project_server {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                project_open_problem(&error, workflow_application, git_operation),
+            );
         }
-        let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
+        let project_route = project_route_for_handshake(handshake);
+        if let Some(response) =
+            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
+        {
+            return response;
+        }
+        let Ok((resolved_project_path, _)) = project_route else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if !configuration_reset
-            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
+        if let Some(response) =
+            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
         {
+            return response;
+        }
+        if admitted_root.is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -217,31 +313,52 @@ pub(super) async fn execute_daemon_invocation(
         return response;
     }
     let request_id = request.request_id.clone();
+    let semantic_control = SemanticInvocationControlV1::from_request(&request);
+    if let Some(response) =
+        semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
+    {
+        return response;
+    }
     let git_operation = invocation_is_git_operation(request.operation());
-    let configuration_reset = request.is_configuration_reset();
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if !configuration_reset {
-            let project_server = engine
-                .project_server_for_request(handshake, ProjectServerRequirement::Core)
-                .await;
-            if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
-                );
+        let project_server = await_unix_project_open(
+            semantic_control.as_ref(),
+            engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
+        )
+        .await;
+        let project_server = match project_server {
+            Ok(project_server) => project_server,
+            Err(problem) => {
+                return DaemonInvocationResponse::application_problem(request_id, problem);
             }
+        };
+        if let Err(error) = project_server {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                project_open_problem(&error, workflow_application, git_operation),
+            );
         }
-        let Ok((resolved_project_path, _)) = DaemonEngine::project_route(handshake) else {
+        let project_route = DaemonEngine::project_route(handshake);
+        if let Some(response) =
+            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
+        {
+            return response;
+        }
+        let Ok((resolved_project_path, _)) = project_route else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if !configuration_reset
-            && admitted_lsp_root_for_project_path(&resolved_project_path).is_none()
+        let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
+        if let Some(response) =
+            semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
         {
+            return response;
+        }
+        if admitted_root.is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
@@ -272,10 +389,107 @@ fn project_open_problem(
         )
     {
         service::invocation::DaemonInvocationProblem::ResetRequired
+    } else if crate::daemon::error_message_is_project_open_retryable(&error.to_string()) {
+        // A still-warming project open (or a saturated open queue) is a
+        // retryable state for every operation. Mapping it to the git branch's
+        // terminal not-found/not-authorized would misreport an authorized
+        // worktree that merely has not finished opening.
+        service::invocation::DaemonInvocationProblem::Unavailable
     } else if git_operation {
         service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
     } else {
         service::invocation::DaemonInvocationProblem::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod semantic_control_tests {
+    use super::*;
+    use tracedecay_application::ApplicationProblemKind;
+
+    fn active_control(deadline_offset_micros: i64) -> SemanticInvocationControlV1 {
+        let observed_at = tracedecay_application::clock::now_micros();
+        SemanticInvocationControlV1::new(
+            observed_at,
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                observed_at
+                    .0
+                    .checked_add(deadline_offset_micros)
+                    .expect("test deadline"),
+            ))
+            .expect("valid deadline"),
+            tracedecay_application::CancellationContext::active("semantic-project-open-active")
+                .expect("active cancellation"),
+        )
+    }
+
+    fn cancelled_control() -> SemanticInvocationControlV1 {
+        let observed_at = tracedecay_application::clock::now_micros();
+        SemanticInvocationControlV1::new(
+            observed_at,
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                observed_at.0.checked_add(1_000_000).expect("test deadline"),
+            ))
+            .expect("valid deadline"),
+            tracedecay_application::CancellationContext::cancelled(
+                "semantic-project-open-cancelled",
+                observed_at,
+            )
+            .expect("cancelled cancellation"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_dispatch_admits_controls_before_and_during_project_open() {
+        let cancelled = cancelled_control();
+        let cancelled_problem = await_unix_project_open(Some(&cancelled), async {
+            panic!("pre-cancelled project open must not be polled");
+        })
+        .await
+        .expect_err("pre-cancelled request");
+        assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
+
+        let expired = active_control(0);
+        let expired_problem = await_unix_project_open(Some(&expired), async {
+            panic!("pre-expired project open must not be polled");
+        })
+        .await
+        .expect_err("pre-expired request");
+        assert_eq!(expired_problem.kind(), ApplicationProblemKind::TimedOut);
+
+        let expiring = active_control(2_000);
+        let during_open_problem =
+            await_unix_project_open(Some(&expiring), std::future::pending::<()>())
+                .await
+                .expect_err("project open must observe deadline");
+        assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn portable_dispatch_admits_controls_before_and_during_project_open() {
+        let cancelled = cancelled_control();
+        let cancelled_problem = await_portable_project_open(Some(&cancelled), async {
+            panic!("pre-cancelled project open must not be polled");
+        })
+        .await
+        .expect_err("pre-cancelled request");
+        assert_eq!(cancelled_problem.kind(), ApplicationProblemKind::Cancelled);
+
+        let expired = active_control(0);
+        let expired_problem = await_portable_project_open(Some(&expired), async {
+            panic!("pre-expired project open must not be polled");
+        })
+        .await
+        .expect_err("pre-expired request");
+        assert_eq!(expired_problem.kind(), ApplicationProblemKind::TimedOut);
+
+        let expiring = active_control(2_000);
+        let during_open_problem =
+            await_portable_project_open(Some(&expiring), std::future::pending::<()>())
+                .await
+                .expect_err("project open must observe deadline");
+        assert_eq!(during_open_problem.kind(), ApplicationProblemKind::TimedOut);
     }
 }
 
@@ -293,6 +507,35 @@ mod workflow_reset_tests {
         );
         assert_eq!(
             project_open_problem(&error, false, false),
+            service::invocation::DaemonInvocationProblem::Unavailable
+        );
+    }
+
+    #[test]
+    fn warming_project_open_is_retryable_unavailable_for_every_operation() {
+        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        assert_eq!(
+            project_open_problem(&warming, false, true),
+            service::invocation::DaemonInvocationProblem::Unavailable,
+            "a warming open must not answer git reads as not found or unauthorized"
+        );
+        assert_eq!(
+            project_open_problem(&warming, false, false),
+            service::invocation::DaemonInvocationProblem::Unavailable
+        );
+    }
+
+    #[test]
+    fn failed_project_open_keeps_the_terminal_problem_split() {
+        let failed = crate::errors::TraceDecayError::Config {
+            message: "project store rejected".to_owned(),
+        };
+        assert_eq!(
+            project_open_problem(&failed, false, true),
+            service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+        );
+        assert_eq!(
+            project_open_problem(&failed, false, false),
             service::invocation::DaemonInvocationProblem::Unavailable
         );
     }

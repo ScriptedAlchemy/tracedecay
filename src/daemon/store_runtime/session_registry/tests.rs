@@ -509,112 +509,6 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configuration_reset_requires_the_exact_unmounted_store_confirmation() {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary.path().canonicalize().expect("canonical root");
-    let profile_root = root.join("profile");
-    let project_root = root.join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let project_id = ProjectId::new("project.configuration-reset").expect("project identity");
-    crate::storage::write_enrollment_marker(
-        &project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
-    let sessions_path =
-        crate::storage::profile_sharded_data_root(&profile_root, project_id.as_str())
-            .join(crate::storage::SESSIONS_DB_FILENAME);
-    std::fs::create_dir_all(sessions_path.parent().expect("sessions parent"))
-        .expect("sessions directory");
-    let seed = TestConnection::open(&sessions_path);
-    seed.execute_batch(
-        "CREATE TABLE configuration_legacy_flags (value TEXT NOT NULL);
-         INSERT INTO configuration_legacy_flags VALUES ('legacy');
-         CREATE TABLE unrelated_authority (value TEXT NOT NULL);
-         INSERT INTO unrelated_authority VALUES ('preserved');",
-    )
-    .await
-    .expect("seed incompatible configuration");
-    drop(seed);
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 14, "configuration reset")
-            .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-
-    let preview = registry
-        .reset_project_configuration(
-            project_id.clone(),
-            [project_root.clone()],
-            tracedecay_application::ConfigurationResetRequestV1::default(),
-        )
-        .await
-        .expect("typed reset preview");
-    let tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired { confirmation } =
-        preview
-    else {
-        panic!("incompatible configuration must require confirmation");
-    };
-    let mut wrong_confirmation = confirmation.clone();
-    wrong_confirmation.project_id =
-        ProjectId::new("project.wrong-reset-target").expect("wrong project identity");
-    assert!(
-        registry
-            .reset_project_configuration(
-                project_id.clone(),
-                [project_root.clone()],
-                tracedecay_application::ConfigurationResetRequestV1 {
-                    confirmation: Some(wrong_confirmation),
-                },
-            )
-            .await
-            .is_err(),
-        "a confirmation for another project must be rejected"
-    );
-
-    let outcome = registry
-        .reset_project_configuration(
-            project_id,
-            [project_root],
-            tracedecay_application::ConfigurationResetRequestV1 {
-                confirmation: Some(confirmation),
-            },
-        )
-        .await
-        .expect("confirmed scoped reset");
-    assert!(matches!(
-        outcome,
-        tracedecay_application::ConfigurationResetOutcomeV1::Completed { .. }
-    ));
-    let connection = rusqlite::Connection::open(sessions_path).expect("reopen reset database");
-    assert_eq!(
-        connection
-            .query_row("SELECT value FROM unrelated_authority", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .expect("preserved unrelated data"),
-        "preserved"
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE name = 'configuration_legacy_flags'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("legacy table count"),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worktree_graph_mount_does_not_require_git() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
@@ -705,6 +599,16 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
         .await
         .expect("mount project authority");
     let repository_id = tracedecay_domain::RepositoryId::new("repo:shared").expect("repository id");
+    let replay_binding = || crate::daemon::code_index_scheduler::CodeGraphReplayBindingV1 {
+        generations_root: project_database
+            .database_path()
+            .with_extension("generations"),
+        sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(format!(
+            "sha256:{}",
+            "9".repeat(64)
+        ))
+        .expect("synthetic sealed digest"),
+    };
     let primary = registry
         .retain_code_graph_runtime(
             project_id.clone(),
@@ -713,7 +617,8 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
             None,
             tracedecay_domain::CodeGenerationId::new("generation:primary")
                 .expect("primary generation"),
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&project_database),
+            replay_binding(),
         )
         .await
         .expect("primary graph runtime");
@@ -725,16 +630,18 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
             None,
             tracedecay_domain::CodeGenerationId::new("generation:linked")
                 .expect("linked generation"),
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&project_database),
+            replay_binding(),
         )
         .await
         .expect("linked graph runtime");
 
-    assert!(Arc::ptr_eq(&primary.database, &linked.database));
-    assert_eq!(primary.authority.binding(), linked.authority.binding());
-    assert_ne!(primary.authority.namespace(), linked.authority.namespace());
+    let primary_authority = primary.authority();
+    let linked_authority = linked.authority();
+    assert_eq!(primary_authority.binding(), linked_authority.binding());
+    assert_ne!(primary_authority.namespace(), linked_authority.namespace());
     assert_eq!(
-        primary.authority.canonical_path(),
+        primary_authority.canonical_path(),
         project_database.database_path().with_extension("grafeo")
     );
 }

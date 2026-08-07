@@ -3,7 +3,7 @@
 //! Hook events are bounded wake-up hints only. Every run reconstructs its
 //! source snapshot from gix's HEAD-tree/index/worktree status before content
 //! digests decide whether publication is necessary.
-#![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
+#![allow(dead_code)] // Code-intelligence indexing and reconciliation surface.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -34,9 +34,7 @@ use crate::{
     },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
-        graph_projection::{
-            CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
-        },
+        graph_projection::{CodeGraphEvidenceReader, CodeGraphProjectionError},
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -67,6 +65,7 @@ use crate::{
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
+
 const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
 /// out-of-agent saves): a query admitted after this bound since the last
@@ -1093,7 +1092,7 @@ impl LatestCompleteCodeIndexV1 {
         self.generation.edge_abstentions()
     }
 
-    /// Connect Plan 15 exact/lexical/graph production owners to the latest
+    /// Return exact, lexical, and graph query owners bound to the latest
     /// complete published generation.
     pub fn production_query_owners(
         &self,
@@ -1206,36 +1205,6 @@ impl LatestCompleteCodeIndexV1 {
         });
         let _ = self.query_owners.set(Arc::clone(&owners));
         Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
-    }
-
-    fn activate_persistent_graph(
-        &self,
-        store: CodeGraphProjectionStore,
-        authority: Arc<
-            tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1,
-        >,
-        cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let generation_id = self.generation.manifest().generation_id.clone();
-        store.publish_code_graph_with_cancellation(
-            &generation_id,
-            self.generation.edges(),
-            self.generation.chunks().chunks(),
-            Arc::clone(&cancellation),
-        )?;
-        let reader = store.evidence_reader_with_cancellation(
-            &generation_id,
-            Some(self.generation.snapshot().repository.clone()),
-            self.source_freshness()
-                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
-            cancellation,
-        )?;
-        self.install_query_owners(reader, CodeGraphServingAuthorityV1::Persistent(authority))
-            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-        let _ = self.generation.admitted_chunks();
-        let _ = self.generation.test_attribution_authority();
-        let _ = self.record_index();
-        Ok(())
     }
 }
 
@@ -2428,6 +2397,7 @@ mod tests;
 mod activation;
 mod cadence;
 mod classification;
+mod graph_activation;
 pub(crate) mod identity;
 mod privacy;
 pub(in crate::daemon) mod queries;
@@ -2447,6 +2417,7 @@ pub(crate) use cadence::{
     CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
     newly_eligible_percentile,
 };
+pub(crate) use graph_activation::CodeGraphReplayBindingV1;
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

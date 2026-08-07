@@ -4,6 +4,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,30 +14,46 @@ use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
-    RepositoryId, SourceFreshness, SymbolOccurrenceId,
+    RepositoryId, SourceFreshness, SymbolOccurrenceId, canonical_sha256,
 };
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId, GraphLabel,
-    GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphSnapshot, GraphTraversalDirection, GraphWatermark,
-    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
+    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
+    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
+    SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 
+mod builder;
+mod reader;
 mod traversal;
 
+pub use self::builder::build_published_code_graph_manifest_checked;
+use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
+use crate::lineage::LineageSymbolRecordV1;
 
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 const CODE_NAMESPACE: &str = "code-graph";
 const CODE_PROJECTION: &str = "code-generation";
 const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
 const CURRENT_GENERATION_PROPERTY: &str = "current-generation";
 const PROJECTION_NODE_COUNT_PROPERTY: &str = "projection-node-count";
 const SYMBOL_RECORD_PROPERTY: &str = "symbol-record";
+const FILE_RECORD_PROPERTY: &str = "file-record";
+const CHUNK_RECORD_PROPERTY: &str = "chunk-record";
 const EDGE_RECORD_PROPERTY: &str = "edge-record";
 const SYMBOL_LABEL: &str = "CodeSymbol";
+const FILE_LABEL: &str = "CodeFile";
+const CHUNK_LABEL: &str = "CodeChunk";
 const EDGE_LABEL: &str = "CodeRelationEvidence";
+const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
+const CHUNK_SYMBOL_EDGE_KIND: &str = "CodeChunkDescribesSymbol";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
+pub const CODE_GRAPH_PROJECTOR_REVISION_V2: &str = "code-graph-projector.v2";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -51,6 +69,23 @@ pub enum CodeGraphProjectionError {
     DeadlineExceeded,
     #[error("code graph database conflict")]
     Conflict,
+    #[error(
+        "code graph projection `{namespace}/{projection}` is quarantined after recovery mismatch: {message}"
+    )]
+    ProjectionMismatch {
+        namespace: String,
+        projection: String,
+        message: String,
+    },
+    #[error(
+        "code graph generation `{namespace}/{projection}/{generation}` is quarantined after recovery mismatch: {message}"
+    )]
+    RecoveredGenerationMismatch {
+        namespace: String,
+        projection: String,
+        generation: String,
+        message: String,
+    },
     #[error("code graph database reset required: {0}")]
     ResetRequired(String),
     #[error("code graph database is corrupt: {0}")]
@@ -71,6 +106,26 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Conflict => Self::Conflict,
             GraphDbError::BudgetExhausted => Self::BudgetExhausted,
             GraphDbError::DeadlineExceeded => Self::DeadlineExceeded,
+            GraphDbError::ProjectionMismatch {
+                namespace,
+                projection,
+                message,
+            } => Self::ProjectionMismatch {
+                namespace,
+                projection,
+                message,
+            },
+            GraphDbError::GenerationMismatch {
+                namespace,
+                projection,
+                generation,
+                message,
+            } => Self::RecoveredGenerationMismatch {
+                namespace,
+                projection,
+                generation,
+                message,
+            },
             GraphDbError::ResetRequired { message } => Self::ResetRequired(message),
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message } => Self::Unavailable(message),
@@ -91,6 +146,7 @@ pub struct CodeGraphSymbolBindingV1 {
 struct SymbolRecordV1 {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
+    metadata: Option<LineageSymbolRecordV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,22 +172,11 @@ pub struct CodeGraphTraversalBatchV1 {
     pub coverage: CodeGraphTraversalCoverageV1,
 }
 
-pub trait CodeGraphProjectionPublisher {
-    fn publish_code_graph(
-        &self,
-        generation: &CodeGenerationId,
-        edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
-        cancellation: &CancellationSignal,
-    ) -> Result<GraphWatermark, CodeGraphProjectionError>;
-}
-
 #[derive(Clone)]
 pub struct CodeGraphProjectionStore {
-    database: Arc<GraphDb>,
-    namespace: GraphNamespace,
-    generation_scope: Option<CodeGenerationId>,
-    _owner: Option<Arc<GraphDbOwner>>,
+    snapshot: Arc<VerifiedGraphSnapshot>,
+    projection: GraphProjectionIdentity,
+    generation: CodeGenerationId,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -143,34 +188,22 @@ impl fmt::Debug for CodeGraphProjectionStore {
 }
 
 impl CodeGraphProjectionStore {
-    #[must_use]
-    pub fn from_graph_db(
-        database: Arc<GraphDb>,
-        namespace: GraphNamespace,
+    pub fn from_verified_snapshot(
+        snapshot: VerifiedGraphSnapshot,
         generation: CodeGenerationId,
-    ) -> Self {
-        Self {
-            database,
-            namespace,
-            generation_scope: Some(generation),
-            _owner: None,
-        }
-    }
-
-    pub fn memory(cancellation: &CancellationSignal) -> Result<Self, CodeGraphProjectionError> {
-        Self::open_memory(application_cancellation(cancellation))
-    }
-
-    fn open_memory(
-        cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, CodeGraphProjectionError> {
-        let owner = Arc::new(GraphDbOwner::memory(cancellation)?);
-        let database = owner.handle();
+        let projection = snapshot.projection().clone();
+        let expected = code_graph_generation_id(
+            &generation,
+            &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?,
+        )?;
+        if snapshot.generation() != &expected {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
         Ok(Self {
-            database,
-            namespace: default_namespace()?,
-            generation_scope: None,
-            _owner: Some(owner),
+            snapshot: Arc::new(snapshot),
+            projection,
+            generation,
         })
     }
 
@@ -196,14 +229,16 @@ impl CodeGraphProjectionStore {
         freshness: SourceFreshness,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
-        self.require_generation_scope(generation)?;
+        if generation != &self.generation {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
         generation
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
-        let snapshot = Arc::new(self.database.snapshot()?);
+        let snapshot = Arc::clone(&self.snapshot);
         let current =
-            read_current_generation(&snapshot, &self.namespace, Arc::clone(&cancellation))?;
+            read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;
         if current.generation != *generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
@@ -211,56 +246,36 @@ impl CodeGraphProjectionStore {
             generation: generation.clone(),
             repository_id,
             freshness,
-            namespace: self.namespace.clone(),
+            projection: self.projection.clone(),
             snapshot,
             projection_node_count: current.projection_node_count,
             cancellation,
         })
     }
+}
 
-    pub fn publish_code_graph_with_cancellation(
-        &self,
-        generation: &CodeGenerationId,
-        edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
-        self.require_generation_scope(generation)?;
+/// Mutable in-memory publisher reserved for hermetic tests and evaluations.
+/// Persistent daemon publication never uses this type.
+#[derive(Clone)]
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+struct InMemoryCodeGraphProjectionBuilder {
+    snapshot: Arc<RwLock<Option<Arc<VerifiedGraphSnapshot>>>>,
+    projection: GraphProjectionIdentity,
+}
+
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+impl InMemoryCodeGraphProjectionBuilder {
+    pub fn memory(cancellation: &CancellationSignal) -> Result<Self, CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let built = build_projection(generation, edges, chunks, Arc::clone(&cancellation))?;
-        let watermark = built.watermark.clone();
-        self.database
-            .replace_projection_unverified(ProjectionReplacement {
-                namespace: self.namespace.clone(),
-                projection: projection()?,
-                source_generation: source_generation(generation)?,
-                next_watermark: built.watermark,
-                entities: built.entities,
-                relations: built.relations,
-                cancellation,
-            })?;
-        Ok(watermark)
+        Ok(Self {
+            snapshot: Arc::new(RwLock::new(None)),
+            projection: code_graph_projection_identity(default_namespace()?)?,
+        })
     }
 
-    fn require_generation_scope(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> Result<(), CodeGraphProjectionError> {
-        if self
-            .generation_scope
-            .as_ref()
-            .is_some_and(|expected| expected != generation)
-        {
-            return Err(CodeGraphProjectionError::GenerationMismatch);
-        }
-        Ok(())
-    }
-}
-
-impl CodeGraphProjectionPublisher for CodeGraphProjectionStore {
-    fn publish_code_graph(
+    pub fn publish_code_graph(
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
@@ -274,17 +289,140 @@ impl CodeGraphProjectionPublisher for CodeGraphProjectionStore {
             application_cancellation(cancellation),
         )
     }
-}
 
-impl CodeGraphProjectionStore {
-    fn publish_with_cancellation(
+    pub fn publish_with_cancellation(
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
         chunks: &[CodeSearchChunkV1],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
-        self.publish_code_graph_with_cancellation(generation, edges, chunks, cancellation)
+        if cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
+        let revision =
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?;
+        let manifest = build_code_graph_manifest(
+            self.projection.clone(),
+            generation,
+            edges,
+            chunks,
+            &revision,
+            Arc::clone(&cancellation),
+        )?;
+        let watermark = manifest.watermark.clone();
+        let snapshot = VerifiedGraphSnapshot::memory(manifest, cancellation)?;
+        *self.snapshot.write().map_err(|_| {
+            CodeGraphProjectionError::Unavailable(
+                "code graph verified snapshot lock is poisoned".to_owned(),
+            )
+        })? = Some(Arc::new(snapshot));
+        Ok(watermark)
+    }
+
+    pub fn verified_store(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+        let snapshot = self
+            .snapshot
+            .read()
+            .map_err(|_| {
+                CodeGraphProjectionError::Unavailable(
+                    "code graph verified snapshot lock is poisoned".to_owned(),
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                CodeGraphProjectionError::Unavailable(
+                    "code graph generation is not published".to_owned(),
+                )
+            })?;
+        CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot.as_ref().clone(),
+            generation.clone(),
+        )
+    }
+
+    pub fn evidence_reader(
+        &self,
+        generation: &CodeGenerationId,
+        repository_id: Option<RepositoryId>,
+        freshness: SourceFreshness,
+        cancellation: &CancellationSignal,
+    ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
+        let snapshot = self
+            .snapshot
+            .read()
+            .map_err(|_| {
+                CodeGraphProjectionError::Unavailable(
+                    "code graph verified snapshot lock is poisoned".to_owned(),
+                )
+            })?
+            .clone()
+            .ok_or_else(|| {
+                CodeGraphProjectionError::Unavailable(
+                    "code graph generation is not published".to_owned(),
+                )
+            })?;
+        CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot.as_ref().clone(),
+            generation.clone(),
+        )?
+        .evidence_reader(generation, repository_id, freshness, cancellation)
+    }
+}
+
+#[derive(Clone)]
+#[cfg(feature = "test-helpers")]
+pub struct HermeticCodeGraphProjectionStore {
+    inner: InMemoryCodeGraphProjectionBuilder,
+}
+
+#[cfg(feature = "test-helpers")]
+impl HermeticCodeGraphProjectionStore {
+    pub fn memory(cancellation: &CancellationSignal) -> Result<Self, CodeGraphProjectionError> {
+        InMemoryCodeGraphProjectionBuilder::memory(cancellation).map(|inner| Self { inner })
+    }
+
+    pub fn publish_code_graph(
+        &self,
+        generation: &CodeGenerationId,
+        edges: &[CanonicalRelationEdgeV1],
+        chunks: &[CodeSearchChunkV1],
+        cancellation: &CancellationSignal,
+    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        self.inner
+            .publish_code_graph(generation, edges, chunks, cancellation)
+    }
+
+    pub fn publish_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        edges: &[CanonicalRelationEdgeV1],
+        chunks: &[CodeSearchChunkV1],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        self.inner
+            .publish_with_cancellation(generation, edges, chunks, cancellation)
+    }
+
+    pub fn verified_store(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<CodeGraphProjectionStore, CodeGraphProjectionError> {
+        self.inner.verified_store(generation)
+    }
+
+    pub fn evidence_reader(
+        &self,
+        generation: &CodeGenerationId,
+        repository_id: Option<RepositoryId>,
+        freshness: SourceFreshness,
+        cancellation: &CancellationSignal,
+    ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
+        self.inner
+            .evidence_reader(generation, repository_id, freshness, cancellation)
     }
 }
 
@@ -293,8 +431,8 @@ pub struct CodeGraphEvidenceReader {
     generation: CodeGenerationId,
     repository_id: Option<RepositoryId>,
     freshness: SourceFreshness,
-    namespace: GraphNamespace,
-    snapshot: Arc<GraphSnapshot>,
+    projection: GraphProjectionIdentity,
+    snapshot: Arc<VerifiedGraphSnapshot>,
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
 }
@@ -311,398 +449,107 @@ impl fmt::Debug for CodeGraphEvidenceReader {
     }
 }
 
-impl CodeGraphEvidenceReader {
-    pub fn new(
-        generation: CodeGenerationId,
-        repository_id: Option<RepositoryId>,
-        freshness: SourceFreshness,
-        edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
-    ) -> Result<Self, CodeGraphProjectionError> {
-        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
-        let store = CodeGraphProjectionStore::open_memory(Arc::clone(&cancellation))?;
-        store.publish_with_cancellation(&generation, edges, chunks, Arc::clone(&cancellation))?;
-        validate_reader_metadata(repository_id.as_ref(), &freshness)?;
-        let snapshot = Arc::new(store.database.snapshot()?);
-        let current =
-            read_current_generation(&snapshot, &store.namespace, Arc::clone(&cancellation))?;
-        Ok(Self {
-            generation,
-            repository_id,
-            freshness,
-            namespace: store.namespace.clone(),
-            snapshot,
-            projection_node_count: current.projection_node_count,
-            cancellation,
-        })
-    }
-
-    pub fn generation(&self) -> &CodeGenerationId {
-        &self.generation
-    }
-
-    pub fn repository_id(&self) -> Option<&RepositoryId> {
-        self.repository_id.as_ref()
-    }
-
-    pub fn freshness(&self) -> &SourceFreshness {
-        &self.freshness
-    }
-
-    pub fn traverse(
-        &self,
-        generation: &CodeGenerationId,
-        seed_symbols: &[SymbolOccurrenceId],
-        edge_kinds: &[RelationEdgeKindV1],
-        max_depth: u32,
-    ) -> Result<CodeGraphTraversalBatchV1, CodeGraphProjectionError> {
-        if generation != &self.generation {
-            return Err(CodeGraphProjectionError::GenerationMismatch);
-        }
-        if self.cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
-        }
-        if max_depth == 0 {
-            return Err(CodeGraphProjectionError::Contract(
-                "code graph traversal depth must be positive".to_owned(),
-            ));
-        }
-        let admitted_kinds: BTreeSet<_> = edge_kinds.iter().copied().collect();
-        let mut best_by_target = BTreeMap::<SymbolOccurrenceId, CodeGraphPathCandidateV1>::new();
-        let mut coverage = CodeGraphTraversalCoverageV1::default();
-        for seed in seed_symbols {
-            seed.validate()
-                .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-            let Some(seed_record) = self.symbol_record(seed)? else {
-                continue;
-            };
-            if seed_record.binding.is_none() {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph authorized an unbound seed".to_owned(),
-                ));
-            }
-            let adjacency = self.adjacency(seed, max_depth)?;
-            self.traverse_seed(
-                seed,
-                max_depth,
-                &admitted_kinds,
-                &adjacency,
-                &mut coverage,
-                &mut best_by_target,
-            )?;
-        }
-        let mut candidates: Vec<_> = best_by_target.into_values().collect();
-        candidates.sort_by(|left, right| {
-            right
-                .score_micros
-                .cmp(&left.score_micros)
-                .then_with(|| left.target.cmp(&right.target))
-        });
-        coverage.eligible = candidates.len() as u64;
-        Ok(CodeGraphTraversalBatchV1 {
-            candidates,
-            coverage,
-        })
-    }
-
-    fn adjacency(
-        &self,
-        seed: &SymbolOccurrenceId,
-        max_depth: u32,
-    ) -> Result<BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>, CodeGraphProjectionError>
-    {
-        let graph_depth = usize::try_from(max_depth)
-            .ok()
-            .and_then(|depth| depth.checked_mul(2))
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Contract(
-                    "code graph traversal depth overflowed".to_owned(),
-                )
-            })?;
-        let result = self.snapshot.traverse(TraversalRequest {
-            namespace: self.namespace.clone(),
-            start: symbol_entity_id(seed)?,
-            relation_kinds: BTreeSet::new(),
-            direction: GraphTraversalDirection::Outgoing,
-            max_depth: graph_depth,
-            max_visits: self.projection_node_count,
-            max_results: self.projection_node_count,
-            cancellation: Arc::clone(&self.cancellation),
-        })?;
-        let mut adjacency = BTreeMap::<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>::new();
-        for visit in result.visits {
-            if visit.depth % 2 == 0 {
-                continue;
-            }
-            let entity = self
-                .snapshot
-                .entity(
-                    &self.namespace,
-                    &visit.entity,
-                    Arc::clone(&self.cancellation),
-                )?
-                .ok_or_else(|| {
-                    CodeGraphProjectionError::Corrupt(
-                        "graph traversal referenced a missing edge entity".to_owned(),
-                    )
-                })?;
-            if !has_label(&entity, EDGE_LABEL) {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph alternation contains a non-edge entity".to_owned(),
-                ));
-            }
-            let edge: CanonicalRelationEdgeV1 =
-                deserialize_property(&entity, EDGE_RECORD_PROPERTY)?;
-            validate_edge(&edge)?;
-            if edge_entity_id(&edge)? != entity.identity {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph edge identity does not match its payload".to_owned(),
-                ));
-            }
-            adjacency
-                .entry(edge.from_occurrence.clone())
-                .or_default()
-                .push(edge);
-        }
-        for edges in adjacency.values_mut() {
-            edges.sort_by(compare_edges);
-            edges.dedup();
-        }
-        Ok(adjacency)
-    }
-
-    fn traverse_seed(
-        &self,
-        seed: &SymbolOccurrenceId,
-        max_depth: u32,
-        edge_kinds: &BTreeSet<RelationEdgeKindV1>,
-        adjacency: &BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>,
-        coverage: &mut CodeGraphTraversalCoverageV1,
-        best_by_target: &mut BTreeMap<SymbolOccurrenceId, CodeGraphPathCandidateV1>,
-    ) -> Result<(), CodeGraphProjectionError> {
-        let mut frontiers = BTreeMap::from([(seed.clone(), vec![FrontierPath::seed()])]);
-        let mut depths = BTreeMap::from([(seed.clone(), 0_usize)]);
-        let mut queue = VecDeque::from([seed.clone()]);
-        while let Some(source) = queue.pop_front() {
-            if self.cancellation.is_cancelled() {
-                return Err(CodeGraphProjectionError::Cancelled);
-            }
-            let depth = depths[&source];
-            if depth >= max_depth as usize {
-                continue;
-            }
-            let source_record = self.symbol_record(&source)?.ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph traversal reached a missing symbol entity".to_owned(),
-                )
-            })?;
-            if source_record.binding.is_none() {
-                continue;
-            }
-            let prefixes = frontiers.get(&source).cloned().ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph symbol has no path frontier".to_owned(),
-                )
-            })?;
-            for edge in adjacency.get(&source).into_iter().flatten() {
-                coverage.examined = coverage.examined.saturating_add(prefixes.len() as u64);
-                if !edge_kinds.contains(&edge.kind) {
-                    coverage.excluded = coverage.excluded.saturating_add(prefixes.len() as u64);
-                    continue;
-                }
-                let target_depth = depth + 1;
-                if depths
-                    .get(&edge.to_occurrence)
-                    .is_some_and(|known| *known < target_depth)
-                {
-                    continue;
-                }
-                let is_new = !depths.contains_key(&edge.to_occurrence);
-                if is_new {
-                    depths.insert(edge.to_occurrence.clone(), target_depth);
-                }
-                for prefix in &prefixes {
-                    admit_frontier_path(
-                        frontiers.entry(edge.to_occurrence.clone()).or_default(),
-                        prefix.extended(edge),
-                    );
-                }
-                if is_new {
-                    queue.push_back(edge.to_occurrence.clone());
-                }
-            }
-        }
-
-        for (target, paths) in frontiers {
-            if paths.first().is_none_or(|path| path.segments.is_empty()) {
-                continue;
-            }
-            let record = self.symbol_record(&target)?.ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt(
-                    "code graph path targets a missing symbol entity".to_owned(),
-                )
-            })?;
-            let Some(binding) = record.binding else {
-                coverage.unknown = coverage.unknown.saturating_add(paths.len() as u64);
-                continue;
-            };
-            let best = best_frontier_path(paths)?;
-            let weakest_authority = best.weakest.ok_or_else(|| {
-                CodeGraphProjectionError::Corrupt("code graph emitted an empty path".to_owned())
-            })?;
-            let candidate = CodeGraphPathCandidateV1 {
-                target: target.clone(),
-                binding,
-                path: best.segments,
-                weakest_authority,
-                score_micros: best.score,
-            };
-            match best_by_target.entry(target) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(candidate);
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let current = entry.get();
-                    if candidate.score_micros > current.score_micros
-                        || (candidate.score_micros == current.score_micros
-                            && compare_paths(&candidate.path, &current.path).is_lt())
-                    {
-                        entry.insert(candidate);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn symbol_record(
-        &self,
-        occurrence: &SymbolOccurrenceId,
-    ) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
-        let identity = symbol_entity_id(occurrence)?;
-        let Some(entity) =
-            self.snapshot
-                .entity(&self.namespace, &identity, Arc::clone(&self.cancellation))?
-        else {
-            return Ok(None);
-        };
-        if !has_label(&entity, SYMBOL_LABEL) {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph symbol identity has the wrong label".to_owned(),
-            ));
-        }
-        let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
-        validate_symbol_record(&record)?;
-        if record.occurrence != *occurrence || symbol_entity_id(&record.occurrence)? != identity {
-            return Err(CodeGraphProjectionError::Corrupt(
-                "code graph symbol identity does not match its payload".to_owned(),
-            ));
-        }
-        Ok(Some(record))
-    }
-}
-
-struct BuiltProjection {
-    watermark: GraphWatermark,
-    entities: Vec<GraphEntity>,
-    relations: Vec<GraphRelation>,
-}
-
-fn build_projection(
+pub fn code_graph_generation_id(
     generation: &CodeGenerationId,
-    edges: &[CanonicalRelationEdgeV1],
-    chunks: &[CodeSearchChunkV1],
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<BuiltProjection, CodeGraphProjectionError> {
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphGenerationId, CodeGraphProjectionError> {
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBindingV1>::new();
-    for chunk in chunks {
-        if cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
-        }
-        chunk
-            .validate()
-            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-        if chunk.anchor.generation_id != *generation {
-            return Err(CodeGraphProjectionError::GenerationMismatch);
-        }
-        let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
-            continue;
-        };
-        let candidate = CodeGraphSymbolBindingV1 {
-            file: chunk.anchor.file_occurrence_id.clone(),
-            chunk: Some(chunk.id.clone()),
-            language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-        };
-        match bindings.entry(symbol) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(candidate);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let current = entry.get_mut();
-                if current.file != candidate.file
-                    || current.language_descriptor_revision
-                        != candidate.language_descriptor_revision
-                {
-                    return Err(CodeGraphProjectionError::Contract(
-                        "one symbol occurrence has conflicting graph candidate bindings".to_owned(),
-                    ));
-                }
-                if candidate.chunk < current.chunk {
-                    current.chunk = candidate.chunk;
-                }
-            }
-        }
-    }
-
-    let mut retained_edges = Vec::new();
-    for edge in edges {
-        if cancellation.is_cancelled() {
-            return Err(CodeGraphProjectionError::Cancelled);
-        }
-        validate_edge(edge)?;
-        if bindings.contains_key(&edge.from_occurrence) {
-            retained_edges.push(edge.clone());
-        }
-    }
-    retained_edges.sort_by(compare_edges);
-    retained_edges.dedup();
-
-    let mut occurrences: BTreeSet<_> = bindings.keys().cloned().collect();
-    for edge in &retained_edges {
-        occurrences.insert(edge.to_occurrence.clone());
-    }
-    let mut entities = Vec::with_capacity(occurrences.len() + retained_edges.len() + 1);
-    for occurrence in occurrences {
-        let record = SymbolRecordV1 {
-            binding: bindings.get(&occurrence).cloned(),
-            occurrence,
-        };
-        entities.push(symbol_entity(record)?);
-    }
-    for edge in &retained_edges {
-        entities.push(edge_entity(edge)?);
-    }
-    let projection_node_count = entities.len().checked_add(1).ok_or_else(|| {
-        CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
-    })?;
-    entities.push(current_generation_entity(
+    let digest = canonical_sha256(&(
+        "tracedecay.code-graph-generation.v1",
         generation,
-        projection_node_count,
-    )?);
+        projector_revision,
+    ))
+    .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    GraphGenerationId::new(format!("code-graph:{}", digest.as_str())).map_err(Into::into)
+}
 
-    let mut relations = Vec::with_capacity(retained_edges.len().saturating_mul(2));
-    for edge in retained_edges {
-        relations.push(source_relation(&edge)?);
-        relations.push(target_relation(&edge)?);
+pub fn code_graph_idempotency_key(
+    generation: &CodeGenerationId,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphIdempotencyKey, CodeGraphProjectionError> {
+    let graph_generation = code_graph_generation_id(generation, projector_revision)?;
+    GraphIdempotencyKey::new(format!("publish:{}", graph_generation.as_str())).map_err(Into::into)
+}
+
+pub fn code_graph_projection_identity(
+    namespace: GraphNamespace,
+) -> Result<GraphProjectionIdentity, CodeGraphProjectionError> {
+    Ok(GraphProjectionIdentity::new(namespace, projection()?))
+}
+
+pub fn build_code_graph_manifest(
+    projection: GraphProjectionIdentity,
+    generation: &CodeGenerationId,
+    edges: &[CanonicalRelationEdgeV1],
+    chunks: &[CodeSearchChunkV1],
+    projector_revision: &GraphProjectorRevision,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
+    let check = || {
+        if cancellation.is_cancelled() {
+            Err(GraphDbError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    build_code_graph_manifest_checked(
+        projection,
+        generation,
+        edges,
+        chunks,
+        projector_revision,
+        &check,
+    )
+}
+
+pub fn build_code_graph_manifest_checked(
+    projection: GraphProjectionIdentity,
+    generation: &CodeGenerationId,
+    edges: &[CanonicalRelationEdgeV1],
+    chunks: &[CodeSearchChunkV1],
+    projector_revision: &GraphProjectorRevision,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
+    build_code_graph_manifest_inputs_checked(
+        projection,
+        generation,
+        edges,
+        chunks,
+        None,
+        projector_revision,
+        check,
+    )
+}
+
+fn build_code_graph_manifest_inputs_checked(
+    projection: GraphProjectionIdentity,
+    generation: &CodeGenerationId,
+    edges: &[CanonicalRelationEdgeV1],
+    chunks: &[CodeSearchChunkV1],
+    production: Option<ProductionCodeGraphInputs<'_>>,
+    projector_revision: &GraphProjectorRevision,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphGenerationManifest, CodeGraphProjectionError> {
+    check()?;
+    if projection.projection != self::projection()? {
+        return Err(CodeGraphProjectionError::Contract(
+            "code graph projection identity uses a foreign projector".to_owned(),
+        ));
     }
-    Ok(BuiltProjection {
-        watermark: GraphWatermark::new(stable_identity("watermark", generation.as_str()))?,
-        entities,
-        relations,
-    })
+    let built = build_projection(&projection, generation, edges, chunks, production, check)?;
+    GraphGenerationManifest::new_checked(
+        projection,
+        code_graph_generation_id(generation, projector_revision)?,
+        source_generation(generation)?,
+        built.watermark,
+        vec![],
+        built.entities,
+        built.relations,
+        check,
+    )
+    .map_err(Into::into)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -712,13 +559,16 @@ struct CurrentGenerationV1 {
 }
 
 fn read_current_generation(
-    snapshot: &GraphSnapshot,
-    namespace: &GraphNamespace,
+    snapshot: &VerifiedGraphSnapshot,
+    projection: &GraphProjectionIdentity,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<CurrentGenerationV1, CodeGraphProjectionError> {
     let identity = GraphEntityId::new(CURRENT_GENERATION_ENTITY)?;
     let entity = snapshot
-        .entity(namespace, &identity, cancellation)?
+        .entity(
+            &GraphEntityRef::new(projection.clone(), identity),
+            cancellation,
+        )?
         .ok_or_else(|| {
             CodeGraphProjectionError::Unavailable(
                 "code graph generation is not published".to_owned(),
@@ -791,12 +641,13 @@ fn edge_entity(edge: &CanonicalRelationEdgeV1) -> Result<GraphEntity, CodeGraphP
 }
 
 fn source_relation(
+    projection: &GraphProjectionIdentity,
     edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphRelation, CodeGraphProjectionError> {
-    GraphRelation::new(
+) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
+    GraphGenerationRelation::new(
         relation_id("source", edge)?,
-        symbol_entity_id(&edge.from_occurrence)?,
-        edge_entity_id(edge)?,
+        GraphEntityRef::new(projection.clone(), symbol_entity_id(&edge.from_occurrence)?),
+        GraphEntityRef::new(projection.clone(), edge_entity_id(edge)?),
         GraphRelationKind::new(SOURCE_EDGE_KIND)?,
         BTreeMap::new(),
     )
@@ -804,12 +655,13 @@ fn source_relation(
 }
 
 fn target_relation(
+    projection: &GraphProjectionIdentity,
     edge: &CanonicalRelationEdgeV1,
-) -> Result<GraphRelation, CodeGraphProjectionError> {
-    GraphRelation::new(
+) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
+    GraphGenerationRelation::new(
         relation_id("target", edge)?,
-        edge_entity_id(edge)?,
-        symbol_entity_id(&edge.to_occurrence)?,
+        GraphEntityRef::new(projection.clone(), edge_entity_id(edge)?),
+        GraphEntityRef::new(projection.clone(), symbol_entity_id(&edge.to_occurrence)?),
         GraphRelationKind::new(TARGET_EDGE_KIND)?,
         BTreeMap::new(),
     )
@@ -843,6 +695,7 @@ fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 fn default_namespace() -> Result<GraphNamespace, CodeGraphProjectionError> {
     GraphNamespace::new(CODE_NAMESPACE).map_err(Into::into)
 }
@@ -944,6 +797,9 @@ fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjec
             .language_descriptor_revision
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    }
+    if let Some(metadata) = &record.metadata {
+        builder::validate_symbol_metadata(metadata, &record.occurrence)?;
     }
     Ok(())
 }

@@ -5,8 +5,8 @@ use super::*;
 
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, ReviewProposalCommand, ReviewProposalDispositionV1,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    CreateWorkCommand, ReviewProposalCommand, ReviewProposalDispositionV1, ReviewProposalRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 
 #[tokio::test]

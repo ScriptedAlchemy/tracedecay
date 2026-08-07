@@ -506,6 +506,10 @@ impl RuntimeRequestProbeV1 for ExternalSourceRuntimeReadProbe {
     fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
         None
     }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
 }
 
 fn digest_suffix(digest: &str) -> std::result::Result<&str, HostAdmissionOutcome> {

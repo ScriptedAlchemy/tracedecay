@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
-use tracedecay_application::{
-    ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
-    remote::auth::RemoteEnrollmentAdmissionEvidenceV1,
-};
+use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
@@ -82,10 +79,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
         let registry =
             StoreRuntimeRegistry::new(registry_resolver, Arc::new(LifecycleShardRuntimePublisher));
-        let graph_registry =
-            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 8 }).map_err(|error| {
-                session_registry_error("create graph runtime registry", error.to_string())
-            })?;
+        let graph_manifest_provider =
+            Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
+        let graph_registry = GraphDbRegistry::new_with_manifest_provider(
+            GraphDbRegistryConfig { max_open: 8 },
+            graph_manifest_provider.clone(),
+        )
+        .map_err(|error| {
+            session_registry_error("create graph runtime registry", error.to_string())
+        })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
         let profile_runtime = open_runtime(
@@ -114,6 +116,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             resolver,
             registry,
             graph_registry,
+            graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
             profile_pin,
             profile_runtime,
@@ -542,114 +545,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 })?;
         }
         Ok(database)
-    }
-
-    /// Inspects or resets the exact project-session configuration store before
-    /// it is attached to a project runtime.
-    pub(crate) async fn reset_project_configuration(
-        &self,
-        project_id: ProjectId,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
-        request: ConfigurationResetRequestV1,
-    ) -> Result<ConfigurationResetOutcomeV1> {
-        self.resolver
-            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
-                project_id.clone(),
-                enrollment_roots,
-            ))
-            .map_err(|error| {
-                session_registry_error(
-                    "register configuration reset authority",
-                    format!("{error:?}"),
-                )
-            })?;
-        let mut mounted = self.project_sessions.lock().await;
-        if mounted.contains_key(&project_id) {
-            return Err(session_registry_error(
-                "reset project configuration",
-                "configuration store is already attached".to_owned(),
-            ));
-        }
-        let shard_id = StoreShardIdV1::project_sessions(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id.clone(),
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            None,
-            false,
-            "open configuration reset target",
-        )
-        .await?;
-        let expected_binding = runtime.binding().clone();
-        let expected_locator = runtime.locator().verified().clone();
-        let runtime_binding_digest = canonical_sha256(&expected_binding).map_err(|error| {
-            session_registry_error("bind configuration reset target", error.to_string())
-        })?;
-        let authority = runtime
-            .database_authority("reset project configuration")
-            .map_err(|failure| registry_open_error("reset project configuration", failure))?;
-
-        let Some(confirmation) = request.confirmation else {
-            let refusal = RegisteredGlobalDb::configuration_reset_confirmation(
-                &runtime,
-                &expected_binding,
-                &expected_locator,
-                &authority,
-            )
-            .await?;
-            return Ok(ConfigurationResetOutcomeV1::ConfirmationRequired {
-                confirmation: ConfigurationResetConfirmationV1 {
-                    brain_id: self.identity.brain_id().clone(),
-                    profile_id: self.identity.profile_id().clone(),
-                    project_id,
-                    runtime_binding_digest,
-                    locator_digest: expected_locator.locator_digest,
-                    refusal_reason: refusal.refusal_reason().to_owned(),
-                },
-            });
-        };
-        confirmation.validate().map_err(|error| {
-            session_registry_error(
-                "validate configuration reset confirmation",
-                error.to_string(),
-            )
-        })?;
-        if confirmation.brain_id != *self.identity.brain_id()
-            || confirmation.profile_id != *self.identity.profile_id()
-            || confirmation.project_id != project_id
-            || confirmation.runtime_binding_digest != runtime_binding_digest
-            || confirmation.locator_digest != expected_locator.locator_digest
-        {
-            return Err(session_registry_error(
-                "validate configuration reset confirmation",
-                "confirmation does not bind the exact project, profile, and store publication"
-                    .to_owned(),
-            ));
-        }
-        let database = RegisteredGlobalDb::reset_configuration_and_attach(
-            runtime,
-            expected_binding,
-            expected_locator.clone(),
-            authority,
-            crate::global_db::configuration::ConfigurationResetConfirmation::from_refusal_reason(
-                confirmation.refusal_reason,
-            ),
-        )
-        .await?;
-        mounted.insert(project_id.clone(), Arc::new(database));
-        Ok(ConfigurationResetOutcomeV1::Completed {
-            brain_id: self.identity.brain_id().clone(),
-            profile_id: self.identity.profile_id().clone(),
-            project_id,
-            runtime_binding_digest,
-            locator_digest: expected_locator.locator_digest,
-        })
     }
 
     /// Mounts one project graph/memory database through the retained registry.

@@ -273,9 +273,12 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         tracedecay_application::InvocationTarget::CurrentProject => None,
                         tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope),
                     };
-                    let policy = if operation
-                        == crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
-                    {
+                    let policy = if matches!(
+                        operation,
+                        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch
+                    ) {
                         crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
                     } else {
                         crate::daemon_client::InvocationCancellationPolicy::ReadOnly
@@ -283,7 +286,9 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     let request = match (operation, typed) {
                         (
                             crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
-                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
                             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                                 request,
                             ),

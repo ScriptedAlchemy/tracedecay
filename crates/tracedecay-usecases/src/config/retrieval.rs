@@ -155,6 +155,7 @@ pub struct SemanticResourceRequirementV1 {
     pub tokenizer_bytes: u64,
     pub resident_bytes: u64,
     pub threads: u32,
+    pub max_concurrent_sessions: u32,
     pub batch_size: u32,
     pub sequence_length: u32,
     pub load_deadline_ms: u64,
@@ -167,6 +168,7 @@ impl SemanticResourceRequirementV1 {
             && self.resident_bytes >= self.model_bytes
             && self.resident_bytes >= self.tokenizer_bytes
             && self.threads > 0
+            && self.max_concurrent_sessions > 0
             && self.batch_size > 0
             && self.sequence_length > 0
             && self.load_deadline_ms > 0
@@ -177,6 +179,7 @@ impl SemanticResourceRequirementV1 {
             && ceiling.tokenizer_bytes >= self.tokenizer_bytes
             && ceiling.resident_bytes >= self.resident_bytes
             && ceiling.threads >= self.threads
+            && ceiling.max_concurrent_sessions >= self.max_concurrent_sessions
             && ceiling.batch_size >= self.batch_size
             && ceiling.sequence_length >= self.sequence_length
             && ceiling.load_deadline_ms >= self.load_deadline_ms

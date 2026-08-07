@@ -218,11 +218,11 @@ fn query_runs() -> &'static Mutex<HashMap<String, StoredExplorerRun>> {
     QUERY_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn run_owner(state: &DashboardState) -> String {
+fn run_owner(state: &DashboardState) -> Option<String> {
     state
-        .project_id
-        .clone()
-        .unwrap_or_else(|| state.graph_db_path.clone())
+        .resolved_scope
+        .as_ref()
+        .map(|scope| scope.scope_digest.to_string())
 }
 
 fn new_run_id() -> Option<String> {
@@ -368,7 +368,7 @@ fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     runs.get(run_id)
-        .filter(|stored| stored.owner == run_owner(state))
+        .filter(|stored| run_owner(state).as_ref() == Some(&stored.owner))
         .cloned()
 }
 
@@ -379,6 +379,13 @@ pub async fn create_query(
     if let Err(message) = validate_query(&mut request) {
         return bad_request(message);
     }
+    let Some(owner) = run_owner(&state) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail": "exact registered project scope is unavailable"})),
+        )
+            .into_response();
+    };
     let Some(run_id) = new_run_id() else {
         return internal_error("could not allocate explorer query run identity");
     };
@@ -386,7 +393,7 @@ pub async fn create_query(
     let cancellation = CancellationToken::new();
     if let Err(message) = remember_run(
         StoredExplorerRun {
-            owner: run_owner(&state),
+            owner,
             cancellation: cancellation.clone(),
             run: Arc::clone(&run),
         },
@@ -571,19 +578,16 @@ async fn code_source(
     state: &DashboardState,
     request: &ExplorerQueryRequestV1,
 ) -> ExplorerSourceProgressV1 {
-    let payload =
+    let read =
         match graph_service::search_payload(state, &request.query, request.limit, request.offset)
             .await
         {
-            Ok(payload) => payload,
+            Ok(read) => read,
             Err(error) => {
-                return ExplorerSourceProgressV1::error(
-                    ExplorerSourceIdV1::CodeGraph,
-                    "code_graph_read_failed",
-                    error,
-                );
+                return code_graph_error(error);
             }
         };
+    let payload = read.payload;
     let Ok(total) = u64::try_from(payload.total) else {
         return ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,
@@ -606,7 +610,7 @@ async fn code_source(
             );
         }
     };
-    ready_source(
+    let mut source = ready_source(
         ExplorerSourceIdV1::CodeGraph,
         request,
         rows,
@@ -614,7 +618,68 @@ async fn code_source(
         json!({"query": request.query}),
         "symbols",
         Vec::new(),
-    )
+    );
+    source.freshness = "fresh";
+    source.watermark = Some(read.generation.graph_generation_id);
+    source
+}
+
+fn code_graph_error(
+    error: tracedecay_application::DashboardGraphReadErrorV1,
+) -> ExplorerSourceProgressV1 {
+    use tracedecay_application::DashboardGraphReadErrorV1;
+
+    match error {
+        DashboardGraphReadErrorV1::MissingRegistry => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "missing_registry",
+            "the exact project graph registry is missing",
+        ),
+        DashboardGraphReadErrorV1::Unavailable { detail } => {
+            ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::CodeGraph,
+                "graph_authority_unavailable",
+                detail,
+            )
+        }
+        DashboardGraphReadErrorV1::Stale { detail } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_generation_stale",
+            detail,
+        ),
+        DashboardGraphReadErrorV1::Cancelled => {
+            let mut source = ExplorerSourceProgressV1::unavailable(
+                ExplorerSourceIdV1::CodeGraph,
+                "graph_read_cancelled",
+                "the graph read was cancelled",
+            );
+            source.phase = ExplorerSourcePhaseV1::Cancelled;
+            source.outcome = ExplorerSourceOutcomeV1::Cancelled;
+            source
+        }
+        DashboardGraphReadErrorV1::TimedOut => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_read_timed_out",
+            "the graph read timed out",
+        ),
+        DashboardGraphReadErrorV1::Denied => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_read_denied",
+            "the graph read is not authorized",
+        ),
+        DashboardGraphReadErrorV1::InvalidRequest { detail } => {
+            ExplorerSourceProgressV1::error(
+                ExplorerSourceIdV1::CodeGraph,
+                "graph_request_invalid",
+                detail,
+            )
+        }
+        DashboardGraphReadErrorV1::Corrupt { detail } => ExplorerSourceProgressV1::error(
+            ExplorerSourceIdV1::CodeGraph,
+            "verified_graph_corrupt",
+            detail,
+        ),
+    }
 }
 
 async fn session_source(

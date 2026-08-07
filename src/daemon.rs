@@ -182,6 +182,7 @@ pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
+mod semantic_activation_reconciler;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;

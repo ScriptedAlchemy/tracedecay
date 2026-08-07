@@ -54,10 +54,18 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
 }
 
 /// Best-effort: try to flush pending tokens to the worldwide counter.
+///
+/// `upload_enabled` is the already-resolved canonical user-profile setting.
+/// Legacy user metadata carries the pending counter and cooldown timestamps,
+/// but it is never an authorization fallback for upload.
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
-pub(crate) fn try_flush(config: &mut tracedecay::user_config::UserConfig, force: bool) {
-    if config.pending_upload == 0 || !config.upload_enabled {
+pub(crate) fn try_flush(
+    config: &mut tracedecay::user_config::UserConfig,
+    force: bool,
+    upload_enabled: bool,
+) {
+    if config.pending_upload == 0 || !upload_enabled {
         return;
     }
     let now = current_unix_timestamp();
@@ -707,5 +715,19 @@ mod gather_tests {
         assert_eq!(elapsed_since(100, 40), 60);
         assert_eq!(elapsed_since(100, 100), 0);
         assert_eq!(elapsed_since(100, 140), 0);
+    }
+
+    #[test]
+    fn canonical_upload_denial_overrides_stale_legacy_metadata() {
+        let mut config = tracedecay::user_config::UserConfig {
+            upload_enabled: true,
+            pending_upload: 42,
+            ..tracedecay::user_config::UserConfig::default()
+        };
+
+        try_flush(&mut config, true, false);
+
+        assert_eq!(config.pending_upload, 42);
+        assert_eq!(config.last_flush_attempt_at, 0);
     }
 }

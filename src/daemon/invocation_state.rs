@@ -162,6 +162,7 @@ impl DaemonInvocationState {
 
     pub(super) fn restore_initial_query_authority_for_project(
         &self,
+        project_root: &Path,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
         cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
@@ -169,8 +170,18 @@ impl DaemonInvocationState {
         query_authority_provider::QueryAuthorityProviderStatusV1,
         query_authority_provider::QueryAuthorityUpdateErrorV1,
     > {
-        self.query_authority_provider
-            .install_evaluated_initial_state(scope, state, cursor_keys)
+        let status = self
+            .query_authority_provider
+            .install_evaluated_initial_state(scope, state.clone(), cursor_keys)?;
+        if !crate::application::semantic_runtime::commit_project_initial_semantic_roots(
+            project_root.to_path_buf(),
+            &state,
+        ) {
+            return Err(
+                query_authority_provider::QueryAuthorityUpdateErrorV1::ActivationNotCurrent,
+            );
+        }
+        Ok(status)
     }
 
     pub(super) fn query_activation_registrar(
@@ -199,6 +210,7 @@ impl DaemonInvocationState {
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
         >,
+        graph_publication_database: Arc<crate::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
         // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
@@ -234,11 +246,8 @@ impl DaemonInvocationState {
                 canonical_project_root.clone(),
                 self.code_index_schedulers.clone(),
                 Arc::clone(&graph_runtime),
+                Arc::clone(&graph_publication_database),
             ),
-        );
-        code_index_scheduler::semantic_vector_graph::register_project_semantic_vector_graph_provider(
-            &canonical_project_root,
-            Arc::clone(&vector_graph),
         );
         let semantic_schedule = semantic_runtime
             .zip(semantic_lifecycle)
@@ -268,12 +277,22 @@ impl DaemonInvocationState {
                 store_root,
                 semantic_schedule,
                 graph_runtime,
+                graph_publication_database,
             )
             .await
-            .map(|_| ())
             .map_err(|error| TraceDecayError::Config {
                 message: format!("code-index scheduler could not be mounted: {error}"),
-            })
+            })?;
+        if !self
+            .code_index_schedulers
+            .install_semantic_vector_graph_provider(&canonical_project_root, vector_graph)
+            .await
+        {
+            return Err(TraceDecayError::Config {
+                message: "semantic vector graph provider could not be installed in the mounted code-index authority".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -651,63 +670,6 @@ impl DaemonInvocationState {
     ) -> DaemonInvocationResponse {
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
-        }
-        if request.is_configuration_reset() {
-            if let Err(problem) = request.validate() {
-                return DaemonInvocationResponse::problem(request.request_id, problem);
-            }
-            let Some(project_path) = project_path else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            let service::invocation::DaemonInvocationPayload::Configuration {
-                request:
-                    crate::application_surface::ConfigurationSurfaceRequest::Reset(reset_request),
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            } = request.payload
-            else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
-            };
-            if cancellation.is_cancelled()
-                || deadline.is_elapsed_at(observed_at)
-                || deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros())
-            {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
-                );
-            }
-            return match store_administration
-                .reset_project_configuration(project_path, reset_request)
-                .await
-            {
-                Ok(outcome) => DaemonInvocationResponse::with_outcome(
-                    request.request_id,
-                    service::invocation::DaemonInvocationOutcome::ConfigurationReset { outcome },
-                ),
-                Err(error) => {
-                    crate::daemon::log_daemon_event(
-                        "configuration_reset",
-                        &[
-                            ("outcome", "refused".to_owned()),
-                            ("project", project_path.display().to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                    DaemonInvocationResponse::problem(
-                        request.request_id,
-                        service::invocation::DaemonInvocationProblem::Unavailable,
-                    )
-                }
-            };
         }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {

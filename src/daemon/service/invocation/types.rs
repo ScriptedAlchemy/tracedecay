@@ -79,8 +79,7 @@ impl BoundedHookOrchestratorV1 {
         F: Fn(HookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let work: Arc<HookOrchestrationWorkV1> =
-            Arc::new(move |request| Box::pin(work(request)));
+        let work: Arc<HookOrchestrationWorkV1> = Arc::new(move |request| Box::pin(work(request)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
@@ -310,6 +309,16 @@ pub(in crate::daemon::service) struct RegisteredConfigurationRuntime {
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
     pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
+    pub(super) semantic_evaluation_workers:
+        Arc<crate::daemon::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1>,
+}
+
+impl RegisteredConfigurationRuntime {
+    pub(in crate::daemon::service) fn semantic_evaluation_workers(
+        &self,
+    ) -> &Arc<crate::daemon::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1> {
+        &self.semantic_evaluation_workers
+    }
 }
 
 pub(super) struct RuntimeLspSession {

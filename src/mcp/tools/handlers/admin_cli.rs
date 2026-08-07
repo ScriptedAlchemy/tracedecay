@@ -563,6 +563,7 @@ async fn registry_context(
     let public = PublicProjectRegistryContext::new(&context, active_id.as_deref());
     Ok(json!({
         "status": "ok",
+        "profile_id": global_db.binding().shard_id.profile_id.as_str(),
         "project": public.project,
         "aliases": context.aliases,
         "stores": context.stores,

@@ -202,12 +202,6 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions();
     for operation in APPLICATION_SURFACE_OPERATIONS {
-        // The destructive configuration reset journey is CLI-only by catalog
-        // design and never advertises an MCP tool.
-        if operation == crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset
-        {
-            continue;
-        }
         let tool_name = format!("tracedecay_{}", operation.as_str());
         let tool = tools
             .iter()

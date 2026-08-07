@@ -69,6 +69,24 @@ pub(crate) use session::{
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
+mod configuration_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod context_scout_control_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
 mod dispatch_test_support;
 #[cfg(test)]
 #[allow(

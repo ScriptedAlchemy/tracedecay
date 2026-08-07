@@ -2,6 +2,10 @@
 
 use super::*;
 
+mod settlement;
+
+use settlement::{configuration_effect, reconcile_configuration_runtime};
+
 pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -107,6 +111,7 @@ pub(super) async fn execute_configuration(
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
                 ConfigurationSurfaceRequest::Set(request),
             ) => {
+                let idempotency_key = request.idempotency_key;
                 let mutation = DirectConfigurationMutation::Set {
                     layer: request.layer,
                     key: request.key,
@@ -115,8 +120,10 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    idempotency_key.clone(),
                     &mutation,
                     request.expected_revision.clone(),
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -133,17 +140,19 @@ pub(super) async fn execute_configuration(
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &idempotency_key,
                     &request.expected_revision,
                     receipt.operation_digest,
-                    observed_at,
-                    deadline,
+                    receipt.settlement_authority,
+                    receipt.created_at,
+                    receipt.effective_deadline_at,
                 )
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset,
                 ConfigurationSurfaceRequest::Unset(request),
             ) => {
+                let idempotency_key = request.idempotency_key;
                 let mutation = DirectConfigurationMutation::Unset {
                     layer: request.layer,
                     key: request.key,
@@ -151,8 +160,10 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    idempotency_key.clone(),
                     &mutation,
                     request.expected_revision.clone(),
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -169,17 +180,19 @@ pub(super) async fn execute_configuration(
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &idempotency_key,
                     &request.expected_revision,
                     receipt.operation_digest,
-                    observed_at,
-                    deadline,
+                    receipt.settlement_authority,
+                    receipt.created_at,
+                    receipt.effective_deadline_at,
                 )
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
                 ConfigurationSurfaceRequest::Batch(request),
             ) => {
+                let idempotency_key = request.idempotency_key;
                 let mutations = request
                     .mutations
                     .into_iter()
@@ -199,8 +212,10 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    idempotency_key.clone(),
                     &mutation,
                     request.expected_revision.clone(),
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -217,25 +232,29 @@ pub(super) async fn execute_configuration(
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &idempotency_key,
                     &request.expected_revision,
                     receipt.operation_digest,
-                    observed_at,
-                    deadline,
+                    receipt.settlement_authority,
+                    receipt.created_at,
+                    receipt.effective_deadline_at,
                 )
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationWriteCredential,
                 ConfigurationSurfaceRequest::WriteCredential(request),
             ) => {
+                let idempotency_key = request.idempotency_key;
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    Some(idempotency_key.clone()),
                     ConfigurationMutationOperationV1::CredentialWrite,
                     registered.scope.scope_digest.clone(),
                     request.expected_revision.clone(),
                     ConfigurationMutationSinkV1::CredentialStore,
                     ConfigurationMutationEffectV1::WriteCredentialReference,
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let metadata = client
@@ -251,22 +270,18 @@ pub(super) async fn execute_configuration(
                     .await?;
                 let payload =
                     serde_json::to_value(&metadata).map_err(|_| ConfigurationError::Unavailable)?;
-                let digest = canonical_sha256(&(
-                    "tracedecay.configuration.credential-surface.v1",
-                    &payload,
-                ))
-                .map_err(ConfigurationError::validation)?;
                 configuration_effect(
                     payload,
                     authority,
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &idempotency_key,
                     &request.expected_revision,
-                    digest,
-                    observed_at,
-                    deadline,
+                    metadata.operation_digest,
+                    metadata.settlement_authority,
+                    metadata.created_at,
+                    metadata.effective_deadline_at,
                 )
             }
             (
@@ -276,11 +291,13 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    None,
                     ConfigurationMutationOperationV1::ProtectedDryRun,
                     registered.scope.scope_digest.clone(),
                     request.expected_revision.clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let plan = client
@@ -307,11 +324,13 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    Some(request.idempotency_key.clone()),
                     ConfigurationMutationOperationV1::ProtectedApply,
                     registered.scope.scope_digest.clone(),
                     request.expected_base_revision_id.clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let receipt = client
@@ -322,21 +341,23 @@ pub(super) async fn execute_configuration(
                             actor_id: registered.actor.clone(),
                             expected_base_revision_id: request.expected_base_revision_id.clone(),
                             operation_digest: request.operation_digest,
-                            idempotency_key: request.idempotency_key,
+                            idempotency_key: request.idempotency_key.clone(),
                         },
                     )
                     .await?;
+                reconcile_configuration_runtime(&registered, &receipt, observed_at).await;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &request.idempotency_key,
                     &request.expected_base_revision_id,
                     receipt.operation_digest,
-                    observed_at,
-                    deadline,
+                    receipt.settlement_authority,
+                    receipt.created_at,
+                    receipt.effective_deadline_at,
                 )
             }
             (
@@ -347,11 +368,13 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    None,
                     ConfigurationMutationOperationV1::RollbackDryRun,
                     registered.scope.scope_digest.clone(),
                     current.revision_id.clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let plan = client
@@ -380,11 +403,13 @@ pub(super) async fn execute_configuration(
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
+                    Some(request.idempotency_key.clone()),
                     ConfigurationMutationOperationV1::RollbackApply,
                     registered.scope.scope_digest.clone(),
                     request.expected_base_revision_id.clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                    deadline.expires_at,
                     observed_at,
                 )?;
                 let receipt = client
@@ -395,21 +420,23 @@ pub(super) async fn execute_configuration(
                             actor_id: registered.actor.clone(),
                             expected_base_revision_id: request.expected_base_revision_id.clone(),
                             operation_digest: request.operation_digest,
-                            idempotency_key: request.idempotency_key,
+                            idempotency_key: request.idempotency_key.clone(),
                         },
                     )
                     .await?;
+                reconcile_configuration_runtime(&registered, &receipt, observed_at).await;
                 configuration_effect(
                     serde_json::to_value(&receipt).map_err(|_| ConfigurationError::Unavailable)?,
                     authority,
                     &registered.actor,
                     &registered.scope,
                     surface_operation,
-                    &wire_request_id,
+                    &request.idempotency_key,
                     &request.expected_base_revision_id,
                     receipt.operation_digest,
-                    observed_at,
-                    deadline,
+                    receipt.settlement_authority,
+                    receipt.created_at,
+                    receipt.effective_deadline_at,
                 )
             }
             _ => Err(ConfigurationError::validation_message(
@@ -439,7 +466,14 @@ async fn apply_configuration_or_semantic_transition(
     now: UtcMicros,
 ) -> Result<crate::application::configuration::ConfigurationMutationReceipt, ConfigurationError> {
     let semantic_profile = semantic_profile_transition(&mutation)?;
-    let receipt = if let Some(semantic_profile) = semantic_profile {
+    let current = registered.runtime.client().current().await?;
+    let receipt = if current.revision_id != expected_revision {
+        registered
+            .runtime
+            .client()
+            .mutate_direct(authority, mutation, expected_revision)
+            .await?
+    } else if let Some(semantic_profile) = semantic_profile {
         let operation = registered
             .semantic_operation
             .get()
@@ -474,15 +508,7 @@ async fn apply_configuration_or_semantic_transition(
             .mutate_direct(authority, mutation, expected_revision)
             .await?
     };
-    let current = registered.runtime.client().current().await?;
-    let root_current = crate::config::root_runtime_configuration(&current)
-        .map_err(|_| ConfigurationError::Unavailable)?;
-    crate::config::install_pinned_runtime_configuration(root_current)
-        .map_err(|_| ConfigurationError::Unavailable)?;
-    registered
-        .runtime
-        .record_runtime_activation(Some(current.revision_id), None, now)
-        .await?;
+    reconcile_configuration_runtime(registered, &receipt, now).await;
     Ok(receipt)
 }
 
@@ -547,11 +573,13 @@ fn map_semantic_configuration_error(
 fn issue_configuration_mutation_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
+    idempotency_key: Option<ConfigurationIdempotencyKey>,
     operation: ConfigurationMutationOperationV1,
     scope_digest: ManifestDigest,
     expected_revision: ConfigurationRevisionId,
     sink: ConfigurationMutationSinkV1,
     effect: ConfigurationMutationEffectV1,
+    effective_deadline_at: UtcMicros,
     observed_at: UtcMicros,
 ) -> Result<ConfigurationMutationAuthority, ConfigurationError> {
     registered
@@ -563,6 +591,8 @@ fn issue_configuration_mutation_authority(
             expected_revision,
             sink,
             effect,
+            idempotency_key,
+            effective_deadline_at,
             observed_at,
         )
         .map_err(|_| ConfigurationError::Unavailable)
@@ -571,13 +601,22 @@ fn issue_configuration_mutation_authority(
 fn issue_direct_configuration_mutation_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
+    idempotency_key: ConfigurationIdempotencyKey,
     mutation: &DirectConfigurationMutation,
     expected_revision: ConfigurationRevisionId,
+    effective_deadline_at: UtcMicros,
     observed_at: UtcMicros,
 ) -> Result<ConfigurationMutationAuthority, ConfigurationError> {
     registered
         .grants
-        .issue_direct(request_id, mutation, expected_revision, observed_at)
+        .issue_direct(
+            request_id,
+            idempotency_key,
+            mutation,
+            expected_revision,
+            effective_deadline_at,
+            observed_at,
+        )
         .map_err(|problem| match problem {
             DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 ConfigurationError::MutationAuthorityRejected
@@ -786,99 +825,6 @@ fn configuration_preview(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn configuration_effect(
-    payload: serde_json::Value,
-    authority: AuthorityReceipt,
-    actor: &ActorId,
-    scope: &ResolvedScope,
-    operation: crate::application_surface::ApplicationSurfaceOperation,
-    request_id: &str,
-    expected_revision: &ConfigurationRevisionId,
-    operation_digest: ManifestDigest,
-    observed_at: UtcMicros,
-    deadline: Deadline,
-) -> Result<ApplicationOutcome<serde_json::Value>, ConfigurationError> {
-    let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
-            .map_err(ConfigurationError::validation)?
-            .ok_or_else(|| {
-                ConfigurationError::validation_message("unknown configuration operation")
-            })?;
-    let idempotency_digest = derive_logical_effect_idempotency(
-        LogicalEffectIdempotencyDomain::ConfigurationEffect,
-        &(
-            actor,
-            scope,
-            operation.as_str(),
-            expected_revision,
-            &operation_digest,
-        ),
-    )
-    .map_err(|error| ConfigurationError::validation_message(error.to_string()))?;
-    let idempotency_suffix = idempotency_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            ConfigurationError::validation_message(
-                "configuration effect idempotency digest is malformed",
-            )
-        })?;
-    let idempotency_key = IdempotencyKey::new(format!("configuration.effect.{idempotency_suffix}"))
-        .map_err(ConfigurationError::validation)?;
-    let expected_state = canonical_sha256(&(
-        "tracedecay.configuration.expected-revision.v1",
-        expected_revision,
-    ))
-    .map_err(ConfigurationError::validation)?;
-    let committed_state = canonical_sha256(&(
-        "tracedecay.configuration.committed-effect.v1",
-        &operation_digest,
-        &payload,
-    ))
-    .map_err(ConfigurationError::validation)?;
-    let execution = OperationReceipt::completed(
-        observed_at,
-        current_micros(),
-        deadline,
-        OperationBudgetUsage::default(),
-    )
-    .map_err(ConfigurationError::validation)?;
-    let receipt = EffectReceipt {
-        operation: application_operation.use_case_id().clone(),
-        request_id: RequestId::new(request_id).map_err(ConfigurationError::validation)?,
-        actor: actor.clone(),
-        scope: scope.clone(),
-        effect_class: EffectClass::ConfigurationWrite,
-        idempotency_key: idempotency_key.clone(),
-        input_digest: operation_digest,
-        expected_state: expected_state.clone(),
-        policy_digest: authority.policy.digest.clone(),
-        configuration_digest: committed_state.clone(),
-        catalog_digest: stable_digest(&"tracedecay.application.catalog.v1")
-            .map_err(|_| ConfigurationError::Unavailable)?,
-        privacy_digest: stable_digest(&"tracedecay.application.privacy.v1")
-            .map_err(|_| ConfigurationError::Unavailable)?,
-        outcome: EffectTermination::Completed,
-        committed_state: Some(committed_state),
-        external_proof: None,
-    };
-    let effect = EffectResult::new(
-        EffectId::new(format!("effect.configuration.{idempotency_suffix}"))
-            .map_err(ConfigurationError::validation)?,
-        EffectClass::ConfigurationWrite,
-        idempotency_key,
-        authority,
-        expected_state,
-        execution,
-        ReconciliationState::Reconciled,
-        receipt,
-        Some(payload),
-    )
-    .map_err(ConfigurationError::validation)?;
-    Ok(ApplicationOutcome::Effect(effect))
-}
-
 fn invalid_configuration_request() -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
         diagnostic: SafeDiagnostic {
@@ -993,91 +939,5 @@ impl DaemonSemanticRuntimeRegistrar {
                 },
             )
             .await
-    }
-}
-
-impl DaemonInvocationService {
-    pub(super) async fn configuration_runtime(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<RegisteredConfigurationRuntime> {
-        self.project_runtimes.get(project_root?).await
-    }
-
-    pub(super) async fn execute_semantic_evaluation(
-        &self,
-        project_root: Option<&Path>,
-        request_id: String,
-        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
-    ) -> DaemonInvocationResponse {
-        let Some(project_root) = project_root else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        };
-        let Some(registered) = self.configuration_runtime(Some(project_root)).await else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        };
-        let Some(operation) = registered.semantic_operation.get().cloned() else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        };
-        let canonical_root = match project_root.canonicalize() {
-            Ok(root) => root,
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            }
-        };
-        let authority =
-            crate::daemon::semantic_evaluation::DaemonSemanticEvaluationSnapshotAuthorityV1::new(
-                canonical_root.clone(),
-                registered.scope.clone(),
-                self.code_index_schedulers.clone(),
-                candidate.clone(),
-            );
-        match operation
-            .evaluate_and_publish_profile(&authority, &canonical_root, candidate)
-            .await
-        {
-            Ok(publication) => DaemonInvocationResponse::with_outcome(
-                request_id,
-                DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
-                    scope: publication.snapshot.scope,
-                    profile_digest: publication.accepted_profile.profile_digest().clone(),
-                    report_digest: publication
-                        .accepted_profile
-                        .evaluation()
-                        .report_digest()
-                        .clone(),
-                    report: publication.report,
-                    source_generation: publication.snapshot.code_generation,
-                    snapshot_digest: publication.snapshot.code_snapshot_digest,
-                },
-            ),
-            Err(SemanticActivationCoordinationErrorV1::Rejected) => {
-                DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                )
-            }
-            Err(SemanticActivationCoordinationErrorV1::Conflict) => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
-            }
-            Err(SemanticActivationCoordinationErrorV1::Runtime(_)) => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
-            }
-            Err(SemanticActivationCoordinationErrorV1::Unavailable) => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
-            }
-        }
     }
 }

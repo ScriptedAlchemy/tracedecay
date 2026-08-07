@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -896,6 +896,7 @@ struct RecoveryRuntimeProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: Arc<AtomicU8>,
+    commit_started: AtomicBool,
 }
 
 impl RecoveryRuntimeProbeV1 {
@@ -920,6 +921,7 @@ impl RecoveryRuntimeProbeV1 {
                     .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
             },
             interruption,
+            commit_started: AtomicBool::new(false),
         })
     }
 }
@@ -941,6 +943,14 @@ impl RuntimeRequestProbeV1 for RecoveryRuntimeProbeV1 {
             }
             None => None,
         }
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }
 

@@ -4,6 +4,8 @@
 //! capability's already-mounted transport into the stable SDK method spelling
 //! the generator emits and retains typed unavailability for incomplete wires.
 
+use std::collections::BTreeSet;
+
 use tracedecay_tool_catalog::{
     BindingStatus, BindingSurface, CatalogContributionV1, CatalogValidationError,
     ExecutableBindingAvailabilityV1, ExecutableUnavailableDispositionV1, OperationId,
@@ -12,7 +14,8 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::{
-    ApplicationContractError, application_catalog_contributions, work_executable_binding_registry,
+    ApplicationContractError, application_catalog_contributions,
+    configuration_executable_binding_registry, work_executable_binding_registry,
     workflow_executable_binding_registry,
 };
 
@@ -26,11 +29,17 @@ pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, ApplicationContractError> {
     let work = work_executable_binding_registry()?;
     let workflow = workflow_executable_binding_registry()?;
+    let configuration = configuration_executable_binding_registry()?;
     let mut bindings = work
         .iter()
         .chain(workflow.iter())
+        .chain(configuration.iter())
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
+    let http_operations = bindings
+        .iter()
+        .map(|availability| availability.operation_id().clone())
+        .collect::<BTreeSet<_>>();
     for contribution in application_catalog_contributions()? {
         bindings.extend(
             contribution
@@ -42,7 +51,9 @@ pub fn sdk_executable_binding_registry()
                         && !binding.is_alias()
                 })
                 .map(|binding| project_mcp_availability(&contribution, binding))
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|availability| !http_operations.contains(availability.operation_id())),
         );
     }
     Ok(SdkExecutableBindingRegistryV1::new(bindings)?)
@@ -154,8 +165,10 @@ mod tests {
 
     use schemars::JsonSchema;
     use tracedecay_tool_catalog::{
-        BindingSurface, ExecutableUnavailableDispositionV1, OperationId,
-        SdkExecutableBindingAvailabilityV1, SdkTransportBindingV1,
+        BindingSurface, CancellationContract, DeadlineBehavior, EffectClass,
+        ExecutableUnavailableDispositionV1, IdempotencyContract, OperationId, ReceiptContract,
+        ReconciliationContract, SdkExecutableBindingAvailabilityV1, SdkTransportBindingV1,
+        TerminalState,
     };
 
     use super::{project_mcp_availability, sdk_executable_binding_registry};
@@ -174,6 +187,17 @@ mod tests {
     #[test]
     fn sdk_registry_projects_mounted_routes_as_named_direct_methods() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
+        assert!(
+            registry
+                .iter()
+                .filter(|availability| availability
+                    .operation_id()
+                    .as_str()
+                    .starts_with("operation.work."))
+                .all(|availability| availability.binding().is_some()),
+            "mounted Work operations must not be projected as unavailable"
+        );
+
         let work = registry
             .get(&OperationId::new("operation.work.generate_proposal").expect("operation ID"))
             .and_then(|availability| availability.binding())
@@ -198,6 +222,73 @@ mod tests {
             workflow.sdk_method().as_str(),
             "workflow_register_definition"
         );
+    }
+
+    #[test]
+    fn sdk_registry_mounts_every_configuration_operation_with_canonical_lifecycle() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        for operation in crate::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+            let operation_id =
+                OperationId::new(format!("operation.application.{operation}")).expect("operation");
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("mounted configuration SDK binding");
+            assert_eq!(
+                binding.sdk_method().as_str(),
+                format!("application_{operation}")
+            );
+            assert!(matches!(
+                binding.transport(),
+                SdkTransportBindingV1::Http { route_path }
+                    if route_path == &format!("/application/configuration/{operation}")
+            ));
+            assert_eq!(binding.deadline().maximum_millis(), 15_000);
+            if binding.effect() == EffectClass::ConfigurationWrite {
+                assert_eq!(binding.idempotency(), IdempotencyContract::Required);
+                assert_eq!(binding.receipt(), ReceiptContract::DurableEffect);
+                assert_eq!(binding.reconciliation(), ReconciliationContract::Required);
+                assert_eq!(
+                    binding.terminal_states().states(),
+                    [
+                        TerminalState::Completed,
+                        TerminalState::TimedOut,
+                        TerminalState::Failed,
+                        TerminalState::EffectUnknown,
+                        TerminalState::Partial,
+                    ]
+                );
+                assert_eq!(
+                    binding.deadline().behavior(),
+                    DeadlineBehavior::ReturnEffectReceipt
+                );
+                assert!(matches!(
+                    binding.cancellation(),
+                    CancellationContract::NotCancellable
+                ));
+            } else {
+                assert_eq!(binding.idempotency(), IdempotencyContract::NotRequired);
+                assert_eq!(binding.receipt(), ReceiptContract::Operation);
+                assert_eq!(
+                    binding.terminal_states().states(),
+                    [
+                        TerminalState::Completed,
+                        TerminalState::Cancelled,
+                        TerminalState::TimedOut,
+                        TerminalState::Failed,
+                        TerminalState::Partial,
+                    ]
+                );
+                assert_eq!(
+                    binding.deadline().behavior(),
+                    DeadlineBehavior::ReturnOperationReceipt
+                );
+                assert!(matches!(
+                    binding.cancellation(),
+                    CancellationContract::Cooperative { .. }
+                ));
+            }
+        }
     }
 
     #[test]
@@ -249,6 +340,9 @@ mod tests {
                     .find(|manifest| manifest.capability_id() == surface.capability_id())
                     .expect("binding manifest");
                 let availability = registry.get(&operation_id).expect("SDK availability");
+                if availability.binding().is_some() {
+                    continue;
+                }
                 let expected_disposition = if !manifest.availability().is_callable() {
                     ExecutableUnavailableDispositionV1::CapabilityDisabled
                 } else if contribution

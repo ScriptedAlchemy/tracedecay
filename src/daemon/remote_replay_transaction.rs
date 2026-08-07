@@ -351,6 +351,7 @@ fn execute_fence_install(
         cancellation: request.control().cancellation.clone(),
         deadline: request.control().deadline.clone(),
         interruption,
+        commit_started: AtomicBool::new(false),
     });
     let outcome = tokio_runtime
         .block_on(
@@ -546,6 +547,7 @@ fn execute_replay(
         cancellation: request.control().cancellation.clone(),
         deadline: request.control().deadline.clone(),
         accepting: Arc::clone(accepting),
+        commit_started: AtomicBool::new(false),
     });
     let outcome = tokio_runtime
         .block_on(
@@ -775,6 +777,7 @@ struct ReplayRequestProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     accepting: Arc<AtomicBool>,
+    commit_started: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for ReplayRequestProbeV1 {
@@ -789,12 +792,21 @@ impl RuntimeRequestProbeV1 for ReplayRequestProbeV1 {
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         (!self.accepting.load(Ordering::Acquire)).then_some(RuntimeInterruptionV1::Cancelled)
     }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
 }
 
 struct ForwardedReplayProbeV1 {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: Arc<dyn RuntimeRequestProbeV1>,
+    commit_started: AtomicBool,
 }
 
 impl RuntimeRequestProbeV1 for ForwardedReplayProbeV1 {
@@ -808,5 +820,13 @@ impl RuntimeRequestProbeV1 for ForwardedReplayProbeV1 {
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         self.interruption.interruption()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }

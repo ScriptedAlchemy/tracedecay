@@ -91,6 +91,7 @@ fn dispatch_capacity_for_host() -> usize {
 
 struct ActiveDispatch {
     cancellation: tracedecay_application::CancellationSignal,
+    live_cancellable: bool,
     settlement: Arc<DispatchExecutionSettlement>,
 }
 
@@ -126,6 +127,7 @@ impl RetainedDispatchRegistry {
     async fn spawn<T, F>(
         &self,
         cancellation: tracedecay_application::CancellationSignal,
+        live_cancellable: bool,
         future: F,
     ) -> Result<(
         tokio::sync::oneshot::Receiver<Result<T>>,
@@ -162,6 +164,7 @@ impl RetainedDispatchRegistry {
             task.id(),
             ActiveDispatch {
                 cancellation,
+                live_cancellable,
                 settlement: Arc::clone(&settlement),
             },
         );
@@ -190,7 +193,9 @@ impl RetainedDispatchRegistry {
         self.accepting.store(false, Ordering::Release);
         let requested_at = tracedecay_application::clock::now_micros();
         for active in state.active.values() {
-            let _ = active.cancellation.cancel(requested_at);
+            if active.live_cancellable {
+                let _ = active.cancellation.cancel(requested_at);
+            }
         }
         while let Some(joined) = state.tasks.join_next_with_id().await {
             match joined {
@@ -280,6 +285,8 @@ pub(super) struct DispatchControl {
     deadline: tracedecay_application::Deadline,
     deadline_at: tokio::time::Instant,
     cancellation: tracedecay_application::CancellationSignal,
+    live_cancellable: bool,
+    canonical_effect_settlement: bool,
 }
 
 impl super::McpServer {
@@ -322,17 +329,21 @@ impl super::McpServer {
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
         let source_edit = super::requests::is_source_edit_tool(tool_name);
         let controlled_read = super::requests::is_controlled_read_tool(tool_name);
-        let carried_deadline = super::requests::dispatch_deadline_horizon_micros(
-            application_surface.is_some() || source_edit,
-            controlled_read || source_edit,
-        )
-        .and_then(|horizon| {
+        let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("could not resolve MCP dispatch deadline: {error}"),
+            })?;
+        let carried_horizon = if application_surface.is_some() {
+            i64::try_from(ceiling.as_micros()).ok()
+        } else {
+            super::requests::dispatch_deadline_horizon_micros(controlled_read || source_edit)
+        };
+        let carried_deadline = carried_horizon.and_then(|horizon| {
             tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
                 super::requests::mcp_now_micros().0.saturating_add(horizon),
             ))
             .ok()
         });
-        let ceiling = crate::mcp::tools::handlers::tool_dispatch_ceiling(tool_name);
         let deadline = match carried_deadline {
             Some(deadline)
                 if crate::daemon_client::deadline_remaining(&deadline)
@@ -378,6 +389,11 @@ impl DispatchControl {
                     .to_owned(),
             })?;
         Ok(Self {
+            live_cancellable: crate::mcp::tools::binding::tool_supports_live_cancellation(
+                &tool_name,
+            ),
+            canonical_effect_settlement:
+                crate::mcp::tools::binding::tool_requires_canonical_effect_settlement(&tool_name),
             tool_name,
             deadline,
             deadline_at,
@@ -418,7 +434,9 @@ impl DispatchControl {
             ));
         }
 
-        let (mut result, settlement) = match registry.spawn(self.cancellation.clone(), future).await
+        let (mut result, settlement) = match registry
+            .spawn(self.cancellation.clone(), self.live_cancellable, future)
+            .await
         {
             Ok(admitted) => admitted,
             Err(error) => return RetainedDispatchOutcome::failed(error),
@@ -430,14 +448,16 @@ impl DispatchControl {
 
         let outcome = tokio::select! {
             biased;
-            () = &mut cancellation => {
+            () = &mut cancellation, if self.live_cancellable => {
                 Err(DispatchFailure::new(dispatch_cancelled_error(
                     &self.tool_name,
                     settlement.snapshot(),
                 )))
             }
             () = &mut deadline => {
-                if self
+                if self.canonical_effect_settlement {
+                    receive_canonical_result(&mut result).await
+                } else if self
                     .cancellation
                     .cancel(tracedecay_application::clock::now_micros())
                 {
@@ -523,13 +543,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_before_commit_returns_cancelled_while_the_worker_remains_owned() {
+    async fn live_cancellation_before_commit_returns_cancelled_while_the_worker_remains_owned() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
             tracedecay_application::CancellationSignal::active("cancel.before-commit")
                 .expect("cancellation");
         let control = DispatchControl::new(
-            "tracedecay_configuration_set",
+            "tracedecay_search",
             deadline_after(std::time::Duration::from_secs(60)),
             cancellation.clone(),
         )
@@ -568,7 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_claim_rejects_late_cancellation_and_returns_the_canonical_result() {
+    async fn non_cancellable_effect_returns_the_canonical_result_after_admission() {
         let registry = Arc::new(RetainedDispatchRegistry::new());
         let cancellation =
             tracedecay_application::CancellationSignal::active("cancel.after-commit")
@@ -579,16 +599,14 @@ mod tests {
             cancellation.clone(),
         )
         .expect("control");
-        let commit_started = Arc::new(tokio::sync::Notify::new());
+        let effect_started = Arc::new(tokio::sync::Notify::new());
         let worker_release = Arc::new(tokio::sync::Notify::new());
-        let started = Arc::clone(&commit_started);
+        let started = Arc::clone(&effect_started);
         let release = Arc::clone(&worker_release);
-        let worker_cancellation = cancellation.clone();
         let runner_registry = Arc::clone(&registry);
         let runner = tokio::spawn(async move {
             control
                 .run_retained(&runner_registry, async move {
-                    assert!(worker_cancellation.try_begin_commit());
                     started.notify_one();
                     release.notified().await;
                     Ok::<_, crate::errors::TraceDecayError>("committed")
@@ -596,11 +614,11 @@ mod tests {
                 .await
         });
 
-        commit_started.notified().await;
-        assert!(!cancellation.cancel(tracedecay_application::clock::now_micros()));
+        effect_started.notified().await;
+        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
         assert!(
             !runner.is_finished(),
-            "the committed worker owns canonical settlement"
+            "an admitted non-cancellable effect owns canonical settlement"
         );
         worker_release.notify_one();
         let committed = runner.await.expect("dispatch runner");

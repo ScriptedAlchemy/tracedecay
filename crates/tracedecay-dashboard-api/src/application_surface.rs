@@ -4,9 +4,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::Router;
-use tracedecay_application::{ApplicationProblemEnvelope, RequestId};
+use serde_json::Value;
+use tracedecay_application::{ApplicationOutcome, ApplicationProblemEnvelope, RequestId};
 use tracedecay_domain::ProjectId;
-use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::configuration::{
+    ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
+};
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 pub struct DashboardApplicationRouters {
@@ -16,10 +19,20 @@ pub struct DashboardApplicationRouters {
     pub work: Router,
 }
 
-pub type DashboardConfigurationApplyFuture<'a> =
-    Pin<Box<dyn Future<Output = std::result::Result<(), ApplicationProblemEnvelope>> + Send + 'a>>;
+pub type DashboardConfigurationApplyFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<ApplicationOutcome<Value>, ApplicationProblemEnvelope>,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub trait DashboardApplicationRuntime: Send + Sync {
+    /// Exact profile bound by the daemon handshake. A dashboard mounted
+    /// without that identity cannot advertise or dispatch profile writes.
+    fn user_profile_id(&self) -> Option<&UserProfileId>;
+
     fn routers(
         &self,
         active_project_id: ProjectId,
@@ -30,5 +43,6 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         request_id: RequestId,
         mutations: Vec<DirectConfigurationMutation>,
         expected_revision: ConfigurationRevisionId,
+        idempotency_key: ConfigurationIdempotencyKey,
     ) -> DashboardConfigurationApplyFuture<'a>;
 }

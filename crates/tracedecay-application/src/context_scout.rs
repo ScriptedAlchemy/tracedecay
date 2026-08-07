@@ -41,8 +41,8 @@ const CONTEXT_SCOUT_SPECS: [ContextScoutOperationSpec; 11] = [
     read_spec("context_scout_explain", "Explain Context Scout state"),
     read_spec("context_scout_capability", "Read Context Scout capability"),
     read_spec("context_scout_budget", "Read Context Scout budget"),
-    control_spec("context_scout_pause", "Pause Context Scout"),
-    control_spec("context_scout_resume", "Resume Context Scout"),
+    configuration_control_spec("context_scout_pause", "Pause Context Scout"),
+    configuration_control_spec("context_scout_resume", "Resume Context Scout"),
     control_spec("context_scout_cancel", "Cancel Context Scout work"),
     control_spec("context_scout_claim", "Claim a Context Scout delivery"),
     control_spec("context_scout_delivery", "Record a Context Scout delivery"),
@@ -65,6 +65,19 @@ const fn control_spec(operation: &'static str, summary: &'static str) -> Context
         summary,
         description: "Execute the exact-address Context Scout control through the daemon-owned application authority.",
         effect: EffectClass::Administrative,
+        paginated: false,
+    }
+}
+
+const fn configuration_control_spec(
+    operation: &'static str,
+    summary: &'static str,
+) -> ContextScoutOperationSpec {
+    ContextScoutOperationSpec {
+        operation,
+        summary,
+        description: "Persist the exact-address Context Scout state through the canonical configuration authority.",
+        effect: EffectClass::ConfigurationWrite,
         paginated: false,
     }
 }
@@ -102,21 +115,15 @@ pub fn context_scout_surface_catalog_contribution()
             privacy: PrivacyClass::ScopedMetadata,
             lifecycle: LifecycleClass::Resumable,
             streaming: StreamingContract::Unsupported,
-            cancellation: CancellationContract::cooperative(if is_effect {
-                vec![
-                    CancellationPoint::BeforeAdmission,
-                    CancellationPoint::BeforeEffect,
-                    CancellationPoint::EffectInFlight,
-                    CancellationPoint::Reconciling,
-                    CancellationPoint::AfterCommit,
-                ]
+            cancellation: if is_effect {
+                CancellationContract::NotCancellable
             } else {
-                vec![
+                CancellationContract::cooperative(vec![
                     CancellationPoint::BeforeAdmission,
                     CancellationPoint::BeforeRead,
                     CancellationPoint::DuringRead,
-                ]
-            })?,
+                ])?
+            },
             deadline: DeadlineContract::new(
                 15_000,
                 if is_effect {
@@ -159,9 +166,11 @@ pub fn context_scout_surface_catalog_contribution()
                 ReceiptContract::Operation
             },
             terminal_states: TerminalStateContract::new(if is_effect {
+                // Effect-class Scout operations are NotCancellable, and the
+                // manifest contract requires the cancelled terminal to match
+                // the cancellation contract exactly.
                 vec![
                     TerminalState::Completed,
-                    TerminalState::Cancelled,
                     TerminalState::TimedOut,
                     TerminalState::Failed,
                     TerminalState::EffectUnknown,
@@ -296,12 +305,11 @@ mod tests {
                     capability.deadline().behavior(),
                     DeadlineBehavior::ReturnEffectReceipt
                 );
-                assert!(
-                    capability
-                        .cancellation()
-                        .points()
-                        .contains(&CancellationPoint::EffectInFlight)
+                assert_eq!(
+                    capability.cancellation(),
+                    &CancellationContract::NotCancellable
                 );
+                assert_eq!(capability.deadline().maximum_millis(), 15_000);
                 assert!(
                     capability
                         .terminal_states()
@@ -353,6 +361,34 @@ mod tests {
                 .get(operation.use_case_id())
                 .expect("Scout operation has one canonical handler");
             assert_eq!(handler.operation(), &operation);
+        }
+    }
+
+    #[test]
+    fn pause_and_resume_publish_configuration_effect_settlement_metadata() {
+        let contribution = context_scout_surface_catalog_contribution().unwrap();
+        for operation in ["context_scout_pause", "context_scout_resume"] {
+            let spec = CONTEXT_SCOUT_SPECS
+                .iter()
+                .find(|spec| spec.operation == operation)
+                .unwrap();
+            let capability = contribution
+                .capabilities()
+                .iter()
+                .find(|capability| capability.capability_id() == &capability_id(spec).unwrap())
+                .unwrap();
+            assert_eq!(capability.effect(), EffectClass::ConfigurationWrite);
+            assert_eq!(
+                capability.cancellation(),
+                &CancellationContract::NotCancellable
+            );
+            assert_eq!(capability.deadline().maximum_millis(), 15_000);
+            assert_eq!(capability.receipt(), ReceiptContract::DurableEffect);
+            assert_eq!(capability.idempotency(), IdempotencyContract::Required);
+            assert_eq!(
+                capability.reconciliation(),
+                ReconciliationContract::Required
+            );
         }
     }
 }

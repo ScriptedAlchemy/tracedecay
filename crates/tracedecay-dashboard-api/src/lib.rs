@@ -79,7 +79,6 @@ mod events_api;
 mod explorer_api;
 pub mod feedback_api;
 mod graph_api;
-mod graph_queries;
 mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
@@ -217,6 +216,9 @@ pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sy
 #[derive(Clone)]
 pub struct DashboardStateCompositionV1 {
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
+    /// Daemon/application-owned verified graph read authority. HTTP adapters
+    /// receive bounded read models and never a graph store handle.
+    pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
@@ -267,6 +269,9 @@ pub struct DashboardState {
     /// unavailable states from it and never re-resolve scope from paths or
     /// the CWD per request.
     pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
+    /// Exact verified-generation graph reader retained by the daemon.
+    pub graph_read_authority:
+        Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
@@ -500,6 +505,7 @@ async fn build_state_inner(
 ) -> Result<DashboardState> {
     let DashboardStateCompositionV1 {
         project_graph_resolver,
+        graph_read_authority,
         registered_project_session_db,
         lcm_read_authority,
         registered_savings_db,
@@ -537,6 +543,7 @@ async fn build_state_inner(
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
         ),
+        graph_read_authority,
         project_graph,
         project_graph_resolver,
         memory_owner,
@@ -588,6 +595,7 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         true,
         DashboardStateCompositionV1 {
             project_graph_resolver: None,
+            graph_read_authority: None,
             registered_project_session_db: None,
             lcm_read_authority: None,
             registered_savings_db: None,
@@ -623,6 +631,7 @@ pub async fn build_selected_project_state(
         false,
         DashboardStateCompositionV1 {
             project_graph_resolver: active.project_graph_resolver.clone(),
+            graph_read_authority: active.graph_read_authority.clone(),
             registered_project_session_db: None,
             lcm_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
@@ -805,6 +814,7 @@ where
         options.warm_token_counts,
         DashboardStateCompositionV1 {
             project_graph_resolver: test_project_graph_resolver,
+            graph_read_authority: None,
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
             lcm_read_authority: None,
@@ -1170,9 +1180,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route(
             "/api/plugins/holographic/curation/config",
-            get(automation_config_api::get_config)
-                .patch(automation_config_api::patch_config)
-                .delete(automation_config_api::reset_config),
+            get(automation_config_api::get_config).patch(automation_config_api::patch_config),
         )
         .route(
             "/api/automation/skills",
@@ -1785,6 +1793,7 @@ mod authority_tests {
                     &project_root,
                     layout.identity.project_id.as_deref(),
                 ),
+                graph_read_authority: None,
                 project_graph: None,
                 project_graph_resolver: None,
                 memory_owner,
@@ -1809,7 +1818,8 @@ mod authority_tests {
                 dashboard_root: layout.dashboard_root.clone(),
                 retention_config: crate::config::RetentionConfig::default(),
                 user_settings: Arc::new(
-                    crate::application::configuration::ProductionUserSettingsDaemonClient,
+                    crate::application::configuration::ProductionUserSettingsDaemonClient::default(
+                    ),
                 ),
                 curation_activity: Arc::new(RwLock::new(Vec::new())),
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
@@ -1840,8 +1850,8 @@ mod authority_tests {
                 .expect("registered project id"),
         )
         .expect("valid project id");
-        #[allow(deprecated)]
-        let expected = crate::application::context::resolve_exact_root_scope(
+        let expected = crate::application::context::RegisteredScopeResolver::resolve(
+            &fixture.layout.project_root,
             &fixture.layout.project_root,
             &project_id,
         )

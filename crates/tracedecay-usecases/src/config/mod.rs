@@ -19,11 +19,10 @@ pub use tracedecay_global_db::configuration::{registry, resolver};
 #[cfg(test)]
 pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
@@ -127,15 +126,6 @@ impl PinnedRuntimeConfiguration {
 
 pub type RuntimeConfigurationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-pub trait ConfigurationDaemonClient: Send + Sync {
-    fn mutate_direct(
-        &self,
-        target: RuntimeConfigurationTarget,
-        mutation: crate::configuration::DirectConfigurationMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration>;
-}
-
 pub struct OpenedRuntimeConfiguration {
     pub(crate) configuration: PinnedRuntimeConfiguration,
     pub(crate) registered_database: Arc<RegisteredGlobalDb>,
@@ -219,69 +209,6 @@ fn runtime_configuration_authority() -> Result<&'static dyn RuntimeConfiguration
         .get()
         .map(Arc::as_ref)
         .ok_or_else(|| config_error("runtime configuration authority is not installed"))
-}
-
-#[derive(Default)]
-struct RuntimeConfigurationState {
-    pinned: BTreeMap<String, PinnedRuntimeConfiguration>,
-    clients: BTreeMap<String, Arc<dyn ConfigurationDaemonClient>>,
-}
-
-fn runtime_configuration_state() -> &'static RwLock<RuntimeConfigurationState> {
-    static STATE: OnceLock<RwLock<RuntimeConfigurationState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(RuntimeConfigurationState::default()))
-}
-
-pub fn install_pinned_runtime_configuration(
-    configuration: PinnedRuntimeConfiguration,
-) -> Result<()> {
-    runtime_configuration_state()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pinned
-        .insert(
-            configuration.target.project_id.as_str().to_owned(),
-            configuration,
-        );
-    Ok(())
-}
-
-pub fn install_configuration_daemon_client_for_project(
-    target: &RuntimeConfigurationTarget,
-    client: Arc<dyn ConfigurationDaemonClient>,
-) {
-    runtime_configuration_state()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clients
-        .insert(target.project_id.as_str().to_owned(), client);
-}
-
-pub fn configuration_daemon_client_for_project(
-    project_id: &ProjectId,
-) -> Option<Arc<dyn ConfigurationDaemonClient>> {
-    runtime_configuration_state()
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clients
-        .get(project_id.as_str())
-        .cloned()
-}
-
-pub fn uninstall_configuration_daemon_client_for_project(
-    target: &RuntimeConfigurationTarget,
-    client: &Arc<dyn ConfigurationDaemonClient>,
-) {
-    let mut state = runtime_configuration_state()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if state
-        .clients
-        .get(target.project_id.as_str())
-        .is_some_and(|installed| Arc::ptr_eq(installed, client))
-    {
-        state.clients.remove(target.project_id.as_str());
-    }
 }
 
 fn runtime_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<TraceDecayConfig> {

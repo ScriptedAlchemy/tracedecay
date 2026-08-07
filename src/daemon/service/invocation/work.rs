@@ -19,6 +19,20 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
     )
 }
 
+/// Retryable state for an admitted project route whose per-project runtime or
+/// service registration has not finished mounting behind the core open
+/// publication. Concealing this window as not-found would misreport an
+/// authenticated project the caller is standing in.
+pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationResponse {
+    application_problem(
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.surface.unavailable".to_owned(),
+            message: "The project runtime for this operation is still mounting".to_owned(),
+        }),
+    )
+}
+
 pub(super) fn execute_work_application(
     registered: RegisteredWorkRuntime,
     request_id: String,

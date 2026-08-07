@@ -230,12 +230,22 @@ async fn handle_status_command_within(
     let global_tokens_saved = accounting
         .get("global_tokens_saved")
         .and_then(Value::as_u64);
+    let upload_enabled = timeout_at(
+        deadline,
+        commands::canonical_upload_enabled(&project_path),
+    )
+    .await
+    .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+        message:
+            "timed out waiting for canonical worldwide-counter upload setting before status deadline"
+                .to_string(),
+    })??;
     let mut config = tracedecay::user_config::UserConfig::load();
     let now = current_unix_timestamp();
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let stderr_is_terminal = std::io::stderr().is_terminal();
     let fetch_online = should_fetch_online_status_embellishments(stdout_is_terminal);
-    let worldwide = if !fetch_online || !config.upload_enabled {
+    let worldwide = if !fetch_online || !upload_enabled {
         None
     } else if now - config.last_worldwide_fetch_at < 60 {
         (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
@@ -249,7 +259,7 @@ async fn handle_status_command_within(
     } else {
         (config.last_worldwide_total > 0).then_some(config.last_worldwide_total)
     };
-    let country_flags = if !fetch_online || !config.upload_enabled {
+    let country_flags = if !fetch_online || !upload_enabled {
         Vec::new()
     } else if now - config.last_flags_fetch_at < 1800 {
         config.cached_country_flags.clone()

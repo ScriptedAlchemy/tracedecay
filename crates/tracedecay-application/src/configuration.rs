@@ -6,21 +6,26 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
-    ProtectedChange, RollbackModeV1, SettingKey,
+    ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
+    ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
+    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1,
+    CredentialReferenceId, ProtectedChange, RestartRequirementV1, RollbackModeV1, SettingKey,
+    SettingSensitivityV1,
 };
-use tracedecay_domain::{BrainId, LocatorDigest, ManifestDigest, ProjectId, UserProfileId};
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
     PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
-    UseCaseId,
+    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
+    TerminalStateContract, UseCaseId,
 };
 
 use crate::current_bindings;
@@ -52,6 +57,7 @@ pub struct ConfigurationSetRequestV1 {
     pub key: SettingKey,
     pub value: ConfigurationValueV1,
     pub expected_revision: ConfigurationRevisionId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -74,6 +80,7 @@ pub struct ConfigurationUnsetRequestV1 {
     pub layer: ConfigurationLayerIdV1,
     pub key: SettingKey,
     pub expected_revision: ConfigurationRevisionId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -81,6 +88,7 @@ pub struct ConfigurationUnsetRequestV1 {
 pub struct ConfigurationBatchRequestV1 {
     pub mutations: Vec<ConfigurationDirectMutationRequestV1>,
     pub expected_revision: ConfigurationRevisionId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -90,6 +98,7 @@ pub struct ConfigurationWriteCredentialRequestV1 {
     pub kind: CredentialKindV1,
     pub write_handle: String,
     pub expected_revision: ConfigurationRevisionId,
+    pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -129,57 +138,59 @@ pub struct ConfigurationAuditRequestV1 {
     pub limit: usize,
 }
 
-/// Exact reset refusal that an operator must echo before configuration data is
-/// destroyed. The runtime and locator digests cover the daemon-pinned store
-/// publication without exposing its filesystem path.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationResetConfirmationV1 {
-    pub brain_id: BrainId,
-    pub profile_id: UserProfileId,
-    pub project_id: ProjectId,
-    pub runtime_binding_digest: ManifestDigest,
-    pub locator_digest: LocatorDigest,
-    pub refusal_reason: String,
-}
-
-impl ConfigurationResetConfirmationV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if self.refusal_reason.is_empty()
-            || self.refusal_reason.trim() != self.refusal_reason
-            || self.refusal_reason.len() > 512
-            || self.refusal_reason.chars().any(char::is_control)
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "configuration reset refusal reason",
-            });
-        }
-        self.runtime_binding_digest.validate()?;
-        self.locator_digest.validate()?;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationResetRequestV1 {
-    #[serde(default)]
-    pub confirmation: Option<ConfigurationResetConfirmationV1>,
+pub struct SettingSummary {
+    pub key: SettingKey,
+    pub sensitivity: SettingSensitivityV1,
+    pub restart_requirement: RestartRequirementV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "outcome", content = "value")]
-pub enum ConfigurationResetOutcomeV1 {
-    ConfirmationRequired {
-        confirmation: ConfigurationResetConfirmationV1,
-    },
-    Completed {
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        runtime_binding_digest: ManifestDigest,
-        locator_digest: LocatorDigest,
-    },
+pub struct ResolvedSetting {
+    pub key: SettingKey,
+    pub effective_value: ConfigurationValueV1,
+    pub snapshot_id: ConfigurationSnapshotId,
+    pub effective_behavior_digest: ManifestDigest,
+    pub resolution_provenance_digest: ManifestDigest,
+    pub candidates: Vec<ConfigurationCandidateV1>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationDriftV1 {
+    Current,
+    NeverActivated,
+    PendingRestart,
+    ActivationFailed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ComponentConfigurationState {
+    pub component: String,
+    pub desired_revision_id: ConfigurationRevisionId,
+    pub observed_revision_id: Option<ConfigurationRevisionId>,
+    pub last_working_revision_id: Option<ConfigurationRevisionId>,
+    pub restart_required: bool,
+    pub activation_error_code: Option<String>,
+    pub drift: ActivationDriftV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigurationMutationReceipt {
+    pub receipt_id: ConfigurationReceiptId,
+    pub base_revision_id: ConfigurationRevisionId,
+    pub result_revision_id: ConfigurationRevisionId,
+    pub snapshot_id: ConfigurationSnapshotId,
+    pub operation_digest: ManifestDigest,
+    pub settlement_authority: ConfigurationSettlementAuthorityV1,
+    pub created_at: UtcMicros,
+    pub effective_deadline_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ConfigurationAuditPage {
+    pub events: Vec<ConfigurationAuditEvent>,
+    pub next_after_event_id: Option<ConfigurationAuditEventId>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -198,7 +209,6 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationRollbackApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
-    Reset(ConfigurationResetRequestV1),
 }
 
 struct ConfigurationSurfaceSpec {
@@ -217,9 +227,8 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Http,
     BindingSurface::Dashboard,
 ];
-const CONFIGURATION_RESET_SURFACES: [BindingSurface; 1] = [BindingSurface::Cli];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 14] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
@@ -337,18 +346,9 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 14] = [
         paginated: true,
         surfaces: &CONFIGURATION_SURFACES,
     },
-    ConfigurationSurfaceSpec {
-        name: "configuration_reset",
-        summary: "Reset incompatible configuration",
-        description: "Reset only the exact incompatible project configuration store after echoing its daemon-issued confirmation.",
-        example: "Reset the refused project configuration store",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        surfaces: &CONFIGURATION_RESET_SURFACES,
-    },
 ];
 
-pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 14] = [
+pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_list",
     "configuration_explain",
     "configuration_get",
@@ -362,7 +362,6 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 14] = [
     "configuration_rollback_preview",
     "configuration_rollback_apply",
     "configuration_audit",
-    "configuration_reset",
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -378,13 +377,172 @@ pub fn configuration_surface_catalog_contribution()
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.configuration-surface")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = configuration_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Daemon-owned public HTTP bindings for every shipped configuration use case.
+///
+/// The contribution above owns both manifest references and generated schema
+/// bodies. This registry adds only the concrete daemon service, codec, and
+/// externally mounted HTTP path consumed by first-party SDKs.
+pub fn configuration_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contribution = configuration_surface_catalog_contribution()?;
+    let service_id = ServiceId::new("service.application.configuration")?;
+    let mut bindings = Vec::with_capacity(CONFIGURATION_SPECS.len());
+    for spec in &CONFIGURATION_SPECS {
+        let capability_id = CapabilityId::new(capability_id(spec.name))?;
+        let manifest = contribution
+            .capabilities()
+            .binary_search_by(|manifest| manifest.capability_id().cmp(&capability_id))
+            .ok()
+            .map(|index| &contribution.capabilities()[index])
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "configuration executable capability",
+            })?;
+        let schema = contribution.executable_schema(&capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "configuration executable schema",
+            },
+        )?;
+        let http_binding = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.capability_id() == &capability_id
+                    && binding.surface() == BindingSurface::Http
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "configuration HTTP binding",
+            })?;
+        let executable = ExecutableBindingV1::daemon_owned(
+            manifest,
+            OperationId::new(format!("operation.application.{}", spec.name))?,
+            service_id.clone(),
+            schema.request_schema().clone(),
+            schema.result_schema().clone(),
+            CodecBindingKey::new(format!(
+                "codec.application.configuration.{}.json.v1",
+                spec.name
+            ))?,
+            RouteExposureV1::Public {
+                binding_id: http_binding.binding_id().clone(),
+                route_path: format!("/application/configuration/{}", spec.name),
+            },
+        )?;
+        bindings.push(ExecutableBindingAvailabilityV1::available(executable));
+    }
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
+}
+
+fn configuration_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::with_capacity(CONFIGURATION_SPECS.len());
+    macro_rules! add {
+        ($operation:literal, $request:ty, $result:ty) => {
+            schemas.push(configuration_executable_schema::<$request, $result>(
+                contribution,
+                $operation,
+            )?)
+        };
+    }
+    add!(
+        "configuration_list",
+        ConfigurationListRequestV1,
+        Vec<SettingSummary>
+    );
+    add!(
+        "configuration_explain",
+        ConfigurationGetRequestV1,
+        ResolvedSetting
+    );
+    add!(
+        "configuration_get",
+        ConfigurationGetRequestV1,
+        ResolvedSetting
+    );
+    add!(
+        "configuration_set",
+        ConfigurationSetRequestV1,
+        ConfigurationMutationReceipt
+    );
+    add!(
+        "configuration_unset",
+        ConfigurationUnsetRequestV1,
+        ConfigurationMutationReceipt
+    );
+    add!(
+        "configuration_batch",
+        ConfigurationBatchRequestV1,
+        ConfigurationMutationReceipt
+    );
+    add!(
+        "configuration_write_credential",
+        ConfigurationWriteCredentialRequestV1,
+        tracedecay_domain::configuration::CredentialReferenceMetadataV1
+    );
+    add!(
+        "configuration_observed_state",
+        ConfigurationObservedStateRequestV1,
+        Vec<ComponentConfigurationState>
+    );
+    add!(
+        "configuration_protected_preview",
+        ConfigurationProtectedPreviewRequestV1,
+        tracedecay_domain::configuration::ProtectedChangePlan
+    );
+    add!(
+        "configuration_protected_apply",
+        ConfigurationProtectedApplyRequestV1,
+        ConfigurationMutationReceipt
+    );
+    add!(
+        "configuration_rollback_preview",
+        ConfigurationRollbackPreviewRequestV1,
+        tracedecay_domain::configuration::ProtectedChangePlan
+    );
+    add!(
+        "configuration_rollback_apply",
+        ConfigurationRollbackApplyRequestV1,
+        ConfigurationMutationReceipt
+    );
+    add!(
+        "configuration_audit",
+        ConfigurationAuditRequestV1,
+        ConfigurationAuditPage
+    );
+    Ok(schemas)
+}
+
+fn configuration_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    operation: &str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let capability_id = CapabilityId::new(capability_id(operation))?;
+    let manifest = contribution
+        .capabilities()
+        .binary_search_by(|manifest| manifest.capability_id().cmp(&capability_id))
+        .ok()
+        .map(|index| &contribution.capabilities()[index])
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "configuration schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
+        manifest,
+    )?)
 }
 
 pub fn configuration_surface_handler_descriptors()
@@ -421,24 +579,17 @@ fn capability(
         request_schema: configuration_surface_request_schema(spec.name)?,
         result_schema: configuration_surface_result_schema(spec.name)?,
         effect,
-        scope: ScopeRequirement::new(if spec.name == "configuration_reset" {
-            vec![ScopeDimension::Project]
-        } else {
-            vec![ScopeDimension::ConfigurationLayer, ScopeDimension::Project]
-        })?,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::ConfigurationLayer,
+            ScopeDimension::Project,
+        ])?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Resumable,
         streaming: StreamingContract::Unsupported,
         cancellation: if is_effect {
-            CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeEffect,
-                CancellationPoint::EffectInFlight,
-                CancellationPoint::Reconciling,
-                CancellationPoint::AfterCommit,
-            ])?
+            CancellationContract::NotCancellable
         } else {
             CancellationContract::cooperative(vec![
                 CancellationPoint::BeforeAdmission,
@@ -490,7 +641,6 @@ fn capability(
         terminal_states: TerminalStateContract::new(if is_effect {
             vec![
                 TerminalState::Completed,
-                TerminalState::Cancelled,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
                 TerminalState::EffectUnknown,
@@ -507,23 +657,23 @@ fn capability(
         })?,
         availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: application_profile_ids(if spec.name == "configuration_reset" {
-            &[APPLICATION_ADMINISTRATIVE_PROFILE_ID]
-        } else if matches!(
-            spec.name,
-            "configuration_list"
-                | "configuration_explain"
-                | "configuration_get"
-                | "configuration_observed_state"
-                | "configuration_audit"
-        ) {
-            &[
-                APPLICATION_DEFAULT_PROFILE_ID,
-                APPLICATION_ADMINISTRATIVE_PROFILE_ID,
-            ]
-        } else {
-            &[APPLICATION_DEFAULT_PROFILE_ID]
-        })?,
+        profile_eligibility: application_profile_ids(
+            if matches!(
+                spec.name,
+                "configuration_list"
+                    | "configuration_explain"
+                    | "configuration_get"
+                    | "configuration_observed_state"
+                    | "configuration_audit"
+            ) {
+                &[
+                    APPLICATION_DEFAULT_PROFILE_ID,
+                    APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+                ]
+            } else {
+                &[APPLICATION_DEFAULT_PROFILE_ID]
+            },
+        )?,
         required_features: Vec::new(),
     })?)
 }
@@ -609,9 +759,12 @@ mod tests {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         assert_eq!(contribution.capabilities().len(), CONFIGURATION_SPECS.len());
         assert_eq!(
+            contribution.executable_schemas().len(),
+            CONFIGURATION_SPECS.len()
+        );
+        assert_eq!(
             contribution.bindings().len(),
-            (CONFIGURATION_SPECS.len() - 1) * CONFIGURATION_SURFACES.len()
-                + CONFIGURATION_RESET_SURFACES.len()
+            CONFIGURATION_SPECS.len() * CONFIGURATION_SURFACES.len()
         );
         assert!(
             contribution
@@ -619,6 +772,60 @@ mod tests {
                 .iter()
                 .all(|capability| capability.availability().is_callable())
         );
+    }
+
+    #[test]
+    fn configuration_executable_registry_binds_every_public_http_schema() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+        let registry = configuration_executable_binding_registry().expect("registry");
+
+        assert_eq!(registry.iter().count(), CONFIGURATION_SPECS.len());
+        for spec in &CONFIGURATION_SPECS {
+            let operation_id =
+                OperationId::new(format!("operation.application.{}", spec.name)).unwrap();
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("available configuration binding");
+            let manifest = contribution
+                .capabilities()
+                .iter()
+                .find(|manifest| manifest.capability_id() == binding.capability_id())
+                .unwrap();
+            assert_eq!(
+                binding.request_schema().schema_ref(),
+                manifest.request_schema()
+            );
+            assert_eq!(
+                binding.result_schema().schema_ref(),
+                manifest.result_schema()
+            );
+            assert_eq!(binding.terminal_states(), manifest.terminal_states());
+            let requires_idempotency = binding
+                .request_schema()
+                .body()
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|field| field.as_str() == Some("idempotency_key"))
+                });
+            assert_eq!(
+                requires_idempotency,
+                spec.effect.is_effect(),
+                "{} must expose caller idempotency exactly when it admits an effect",
+                spec.name
+            );
+            assert!(matches!(
+                binding.exposure(),
+                RouteExposureV1::Public {
+                    binding_id,
+                    route_path,
+                } if binding_id.as_str() == format!("binding.http.{}.v1", spec.name)
+                    && route_path == &format!("/application/configuration/{}", spec.name)
+            ));
+        }
     }
 
     #[test]
@@ -651,42 +858,14 @@ mod tests {
                 "{} must not advertise a nonexistent projectless profile route",
                 capability.capability_id()
             );
-            if capability.capability_id().as_str() != "capability.application.configuration.reset" {
-                assert!(
-                    capability
-                        .scope()
-                        .requires(ScopeDimension::ConfigurationLayer),
-                    "{} must route through an exact configuration-layer authority",
-                    capability.capability_id()
-                );
-            }
+            assert!(
+                capability
+                    .scope()
+                    .requires(ScopeDimension::ConfigurationLayer),
+                "{} must route through an exact configuration-layer authority",
+                capability.capability_id()
+            );
         }
-    }
-
-    #[test]
-    fn configuration_reset_is_cli_only() {
-        let contribution = configuration_surface_catalog_contribution().expect("contribution");
-        let reset_capability = contribution
-            .capabilities()
-            .iter()
-            .find(|capability| {
-                capability.capability_id().as_str() == "capability.application.configuration.reset"
-            })
-            .expect("reset capability");
-        let reset = contribution
-            .bindings()
-            .iter()
-            .filter(|binding| binding.operation().as_str() == "configuration_reset")
-            .collect::<Vec<_>>();
-        assert_eq!(reset.len(), 1);
-        assert_eq!(reset[0].surface(), BindingSurface::Cli);
-        assert_eq!(
-            reset_capability.profile_eligibility(),
-            &[
-                tracedecay_tool_catalog::ProfileId::new(APPLICATION_ADMINISTRATIVE_PROFILE_ID)
-                    .expect("profile ID")
-            ]
-        );
     }
 
     #[test]
@@ -711,6 +890,10 @@ mod tests {
             value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
             expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
                 "revision.configuration-test",
+            )
+            .unwrap(),
+            idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+                "configuration.idempotency.test",
             )
             .unwrap(),
         };

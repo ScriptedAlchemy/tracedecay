@@ -10,8 +10,8 @@
 //! This module owns only the CLI-specific brokering: the daemon handshake,
 //! the registry status taxonomy, and payload field extraction. The resolution
 //! guards (canonicalization, sibling-root authorization, digest revalidation)
-//! and the daemon-owned identity delegation live in the single root-façade
-//! path (`tracedecay::application::context::resolve_registered_root_scope`).
+//! and the daemon-owned identity delegation live in the single canonical
+//! path (`tracedecay::application::context::RegisteredScopeResolver`).
 
 use std::path::{Path, PathBuf};
 
@@ -19,10 +19,12 @@ use serde_json::Value;
 
 use super::daemon::daemon_tool_json;
 
-/// A CLI command's resolved project scope: the registry's canonical root
-/// (used for the daemon handshake) plus the exact application scope.
+/// A CLI command's resolved project scope: the registered profile/project
+/// identities and canonical root used by the daemon application boundary.
 #[derive(Debug)]
 pub(crate) struct ResolvedCliScope {
+    pub(crate) profile_id: tracedecay_domain::configuration::UserProfileId,
+    pub(crate) project_id: tracedecay_domain::ProjectId,
     pub(crate) project_path: PathBuf,
 }
 
@@ -90,6 +92,24 @@ fn scope_from_registry_payload(
                 requested.display()
             ))
         })?;
+    let profile_id = payload
+        .get("profile_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            config_error(format!(
+                "project registry response for '{}' omitted profile_id",
+                requested.display()
+            ))
+        })
+        .and_then(|profile_id| {
+            tracedecay_domain::configuration::UserProfileId::new(profile_id).map_err(|error| {
+                config_error(format!(
+                    "registry profile id for '{}' is not canonical: {error}",
+                    requested.display()
+                ))
+            })
+        })?;
     let project_id = required_project_str(project, "project_id", requested)?;
     let canonical_root = required_project_str(project, "canonical_root", requested)?;
     let canonical = canonicalize_absolute_root(
@@ -104,11 +124,9 @@ fn scope_from_registry_payload(
         ))
     })?;
     // The requested-root canonicalization, sibling-root authorization, and
-    // scope-digest revalidation all live in the single root-façade path; the
+    // scope-digest revalidation all live in the single canonical resolver; the
     // CLI keeps only the registry brokering and selector taxonomy above.
-    #[allow(deprecated)]
-    // the CLI crosses through the root facade until the application boundary owns resolution
-    tracedecay::application::context::resolve_registered_root_scope(
+    tracedecay::application::context::RegisteredScopeResolver::resolve(
         &canonical,
         requested,
         &project_id,
@@ -120,6 +138,8 @@ fn scope_from_registry_payload(
         ))
     })?;
     Ok(ResolvedCliScope {
+        profile_id,
+        project_id,
         project_path: canonical,
     })
 }
@@ -178,6 +198,7 @@ mod tests {
     fn ok_payload(canonical_root: &Path) -> Value {
         serde_json::json!({
             "status": "ok",
+            "profile_id": "profile.cli-scope-test",
             "project": {
                 "project_id": "project.cli-scope-test",
                 "label": "cli-scope-test",
@@ -205,6 +226,8 @@ mod tests {
 
         assert_eq!(first.project_path, root);
         assert_eq!(second.project_path, root);
+        assert_eq!(first.profile_id.as_str(), "profile.cli-scope-test");
+        assert_eq!(second.profile_id.as_str(), "profile.cli-scope-test");
     }
 
     #[test]
@@ -288,13 +311,19 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
         for payload in [
-            serde_json::json!({ "status": "ok", "project": null }),
             serde_json::json!({
                 "status": "ok",
+                "profile_id": "profile.cli-scope-test",
+                "project": null
+            }),
+            serde_json::json!({
+                "status": "ok",
+                "profile_id": "profile.cli-scope-test",
                 "project": { "canonical_root": root.to_string_lossy() },
             }),
             serde_json::json!({
                 "status": "ok",
+                "profile_id": "profile.cli-scope-test",
                 "project": { "project_id": "project.cli-scope-test" },
             }),
         ] {
@@ -304,6 +333,24 @@ mod tests {
                 "incomplete registry payload must fail closed: {error}"
             );
         }
+    }
+
+    #[test]
+    fn missing_profile_identity_fails_closed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut payload = ok_payload(&root);
+        payload
+            .as_object_mut()
+            .expect("registry payload object")
+            .remove("profile_id");
+
+        let error = scope_from_registry_payload(&root, &payload).unwrap_err();
+
+        assert!(
+            error.to_string().contains("omitted profile_id"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

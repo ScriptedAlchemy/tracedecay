@@ -114,17 +114,3 @@ pub async fn save_project_config(
             ),
         })
 }
-
-pub async fn clear_project_config(dashboard_root: &Path) -> Result<()> {
-    let path = project_config_path(dashboard_root);
-    match tokio::fs::remove_file(&path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!(
-                "failed to remove automation config '{}': {error}",
-                path.display()
-            ),
-        }),
-    }
-}

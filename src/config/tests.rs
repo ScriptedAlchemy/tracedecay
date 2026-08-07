@@ -1066,34 +1066,21 @@ mod topology_resolution {
 }
 
 mod runtime_configuration_cutover {
-    use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::process::Command;
-    use std::sync::Mutex;
 
     use tempfile::TempDir;
-    use tracedecay_domain::configuration::{
-        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-        SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
-    };
+    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{ProjectId, UtcMicros};
-    use tracedecay_usecases::config::{
-        ConfigurationDaemonClient as UsecaseConfigurationDaemonClient,
-        PinnedRuntimeConfiguration as UsecasePinnedRuntimeConfiguration,
-        RuntimeConfigurationFuture as UsecaseRuntimeConfigurationFuture,
-        RuntimeConfigurationTarget as UsecaseRuntimeConfigurationTarget,
-    };
 
-    use crate::application::configuration::DirectConfigurationMutation;
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+    use crate::config::resolver::resolve_configuration;
     use crate::config::{
         PinnedRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
         TraceDecayConfig, cached_runtime_configuration, cached_sync_config,
-        cached_telemetry_config, commit_runtime_configuration_mutation,
-        direct_mutation_for_runtime_config_diff, install_pinned_runtime_configuration,
-        mutate_pinned_runtime_configuration, runtime_configuration_for_layout,
+        cached_telemetry_config, install_pinned_runtime_configuration,
+        runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1102,244 +1089,6 @@ mod runtime_configuration_cutover {
 
     fn revision_id(value: &str) -> ConfigurationRevisionId {
         ConfigurationRevisionId::new(value).expect("fixture revision id is canonical")
-    }
-
-    struct RecordingDaemonClient {
-        next: UsecasePinnedRuntimeConfiguration,
-        calls: Mutex<
-            Vec<(
-                UsecaseRuntimeConfigurationTarget,
-                DirectConfigurationMutation,
-                ConfigurationRevisionId,
-            )>,
-        >,
-    }
-
-    impl UsecaseConfigurationDaemonClient for RecordingDaemonClient {
-        fn mutate_direct(
-            &self,
-            target: UsecaseRuntimeConfigurationTarget,
-            mutation: DirectConfigurationMutation,
-            expected_revision: ConfigurationRevisionId,
-        ) -> UsecaseRuntimeConfigurationFuture<'_, UsecasePinnedRuntimeConfiguration> {
-            self.calls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((target, mutation, expected_revision));
-            let next = self.next.clone();
-            Box::pin(async move { Ok(next) })
-        }
-    }
-
-    #[test]
-    fn runtime_configuration_diff_is_typed_and_rejects_legacy_metadata() {
-        let project_id = project_id("project.runtime-mutation");
-        let before = TraceDecayConfig::default();
-        let mut after = before.clone();
-        after.git_ignore = false;
-        after.sync.auto_watch = false;
-
-        let mutation = direct_mutation_for_runtime_config_diff(&project_id, &before, &after)
-            .expect("runtime fields have typed settings")
-            .expect("changed settings require a mutation");
-        let DirectConfigurationMutation::Batch { mutations } = mutation else {
-            panic!("runtime configuration changes must be batched typed mutations");
-        };
-        assert_eq!(mutations.len(), 2);
-        assert!(mutations.iter().any(|mutation| {
-            matches!(
-                mutation,
-                DirectConfigurationMutation::Set {
-                    layer: ConfigurationLayerIdV1::Project { project_id: target },
-                    key,
-                    value: ConfigurationValueV1::Boolean(false),
-                } if target == &project_id && key.as_str() == "index.git_ignore.v1"
-            )
-        }));
-        assert!(mutations.iter().any(|mutation| {
-            matches!(
-                mutation,
-                DirectConfigurationMutation::Set {
-                    layer: ConfigurationLayerIdV1::Project { project_id: target },
-                    key,
-                    value: ConfigurationValueV1::Boolean(false),
-                } if target == &project_id && key.as_str() == SYNC_AUTO_WATCH_SETTING_KEY
-            )
-        }));
-
-        let mut metadata_change = before;
-        metadata_change.root_dir = "/not-an-authority".to_owned();
-        assert!(
-            direct_mutation_for_runtime_config_diff(
-                &project_id,
-                &TraceDecayConfig::default(),
-                &metadata_change
-            )
-            .is_err(),
-            "root_dir is migration metadata and cannot enter the control plane"
-        );
-    }
-
-    #[test]
-    fn semantic_runtime_selection_changes_atomically_as_one_typed_setting() {
-        let project_id = project_id("project.semantic-runtime");
-        let before = TraceDecayConfig::default();
-        let mut after = before.clone();
-        after.semantic.active_profile = Some(crate::config::SemanticProfileSelection {
-            profile_id: "code-embedding.v1".to_owned(),
-            accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
-                "sha256:{}",
-                "1".repeat(64)
-            ))
-            .unwrap(),
-            artifact_digest: "a".repeat(64),
-            artifact_path: std::path::PathBuf::from("/var/lib/tracedecay/models/code-embedding"),
-        });
-
-        let mutation = direct_mutation_for_runtime_config_diff(&project_id, &before, &after)
-            .expect("semantic runtime configuration is valid")
-            .expect("semantic selection change requires a mutation");
-        let DirectConfigurationMutation::Batch { mutations } = mutation else {
-            panic!("semantic selection must use the typed batch boundary");
-        };
-        assert_eq!(mutations.len(), 1);
-        let DirectConfigurationMutation::Set { key, value, .. } = &mutations[0] else {
-            panic!("semantic selection must be one atomic set");
-        };
-        assert_eq!(key.as_str(), crate::config::SEMANTIC_RUNTIME_SETTING_KEY);
-        let ConfigurationValueV1::Text(encoded) = value else {
-            panic!("semantic selection must use the canonical text value");
-        };
-        let decoded: crate::config::SemanticConfig = serde_json::from_str(encoded).unwrap();
-        assert_eq!(decoded, after.semantic);
-    }
-
-    #[tokio::test]
-    async fn daemon_mutation_response_is_retargeted_and_published_without_legacy_write() {
-        let project_id = project_id("project.runtime-daemon-client");
-        let root = TempDir::new().expect("temporary project root");
-        let returned_root = TempDir::new().expect("temporary daemon response root");
-        let registry = ConfigurationRegistry::core().expect("registry is available");
-        let current_revision = revision_id("revision.runtime-daemon-client.current");
-        let next_revision = revision_id("revision.runtime-daemon-client.next");
-        let current = PinnedRuntimeConfiguration::new(
-            RuntimeConfigurationTarget {
-                project_id: project_id.clone(),
-                project_root: root.path().to_path_buf(),
-            },
-            current_revision.clone(),
-            resolve_configuration(&registry, &[])
-                .expect("defaults resolve")
-                .snapshot,
-        )
-        .expect("default snapshot materializes");
-        let mut updated = current.config.clone();
-        updated.git_ignore = false;
-        let mutation =
-            direct_mutation_for_runtime_config_diff(&project_id, &current.config, &updated)
-                .expect("runtime fields have typed settings")
-                .expect("gitignore update requires a mutation");
-        let expected_mutation = mutation.clone();
-        let next = UsecasePinnedRuntimeConfiguration::new(
-            UsecaseRuntimeConfigurationTarget {
-                project_id: project_id.clone(),
-                project_root: returned_root.path().to_path_buf(),
-            },
-            next_revision.clone(),
-            resolve_configuration(
-                &registry,
-                &[ConfigurationLayerV1 {
-                    layer: ConfigurationLayerIdV1::Project {
-                        project_id: project_id.clone(),
-                    },
-                    revision_id: next_revision.clone(),
-                    entries: BTreeMap::from([(
-                        SettingKey::new("index.git_ignore.v1").expect("known setting key"),
-                        ConfigurationValueV1::Boolean(false),
-                    )]),
-                }],
-            )
-            .expect("updated project layer resolves")
-            .snapshot,
-        )
-        .expect("updated snapshot materializes");
-        let client = RecordingDaemonClient {
-            next,
-            calls: Mutex::new(Vec::new()),
-        };
-
-        let published = commit_runtime_configuration_mutation(&client, &current, mutation)
-            .await
-            .expect("daemon response is accepted");
-
-        let calls = client
-            .calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0.project_id, current.target.project_id);
-        assert_eq!(calls[0].0.project_root, current.target.project_root);
-        assert_eq!(calls[0].1, expected_mutation);
-        assert_eq!(calls[0].2, current_revision);
-        assert_eq!(published.revision_id, next_revision);
-        assert_eq!(published.target.project_root, root.path().to_path_buf());
-        assert_eq!(
-            published.config.root_dir,
-            root.path().to_string_lossy().to_string(),
-            "the daemon response root is non-authoritative"
-        );
-        assert!(!published.config.git_ignore);
-        assert_eq!(
-            cached_runtime_configuration(root.path())
-                .expect("published cache entry")
-                .revision_id,
-            next_revision
-        );
-        assert!(
-            !root.path().join(".tracedecay").join("config.json").exists(),
-            "typed daemon mutation must not write config.json"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_daemon_client_fails_closed_without_legacy_file_fallback() {
-        let project_id = project_id("project.runtime-fail-closed");
-        let root = TempDir::new().expect("temporary project root");
-        let legacy_path = root.path().join("config.json");
-        let legacy_contents = r#"{"git_ignore":false,"root_dir":"/legacy"}"#;
-        std::fs::write(&legacy_path, legacy_contents).expect("write legacy fixture");
-        let snapshot = resolve_configuration(
-            &ConfigurationRegistry::core().expect("registry is available"),
-            &[],
-        )
-        .expect("defaults resolve")
-        .snapshot;
-        let current = PinnedRuntimeConfiguration::new(
-            RuntimeConfigurationTarget {
-                project_id,
-                project_root: root.path().to_path_buf(),
-            },
-            revision_id("revision.runtime-fail-closed"),
-            snapshot,
-        )
-        .expect("default snapshot materializes");
-        let mut updated = current.config.clone();
-        updated.git_ignore = !updated.git_ignore;
-
-        let error = mutate_pinned_runtime_configuration(&current, updated)
-            .await
-            .expect_err("missing control-plane client must reject mutation");
-        assert!(
-            error
-                .to_string()
-                .contains("daemon control-plane client is not installed"),
-            "unexpected mutation error: {error}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&legacy_path).expect("legacy fixture remains readable"),
-            legacy_contents,
-            "missing authority must never fall back to config.json"
-        );
     }
 
     #[test]

@@ -3,10 +3,6 @@
 //!
 //! `production_project_server` is the single composition root shared by the
 //! Unix broker, the portable broker, and the in-process test harness.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
 
@@ -357,6 +353,7 @@ pub(super) async fn production_project_server(
         let route_registered = Arc::clone(&route_registered);
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
+        let graph_publication_database = Arc::new(cg.db().clone());
         Arc::new(move || {
             let invocation = invocation.clone();
             let project_id = project_id.clone();
@@ -369,6 +366,7 @@ pub(super) async fn production_project_server(
             let route_registered = Arc::clone(&route_registered);
             let cancellation = cancellation.clone();
             let graph_runtime = Arc::clone(&graph_runtime);
+            let graph_publication_database = Arc::clone(&graph_publication_database);
             Box::pin(async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
@@ -384,6 +382,7 @@ pub(super) async fn production_project_server(
                     semantic_lifecycle,
                     Some(semantic_resources),
                     graph_runtime,
+                    graph_publication_database,
                 );
                 tokio::select! {
                     biased;
@@ -860,6 +859,7 @@ pub(super) async fn production_project_server(
                 Arc::clone(&diagnostic_broker),
                 invocation.feedback_runtime_registrar(),
                 store_telemetry_sampling,
+                Arc::clone(cg.configuration_runtime()),
             );
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
