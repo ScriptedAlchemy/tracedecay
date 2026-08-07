@@ -382,10 +382,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "token-counting")]
     struct TypedFailureBackend {
         error: AgentTaskError,
     }
 
+    #[cfg(feature = "token-counting")]
     impl AgentTaskBackend for TypedFailureBackend {
         fn run_task(
             &self,
@@ -395,6 +397,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     async fn propose_with_backend_failure(
         error: AgentTaskError,
     ) -> Result<ContextScoutModelProposalV1, ContextScoutModelErrorV1> {
@@ -407,6 +410,7 @@ mod tests {
             .await
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn denied_backend_surfaces_denied_not_unavailable() {
         assert_eq!(
@@ -418,6 +422,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn disconnected_backend_surfaces_disconnect_not_unavailable() {
         assert_eq!(
@@ -429,6 +434,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn unavailable_backend_surfaces_unavailable() {
         assert_eq!(
