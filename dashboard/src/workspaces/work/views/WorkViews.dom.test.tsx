@@ -134,6 +134,35 @@ async function open(name: string) {
   return user;
 }
 
+const ID_REFERENCES = ['aria-controls', 'aria-labelledby', 'aria-describedby'] as const;
+
+/**
+ * Every id an ARIA reference on the page names but the page did not draw.
+ *
+ * The accessibility gate reads references, not intentions: an `aria-controls`
+ * naming an absent element is a critical `aria-valid-attr-value` failure, not
+ * a control that merely happens to point at nothing. This returns the offences
+ * rather than a boolean so a failure names the attribute that broke.
+ */
+function danglingReferences(container: HTMLElement): string[] {
+  const offences: string[] = [];
+  const selector = ID_REFERENCES.map((attribute) => `[${attribute}]`).join(',');
+  for (const element of Array.from(container.querySelectorAll(selector))) {
+    for (const attribute of ID_REFERENCES) {
+      const value = element.getAttribute(attribute);
+      if (value === null) continue;
+      for (const id of value.split(/\s+/).filter((token) => token !== '')) {
+        // Resolved against the document, the way an assistive technology
+        // resolves an IDREF — not against this subtree.
+        if (element.ownerDocument.getElementById(id) === null) {
+          offences.push(`${element.tagName.toLowerCase()} ${attribute}="${id}"`);
+        }
+      }
+    }
+  }
+  return offences;
+}
+
 beforeEach(() => {
   serve(() => ({ status: 200, body: snapshotBody(GRAPH) }));
 });
@@ -213,16 +242,34 @@ describe('the projection switcher', () => {
     expect(screen.getByRole('tab', { selected: true }).textContent).toBe('Board');
   });
 
-  /** Losing the switcher on a refusal would strand a reader in a projection
-   * they cannot leave. */
-  it('keeps the camera reachable when the read refuses, and draws no projection', async () => {
+  it('resolves every ARIA reference it makes while a snapshot is drawn', async () => {
+    const { container } = renderPage('/work?view=dag');
+    await waitFor(() => expect(container.querySelector('[data-work-view="dag"]')).not.toBeNull());
+
+    expect(danglingReferences(container)).toEqual([]);
+  });
+
+  /**
+   * Losing the switcher on a refusal would strand a reader in a projection
+   * they cannot leave — so the tabs stay. Which means the region they name has
+   * to stay with them: tabs that keep `aria-controls` pointed at a panel the
+   * refusal branch never drew are a dangling reference, and the accessibility
+   * gate reads that as a critical invalid attribute value rather than as a
+   * projection that is merely absent.
+   */
+  it('keeps the camera and the region it controls when the read refuses', async () => {
     serve(() => ({ status: 503, body: { kind: 'problem', value: { problem: {} } } }));
     const { container } = renderPage('/work?view=dag');
 
     await waitFor(() => expect(screen.getByText(/Work runtime is unavailable/)).toBeTruthy());
     expect(screen.getByRole('tablist', { name: 'Work projection' })).toBeTruthy();
     expect(container.querySelector('[data-work-view]')).toBeNull();
-    expect(container.querySelector('[role="tabpanel"]')).toBeNull();
+
+    // The refusal is what the camera is now pointed at, so it belongs inside
+    // the region the tabs control rather than beside it.
+    const panel = screen.getByRole('tabpanel');
+    expect(within(panel).getByText(/Work runtime is unavailable/)).toBeTruthy();
+    expect(danglingReferences(container)).toEqual([]);
   });
 });
 

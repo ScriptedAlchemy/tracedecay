@@ -9,6 +9,7 @@ import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
 import { WorkDagView } from './views/WorkDagView.tsx';
 import {
+  PROJECTION_PANEL_ID,
   type WorkProjectionKind,
   WorkProjectionSwitcher,
   projectionNote,
@@ -157,41 +158,48 @@ export function WorkPage() {
             <p className="text-3xs text-text-muted">{projectionNote(projection)}</p>
           </div>
 
-          {snapshot.isPending ? (
-            <Panel legend="Work read model">
-              <StateChip kind="loading" detail="reading the snapshot" />
-            </Panel>
-          ) : null}
+          {/* The region the camera points at, drawn in every state rather than
+            * only when there is a projection to put in it. The tabs above
+            * declare that they control this region, so it has to exist for as
+            * long as they do — and under a refusal it is where a reader who
+            * just moved the camera looks to find out why nothing moved. */}
+          <div
+            role="tabpanel"
+            id={PROJECTION_PANEL_ID}
+            aria-labelledby={tabId(projection)}
+            className="flex min-w-0 flex-col gap-3"
+          >
+            {snapshot.isPending ? (
+              <Panel legend="Work read model">
+                <StateChip kind="loading" detail="reading the snapshot" />
+              </Panel>
+            ) : null}
 
-          {result?.outcome === 'refused' ? (
-            <Panel legend="Work read model">
-              {/* The daemon's own reason, in the taxonomy's vocabulary. An
-                * unavailable runtime and an empty board are different things and
-                * must never render alike. */}
-              <StateChip kind={result.state} detail={result.detail} />
-              <p className="mt-1 text-3xs text-text-muted">
-                No board is drawn. This build reads the Work routes and does not
-                infer their contents when they refuse.
-              </p>
-            </Panel>
-          ) : null}
+            {result?.outcome === 'refused' ? (
+              <Panel legend="Work read model">
+                {/* The daemon's own reason, in the taxonomy's vocabulary. An
+                  * unavailable runtime and an empty board are different things and
+                  * must never render alike. */}
+                <StateChip kind={result.state} detail={result.detail} />
+                <p className="mt-1 text-3xs text-text-muted">
+                  No board is drawn. This build reads the Work routes and does not
+                  infer their contents when they refuse.
+                </p>
+              </Panel>
+            ) : null}
+
+            {value === undefined ? null : (
+              <WorkProjectionView
+                kind={projection}
+                snapshot={value}
+                selected={selected}
+                onSelect={setSelected}
+              />
+            )}
+          </div>
 
           {value === undefined ? null : (
             <>
-              <div
-                role="tabpanel"
-                id="work-projection-panel"
-                aria-labelledby={tabId(projection)}
-                className="min-w-0"
-              >
-                <WorkProjectionView
-                  kind={projection}
-                  snapshot={value}
-                  selected={selected}
-                  onSelect={setSelected}
-                />
-              </div>
-
               {delta.data?.outcome === 'refused' ? (
                 <Panel legend="Continuation">
                   <StateChip kind={delta.data.state} detail={delta.data.detail} />

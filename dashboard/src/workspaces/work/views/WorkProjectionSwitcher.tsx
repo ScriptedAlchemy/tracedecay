@@ -109,6 +109,17 @@ export function tabId(kind: WorkProjectionKind): string {
   return `work-projection-${kind}`;
 }
 
+/**
+ * The region the tabs control, named once so the two halves of the pattern
+ * cannot drift apart.
+ *
+ * Whoever renders this switcher owes the page an element carrying this id, for
+ * as long as the switcher is on screen. `aria-controls` is a reference, and a
+ * reference to an element that was never drawn is not a weaker control — it is
+ * an invalid one, which is what the accessibility gate reads it as.
+ */
+export const PROJECTION_PANEL_ID = 'work-projection-panel';
+
 export function WorkProjectionSwitcher({
   active,
   onSelect,
@@ -154,7 +165,7 @@ export function WorkProjectionSwitcher({
             type="button"
             role="tab"
             aria-selected={selected}
-            aria-controls="work-projection-panel"
+            aria-controls={PROJECTION_PANEL_ID}
             // Roving tabindex: the tablist is one stop in the page's tab
             // order and the arrows move within it.
             tabIndex={selected ? 0 : -1}
