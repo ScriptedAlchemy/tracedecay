@@ -6,6 +6,7 @@ mod activity_tests;
 mod execution;
 mod mcp_dispatch;
 mod retrieval;
+mod review_labels;
 mod runtime;
 
 pub use activity::ActivityObservedV1;
@@ -14,6 +15,7 @@ pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
 };
 pub use retrieval::*;
+pub use review_labels::*;
 pub use runtime::*;
 
 use std::collections::BTreeMap;
