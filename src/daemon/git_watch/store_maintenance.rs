@@ -10,12 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
-#[cfg(unix)]
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
@@ -72,7 +70,6 @@ impl ScopeRootProofInputsV1 {
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the maintenance owner keeps the GC cadence
 /// eligible for a retry.
-#[cfg(unix)]
 pub(super) async fn run_gc(
     administration: &StoreAdministration,
     branch_gc_days: u64,

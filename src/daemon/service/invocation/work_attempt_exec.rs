@@ -315,7 +315,7 @@ async fn execute_provider<S, P, W>(
                 ?problem,
                 "work attempt could not be marked running; terminating provider"
             );
-            terminate(&mut child, libc::SIGKILL);
+            terminate(&mut child, TerminationSignal::Kill);
             let _ = child.wait().await;
             return;
         }
@@ -351,7 +351,7 @@ async fn execute_provider<S, P, W>(
             Err(_) => WorkAttemptProviderOutcomeV1::LaunchFailed,
         },
         () = tokio::time::sleep(wall) => {
-            terminate(&mut child, libc::SIGKILL);
+            terminate(&mut child, TerminationSignal::Kill);
             let _ = child.wait().await;
             WorkAttemptProviderOutcomeV1::TimedOut
         }
@@ -401,7 +401,7 @@ where
             "work attempt cancellation could not be acknowledged"
         );
     }
-    terminate(child, libc::SIGINT);
+    terminate(child, TerminationSignal::Interrupt);
     if tokio::time::timeout(CANCELLATION_GRACE, child.wait())
         .await
         .is_err()
@@ -413,14 +413,26 @@ where
                 "work attempt cancellation could not be escalated"
             );
         }
-        terminate(child, libc::SIGKILL);
+        terminate(child, TerminationSignal::Kill);
         let _ = child.wait().await;
     }
     WorkAttemptProviderOutcomeV1::Cancelled
 }
 
+/// Cancellation-ladder rung, kept platform-neutral so call sites compile on
+/// every target; only the unix `terminate` maps it onto a real signal number.
+#[derive(Clone, Copy)]
+enum TerminationSignal {
+    Interrupt,
+    Kill,
+}
+
 #[cfg(unix)]
-fn terminate(child: &mut tokio::process::Child, signal: i32) {
+fn terminate(child: &mut tokio::process::Child, signal: TerminationSignal) {
+    let signal = match signal {
+        TerminationSignal::Interrupt => libc::SIGINT,
+        TerminationSignal::Kill => libc::SIGKILL,
+    };
     if let Some(pid) = child.id() {
         let pid = pid as libc::pid_t;
         // The child leads its own process group; signal the whole group so
@@ -434,7 +446,7 @@ fn terminate(child: &mut tokio::process::Child, signal: i32) {
 }
 
 #[cfg(not(unix))]
-fn terminate(child: &mut tokio::process::Child, _signal: i32) {
+fn terminate(child: &mut tokio::process::Child, _signal: TerminationSignal) {
     let _ = child.start_kill();
 }
 
