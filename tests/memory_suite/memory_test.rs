@@ -19,7 +19,7 @@ use tracedecay::memory::types::{
     MemoryCategory, MemoryGroomingOperation, SearchFactsRequest, UpdateFactRequest,
 };
 use tracedecay::store::memory::DatabaseFactStore;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 #[path = "memory_test/compatibility_authority.rs"]
@@ -28,14 +28,51 @@ mod compatibility_authority;
 #[path = "memory_test/legacy_store.rs"]
 mod legacy_store;
 
-// Future candidate: seed from the cross-process store template like
-// `make_memory_store` below and tests/mcp_suite/fixture.rs do, instead of
-// paying full schema creation per test. Only worth it once that fixture
-// moves to tests/common — seven call sites run in parallel today.
+/// Initializes a throwaway project under its own hermetic profile.
+///
+/// The profile root is explicit and lives beside the project inside the same
+/// temporary directory. That is load-bearing twice over, and this binary
+/// carries neither `cfg(test)` nor `test-transport`, so
+/// `TraceDecay::standalone_test_open_options` — which supplies exactly this
+/// profile for in-crate tests — never runs here:
+///
+/// 1. `ephemeral_root_rejection` refuses an OS-temp project root only when the
+///    *profile* is durable. Falling back to the repository's shared
+///    `TRACEDECAY_DATA_DIR` profile made every `init` here fail as an attempt to
+///    register a throwaway checkout as a durable authority. A profile that is
+///    itself throwaway is the sanctioned fixture shape.
+/// 2. Project initialization takes the profile's exclusive lifecycle lease. The
+///    seven call sites below run in parallel, so one shared profile serialized
+///    them into "another lifecycle operation is already active" failures. A
+///    profile per project makes the leases disjoint.
+///
+/// This mirrors `memory_eval_test::initialize_fixture_project`, the same
+/// suite's existing precedent.
+///
+/// Future candidate: seed from the cross-process store template like
+/// `make_memory_store` below and tests/mcp_suite/fixture.rs do, instead of
+/// paying full schema creation per test. Only worth it once that fixture
+/// moves to tests/common.
 async fn make_project() -> (TempDir, TraceDecay) {
     let tmp = TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("a.rs"), "pub fn hello() {}").unwrap();
-    let cg = TraceDecay::init(tmp.path()).await.unwrap();
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::write(project_root.join("a.rs"), "pub fn hello() {}").unwrap();
+
+    let profile_root = tmp.path().join("home/.tracedecay");
+    // Pre-create the global DB from the cached empty-schema template so `init`
+    // opens an existing store instead of paying full schema creation.
+    crate::common::write_empty_global_db_schema(&profile_root.join("global.db")).await;
+
+    let cg = TraceDecay::init_with_options(
+        &project_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .unwrap();
     (tmp, cg)
 }
 
