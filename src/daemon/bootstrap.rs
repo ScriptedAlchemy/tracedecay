@@ -93,7 +93,11 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         profile_database,
         store_administration.clone(),
         invocation.code_index_schedulers.clone(),
-        sync_config.retention,
+        sync_config.retention.clone(),
+        maintenance::BranchStoreGcCadenceV1 {
+            branch_gc_days: sync_config.branch_gc_days,
+            orphan_db_gc_days: sync_config.orphan_db_gc_days,
+        },
     )
     .await;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
@@ -294,6 +298,10 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
+        maintenance::BranchStoreGcCadenceV1 {
+            branch_gc_days: sync_config.branch_gc_days,
+            orphan_db_gc_days: sync_config.orphan_db_gc_days,
+        },
     )
     .await;
     // Install the daemon-wide git-metadata owner. Individual projects provide

@@ -1,12 +1,13 @@
-//! Store-maintenance operations performed by the daemon git watcher.
+//! Retention, compaction, and garbage-collection operations run by the daemon
+//! maintenance owner.
 //!
-//! Every operation that opens, tracks, or garbage-collects a store lives here
-//! so its [`StoreAdministration`] lifetime is kept separate from the watcher
-//! state machine.
+//! Every operation that opens or garbage-collects a store lives here so its
+//! [`StoreAdministration`] lifetime is kept separate from the watcher state
+//! machine. The git watcher itself never opens or mutates a store: it routes
+//! exact-frontier freshness requests to the code-index scheduler and wakes the
+//! maintenance owner.
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -15,9 +16,7 @@ use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
 #[cfg(unix)]
-use super::branch_admin::{StoreAdministration, StoreWriterClass};
-#[cfg(unix)]
-use super::git_watch::GitWatcherInner;
+use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
 #[path = "store_maintenance/graph_replay.rs"]
@@ -69,134 +68,39 @@ impl ScopeRootProofInputsV1 {
     }
 }
 
-/// Opens the project store and runs a diff-scoped incremental sync (or a full
-/// sync when the diff base is missing / oversized). Returns true on success.
-/// `SyncLock` is treated as success (a peer synced).
-///
-/// The `TraceDecay` sync/open futures are `Send` (the sync path scopes its
-/// `!Send` `gix` values so they drop before every `.await`; see
-/// `indexing::stamp_last_synced_commit`), so this awaits them directly on the
-/// caller's task under the daemon-wide sync semaphore — no nested runtime.
-#[cfg(unix)]
-pub(super) async fn sync_project(
-    cg: &TraceDecay,
-    escalation: usize,
-    administration: &StoreAdministration,
-) -> bool {
-    // The sync must still exclude branch-store GC — GC selects and unlinks the
-    // SQLite family this sync is writing into — but nothing else. It therefore
-    // takes the store's *content* lane rather than daemon-wide exclusion.
-    //
-    // What that changes: `cg.sync()` is O(store) and runs for minutes on a large
-    // index. Under the old single daemon-wide gate it blocked every writer in
-    // the process, including the first project-open of an unrelated project. Now
-    // it blocks only this store's destructive lane and other content writers on
-    // this same store, which is exactly the protection the original comment
-    // asked for. Owner bookkeeping for this store — project open, owner rekey,
-    // scheduler transitions — proceeds beside it.
-    administration
-        .with_writer_in(
-            crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Content),
-            || async {
-                let base = cg.last_synced_commit().await;
-                let result = match base {
-                    Some(base) => match cg.stale_files_since_commit(&base, escalation) {
-                        Some(files) if files.is_empty() => Ok(()),
-                        Some(files) => cg.sync_if_stale_silent(&files).await,
-                        // Base missing/unreachable or over the escalation limit → full.
-                        None => cg.sync().await.map(|_| ()),
-                    },
-                    None => cg.sync().await.map(|_| ()),
-                };
-                result.is_ok()
-            },
-        )
-        .await
-}
-
-/// Proactively tracks a linked worktree's branch. Returns the
-/// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
-#[cfg(unix)]
-pub(super) async fn track_worktree_branch(
-    administration: &StoreAdministration,
-    cg: &TraceDecay,
-    wt_root: PathBuf,
-    branch: String,
-) -> Option<String> {
-    administration
-        .with_writer_in(
-            crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Owner),
-            || async {
-                cg.track_worktree_branch(&wt_root, &branch)
-                    .await
-                    .ok()
-                    .map(|outcome| format!("{outcome:?}"))
-            },
-        )
-        .await
-}
-
-/// Resolves a `worktrees/<name>` leaf to `(worktree_root, branch)` by reading
-/// its `gitdir` file and the linked HEAD.
-#[cfg(unix)]
-pub(super) fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, String)> {
-    let wt_meta = common.join("worktrees").join(name);
-    let gitdir_file = wt_meta.join("gitdir");
-    let gitdir_raw = std::fs::read_to_string(&gitdir_file).ok()?;
-    // `gitdir` points at `<worktree>/.git`; the worktree root is its parent.
-    let gitdir = PathBuf::from(gitdir_raw.trim());
-    let wt_root = gitdir.parent()?.to_path_buf();
-    let branch = crate::branch::current_branch(&wt_root)?;
-    Some((wt_root, branch))
-}
-
-/// Returns the current linked-worktree metadata leaves for one conservative
-/// reconciliation pass. Native Git remains authoritative when each leaf is
-/// resolved; this inventory only recovers callback path detail lost to lock
-/// contention.
-#[cfg(unix)]
-pub(super) fn linked_worktree_names(common: &Path) -> std::collections::HashSet<String> {
-    let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
-        return std::collections::HashSet::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect()
-}
-
 /// Runs branch-store GC for a project through the daemon administration
 /// coordinator, logging what it removed. Returns `false` when layout resolution
-/// or administration fails so the backstop keeps the GC cadence eligible for a
-/// retry.
+/// or administration fails so the maintenance owner keeps the GC cadence
+/// eligible for a retry.
 #[cfg(unix)]
-pub(super) async fn run_gc(inner: &Arc<GitWatcherInner>, cg: &TraceDecay) -> bool {
+pub(super) async fn run_gc(
+    administration: &StoreAdministration,
+    branch_gc_days: u64,
+    orphan_db_gc_days: u64,
+    cg: &TraceDecay,
+) -> bool {
     let root = cg.project_root();
     let data_root = &cg.store_layout().data_root;
 
-    // Preserve the sync-semaphore → administration-gate acquisition order used
-    // by sync and worktree tracking. The coordinator owns the writer gate and
-    // its process/store-holder safety checks.
-    let _permit = inner.sync_semaphore.acquire().await;
-    let report = inner
-        .administration
+    // The coordinator owns the writer gate and its process/store-holder
+    // safety checks; GC never runs beside a content writer on the same store.
+    let report = administration
         .execute_branch_admin_in_layout(
             root,
             data_root,
             BranchAdminAction::Gc,
-            inner.config.branch_gc_days,
-            inner.config.orphan_db_gc_days,
+            branch_gc_days,
+            orphan_db_gc_days,
         )
         .await;
     let report = match report {
         Ok(report) => report,
         Err(_) => {
             log_daemon_event(
-                "git_watch_degraded",
+                "retention_degraded",
                 &[
-                    ("scope", "project".to_string()),
-                    ("reason", "branch_gc_deferred".to_string()),
+                    ("pass", "branch_gc".to_string()),
+                    ("project", root.display().to_string()),
                     ("failure", "branch_administration_failed".to_string()),
                 ],
             );
@@ -206,10 +110,9 @@ pub(super) async fn run_gc(inner: &Arc<GitWatcherInner>, cg: &TraceDecay) -> boo
 
     if !report.removed_branches.is_empty() || !report.removed_orphan_dbs.is_empty() {
         log_daemon_event(
-            "git_watch_synced",
+            "retention_branch_gc",
             &[
-                ("scope", "project".to_string()),
-                ("action", "gc".to_string()),
+                ("project", root.display().to_string()),
                 ("removed_tracked", report.removed_branches.len().to_string()),
                 (
                     "removed_orphans",

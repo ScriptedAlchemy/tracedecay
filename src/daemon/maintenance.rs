@@ -441,6 +441,17 @@ pub(super) struct MaintenanceMetricsV1 {
 }
 
 #[derive(Clone)]
+/// Grace windows for the daily branch-store GC pass, taken from the pinned
+/// sync configuration at daemon startup.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BranchStoreGcCadenceV1 {
+    pub(super) branch_gc_days: u64,
+    pub(super) orphan_db_gc_days: u64,
+}
+
+/// Interval between branch-store GC passes across mounted projects.
+const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+
 pub(super) struct MaintenanceCoordinator {
     cancellation: crate::application::context::CancellationToken,
     wake: Arc<Notify>,
@@ -450,6 +461,9 @@ pub(super) struct MaintenanceCoordinator {
     /// last store processed. The next tick resumes immediately after it so no
     /// store is starved when the mounted set exceeds `MAINTENANCE_STORE_PAGE_LIMIT`.
     store_cursor: Arc<Mutex<Option<String>>>,
+    /// Instant of the last branch-store GC pass that succeeded for every
+    /// mounted project. `None` keeps the daily cadence retry-eligible.
+    last_branch_gc: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for MaintenanceCoordinator {
@@ -460,6 +474,7 @@ impl Default for MaintenanceCoordinator {
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
             store_cursor: Arc::new(Mutex::new(None)),
+            last_branch_gc: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -538,6 +553,7 @@ impl MaintenanceCoordinator {
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
+        branch_gc: BranchStoreGcCadenceV1,
     ) -> Self {
         let coordinator = Self::default();
         if !retention_maintenance_enabled(&retention) {
@@ -553,6 +569,7 @@ impl MaintenanceCoordinator {
                     administration,
                     code_index_schedulers,
                     retention,
+                    branch_gc,
                     interval,
                 )
                 .await;
@@ -581,6 +598,7 @@ impl MaintenanceCoordinator {
         administration: StoreAdministration,
         code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: crate::config::RetentionConfig,
+        branch_gc: BranchStoreGcCadenceV1,
         interval: Duration,
     ) {
         let mut cadence = MaintenanceCadence::new(interval);
@@ -606,6 +624,7 @@ impl MaintenanceCoordinator {
                     &administration,
                     &code_index_schedulers,
                     &retention,
+                    branch_gc,
                 )
                 .await;
             next_delay = cadence.finish(Instant::now(), succeeded);
@@ -619,6 +638,7 @@ impl MaintenanceCoordinator {
         administration: &StoreAdministration,
         code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         retention: &crate::config::RetentionConfig,
+        branch_gc: BranchStoreGcCadenceV1,
     ) -> bool {
         let session_databases = administration.mounted_registered_session_databases().await;
         let project_graphs = administration.mounted_project_graphs().await;
@@ -794,6 +814,39 @@ impl MaintenanceCoordinator {
             }
         } else {
             succeeded = false;
+        }
+
+        // Branch-store GC, relocated here from the watcher backstop: the
+        // watcher owns no store authorities, while this owner already holds
+        // the administration coordinator. Daily cadence, retry-eligible — the
+        // stamp advances only when every mounted project's pass succeeded.
+        if !self.cancellation.is_cancelled() {
+            let gc_due = self
+                .last_branch_gc
+                .lock()
+                .await
+                .is_none_or(|at| at.elapsed() >= BRANCH_STORE_GC_PERIOD);
+            if gc_due {
+                let mut gc_succeeded = true;
+                for graph in &project_graphs {
+                    if self.cancellation.is_cancelled() {
+                        gc_succeeded = false;
+                        break;
+                    }
+                    gc_succeeded &= super::store_maintenance::run_gc(
+                        administration,
+                        branch_gc.branch_gc_days,
+                        branch_gc.orphan_db_gc_days,
+                        graph,
+                    )
+                    .await;
+                }
+                if gc_succeeded {
+                    *self.last_branch_gc.lock().await = Some(Instant::now());
+                } else {
+                    succeeded = false;
+                }
+            }
         }
 
         let mut metrics = self.metrics.lock().await;
