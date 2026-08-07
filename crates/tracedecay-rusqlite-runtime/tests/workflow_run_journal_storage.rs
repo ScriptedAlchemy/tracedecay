@@ -14,8 +14,7 @@ use tracedecay_application::{
     WorkflowAdmissionSnapshot, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
     WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowRunAppendOutcome,
     WorkflowRunAppendRequest, WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError,
-    WorkflowRunStoragePort,
-    work_executable_catalog_digest, workflow_artifact_payload_digest,
+    WorkflowRunStoragePort, work_executable_catalog_digest, workflow_artifact_payload_digest,
 };
 use tracedecay_domain::{
     ManifestDigest, ProjectId, RunId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkCommandId,
