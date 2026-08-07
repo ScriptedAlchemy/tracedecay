@@ -178,13 +178,13 @@ impl WorktreeChangeClassificationV1 {
     }
 }
 
-/// Whether `path` (repository-relative, forward-slash) names TraceDecay's own
+/// Whether `path` (repository-relative, forward-slash) names `TraceDecay`'s own
 /// project-local private store directory or something inside it.
 ///
 /// Enrolling a project writes `.tracedecay/enrollment.json` into the checkout
 /// (`tracedecay_runtime_core::storage::identity::enrollment_marker_path`), and
 /// the daemon keeps other private state there. Those bytes are produced by
-/// TraceDecay, are never checkout content, and are not indexable source. Unless
+/// `TraceDecay`, are never checkout content, and are not indexable source. Unless
 /// the user happens to ignore `.tracedecay/`, gix reports them as untracked, so
 /// treating them as a worktree change makes *every* enrolled checkout look
 /// permanently dirty: no capture can then seal an exact HEAD tree, no published
@@ -303,7 +303,7 @@ mod tests {
     }
 
     /// Enrolling a project writes `.tracedecay/enrollment.json` into the
-    /// checkout. That is TraceDecay's own state, so a checkout that is
+    /// checkout. That is `TraceDecay`'s own state, so a checkout that is
     /// otherwise clean must stay classified clean — otherwise no capture can
     /// seal an exact HEAD tree and exact-scope admission refuses forever with
     /// `lsp-code-index-source-revision-unavailable`.
@@ -342,7 +342,7 @@ mod tests {
         );
     }
 
-    /// The exclusion is scoped to TraceDecay's own directory only; real
+    /// The exclusion is scoped to `TraceDecay`'s own directory only; real
     /// untracked source still classifies the worktree as dirty.
     #[test]
     fn untracked_source_still_classifies_as_a_change() {
