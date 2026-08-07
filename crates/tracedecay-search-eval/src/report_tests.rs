@@ -121,7 +121,10 @@ fn baseline_report_is_self_validating_but_not_activation_evidence() {
     let activation_error = report
         .validate_for_activation(&repo_root, &workload)
         .expect_err("baseline-only report cannot stand in for native activation evidence");
-    assert!(activation_error.to_string().contains("native"));
+    assert!(
+        activation_error.to_string().contains("native"),
+        "unexpected activation refusal: {activation_error}"
+    );
 
     let mut tampered = report.clone();
     tampered.raw_output_digest = "sha256:tampered".to_owned();
