@@ -34,6 +34,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const ID_REFERENCES = ['aria-controls', 'aria-labelledby', 'aria-describedby'] as const;
+
+/**
+ * Every id an ARIA reference on the page names but the page did not draw —
+ * the same guard the work views carry: an `aria-controls` naming an absent
+ * element is a critical `aria-valid-attr-value` failure. This page's exposure
+ * is the ExplorerSplit mobile filters disclosure, whose button references its
+ * panel in the collapsed state too.
+ */
+function danglingReferences(container: HTMLElement): string[] {
+  const offences: string[] = [];
+  const selector = ID_REFERENCES.map((attribute) => `[${attribute}]`).join(',');
+  for (const element of Array.from(container.querySelectorAll(selector))) {
+    for (const attribute of ID_REFERENCES) {
+      const value = element.getAttribute(attribute);
+      if (value === null) continue;
+      for (const id of value.split(/\s+/).filter((token) => token !== '')) {
+        if (element.ownerDocument.getElementById(id) === null) {
+          offences.push(`${element.tagName.toLowerCase()} ${attribute}="${id}"`);
+        }
+      }
+    }
+  }
+  return offences;
+}
+
 describe('SessionsPage temporal retrieval state', () => {
   it('reports the unavailable canonical temporal authority without fake zero rows', async () => {
     vi.stubGlobal(
@@ -52,6 +78,28 @@ describe('SessionsPage temporal retrieval state', () => {
     expect(await screen.findAllByText(/lcm_temporal_retrieval_not_mounted/)).toHaveLength(2);
     expect(screen.queryByText(/no sessions in the current window/i)).toBeNull();
     expect(screen.queryByText(/0 across 0 days/i)).toBeNull();
+  });
+
+  it('resolves every ARIA reference with the filters disclosure closed and open', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(TEMPORAL_RETRIEVAL_UNAVAILABLE)),
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <SessionsPage />
+      </QueryClientProvider>,
+    );
+    await screen.findAllByText(/lcm_temporal_retrieval_not_mounted/);
+
+    // Collapsed is the default state and the one that dangled: the disclosure
+    // button names its panel via aria-controls whether or not it is open.
+    expect(danglingReferences(container)).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Query' }));
+    expect(danglingReferences(container)).toEqual([]);
   });
 
   it('labels server-accounted timeline tokens by their provenance', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
@@ -7,6 +7,7 @@ import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.t
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
+import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import type { ProjectsPayloadV1 } from '../../contracts/generated.ts';
@@ -143,11 +144,7 @@ export function BrainPage() {
               <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
                 <RegistryFieldView groups={groups} activeProjectId={data.active_project_id ?? null} />
               </div>
-              <aside
-                aria-label="Project registry"
-                tabIndex={0}
-                className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
-              >
+              <RegistryRail>
                 {/* The counts that are the same on every row, said once. Every
                   * project in a real registry holds exactly one store and three
                   * to five artifacts, so "1 ST · 4 ART" printed forty-four times
@@ -164,12 +161,31 @@ export function BrainPage() {
                     holdings={holdings}
                   />
                 ))}
-              </aside>
+              </RegistryRail>
             </div>
           </div>
         );
       }}
     </ReadSection>
+  );
+}
+
+/** The registry side rail is a scroll container from `lg` and an ordinary
+ * block below it, so its tab stop is measured from the rendered box (see
+ * `useScrollTabStop`) instead of hard-coded — a literal `tabIndex={0}` gave
+ * every keyboard user on a narrow screen a dead stop in front of the cards. */
+function RegistryRail({ children }: { children: ReactNode }) {
+  const railRef = useRef<HTMLElement>(null);
+  const railTabStop = useScrollTabStop(railRef);
+  return (
+    <aside
+      ref={railRef}
+      aria-label="Project registry"
+      tabIndex={railTabStop}
+      className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
+    >
+      {children}
+    </aside>
   );
 }
 

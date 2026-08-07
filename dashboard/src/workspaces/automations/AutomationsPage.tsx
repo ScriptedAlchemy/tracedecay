@@ -218,7 +218,12 @@ export function AutomationsPage() {
     // reasons, job rows — with nothing to tab to, and it grows taller exactly
     // when a queue is unreadable and the reason paragraph appears. The column
     // takes the tab stop itself, the same remedy Explorer's filter rail uses.
-    <div tabIndex={0} className="flex h-full flex-col overflow-auto">
+    <div
+      tabIndex={0}
+      role="region"
+      aria-label="Automations content"
+      className="flex h-full flex-col overflow-auto"
+    >
       {/* `flex-wrap`, because the scheduler control carries a sentence rather
         * than a chip: under a read-only scope it explains which project a
         * write would reach and how to reach it, and that runs to two lines of

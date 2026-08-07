@@ -82,7 +82,14 @@ export function ExplorerSplit({
           <button
             type="button"
             aria-expanded={mobileFiltersOpen}
-            aria-controls={mobileFiltersId}
+            // The reference exists only while the panel does: a collapsed
+            // disclosure has no panel in the tree, and an `aria-controls`
+            // naming an absent element is the same critical
+            // `aria-valid-attr-value` failure the work projection panel had.
+            // (Mounting the panel `hidden` instead would render `filters` a
+            // second time in every state; this strip already re-renders the
+            // rail's node, so the collapsed copy would make it three.)
+            aria-controls={mobileFiltersOpen ? mobileFiltersId : undefined}
             onClick={() => setMobileFiltersOpen((open) => !open)}
             // The only way to reach filters below `lg`, at 28px tall.
             className="flex min-h-[var(--touch-target-min)] w-full items-center gap-2.5 px-2.5 text-left"
@@ -101,6 +108,8 @@ export function ExplorerSplit({
           {mobileFiltersOpen ? (
             <div
               id={mobileFiltersId}
+              role="region"
+              aria-label="Filter controls"
               // Scrollable regions need keyboard operation (WCAG 2.1.1). A
               // filter column whose current content is all read-out — no facet
               // buttons because nothing loaded — is scrollable with nothing
@@ -125,7 +134,16 @@ export function ExplorerSplit({
             )}
           >
             <BayLegend>Query</BayLegend>
-            <div tabIndex={0} className="min-h-0 flex-1 overflow-auto p-2.5">
+            {/* The aside's name lives on the landmark; the element a reader
+              * actually scrolls is this inner div, so it carries its own name
+              * (axe: scrollable-region-focusable wants the operable node
+              * labelled, not an ancestor). */}
+            <div
+              role="region"
+              aria-label="Filter controls"
+              tabIndex={0}
+              className="min-h-0 flex-1 overflow-auto p-2.5"
+            >
               {filters}
             </div>
           </aside>
@@ -153,6 +171,9 @@ export function ExplorerSplit({
           <div
             role="region"
             aria-label="Result rows"
+            // Empty and refused readings render no focusable rows, so the
+            // scroll container itself must stay keyboard-operable.
+            tabIndex={0}
             className="min-h-0 flex-1 overflow-auto"
           >
             {list}
@@ -318,7 +339,17 @@ export function InspectorPanel({
           </button>
         ) : null}
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-2.5">{children}</div>
+      {/* The panel body is the scroll container inside the Inspector aside;
+        * inspector content is frequently pure read-out with nothing focusable,
+        * so it takes the tab stop and carries the panel's own title. */}
+      <div
+        role="region"
+        aria-label={title}
+        tabIndex={0}
+        className="min-h-0 flex-1 overflow-auto p-2.5"
+      >
+        {children}
+      </div>
     </div>
   );
 }

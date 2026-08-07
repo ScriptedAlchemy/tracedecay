@@ -55,7 +55,16 @@ export function ObservatoryPage() {
   const findings = useStorageFindings();
 
   return (
-    <div className="flex h-full flex-col overflow-auto">
+    // The page column is the scroll container, and wide telemetry read-out
+    // (paths, byte figures) can overflow it horizontally with nothing
+    // focusable inside — so it takes the tab stop and a name, the same shape
+    // Costs and Agents use (axe: scrollable-region-focusable).
+    <div
+      className="flex h-full flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Observatory content"
+    >
       <header className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Observatory</h1>
         <span className="text-2xs text-text-muted">
