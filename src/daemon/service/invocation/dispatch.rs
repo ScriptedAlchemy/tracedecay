@@ -718,7 +718,6 @@ mod future_size_guard {
                 type_only(),
                 type_only(),
                 type_only(),
-                type_only(),
             )
         });
         assert!(
