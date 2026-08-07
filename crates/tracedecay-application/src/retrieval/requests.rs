@@ -3,13 +3,14 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, ManifestDigest,
-    QueryFallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId,
-    TemporalModeV1, TestAttributionEvidenceClassV1, UtcMicros,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, GenerationDiagnosticV1,
+    ManifestDigest, QueryFallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan,
+    SymbolOccurrenceId, TemporalModeV1, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
 use crate::result::OpaqueCursor;
+use crate::retrieval::symbol_graph::SymbolPrimitiveRecord;
 
 pub const MAX_APPLICATION_PAGE_SIZE: u32 = 1_000;
 
@@ -237,7 +238,7 @@ pub struct HealthReadResult {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaRequest {
     pub before_cursor: Option<String>,
@@ -245,7 +246,7 @@ pub struct HealthDeltaRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaScopeV1 {
     pub project_id: Option<String>,
@@ -253,14 +254,14 @@ pub struct HealthDeltaScopeV1 {
     pub path_prefix: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDimensionPointV1 {
     pub score_ppm: u64,
     pub denominator: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaPointV1 {
     pub watermark: ManifestDigest,
@@ -271,7 +272,7 @@ pub struct HealthDeltaPointV1 {
     pub dimensions: BTreeMap<String, HealthDimensionPointV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDimensionDeltaV1 {
     pub before_ppm: u64,
@@ -282,7 +283,7 @@ pub struct HealthDimensionDeltaV1 {
     pub status: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaCoverageV1 {
     pub eligible: Option<u64>,
@@ -291,14 +292,14 @@ pub struct HealthDeltaCoverageV1 {
     pub completeness: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaCurrentnessV1 {
     pub state: String,
     pub observed_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaResult {
     pub schema_version: u32,
@@ -312,4 +313,195 @@ pub struct HealthDeltaResult {
     pub dimensions: BTreeMap<String, HealthDimensionDeltaV1>,
     pub coverage: HealthDeltaCoverageV1,
     pub currentness: HealthDeltaCurrentnessV1,
+}
+
+// Wire pairs for the extended primitive reads. The daemon-side
+// `ExtendedPrimitivePort` (usecases) re-exports these types; they live here so
+// the catalog contribution can register their schema bodies as the single
+// Rust-owned wire authority.
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualifiedNamePrimitiveRequest {
+    pub qualified_name: String,
+    pub page: PageRequest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QualifiedNamePrimitiveResult {
+    pub symbols: Vec<SymbolPrimitiveRecord>,
+    pub total: Option<u64>,
+    /// Opaque resume token; its bounded string is the public wire form.
+    #[schemars(with = "Option<String>")]
+    pub next_cursor: Option<OpaqueCursor>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CallChainPrimitiveRequest {
+    #[serde(alias = "from_id")]
+    pub from_node_id: String,
+    #[serde(alias = "to_id")]
+    pub to_node_id: String,
+    #[serde(default = "default_call_chain_depth", alias = "max_depth")]
+    pub maximum_depth: u32,
+}
+
+const fn default_call_chain_depth() -> u32 {
+    8
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CallChainPrimitiveResult {
+    pub node_ids: Vec<String>,
+    pub edge_kinds: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileDependentsPrimitiveRequest {
+    pub file: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileDependentsPrimitiveResult {
+    pub file: String,
+    pub dependent_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceBodyPrimitiveRequest {
+    pub node_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceBodyPrimitiveResult {
+    pub node_id: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceOutlinePrimitiveRequest {
+    pub file: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceOutlinePrimitiveResult {
+    pub file: String,
+    pub symbols: Vec<SymbolPrimitiveRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleApiPrimitiveRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleApiPrimitiveResult {
+    pub path: String,
+    pub symbols: Vec<SymbolPrimitiveRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileMetadataPrimitiveRequest {
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileMetadataRecord {
+    pub file: String,
+    pub language: Option<String>,
+    pub indexed_at: Option<i64>,
+    pub byte_size: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileMetadataPrimitiveResult {
+    pub files: Vec<FileMetadataRecord>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StorageStatusPrimitiveRequest {
+    #[serde(default)]
+    pub include_details: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StorageStatusHistoryPointV1 {
+    pub observed_at: i64,
+    pub database_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StorageStatusPrimitiveResult {
+    pub status: String,
+    pub read_only: bool,
+    pub database_bytes: Option<u64>,
+    #[serde(default)]
+    pub page_size_bytes: Option<u32>,
+    #[serde(default)]
+    pub page_count: Option<u64>,
+    #[serde(default)]
+    pub freelist_pages: Option<u64>,
+    pub details: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
+    #[serde(default)]
+    pub history: Vec<StorageStatusHistoryPointV1>,
+    #[serde(default)]
+    pub history_coverage: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsPrimitiveScope {
+    Workspace,
+    Package(String),
+    File(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsPrimitiveRequest {
+    pub scope: DiagnosticsPrimitiveScope,
+    pub maximum_diagnostics: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticPrimitiveRecord {
+    pub logical_path: String,
+    pub diagnostic: GenerationDiagnosticV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsPrimitiveResult {
+    pub generation_id: CodeGenerationId,
+    pub clean_generation: bool,
+    pub findings_cleared: bool,
+    pub diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    pub next_cursor: Option<String>,
 }

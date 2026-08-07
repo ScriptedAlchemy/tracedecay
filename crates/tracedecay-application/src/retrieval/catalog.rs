@@ -19,8 +19,20 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::requests::{
-    HealthReadRequest, HealthReadResult, SessionLookupRequest, SessionLookupResult,
-    SourceLinesRequest, SourceLinesResult,
+    CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
+    DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, HealthDeltaRequest,
+    HealthDeltaResult, HealthReadRequest, HealthReadResult, ModuleApiPrimitiveRequest,
+    ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
+    SessionLookupRequest, SessionLookupResult, SourceBodyPrimitiveRequest,
+    SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
+    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult,
+};
+use crate::retrieval::symbol_graph::{
+    GraphRelationRequest, ImplementationsRequest, SignatureSearchRequest, SymbolGraphPage,
+    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchSurfaceRequest, TypeHierarchyRecord,
+    TypeHierarchyRequest,
 };
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
@@ -312,12 +324,15 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
 /// types live in this crate.
 ///
 /// The registered pairs are exactly the types the daemon parses and returns
-/// for these operations (`crate::retrieval::requests`), so the generated SDKs
-/// cannot describe a shape the surface does not speak. The remaining primitive
-/// reads keep truthful `schema_unavailable` dispositions: their wire request
-/// and result types live outside this crate's dependency cone (usecases-owned
-/// runtime types) or need a dedicated surface DTO before a registration here
-/// could be honest.
+/// for these operations: the retrieval reads bind their
+/// `crate::retrieval::requests` pairs, and the symbol-graph reads bind the
+/// request each [`crate::retrieval::SymbolGraphPrimitivePort`] method
+/// validates against the [`SymbolGraphPage`] payload it returns, so the
+/// generated SDKs cannot describe a shape the surface does not speak. The
+/// remaining primitive reads keep truthful `schema_unavailable` dispositions:
+/// their wire request and result types live outside this crate's dependency
+/// cone (usecases-owned runtime types) or need a dedicated surface DTO before
+/// a registration here could be honest.
 fn primitive_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -333,6 +348,72 @@ fn primitive_executable_schemas(
     add!("session_lookup", SessionLookupRequest, SessionLookupResult);
     add!("source_lines", SourceLinesRequest, SourceLinesResult);
     add!("health_read", HealthReadRequest, HealthReadResult);
+    add!("health_delta", HealthDeltaRequest, HealthDeltaResult);
+    add!(
+        "qualified_name",
+        QualifiedNamePrimitiveRequest,
+        QualifiedNamePrimitiveResult
+    );
+    add!(
+        "call_chain",
+        CallChainPrimitiveRequest,
+        CallChainPrimitiveResult
+    );
+    add!(
+        "file_dependents",
+        FileDependentsPrimitiveRequest,
+        FileDependentsPrimitiveResult
+    );
+    add!(
+        "source_body",
+        SourceBodyPrimitiveRequest,
+        SourceBodyPrimitiveResult
+    );
+    add!(
+        "source_outline",
+        SourceOutlinePrimitiveRequest,
+        SourceOutlinePrimitiveResult
+    );
+    add!(
+        "module_api",
+        ModuleApiPrimitiveRequest,
+        ModuleApiPrimitiveResult
+    );
+    add!(
+        "file_metadata",
+        FileMetadataPrimitiveRequest,
+        FileMetadataPrimitiveResult
+    );
+    add!(
+        "storage_status",
+        StorageStatusPrimitiveRequest,
+        StorageStatusPrimitiveResult
+    );
+    add!(
+        "diagnostics_read",
+        DiagnosticsPrimitiveRequest,
+        DiagnosticsPrimitiveResult
+    );
+    add!(
+        "code_signature_search",
+        SignatureSearchRequest,
+        SymbolGraphPage<SymbolPrimitiveRecord>
+    );
+    add!(
+        "code_implementations",
+        ImplementationsRequest,
+        SymbolGraphPage<SymbolRelationRecord>
+    );
+    add!(
+        "code_type_hierarchy",
+        TypeHierarchyRequest,
+        SymbolGraphPage<TypeHierarchyRecord>
+    );
+    add!(
+        "code_callers",
+        GraphRelationRequest,
+        SymbolGraphPage<SymbolRelationRecord>
+    );
     Ok(schemas)
 }
 
@@ -510,13 +591,30 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ],
         deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
     })?;
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.symbol-search")?,
         depends_on: Vec::new(),
         capabilities: vec![capability],
         retrieval_primitives: vec![primitive],
         bindings,
-    })?)
+    })?;
+    // The service request holds a receipt-bound sanitized query view that is
+    // deliberately non-serializable, so the admitted wire form
+    // [`SymbolSearchSurfaceRequest`] carries the raw query text and the daemon
+    // keeps ownership of sanitization; the payload is the same
+    // [`SymbolGraphPage`] the symbol-graph port returns.
+    let manifest =
+        contribution
+            .capabilities()
+            .first()
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "symbol search schema capability",
+            })?;
+    let schema = ExecutableSchemaAuthority::for_types::<
+        SymbolSearchSurfaceRequest,
+        SymbolGraphPage<SymbolPrimitiveRecord>,
+    >(manifest)?;
+    Ok(contribution.with_executable_schemas(vec![schema])?)
 }
 
 fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {

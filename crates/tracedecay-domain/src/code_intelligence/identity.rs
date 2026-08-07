@@ -58,8 +58,12 @@ validated_string_newtype!(
 );
 
 digest_id!(
-    DomainError, std::convert::identity;
+    @schema DomainError, std::convert::identity;
     ContentDigest,
+);
+
+digest_id!(
+    DomainError, std::convert::identity;
     FileIdentityDigest,
     SymbolIdentityDigest,
 );

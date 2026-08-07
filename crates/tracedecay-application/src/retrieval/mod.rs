@@ -37,12 +37,20 @@ pub use ports::{
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,
-    AnchorExpandResult, GraphCallersRequest, GraphCallersResult, GraphImpactRequest,
-    GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
-    HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
-    HealthDimensionPointV1, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE,
-    PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest,
-    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
+    AnchorExpandResult, CallChainPrimitiveRequest, CallChainPrimitiveResult,
+    DiagnosticPrimitiveRecord, DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult,
+    DiagnosticsPrimitiveScope, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
+    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
+    HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaRequest,
+    HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
+    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, ModuleApiPrimitiveRequest,
+    ModuleApiPrimitiveResult, PageRequest, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    SessionLookupRequest, SessionLookupResult, SourceBodyPrimitiveRequest,
+    SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
+    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, SourceReference,
+    StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
     SymbolSearchRequest, SymbolSearchResult,
 };
 pub use source_read::{
@@ -55,7 +63,8 @@ pub use symbol_graph::{
     MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
     SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
     SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord,
-    SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
+    SymbolRelationRecord, SymbolSearchPrimitiveRequest, SymbolSearchSurfaceRequest,
+    TypeHierarchyRecord, TypeHierarchyRequest,
 };
 pub use test_attribution::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, MAX_TEST_FILTER_BYTES,

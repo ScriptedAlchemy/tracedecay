@@ -14,6 +14,7 @@
 //! `GenerationDiagnosticAttachmentV1::diagnostic_anchor` (Plan 25); it never
 //! stores a duplicate diagnostic record.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::code_intelligence::identity::{
@@ -64,7 +65,9 @@ pub enum DiagnosticSeverityV1 {
 /// configuration, session, or daemon-health findings without a truthful
 /// source range are Doctor or application findings and never become
 /// `GenerationDiagnosticV1` records.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticProducerKindV1 {
     UpstreamCompiler,
@@ -79,7 +82,9 @@ pub enum DiagnosticProducerKindV1 {
 
 /// Evidence class for one diagnostic record (Plan 35: evidence class is part
 /// of canonical diagnostic identity).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticEvidenceClassV1 {
     /// Directly observed against the exact clean generation it names.
@@ -97,7 +102,7 @@ pub enum DiagnosticEvidenceClassV1 {
 /// producer provenance: identical findings from the same logical producer and
 /// revision collapse; findings from distinct producers remain distinct
 /// (Plan 35, "Merge and publication semantics").
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticProvenanceV1 {
     pub producer_kind: DiagnosticProducerKindV1,
@@ -124,7 +129,7 @@ impl DiagnosticProvenanceV1 {
 /// publication deterministically, and stale findings cannot cross snapshots
 /// (Plan 35). Stale and historical records remain queryable through
 /// application APIs but are excluded from active publication.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DiagnosticRecordStateV1 {
     /// Current for exactly the clean generation named by the record.
@@ -175,7 +180,7 @@ impl DiagnosticRecordStateV1 {
 /// One durable, generation-bound diagnostic record (Plan 35, "Canonical
 /// diagnostic identity"). Every field is part of canonical identity; the
 /// display message remains sanitized product data.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationDiagnosticV1 {
     /// Plan 13 anchor addressing this record. The code index's

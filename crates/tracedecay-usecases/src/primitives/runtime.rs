@@ -38,9 +38,7 @@ use tracedecay_application::{
     PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
-use tracedecay_domain::{
-    CodeGenerationId, CommitId, ComponentVersion, GenerationDiagnosticV1, UtcMicros,
-};
+use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -146,189 +144,19 @@ pub trait OperationalPrimitivePort: Send + Sync {
     ) -> OperationalPrimitiveFuture<'a>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct QualifiedNamePrimitiveRequest {
-    pub qualified_name: String,
-    pub page: tracedecay_application::PageRequest,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct QualifiedNamePrimitiveResult {
-    pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
-    pub total: Option<u64>,
-    pub next_cursor: Option<OpaqueCursor>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CallChainPrimitiveRequest {
-    #[serde(alias = "from_id")]
-    pub from_node_id: String,
-    #[serde(alias = "to_id")]
-    pub to_node_id: String,
-    #[serde(default = "default_call_chain_depth", alias = "max_depth")]
-    pub maximum_depth: u32,
-}
-
-const fn default_call_chain_depth() -> u32 {
-    8
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CallChainPrimitiveResult {
-    pub node_ids: Vec<String>,
-    pub edge_kinds: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileDependentsPrimitiveRequest {
-    pub file: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileDependentsPrimitiveResult {
-    pub file: String,
-    pub dependent_files: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceBodyPrimitiveRequest {
-    pub node_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceBodyPrimitiveResult {
-    pub node_id: String,
-    pub file: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub body: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceOutlinePrimitiveRequest {
-    pub file: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceOutlinePrimitiveResult {
-    pub file: String,
-    pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ModuleApiPrimitiveRequest {
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ModuleApiPrimitiveResult {
-    pub path: String,
-    pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveRequest {
-    pub files: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataRecord {
-    pub file: String,
-    pub language: Option<String>,
-    pub indexed_at: Option<i64>,
-    pub byte_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveResult {
-    pub files: Vec<FileMetadataRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StorageStatusPrimitiveRequest {
-    #[serde(default)]
-    pub include_details: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StorageStatusHistoryPointV1 {
-    pub observed_at: i64,
-    pub database_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StorageStatusPrimitiveResult {
-    pub status: String,
-    pub read_only: bool,
-    pub database_bytes: Option<u64>,
-    #[serde(default)]
-    pub page_size_bytes: Option<u32>,
-    #[serde(default)]
-    pub page_count: Option<u64>,
-    #[serde(default)]
-    pub freelist_pages: Option<u64>,
-    pub details: Vec<String>,
-    #[serde(default)]
-    pub project_id: Option<String>,
-    #[serde(default)]
-    pub store_path: Option<String>,
-    #[serde(default)]
-    pub history: Vec<StorageStatusHistoryPointV1>,
-    #[serde(default)]
-    pub history_coverage: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DiagnosticsPrimitiveScope {
-    Workspace,
-    Package(String),
-    File(String),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticsPrimitiveRequest {
-    pub scope: DiagnosticsPrimitiveScope,
-    pub maximum_diagnostics: u32,
-    #[serde(default)]
-    pub cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticPrimitiveRecord {
-    pub logical_path: String,
-    pub diagnostic: GenerationDiagnosticV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticsPrimitiveResult {
-    pub generation_id: CodeGenerationId,
-    pub clean_generation: bool,
-    pub findings_cleared: bool,
-    pub diagnostics: Vec<DiagnosticPrimitiveRecord>,
-    pub next_cursor: Option<String>,
-}
+// The extended-primitive wire pairs live at the application boundary
+// (`tracedecay_application::retrieval`) so the catalog contribution can
+// register their schema bodies; this runtime re-exports them for its callers.
+pub use tracedecay_application::retrieval::{
+    CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
+    DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, DiagnosticsPrimitiveScope,
+    FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest,
+    FileMetadataPrimitiveResult, FileMetadataRecord, ModuleApiPrimitiveRequest,
+    ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
+    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
+    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult,
+};
 
 /// Typed extension over existing query/source/system services. Every method is
 /// independently callable; no operation string or untyped parameter bag is

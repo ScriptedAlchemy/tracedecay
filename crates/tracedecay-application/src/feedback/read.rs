@@ -11,10 +11,11 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::feedback::{
-    FeedbackCycleId, FeedbackCycleResultV1, FeedbackFindingId, FeedbackFindingV1, FeedbackResultId,
-    FeedbackScopeV1,
+    FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleResultV1, FeedbackFindingId,
+    FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackResultId, FeedbackScopeV1,
+    FeedbackTargetV1,
 };
-use tracedecay_domain::{CommitId, UtcMicros};
+use tracedecay_domain::{CommitId, RetrievalAnchorId, SymbolOccurrenceId, UtcMicros};
 
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
@@ -173,6 +174,37 @@ pub struct FeedbackExpandResultV1 {
 #[serde(deny_unknown_fields)]
 pub struct FeedbackListResultV1 {
     pub findings: Vec<FeedbackFindingReadV1>,
+}
+
+/// Canonical impact projection returned by `feedback_impact`.
+///
+/// The daemon-side projection owner (usecases) re-exports this type; it lives
+/// here so the catalog contribution can register its schema body as the single
+/// Rust-owned wire authority. Results project from an authorized completed
+/// cycle, so the type is serialize-only like the ledger rows it mirrors.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalFeedbackImpactProjectionV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub scope: FeedbackScopeV1,
+    pub content_identity: Option<FeedbackContentIdentityV1>,
+    pub impact: Option<FeedbackImpactV1>,
+    pub state: Option<FeedbackImpactStateV1>,
+}
+
+/// Canonical affected-tests projection returned by `affected_tests`.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalAffectedTestsProjectionV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub scope: FeedbackScopeV1,
+    pub content_identity: Option<FeedbackContentIdentityV1>,
+    pub target: Option<FeedbackTargetV1>,
+    pub affected_tests: Vec<SymbolOccurrenceId>,
+    pub evidence_anchors: Vec<RetrievalAnchorId>,
+    pub state: Option<FeedbackImpactStateV1>,
 }
 
 #[derive(Clone, Copy, Debug)]

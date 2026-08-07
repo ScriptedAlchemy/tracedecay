@@ -24,6 +24,7 @@ use crate::retrieval::catalog::{
 };
 
 use super::read::{
+    CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
     FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackGetResultV1,
     FeedbackHandleRequestV1, FeedbackListResultV1,
 };
@@ -269,9 +270,11 @@ fn feedback_surface_catalog_contribution_for_handlers(
 /// ([`FeedbackHandleRequestV1`]) — the post-resolution internal request types
 /// are deliberately NOT registered because they are not the wire — and each
 /// result pair is the exact payload type the read service returns. The
+/// canonical impact and affected-tests projections bind the same handle
+/// request against the projection types the daemon owner serializes. The
 /// remaining feedback operations keep truthful `schema_unavailable`
-/// dispositions: their results are usecases-owned projections or ad-hoc
-/// composites with no wire type in this crate.
+/// dispositions: their results are ad-hoc composites with no wire type in
+/// this crate.
 fn feedback_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -291,6 +294,14 @@ fn feedback_executable_schemas(
     add!(FEEDBACK_GET_CAPABILITY_ID_V1, FeedbackGetResultV1);
     add!(FEEDBACK_EXPAND_CAPABILITY_ID_V1, FeedbackExpandResultV1);
     add!(FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackListResultV1);
+    add!(
+        "capability.application.feedback.impact",
+        CanonicalFeedbackImpactProjectionV1
+    );
+    add!(
+        "capability.application.feedback.affected-tests",
+        CanonicalAffectedTestsProjectionV1
+    );
     Ok(schemas)
 }
 

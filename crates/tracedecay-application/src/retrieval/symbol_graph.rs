@@ -19,7 +19,7 @@ pub const MAX_SYMBOL_GRAPH_FILTERS: usize = 32;
 /// Optional narrowing inside the immutable project/repository/worktree scope
 /// carried by [`RequestContext`]. A path prefix never establishes identity or
 /// authorization.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphScope {
     pub path_prefix: Option<String>,
@@ -68,7 +68,7 @@ pub struct SymbolRelationRecord {
     pub depth: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRecord {
     pub symbol: SymbolPrimitiveRecord,
@@ -77,7 +77,7 @@ pub struct TypeHierarchyRecord {
     pub depth: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrimitiveSupportGap {
     pub provider: Option<String>,
@@ -144,11 +144,13 @@ impl PrimitiveSupportGap {
 
 /// Bounded semantic result shared by the compatibility surfaces. Rendering,
 /// transport envelopes, and MCP content blocks remain outside this contract.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphPage<T> {
     pub items: Vec<T>,
     pub total: Option<u64>,
+    /// Opaque resume token; its bounded string is the public wire form.
+    #[schemars(with = "Option<String>")]
     pub next_cursor: Option<OpaqueCursor>,
     pub truncated: bool,
     pub related_edge_count: Option<u64>,
@@ -184,6 +186,23 @@ impl SymbolSearchPrimitiveRequest {
     }
 }
 
+/// Public wire form of [`SymbolSearchPrimitiveRequest`].
+///
+/// [`SymbolSearchPrimitiveRequest::query`] holds a receipt-bound
+/// [`EphemeralSanitizedQueryViewV1`], which is deliberately non-serializable so
+/// a sanitized view can never be reconstructed from a transport payload. The
+/// admitted wire request therefore carries the raw query text and the daemon
+/// sanitizes it; every other field is the same bounded value the port
+/// validates.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolSearchSurfaceRequest {
+    pub query: String,
+    pub scope: SymbolGraphScope,
+    pub lazy_index_ignored_dependencies: bool,
+    pub meta: RetrievalRequestMeta,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactSymbolRequest {
@@ -200,7 +219,7 @@ impl ExactSymbolRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureSearchRequest {
     pub returns: Option<String>,
@@ -217,14 +236,14 @@ impl SignatureSearchRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "selector")]
 pub enum ImplementationSelector {
     Trait { name: String },
     Method { name: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ImplementationsRequest {
     pub selector: ImplementationSelector,
@@ -239,7 +258,7 @@ impl ImplementationsRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRequest {
     pub node_id: String,
@@ -255,7 +274,7 @@ impl TypeHierarchyRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GraphRelationRequest {
     pub node_id: String,

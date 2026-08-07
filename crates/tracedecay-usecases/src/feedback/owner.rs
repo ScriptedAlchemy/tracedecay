@@ -20,11 +20,7 @@ use tracedecay_application::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, ApplicationResult,
     CancellationContext, Deadline, EvidencePacket, RequestContext,
 };
-use tracedecay_domain::{
-    FeedbackContentIdentityV1, FeedbackCycleId, FeedbackImpactStateV1, FeedbackImpactV1,
-    FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, RetrievalAnchorId, SymbolOccurrenceId,
-    UtcMicros,
-};
+use tracedecay_domain::UtcMicros;
 
 /// Closed operation set used by central daemon invocation integration.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,29 +188,12 @@ pub enum FeedbackCanonicalProjectionKindV1 {
     AffectedTests,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CanonicalFeedbackImpactProjectionV1 {
-    pub result_id: FeedbackResultId,
-    pub cycle_id: FeedbackCycleId,
-    pub scope: FeedbackScopeV1,
-    pub content_identity: Option<FeedbackContentIdentityV1>,
-    pub impact: Option<FeedbackImpactV1>,
-    pub state: Option<FeedbackImpactStateV1>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CanonicalAffectedTestsProjectionV1 {
-    pub result_id: FeedbackResultId,
-    pub cycle_id: FeedbackCycleId,
-    pub scope: FeedbackScopeV1,
-    pub content_identity: Option<FeedbackContentIdentityV1>,
-    pub target: Option<FeedbackTargetV1>,
-    pub affected_tests: Vec<SymbolOccurrenceId>,
-    pub evidence_anchors: Vec<RetrievalAnchorId>,
-    pub state: Option<FeedbackImpactStateV1>,
-}
+// The canonical projection wire types live at the application boundary
+// (`tracedecay_application::feedback`) so the catalog contribution can
+// register their schema bodies; this owner re-exports them for its callers.
+pub use tracedecay_application::feedback::{
+    CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
+};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "projection", content = "result")]
