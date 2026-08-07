@@ -2,7 +2,6 @@
 use crate::common;
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fs;
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 use tracedecay::application::host_admission::{HostAdmissionScope, LcmLineageFaultForTest};

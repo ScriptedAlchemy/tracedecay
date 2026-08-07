@@ -1,9 +1,5 @@
 use crate::support::*;
 use serde_json::{Value, json};
-use std::fs;
-use std::path::Path;
-use std::process::Command;
-use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
