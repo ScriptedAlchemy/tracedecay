@@ -595,7 +595,10 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
         panic!("two admitted attempts must produce a topology view");
     };
     assert_eq!(topology.generation, "generation.topology.pinned");
-    assert_eq!(coverage, WorkAttemptListCoverageV1::Complete { returned: 2 });
+    assert_eq!(
+        coverage,
+        WorkAttemptListCoverageV1::Complete { returned: 2 }
+    );
     assert_eq!(execution_placement.mode, policy.placement);
     assert_eq!(execution_placement.lanes.len(), 2);
     let lane_a = &execution_placement.lanes[0];
