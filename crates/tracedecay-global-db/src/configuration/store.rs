@@ -503,9 +503,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 )
                 .map_err(map_protected_change_snapshot_error)?;
             validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
-            let actor_id =
-                ActorId::new("actor.tracedecay-daemon.source-binding-rebind".to_owned())
-                    .map_err(ConfigurationError::validation)?;
+            let actor_id = ActorId::new("actor.tracedecay-daemon.source-binding-rebind".to_owned())
+                .map_err(ConfigurationError::validation)?;
             let revision = ConfigurationRevisionRecordV1 {
                 revision_id: next_revision_id.clone(),
                 parent_revision_id: Some(expected_revision_id.clone()),
