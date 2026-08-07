@@ -194,6 +194,10 @@ test-transport = [
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-usecases/test-transport",
+    # The observation-seed fixture bridge (`dashboard::observation_seed`) is
+    # test-transport-gated and drives the global-db session-temporal refresh
+    # helpers; plain builds (no dev-dep feature unification) need the forward.
+    "tracedecay-global-db/test-helpers",
 ]
 
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's

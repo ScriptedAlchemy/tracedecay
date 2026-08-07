@@ -29,6 +29,11 @@ mod dashboard_graph;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_graph::DashboardGraphReadAdapter;
 mod dashboard_lcm;
+// Only reached by the test-transport dashboard LCM fixture
+// (`dashboard::dashboard_lcm_read_authority_for_test`); gate it so the
+// default production build does not carry it as an unused re-export.
+#[cfg(feature = "test-transport")]
+pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;
 mod dispatch_groups;
 pub mod edit;
