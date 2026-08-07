@@ -65,7 +65,7 @@ impl DaemonInvocationService {
                     .scope_set
                     .roots()
                     .iter()
-                    .any(|scope| &scope.project_id == project_id)
+                    .any(|root| &root.scope().project_id == project_id)
             });
         }
         // Protocol sessions do not expose their admitted workspace after
