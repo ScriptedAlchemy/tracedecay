@@ -588,11 +588,16 @@ def prime_fixture_values(
             time.sleep(0.5)
     fixture["code_node_id"] = code_node_id
 
+    mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
+
+
+def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
+    """Mint one expiring stage-preview input from the live git_hunks producer."""
     hunks = _producer_call(
         client,
         "tracedecay_git_hunks",
         {"scope": "working_tree", "format": "json"},
-        deadline("tracedecay_git_hunks"),
+        deadline_ms,
     )
     preview_input_id = first_value(hunks, {"preview_input_id"})
     hunk_digests = sorted(
@@ -655,6 +660,10 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 # - test_results reads daemon-retained managed test results that only a
 #   covered run_affected_tests execution retains; the fixture has no covered
 #   tests, and its zero-coverage journey verifies nothing is retained.
+# - sessions_for reads the Git-evidence graph projection, whose verified head
+#   is published only by the background git-evidence convergence pass; a
+#   fresh hermetic project never converges (probed: stays unavailable >120s),
+#   so the typed unavailable is the complete hermetic contract.
 # An entry is falsifiable in both directions: a different problem stays FAIL,
 # and a hermetic success FAILs with expected_denial_superseded until the entry
 # is removed.
@@ -675,6 +684,7 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
     "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
+    "tracedecay_sessions_for": ("unavailable", "sessions.git-evidence.unavailable"),
 }
 
 # Opaque probe inputs are permitted ONLY for tools carrying an expected
@@ -1112,7 +1122,23 @@ def _unavailable_tool_row(client: McpClient, policy: ToolPolicy) -> dict[str, An
     return row
 
 
-def _read_tool_row(client: McpClient, definition: dict[str, Any], policy: ToolPolicy, fixture: dict[str, str]) -> dict[str, Any]:
+# Authorities mount asynchronously after project open and report a typed,
+# retryable `unavailable` problem until ready (observed hermetically:
+# feedback_advisory_cycle settles to real evidence ~7s after open). The reads
+# phase honors that product retry contract with one bounded budget; a surface
+# that stays unavailable past the budget still fails, so the retry is
+# falsifiable and is not a blanket skip.
+MOUNT_RETRY_BUDGET_S = 60
+MOUNT_RETRY_DELAY_S = 0.5
+
+
+def _read_tool_row(
+    client: McpClient,
+    definition: dict[str, Any],
+    policy: ToolPolicy,
+    fixture: dict[str, str],
+    policies: dict[str, ToolPolicy] | None = None,
+) -> dict[str, Any]:
     try:
         arguments = materialize_tool_arguments(definition, fixture)
     except Exception as error:
@@ -1121,9 +1147,31 @@ def _read_tool_row(client: McpClient, definition: dict[str, Any], policy: ToolPo
         response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
-    return _expected_denial_row(
-        response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms), policy.name, response,
-    )
+    row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+    if row["verdict"] == "FAIL" and policy.name not in EXPECTED_HERMETIC_DENIALS:
+        ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_S
+        while row["verdict"] == "FAIL" and time.monotonic() < ends_at:
+            kind, code = response_problem_code(response)
+            if code == "git_index.expired_preview" and policy.name == "tracedecay_git_preview":
+                # The stage preview input carries a short product TTL; re-mint
+                # it from its live producer instead of consuming a dead cursor.
+                hunks_policy = (policies or {}).get("tracedecay_git_hunks")
+                if hunks_policy is None:
+                    break
+                try:
+                    mint_preview_input(client, fixture, hunks_policy.deadline_ms)
+                    arguments = materialize_tool_arguments(definition, fixture)
+                except Exception:
+                    break
+            elif kind != "unavailable":
+                break
+            time.sleep(MOUNT_RETRY_DELAY_S)
+            try:
+                response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
+            except Exception as error:
+                return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
+            row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+    return _expected_denial_row(row, policy.name, response)
 
 
 def _write_phase_report(out: Path, report: dict[str, Any]) -> None:
@@ -1188,13 +1236,14 @@ def run_phase(args: argparse.Namespace) -> int:
             except SweepError as error:
                 name = definition.get("name") if isinstance(definition.get("name"), str) else "<invalid>"
                 report["entries"].append(_failure_row("tool", name, 0, "tool_sweep.dispatch_metadata_invalid", str(error)))
-        prime_fixture_values(client, fixture, {policy.name: policy for _, policy in policies})
+        policy_index = {policy.name: policy for _, policy in policies}
+        prime_fixture_values(client, fixture, policy_index)
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
                     report["entries"].append(_unavailable_tool_row(client, policy))
                 elif policy.effect in READ_EFFECTS:
-                    report["entries"].append(_read_tool_row(client, definition, policy, fixture))
+                    report["entries"].append(_read_tool_row(client, definition, policy, fixture, policies=policy_index))
             report["entries"].extend(
                 exercise_discovered_surfaces(
                     client, resources=resources, prompts=prompts, fixture=fixture, deadline_ms=AUXILIARY_SURFACE_DEADLINE_MS

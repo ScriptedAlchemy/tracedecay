@@ -675,5 +675,119 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertTrue(all(arguments["format"] == "json" for _, arguments in calls))
 
 
+class MountRetryTests(unittest.TestCase):
+    """Reads honor typed retryable-unavailable states within one bounded budget."""
+
+    @staticmethod
+    def policy(runner, name):
+        return runner.ToolPolicy(name=name, availability="available", effect="read", deadline_ms=1_000)
+
+    @staticmethod
+    def definition(name):
+        return {"name": name, "inputSchema": {"type": "object", "properties": {}, "required": []}}
+
+    @staticmethod
+    def scripted_client(responses_by_tool):
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def call_tool(self, name, arguments, _deadline_ms):
+                self.calls.append((name, arguments))
+                queue = responses_by_tool[name]
+                response = queue.pop(0) if len(queue) > 1 else queue[0]
+                return response, 3
+
+        return Client()
+
+    @staticmethod
+    def text_response(text, *, is_error=False):
+        return {
+            "result": {
+                "_meta": {"duration_us": 5},
+                "isError": is_error,
+                "content": [{"type": "text", "text": text}],
+            }
+        }
+
+    def test_retryable_unavailable_settles_to_the_real_success(self) -> None:
+        """A mounting authority's typed unavailable retries into its real payload."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_feedback_advisory_cycle"
+        self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+        unavailable = self.text_response(
+            '{"problem":{"kind":"unavailable","code":"feedback.advisory-cycle.unavailable"}}',
+            is_error=True,
+        )
+        success = self.text_response('{"cycle":{"outcome":"evidence"},"finding_handles":[]}')
+        client = self.scripted_client({name: [unavailable, unavailable, success]})
+
+        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(len(client.calls), 3)
+
+    def test_persistent_unavailable_still_fails_after_the_budget(self) -> None:
+        """The retry is falsifiable: an authority that never mounts stays a FAIL."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_BUDGET_S = 0.01
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_feedback_advisory_cycle"
+        unavailable = self.text_response(
+            '{"problem":{"kind":"unavailable","code":"feedback.advisory-cycle.unavailable"}}',
+            is_error=True,
+        )
+        client = self.scripted_client({name: [unavailable]})
+
+        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
+
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "feedback.advisory-cycle.unavailable")
+        self.assertGreater(len(client.calls), 1)
+
+    def test_expected_denials_are_terminal_and_never_retried(self) -> None:
+        """An expected hermetic denial is the terminal contract; no retry burns time on it."""
+        runner = load_runner()
+        name = "tracedecay_sessions_for"
+        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+        denial = self.text_response(f'{{"status":"{kind}","problem_code":"{code}","results":[],"count":0}}')
+        client = self.scripted_client({name: [denial]})
+
+        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertTrue(row["expected_denial"])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
+        """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_git_preview"
+        expired = self.text_response(
+            '{"problem":{"kind":"failed","code":"git_index.expired_preview"}}', is_error=True
+        )
+        minted = self.text_response(
+            '{"preview_input_id":"preview.fresh","hunks":[{"digest":"d1","hunk":{}}]}'
+        )
+        success = self.text_response('{"operation":"stage_hunks","staged":1}')
+        client = self.scripted_client({name: [expired, success], "tracedecay_git_hunks": [minted]})
+        fixture = {"preview_input_id": "preview.stale", "selected_hunk_digests": '["d0"]'}
+        policies = {
+            "tracedecay_git_hunks": self.policy(runner, "tracedecay_git_hunks"),
+            name: self.policy(runner, name),
+        }
+
+        row = runner._read_tool_row(
+            client, self.definition(name), self.policy(runner, name), fixture, policies=policies
+        )
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(fixture["preview_input_id"], "preview.fresh")
+        replayed = [arguments for tool, arguments in client.calls if tool == name]
+        self.assertEqual(len(replayed), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
