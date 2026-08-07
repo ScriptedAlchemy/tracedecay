@@ -72,6 +72,14 @@ pub enum DoctorFamilyUnavailableReasonV1 {
     Denied,
     /// The source state could not be determined.
     Unknown,
+    /// The source could not be reached. Named separately from `Unknown`: the
+    /// source is identified and its unreachability is an observation, not an
+    /// undetermined state.
+    Unavailable,
+    /// The source must be rebuilt before it can be read again.
+    ResetRequired,
+    /// The source was read and found corrupt.
+    Corrupt,
 }
 
 impl DoctorFamilyUnavailableReasonV1 {
@@ -83,7 +91,11 @@ impl DoctorFamilyUnavailableReasonV1 {
             Self::Unwired | Self::Unsupported => DoctorEvidenceStateV1::Unsupported,
             Self::Absent => DoctorEvidenceStateV1::Absent,
             Self::Denied => DoctorEvidenceStateV1::Denied,
-            Self::Unknown => DoctorEvidenceStateV1::Unknown,
+            // An unreachable source is genuinely undetermined; a corrupt or
+            // reset-required source is an OBSERVED degraded condition, which is
+            // a stronger claim than "could not be determined".
+            Self::Unknown | Self::Unavailable => DoctorEvidenceStateV1::Unknown,
+            Self::ResetRequired | Self::Corrupt => DoctorEvidenceStateV1::Degraded,
         }
     }
 
@@ -94,6 +106,9 @@ impl DoctorFamilyUnavailableReasonV1 {
             Self::Absent => "absent",
             Self::Denied => "denied",
             Self::Unknown => "unknown",
+            Self::Unavailable => "unavailable",
+            Self::ResetRequired => "reset_required",
+            Self::Corrupt => "corrupt",
         }
     }
 }
@@ -115,6 +130,42 @@ impl DoctorFamilyConsultationV1 {
     #[must_use]
     const fn is_consulted(self) -> bool {
         matches!(self, Self::Consulted)
+    }
+
+    /// How strongly this consultation record speaks, used to pick the surviving
+    /// record when several independent sources composed one family.
+    ///
+    /// A NAMED degradation outranks a bare `Unknown`: a source that explained
+    /// why it is unavailable must not be masked by a peer that merely could not
+    /// be determined. This is the single ranking the composer uses everywhere.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Consulted => 8,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Corrupt,
+            } => 7,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::ResetRequired,
+            } => 6,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Unavailable,
+            } => 5,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Unknown,
+            } => 4,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Denied,
+            } => 3,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Absent,
+            } => 2,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Unsupported,
+            } => 1,
+            Self::Unavailable {
+                reason: DoctorFamilyUnavailableReasonV1::Unwired,
+            } => 0,
+        }
     }
 }
 
@@ -597,24 +648,7 @@ impl<'a> DoctorReportComposerV1<'a> {
             .unwrap_or_else(|| {
                 consultations
                     .into_iter()
-                    .max_by_key(|consultation| match consultation {
-                        DoctorFamilyConsultationV1::Consulted => 5,
-                        DoctorFamilyConsultationV1::Unavailable {
-                            reason: DoctorFamilyUnavailableReasonV1::Unknown,
-                        } => 4,
-                        DoctorFamilyConsultationV1::Unavailable {
-                            reason: DoctorFamilyUnavailableReasonV1::Denied,
-                        } => 3,
-                        DoctorFamilyConsultationV1::Unavailable {
-                            reason: DoctorFamilyUnavailableReasonV1::Absent,
-                        } => 2,
-                        DoctorFamilyConsultationV1::Unavailable {
-                            reason: DoctorFamilyUnavailableReasonV1::Unsupported,
-                        } => 1,
-                        DoctorFamilyConsultationV1::Unavailable {
-                            reason: DoctorFamilyUnavailableReasonV1::Unwired,
-                        } => 0,
-                    })
+                    .max_by_key(|consultation| consultation.rank())
                     .expect("at least one advisory port is wired")
             });
         Ok((entries, consultation))
@@ -702,26 +736,42 @@ impl<'a> DoctorReportComposerV1<'a> {
             {
                 Ok((
                     storage_entries(findings)?,
-                    unavailable(storage_incomplete_reason(reason)),
+                    unavailable(storage_incomplete_reason(&reason)),
                 ))
             }
             // An empty observed read means the runtime produced no storage
             // findings; that is an absent family, not a healthy claim.
             DoctorStorageFamilyReadV1::Observed { .. } | DoctorStorageFamilyReadV1::Absent => {
-                storage_unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+                storage_unavailable(DoctorFamilyUnavailableReasonV1::Absent, None)
             }
-            DoctorStorageFamilyReadV1::ObservedIncomplete { reason, .. } => {
-                storage_unavailable(storage_incomplete_reason(reason))
-            }
+            DoctorStorageFamilyReadV1::ObservedIncomplete { reason, .. } => storage_unavailable(
+                storage_incomplete_reason(&reason),
+                storage_incomplete_detail(&reason),
+            ),
             DoctorStorageFamilyReadV1::Unsupported => {
-                storage_unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
+                storage_unavailable(DoctorFamilyUnavailableReasonV1::Unsupported, None)
             }
             DoctorStorageFamilyReadV1::Denied => {
-                storage_unavailable(DoctorFamilyUnavailableReasonV1::Denied)
+                storage_unavailable(DoctorFamilyUnavailableReasonV1::Denied, None)
             }
             DoctorStorageFamilyReadV1::Unknown => {
-                storage_unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
+                storage_unavailable(DoctorFamilyUnavailableReasonV1::Unknown, None)
             }
+            // The three named degradations carry the reason the storage source
+            // reported. It is reproduced in the placeholder finding rather than
+            // discarded, so the report says WHY the family is unavailable.
+            DoctorStorageFamilyReadV1::Unavailable { detail } => storage_unavailable(
+                DoctorFamilyUnavailableReasonV1::Unavailable,
+                Some(detail.as_str()),
+            ),
+            DoctorStorageFamilyReadV1::ResetRequired { detail } => storage_unavailable(
+                DoctorFamilyUnavailableReasonV1::ResetRequired,
+                Some(detail.as_str()),
+            ),
+            DoctorStorageFamilyReadV1::Corrupt { detail } => storage_unavailable(
+                DoctorFamilyUnavailableReasonV1::Corrupt,
+                Some(detail.as_str()),
+            ),
         }
     }
 }
@@ -739,7 +789,7 @@ fn storage_entries(
 }
 
 const fn storage_incomplete_reason(
-    reason: DoctorStorageIncompleteReasonV1,
+    reason: &DoctorStorageIncompleteReasonV1,
 ) -> DoctorFamilyUnavailableReasonV1 {
     match reason {
         DoctorStorageIncompleteReasonV1::Unsupported => {
@@ -747,6 +797,27 @@ const fn storage_incomplete_reason(
         }
         DoctorStorageIncompleteReasonV1::Denied => DoctorFamilyUnavailableReasonV1::Denied,
         DoctorStorageIncompleteReasonV1::Unknown => DoctorFamilyUnavailableReasonV1::Unknown,
+        DoctorStorageIncompleteReasonV1::Unavailable { .. } => {
+            DoctorFamilyUnavailableReasonV1::Unavailable
+        }
+        DoctorStorageIncompleteReasonV1::ResetRequired { .. } => {
+            DoctorFamilyUnavailableReasonV1::ResetRequired
+        }
+        DoctorStorageIncompleteReasonV1::Corrupt { .. } => {
+            DoctorFamilyUnavailableReasonV1::Corrupt
+        }
+    }
+}
+
+/// The observed reason text a named storage degradation carries, if any.
+const fn storage_incomplete_detail(reason: &DoctorStorageIncompleteReasonV1) -> Option<&str> {
+    match reason {
+        DoctorStorageIncompleteReasonV1::Unsupported
+        | DoctorStorageIncompleteReasonV1::Denied
+        | DoctorStorageIncompleteReasonV1::Unknown => None,
+        DoctorStorageIncompleteReasonV1::Unavailable { detail }
+        | DoctorStorageIncompleteReasonV1::ResetRequired { detail }
+        | DoctorStorageIncompleteReasonV1::Corrupt { detail } => Some(detail.as_str()),
     }
 }
 
@@ -765,24 +836,7 @@ fn strongest_consultation(
         .unwrap_or_else(|| {
             consultations
                 .into_iter()
-                .max_by_key(|consultation| match consultation {
-                    DoctorFamilyConsultationV1::Consulted => 5,
-                    DoctorFamilyConsultationV1::Unavailable {
-                        reason: DoctorFamilyUnavailableReasonV1::Unknown,
-                    } => 4,
-                    DoctorFamilyConsultationV1::Unavailable {
-                        reason: DoctorFamilyUnavailableReasonV1::Denied,
-                    } => 3,
-                    DoctorFamilyConsultationV1::Unavailable {
-                        reason: DoctorFamilyUnavailableReasonV1::Absent,
-                    } => 2,
-                    DoctorFamilyConsultationV1::Unavailable {
-                        reason: DoctorFamilyUnavailableReasonV1::Unsupported,
-                    } => 1,
-                    DoctorFamilyConsultationV1::Unavailable {
-                        reason: DoctorFamilyUnavailableReasonV1::Unwired,
-                    } => 0,
-                })
+                .max_by_key(|consultation| consultation.rank())
                 .expect("a composed family has at least one source")
         })
 }
@@ -791,7 +845,7 @@ fn strongest_consultation(
 fn unwired_family(
     family: DoctorFindingFamilyV1,
 ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError> {
-    let finding = placeholder_finding(family, DoctorFamilyUnavailableReasonV1::Unwired)?;
+    let finding = placeholder_finding(family, DoctorFamilyUnavailableReasonV1::Unwired, None)?;
     Ok((
         vec![DoctorReportEntryV1::new(finding, None)?],
         unavailable(DoctorFamilyUnavailableReasonV1::Unwired),
@@ -801,8 +855,9 @@ fn unwired_family(
 /// Synthesize the single placeholder entry for an unavailable storage read.
 fn storage_unavailable(
     reason: DoctorFamilyUnavailableReasonV1,
+    detail: Option<&str>,
 ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError> {
-    let finding = placeholder_finding(DoctorFindingFamilyV1::Storage, reason)?;
+    let finding = placeholder_finding(DoctorFindingFamilyV1::Storage, reason, detail)?;
     // The placeholder carries no storage subclass: no specific condition was
     // observed, so there is nothing to classify.
     Ok((
@@ -811,10 +866,37 @@ fn storage_unavailable(
     ))
 }
 
+/// The observed reason text a source reported, rendered safe for a coverage
+/// statement: control characters folded to spaces, trimmed, and bounded so the
+/// composed statement stays inside the statement contract.
+fn sanitized_detail(detail: &str) -> Option<String> {
+    let folded: String = detail
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect();
+    let bounded = truncate_at_char_boundary(folded.trim(), PLACEHOLDER_DETAIL_MAX_BYTES);
+    let bounded = bounded.trim();
+    if bounded.is_empty() {
+        None
+    } else {
+        Some(bounded.to_owned())
+    }
+}
+
+/// Byte budget for the reason text inside a placeholder coverage statement.
+/// The statement contract bounds the whole string at 512 bytes; the fixed
+/// prefix is far shorter than the remaining headroom.
+const PLACEHOLDER_DETAIL_MAX_BYTES: usize = 320;
+
 /// Build a truthful non-healthy placeholder finding for an unavailable family.
+///
+/// When the source reported a reason, it is reproduced in the coverage
+/// statement: a named degradation that discards its reason is only marginally
+/// better than the bare `unknown` it replaced.
 fn placeholder_finding(
     family: DoctorFindingFamilyV1,
     reason: DoctorFamilyUnavailableReasonV1,
+    detail: Option<&str>,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let reference = format!(
         "doctor.{}.{}",
@@ -822,11 +904,18 @@ fn placeholder_finding(
         reason.slug()
     );
     let evidence = DoctorEvidenceRefV1::new(family, DoctorEvidenceReferenceV1::new(reference)?);
-    let statement = format!(
-        "{} family source unavailable ({})",
-        doctor_finding_family_label(family),
-        reason.slug()
-    );
+    let statement = match detail.and_then(sanitized_detail) {
+        Some(detail) => format!(
+            "{} family source unavailable ({}): {detail}",
+            doctor_finding_family_label(family),
+            reason.slug()
+        ),
+        None => format!(
+            "{} family source unavailable ({})",
+            doctor_finding_family_label(family),
+            reason.slug()
+        ),
+    };
     DoctorFindingV1::new(
         family,
         reason.evidence_state(),

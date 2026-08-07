@@ -1364,7 +1364,10 @@ pub trait ObservabilityDoctorPort: Send + Sync {
 /// returned while carrying this reason to weaken report coverage. `Absent` is
 /// intentionally not a reason: an empty, successfully consulted producer does
 /// not make the observations from its peers incomplete.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+/// Variant order is the escalation order used when several producers are
+/// unresolved at once: the most specific, most severe reason wins, so a named
+/// degradation is never masked by a peer producer's bare `Unknown`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorStorageIncompleteReasonV1 {
     /// The producer is unsupported on this build/platform.
@@ -1373,6 +1376,16 @@ pub enum DoctorStorageIncompleteReasonV1 {
     Denied,
     /// The producer state could not be determined.
     Unknown,
+    /// The producer's backing source could not be reached at all. Distinct from
+    /// `Unknown`: the source is named and its unreachability is observed, so the
+    /// observed reason is carried rather than discarded.
+    Unavailable { detail: String },
+    /// The producer's backing source must be rebuilt before it can be read
+    /// again. An observed, named degradation, not an undetermined state.
+    ResetRequired { detail: String },
+    /// The producer's backing source was read and found corrupt. The most
+    /// severe named degradation: it outranks every other reason in a merge.
+    Corrupt { detail: String },
 }
 
 /// One composed storage read: typed findings from resolved producers, their
@@ -1402,6 +1415,13 @@ pub enum DoctorStorageFamilyReadV1 {
     Denied,
     /// The storage state could not be determined.
     Unknown,
+    /// The storage source could not be reached. The observed reason is carried
+    /// so the report names why, instead of collapsing into `Unknown`.
+    Unavailable { detail: String },
+    /// The storage source must be rebuilt before it can be read again.
+    ResetRequired { detail: String },
+    /// The storage source was read and found corrupt.
+    Corrupt { detail: String },
 }
 
 /// Narrow source port for storage retention/size Doctor findings.

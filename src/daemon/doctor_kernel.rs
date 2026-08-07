@@ -987,15 +987,19 @@ pub async fn collect_code_generation_retention_findings(
                 configured_root_receipt,
                 ..
             } => (sources, configured_root_receipt.root_count()),
+            // Each of these is a NAMED vector-authority degradation carrying the
+            // reason the authority reported. Collapsing them into `Unknown`
+            // would claim the state could not be determined when it was in fact
+            // determined and explained, so each keeps its name and its reason.
             super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Unavailable(
-                _,
-            ) => return DoctorStorageFamilyReadV1::Unknown,
+                detail,
+            ) => return DoctorStorageFamilyReadV1::Unavailable { detail },
             super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::ResetRequired(
-                _,
-            ) => return DoctorStorageFamilyReadV1::Unknown,
+                detail,
+            ) => return DoctorStorageFamilyReadV1::ResetRequired { detail },
             super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Corrupt(
-                _,
-            ) => return DoctorStorageFamilyReadV1::Unknown,
+                detail,
+            ) => return DoctorStorageFamilyReadV1::Corrupt { detail },
             super::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources::Denied(
                 _,
             ) => return DoctorStorageFamilyReadV1::Denied,
@@ -1497,6 +1501,17 @@ fn merge_storage_reads(
         (true, Some(DoctorStorageIncompleteReasonV1::Unknown)) => {
             DoctorStorageFamilyReadV1::Unknown
         }
+        // A named degradation survives the merge with its reason intact: no
+        // producer that explained itself is reported as merely undetermined.
+        (true, Some(DoctorStorageIncompleteReasonV1::Unavailable { detail })) => {
+            DoctorStorageFamilyReadV1::Unavailable { detail }
+        }
+        (true, Some(DoctorStorageIncompleteReasonV1::ResetRequired { detail })) => {
+            DoctorStorageFamilyReadV1::ResetRequired { detail }
+        }
+        (true, Some(DoctorStorageIncompleteReasonV1::Corrupt { detail })) => {
+            DoctorStorageFamilyReadV1::Corrupt { detail }
+        }
         (true, None) => DoctorStorageFamilyReadV1::Absent,
     }
 }
@@ -1523,6 +1538,18 @@ fn storage_read_parts(
         DoctorStorageFamilyReadV1::Unknown => {
             (Vec::new(), Some(DoctorStorageIncompleteReasonV1::Unknown))
         }
+        DoctorStorageFamilyReadV1::Unavailable { detail } => (
+            Vec::new(),
+            Some(DoctorStorageIncompleteReasonV1::Unavailable { detail }),
+        ),
+        DoctorStorageFamilyReadV1::ResetRequired { detail } => (
+            Vec::new(),
+            Some(DoctorStorageIncompleteReasonV1::ResetRequired { detail }),
+        ),
+        DoctorStorageFamilyReadV1::Corrupt { detail } => (
+            Vec::new(),
+            Some(DoctorStorageIncompleteReasonV1::Corrupt { detail }),
+        ),
     }
 }
 
