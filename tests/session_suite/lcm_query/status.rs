@@ -46,7 +46,7 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
     .expect("lifecycle state should update");
 
     let status = db
-        .lcm_status_for_test("cursor", Some("session-1"))
+        .lcm_status_deep_for_test("cursor", Some("session-1"))
         .await
         .expect("status should load");
     assert_eq!(status.schema_version, LCM_SCHEMA_VERSION);
@@ -118,7 +118,7 @@ async fn status_reports_payload_gc_run_metadata_after_apply() {
     assert_eq!(report.status, "applied");
 
     let status = db
-        .lcm_status_for_test("cursor", Some("session-gc"))
+        .lcm_status_deep_for_test("cursor", Some("session-gc"))
         .await
         .expect("status should load");
     assert_eq!(status.payload_gc.last_gc_at, Some(1_715_123_456));
@@ -236,39 +236,47 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
     assert_eq!(status.dag.compression_ratio, "1.2:1");
 }
 
-// Pins the SQL pushdown of `count_lossy_ingest_records`: only a JSON boolean
-// `true` under `$.ingest_protection.lossy` counts. Provider metadata outside
-// the object contract fails closed before persistence.
+// Pins the canonical sanitizer plus `count_lossy_ingest_records` SQL pushdown:
+// only the sanitizer's JSON boolean `true` under `$.ingest_protection.lossy`
+// counts. Provider metadata cannot fabricate that authority, and metadata
+// outside the object contract fails closed before persistence.
 #[tokio::test]
 async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
     insert_session(&db, "cursor", "session-lossy").await;
 
-    let variants: &[(&str, Option<&str>)] = &[
+    let variants: &[(&str, &str, Option<&str>)] = &[
         (
             "lossy-true",
+            "credential sk-proj-lcm-status-secret-1234567890",
             Some(r#"{"ingest_protection":{"lossy":true}}"#),
         ),
         (
             "lossy-false",
+            "ordinary body",
             Some(r#"{"ingest_protection":{"lossy":false}}"#),
         ),
         (
             "lossy-integer",
+            "ordinary body",
             Some(r#"{"ingest_protection":{"lossy":1}}"#),
         ),
-        ("missing-key", Some(r#"{"ingest_protection":{}}"#)),
-        ("missing-section", Some(r#"{"other":true}"#)),
-        ("null-metadata", None),
+        (
+            "missing-key",
+            "ordinary body",
+            Some(r#"{"ingest_protection":{}}"#),
+        ),
+        ("missing-section", "ordinary body", Some(r#"{"other":true}"#)),
+        ("null-metadata", "ordinary body", None),
     ];
-    for (idx, (message_id, metadata)) in variants.iter().enumerate() {
+    for (idx, (message_id, content, metadata)) in variants.iter().enumerate() {
         let mut message = raw_message(
             "cursor",
             message_id,
             "session-lossy",
             (idx + 1) as i64,
-            "body",
+            content,
         );
         message.metadata_json = metadata.map(str::to_string);
         assert!(db.upsert_session_message(&message).await);
@@ -286,12 +294,12 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
     }
 
     let status = db
-        .lcm_status_for_test("cursor", Some("session-lossy"))
+        .lcm_status_deep_for_test("cursor", Some("session-lossy"))
         .await
         .expect("status should load");
     assert_eq!(
         status.redaction.lossy_records, 1,
-        "only the JSON boolean true row counts as lossy"
+        "only the canonically sanitized row counts as lossy"
     );
     assert!(status.redaction.enabled);
     assert_eq!(status.redaction.legacy_truncated_count, 0);
