@@ -7,14 +7,15 @@ use crate::db::engine::{Value, params};
 
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactEventId, FactId, FactIdentityMaterialV1, FactOwnerV1,
-    FactPayloadV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros, VectorWatermark,
+    FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1, PayloadAccessState, UtcMicros,
+    VectorWatermark,
 };
 use tracedecay_store::{
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactSourceV1, ProjectMemoryFactStatusV1,
-    ProjectMemoryFactTargetV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1,
-    ProjectMemoryFactV1, ProjectMemoryProjectionStateV1, FactStoreError, FactStoreResult,
-    LegacyFactQuery, StoredFactV1,
+    FactStoreError, FactStoreResult, LegacyFactQuery, ProjectMemoryFactAvailabilityV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactSourceV1, ProjectMemoryFactStatusV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactV1,
+    ProjectMemoryProjectionStateV1, StoredFactV1,
 };
 
 use super::primitives::{
@@ -110,15 +111,13 @@ pub(super) async fn compatibility_legacy_mapping_tx(
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT mapping_json, owner_json FROM memory_v2_legacy_map
-             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
-               AND source_store_id = ?4",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                fact_id.as_str(),
-                source_store_id.as_str(),
-            ],
+            "SELECT projections.fact_id, facts.owner_json, facts.created_at
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
+               AND facts.fact_id = ?3",
+            params![key.kind, key.project_id.as_str(), fact_id.as_str()],
         )
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?;
@@ -132,15 +131,14 @@ pub(super) async fn compatibility_legacy_mapping_tx(
     if row_string(&row, 1, QUERY_OPERATION)? != key.json {
         return Err(FactStoreError::OwnerMismatch);
     }
-    let mapping =
-        from_json::<LegacyFactMappingV1>(&row_string(&row, 0, QUERY_OPERATION)?, QUERY_OPERATION)?;
-    if mapping.owner() != owner || mapping.fact_id() != fact_id {
-        return Err(storage_message(
-            QUERY_OPERATION,
-            "compatibility legacy mapping identity mismatch",
-        ));
-    }
-    Ok(Some(mapping))
+    Ok(Some(LegacyFactMappingV1::new(
+        owner.clone(),
+        source_store_id,
+        row_i64(&row, 0, QUERY_OPERATION)?,
+        fact_id.clone(),
+        LegacyHistoryCoverageV1::Complete,
+        UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
+    )?))
 }
 
 pub(super) async fn compatibility_projection_metadata_tx(
@@ -264,7 +262,6 @@ pub(super) async fn load_compatibility_projections_tx(
             Value::Text(key.kind.to_string()),
             Value::Text(key.project_id.clone()),
             Value::Text(key.json.clone()),
-            Value::Text(source_store_id.as_str().to_owned()),
         ];
         let mut placeholders = Vec::with_capacity(batch.len());
         for fact_id in batch {
@@ -277,8 +274,8 @@ pub(super) async fn load_compatibility_projections_tx(
                     current_facts.projection_state,
                     current_facts.updated_at,
                     current_facts.vector_watermark_json,
-                    mappings.mapping_json,
-                    mappings.owner_json,
+                    legacy_facts.fact_id,
+                    facts.owner_json,
                     current_facts.trust_score,
                     current_facts.active_assertion_id,
                     current_facts.last_event_id,
@@ -303,13 +300,8 @@ pub(super) async fn load_compatibility_projections_tx(
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
-             LEFT JOIN memory_v2_legacy_map AS mappings
-               ON mappings.fact_id = current_facts.fact_id
-              AND mappings.owner_kind = current_facts.owner_kind
-              AND mappings.project_id = current_facts.project_id
-              AND mappings.source_store_id = ?4
              LEFT JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+               ON legacy_facts.canonical_fact_id = current_facts.fact_id
              WHERE current_facts.owner_kind = ?1
                AND current_facts.project_id = ?2
                AND facts.owner_json = ?3
@@ -338,21 +330,21 @@ pub(super) async fn load_compatibility_projections_tx(
                     .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
                     .transpose()?,
             )?;
-            let legacy_mapping = match row_optional_string(&row, 5, QUERY_OPERATION)? {
-                Some(mapping_json) => {
+            let legacy_mapping = match row_optional_i64(&row, 5, QUERY_OPERATION)? {
+                Some(legacy_fact_id) => {
                     if row_optional_string(&row, 6, QUERY_OPERATION)?.as_deref()
                         != Some(key.json.as_str())
                     {
                         return Err(FactStoreError::OwnerMismatch);
                     }
-                    let mapping = from_json::<LegacyFactMappingV1>(&mapping_json, QUERY_OPERATION)?;
-                    if mapping.owner() != owner || mapping.fact_id() != &fact_id {
-                        return Err(storage_message(
-                            QUERY_OPERATION,
-                            "compatibility legacy mapping identity mismatch",
-                        ));
-                    }
-                    Some(mapping)
+                    Some(LegacyFactMappingV1::new(
+                        owner.clone(),
+                        source_store_id.clone(),
+                        legacy_fact_id,
+                        fact_id.clone(),
+                        LegacyHistoryCoverageV1::Complete,
+                        UtcMicros(row_i64(&row, 12, QUERY_OPERATION)?),
+                    )?)
                 }
                 None => None,
             };
@@ -471,18 +463,15 @@ pub(super) async fn compatibility_fact_for_legacy_id_tx(
     legacy_fact_id: i64,
 ) -> FactStoreResult<Option<FactId>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT fact_id, owner_json FROM memory_v2_legacy_map
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
-               AND legacy_fact_id = ?4",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                source_store_id.as_str(),
-                legacy_fact_id,
-            ],
+            "SELECT projections.canonical_fact_id, facts.owner_json
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             WHERE projections.fact_id = ?1
+               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
+            params![legacy_fact_id, key.kind, key.project_id.as_str()],
         )
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?;
@@ -543,16 +532,21 @@ pub(super) async fn resolve_legacy_fact_tx(
     query: &LegacyFactQuery,
 ) -> FactStoreResult<Option<FactId>> {
     let owner = OwnerKey::new(query.owner())?;
+    if query.source_store_id() != &compatibility_source_store_id()? {
+        return Ok(None);
+    }
     let mut rows = snapshot
         .query(
-            "SELECT fact_id, owner_json FROM memory_v2_legacy_map
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND source_store_id = ?3 AND legacy_fact_id = ?4",
+            "SELECT projections.canonical_fact_id, facts.owner_json
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             WHERE projections.fact_id = ?1
+               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
             params![
+                query.legacy_fact_id(),
                 owner.kind,
                 owner.project_id.as_str(),
-                query.source_store_id().as_str(),
-                query.legacy_fact_id(),
             ],
         )
         .await

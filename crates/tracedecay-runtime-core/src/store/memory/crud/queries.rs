@@ -2,9 +2,9 @@
 
 use super::super::DatabaseFactStore;
 use super::super::primitives::{
-    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, authority_storage_error, from_json,
-    parse_payload_access, row_i64, row_optional_f64, row_optional_string, row_string,
-    storage_error, storage_message, to_json,
+    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, authority_storage_error,
+    compatibility_source_store_id, from_json, parse_payload_access, row_i64, row_optional_f64,
+    row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 use super::{
     PROMOTE_OPERATION, Projection, PromotionAttempt, anchor_matches, commit_fact_tx,
@@ -854,9 +854,12 @@ async fn load_current_legacy_mapping_tx(
 ) -> FactStoreResult<Option<LegacyFactMappingV1>> {
     let mut rows = snapshot
         .query(
-            "SELECT mapping_json FROM memory_v2_legacy_map
-             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
-             ORDER BY source_store_id ASC LIMIT 1",
+            "SELECT projections.fact_id, facts.created_at, facts.owner_json
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
+               AND facts.fact_id = ?3",
             params![owner.kind, owner.project_id.as_str(), fact_id.as_str()],
         )
         .await
@@ -868,15 +871,17 @@ async fn load_current_legacy_mapping_tx(
     else {
         return Ok(None);
     };
-    let mapping =
-        from_json::<LegacyFactMappingV1>(&row_string(&row, 0, QUERY_OPERATION)?, QUERY_OPERATION)?;
-    if mapping.owner() != typed_owner || mapping.fact_id() != fact_id {
-        return Err(storage_message(
-            QUERY_OPERATION,
-            "legacy mapping identity mismatch",
-        ));
+    if row_string(&row, 2, QUERY_OPERATION)? != owner.json {
+        return Err(FactStoreError::OwnerMismatch);
     }
-    Ok(Some(mapping))
+    Ok(Some(LegacyFactMappingV1::new(
+        typed_owner.clone(),
+        compatibility_source_store_id()?,
+        row_i64(&row, 0, QUERY_OPERATION)?,
+        fact_id.clone(),
+        LegacyHistoryCoverageV1::Complete,
+        UtcMicros(row_i64(&row, 1, QUERY_OPERATION)?),
+    )?))
 }
 
 pub(in crate::store::memory) async fn promote_fact_proposal_tx(
