@@ -14,10 +14,12 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionDiff,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
+    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowDefinitionActivateRequest,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition,
+    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
 };
 use tracedecay_domain::WorkflowDefinition;
 
@@ -33,6 +35,9 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkflowOperation {
     RegisterDefinition,
+    ActivateDefinition,
+    RetireDefinition,
+    RejectDefinition,
     ValidateDefinition,
     GetDefinition,
     ListDefinitions,
@@ -43,8 +48,11 @@ pub enum WorkflowOperation {
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::RegisterDefinition,
+        Self::ActivateDefinition,
+        Self::RetireDefinition,
+        Self::RejectDefinition,
         Self::ValidateDefinition,
         Self::GetDefinition,
         Self::ListDefinitions,
@@ -57,6 +65,9 @@ impl WorkflowOperation {
     pub const fn operation_id_str(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "operation.workflow.register_definition",
+            Self::ActivateDefinition => "operation.workflow.activate_definition",
+            Self::RetireDefinition => "operation.workflow.retire_definition",
+            Self::RejectDefinition => "operation.workflow.reject_definition",
             Self::ValidateDefinition => "operation.workflow.validate_definition",
             Self::GetDefinition => "operation.workflow.get_definition",
             Self::ListDefinitions => "operation.workflow.list_definitions",
@@ -70,6 +81,9 @@ impl WorkflowOperation {
     pub const fn operation_key(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register_definition",
+            Self::ActivateDefinition => "activate_definition",
+            Self::RetireDefinition => "retire_definition",
+            Self::RejectDefinition => "reject_definition",
             Self::ValidateDefinition => "validate_definition",
             Self::GetDefinition => "get_definition",
             Self::ListDefinitions => "list_definitions",
@@ -96,6 +110,9 @@ impl WorkflowOperation {
     pub const fn route_segment(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register-definition",
+            Self::ActivateDefinition => "activate-definition",
+            Self::RetireDefinition => "retire-definition",
+            Self::RejectDefinition => "reject-definition",
             Self::ValidateDefinition => "validate-definition",
             Self::GetDefinition => "get-definition",
             Self::ListDefinitions => "list-definitions",
@@ -109,6 +126,9 @@ impl WorkflowOperation {
     pub const fn route_path(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "/workflow/register-definition",
+            Self::ActivateDefinition => "/workflow/activate-definition",
+            Self::RetireDefinition => "/workflow/retire-definition",
+            Self::RejectDefinition => "/workflow/reject-definition",
             Self::ValidateDefinition => "/workflow/validate-definition",
             Self::GetDefinition => "/workflow/get-definition",
             Self::ListDefinitions => "/workflow/list-definitions",
@@ -122,6 +142,9 @@ impl WorkflowOperation {
     pub const fn application_route_path(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "/application/workflow/register-definition",
+            Self::ActivateDefinition => "/application/workflow/activate-definition",
+            Self::RetireDefinition => "/application/workflow/retire-definition",
+            Self::RejectDefinition => "/application/workflow/reject-definition",
             Self::ValidateDefinition => "/application/workflow/validate-definition",
             Self::GetDefinition => "/application/workflow/get-definition",
             Self::ListDefinitions => "/application/workflow/list-definitions",
@@ -135,6 +158,9 @@ impl WorkflowOperation {
     pub fn request_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::RegisterDefinition => schema_name::<WorkflowDefinitionRegisterRequest>(),
+            Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
+            Self::RetireDefinition => schema_name::<WorkflowDefinitionRetireRequest>(),
+            Self::RejectDefinition => schema_name::<WorkflowDefinitionRejectRequest>(),
             Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidateRequest>(),
             Self::GetDefinition => schema_name::<WorkflowDefinitionGetRequest>(),
             Self::ListDefinitions => schema_name::<WorkflowDefinitionListRequest>(),
@@ -148,6 +174,9 @@ impl WorkflowOperation {
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::RegisterDefinition => schema_name::<WorkflowDefinition>(),
+            Self::ActivateDefinition | Self::RetireDefinition | Self::RejectDefinition => {
+                schema_name::<WorkflowDefinitionDisposition>()
+            }
             Self::ValidateDefinition => schema_name::<WorkflowDefinitionValidation>(),
             Self::GetDefinition => schema_name::<WorkflowDefinition>(),
             Self::ListDefinitions | Self::DefinitionHistory => {

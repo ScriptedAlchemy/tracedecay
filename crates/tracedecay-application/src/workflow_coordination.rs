@@ -25,6 +25,186 @@ pub enum WorkflowDefinitionAuthorityError {
     Unavailable(String),
 }
 
+/// Durable lifecycle disposition of one immutable workflow definition version.
+///
+/// Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
+/// validate, activate, retire, reject, list, get, diff, and history operations
+/// through the same application surfaces." The definition payload itself stays
+/// immutable — "Editing creates a new version; admitted runs remain pinned" —
+/// so the disposition is a separate revisioned aggregate keyed by the same
+/// definition identity.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowDefinitionLifecycleState {
+    Candidate,
+    Validated,
+    Active,
+    Retired,
+    Rejected,
+}
+
+impl WorkflowDefinitionLifecycleState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Validated => "validated",
+            Self::Active => "active",
+            Self::Retired => "retired",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_state_key(key: &str) -> Option<Self> {
+        match key {
+            "candidate" => Some(Self::Candidate),
+            "validated" => Some(Self::Validated),
+            "active" => Some(Self::Active),
+            "retired" => Some(Self::Retired),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+
+    /// Retire and reject are terminal dispositions: nothing transitions out.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Retired | Self::Rejected)
+    }
+}
+
+/// The three lifecycle transitions that mutate a stored disposition.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowLifecycleOperation {
+    Activate,
+    Retire,
+    Reject,
+}
+
+const ACTIVATE_FROM_CANDIDATE: &[WorkflowDefinitionLifecycleState] = &[
+    WorkflowDefinitionLifecycleState::Validated,
+    WorkflowDefinitionLifecycleState::Active,
+];
+const ACTIVATE_FROM_VALIDATED: &[WorkflowDefinitionLifecycleState] =
+    &[WorkflowDefinitionLifecycleState::Active];
+const RETIRE_FROM_ACTIVE: &[WorkflowDefinitionLifecycleState] =
+    &[WorkflowDefinitionLifecycleState::Retired];
+const REJECT_FROM_OPEN: &[WorkflowDefinitionLifecycleState] =
+    &[WorkflowDefinitionLifecycleState::Rejected];
+
+impl WorkflowLifecycleOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Retire => "retire",
+            Self::Reject => "reject",
+        }
+    }
+
+    pub fn from_operation_key(key: &str) -> Option<Self> {
+        match key {
+            "activate" => Some(Self::Activate),
+            "retire" => Some(Self::Retire),
+            "reject" => Some(Self::Reject),
+            _ => None,
+        }
+    }
+
+    /// Canonical edge table shared by every authority implementation.
+    ///
+    /// Plan 32: the retained lifecycle is `candidate -> validated -> active`
+    /// with retire and reject as terminal dispositions, and "Unknown
+    /// operations, cycles, dangling references, incompatible schemas,
+    /// unbounded fan-out, privilege expansion, unsupported effects, or
+    /// recursive generic execution reject before activation" — so activating a
+    /// candidate records the intermediate `validated` disposition it had to
+    /// clear, and every state it passes through gets its own immutable history
+    /// entry. `None` names an illegal transition.
+    pub const fn path_from(
+        self,
+        current: WorkflowDefinitionLifecycleState,
+    ) -> Option<&'static [WorkflowDefinitionLifecycleState]> {
+        match (self, current) {
+            (Self::Activate, WorkflowDefinitionLifecycleState::Candidate) => {
+                Some(ACTIVATE_FROM_CANDIDATE)
+            }
+            (Self::Activate, WorkflowDefinitionLifecycleState::Validated) => {
+                Some(ACTIVATE_FROM_VALIDATED)
+            }
+            (Self::Retire, WorkflowDefinitionLifecycleState::Active) => Some(RETIRE_FROM_ACTIVE),
+            (
+                Self::Reject,
+                WorkflowDefinitionLifecycleState::Candidate
+                | WorkflowDefinitionLifecycleState::Validated,
+            ) => Some(REJECT_FROM_OPEN),
+            _ => None,
+        }
+    }
+}
+
+/// Revisioned lifecycle disposition of one definition version.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionDisposition {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    pub state: WorkflowDefinitionLifecycleState,
+    #[schemars(range(min = 1))]
+    pub revision: u64,
+    pub transitioned_at: UtcMicros,
+}
+
+/// One immutable history entry appended by a lifecycle transition.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionTransitionEntry {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    pub operation: WorkflowLifecycleOperation,
+    pub from_state: WorkflowDefinitionLifecycleState,
+    pub to_state: WorkflowDefinitionLifecycleState,
+    #[schemars(range(min = 1))]
+    pub from_revision: u64,
+    #[schemars(range(min = 2))]
+    pub to_revision: u64,
+    pub transitioned_at: UtcMicros,
+}
+
+/// Compare-and-swap command carried across the effect journal and applied by
+/// the durable authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionLifecycleCommand {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    pub operation: WorkflowLifecycleOperation,
+    #[schemars(range(min = 1))]
+    pub expected_revision: u64,
+    pub transitioned_at: UtcMicros,
+}
+
+/// Outcome of one attempted lifecycle transition on the durable authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowDefinitionTransitionOutcome {
+    /// The transition ran and appended new immutable history entries.
+    Applied(WorkflowDefinitionDisposition),
+    /// The exact command already ran; the stored disposition is returned
+    /// unchanged so replay stays observably identical.
+    Replayed(WorkflowDefinitionDisposition),
+    /// `expected_revision` did not name the stored revision.
+    RevisionConflict(WorkflowDefinitionDisposition),
+    /// The stored state has no edge for this operation.
+    IllegalTransition(WorkflowDefinitionDisposition),
+    /// No disposition exists for the named definition version.
+    Missing,
+}
+
 pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
     fn insert(
         &self,
@@ -41,6 +221,23 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
         &self,
         definition_id: Option<&WorkflowDefinitionId>,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError>;
+
+    fn load_disposition(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinitionDisposition>, WorkflowDefinitionAuthorityError>;
+
+    fn transition(
+        &self,
+        command: &WorkflowDefinitionLifecycleCommand,
+    ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError>;
+
+    fn transition_history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -107,12 +304,47 @@ pub struct WorkflowDefinitionDiffRequest {
     pub to_version: u64,
 }
 
+/// Wire request for [`WorkflowDefinitionService::activate`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionActivateRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    #[schemars(range(min = 1))]
+    pub expected_revision: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::retire`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionRetireRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    #[schemars(range(min = 1))]
+    pub expected_revision: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::reject`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionRejectRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    #[schemars(range(min = 1))]
+    pub expected_revision: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowCoordinationError {
     InvalidDefinition,
     ScopeMismatch,
     ImmutableDefinitionConflict,
     DefinitionNotFound,
+    IllegalLifecycleTransition,
+    LifecycleRevisionConflict,
     AuthorityUnavailable(String),
 }
 
@@ -127,6 +359,11 @@ impl Display for WorkflowCoordinationError {
                 formatter.write_str("workflow definition identity and version are immutable")
             }
             Self::DefinitionNotFound => formatter.write_str("workflow definition was not found"),
+            Self::IllegalLifecycleTransition => {
+                formatter.write_str("workflow definition lifecycle transition is not legal")
+            }
+            Self::LifecycleRevisionConflict => formatter
+                .write_str("workflow definition lifecycle revision did not match the expectation"),
             Self::AuthorityUnavailable(message) => {
                 write!(
                     formatter,
@@ -212,6 +449,125 @@ where
         self.authority
             .list(Some(definition_id))
             .map_err(coordination_authority_error)
+    }
+
+    /// Advances a registered definition version to `active`.
+    ///
+    /// Plan 32: "Unknown operations, cycles, dangling references, incompatible
+    /// schemas, unbounded fan-out, privilege expansion, unsupported effects,
+    /// or recursive generic execution reject before activation." The stored
+    /// payload is revalidated here, and the `candidate -> validated -> active`
+    /// path is recorded as immutable history entries by the authority.
+    pub fn activate(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+        expected_revision: u64,
+        transitioned_at: UtcMicros,
+    ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
+        let definition = self.get(definition_id, definition_version)?;
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Activate,
+            expected_revision,
+            transitioned_at,
+        })
+    }
+
+    /// Retires an active definition version. Plan 32 keeps retire a terminal
+    /// disposition: admitted runs stay pinned to the version they admitted,
+    /// and nothing transitions back out.
+    pub fn retire(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+        expected_revision: u64,
+        transitioned_at: UtcMicros,
+    ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
+        self.get(definition_id, definition_version)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Retire,
+            expected_revision,
+            transitioned_at,
+        })
+    }
+
+    /// Rejects a candidate or validated definition version. Plan 32 keeps
+    /// reject a terminal disposition alongside retire.
+    pub fn reject(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+        expected_revision: u64,
+        transitioned_at: UtcMicros,
+    ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
+        self.get(definition_id, definition_version)?;
+        self.apply_lifecycle(WorkflowDefinitionLifecycleCommand {
+            definition_id: definition_id.clone(),
+            definition_version,
+            operation: WorkflowLifecycleOperation::Reject,
+            expected_revision,
+            transitioned_at,
+        })
+    }
+
+    pub fn disposition(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
+        }
+        self.authority
+            .load_disposition(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+    }
+
+    pub fn lifecycle_history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowCoordinationError> {
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
+        }
+        self.authority
+            .transition_history(definition_id, definition_version)
+            .map_err(coordination_authority_error)
+    }
+
+    fn apply_lifecycle(
+        &self,
+        command: WorkflowDefinitionLifecycleCommand,
+    ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
+        if command.expected_revision == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
+        }
+        match self
+            .authority
+            .transition(&command)
+            .map_err(coordination_authority_error)?
+        {
+            WorkflowDefinitionTransitionOutcome::Applied(disposition)
+            | WorkflowDefinitionTransitionOutcome::Replayed(disposition) => Ok(disposition),
+            WorkflowDefinitionTransitionOutcome::RevisionConflict(_) => {
+                Err(WorkflowCoordinationError::LifecycleRevisionConflict)
+            }
+            WorkflowDefinitionTransitionOutcome::IllegalTransition(_) => {
+                Err(WorkflowCoordinationError::IllegalLifecycleTransition)
+            }
+            WorkflowDefinitionTransitionOutcome::Missing => {
+                Err(WorkflowCoordinationError::DefinitionNotFound)
+            }
+        }
     }
 
     pub fn diff(

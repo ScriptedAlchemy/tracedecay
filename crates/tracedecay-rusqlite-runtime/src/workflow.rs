@@ -5,10 +5,12 @@ use std::time::Duration;
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
-    WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1,
-    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
-    WorkflowEffectTerminalV1,
+    WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionEntry,
+    WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1,
+    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1,
+    WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
@@ -19,6 +21,7 @@ use crate::exact_sql::{
     ExactSqlStatement, ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction,
     ExactSqlValue, ExactSqlValue as MigrationSqlValue,
 };
+mod disposition;
 mod effect_mutation;
 mod schema;
 
@@ -147,6 +150,13 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             ],
         )
         .map_err(|_| definition_authority_unavailable())?;
+        disposition::seed_candidate_disposition(
+            &transaction,
+            definition.definition_id(),
+            definition.definition_version(),
+            UtcMicros(0),
+        )
+        .map_err(|_| definition_authority_unavailable())?;
         transaction
             .commit()
             .map(|_| ())
@@ -191,6 +201,63 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .map_err(|_| definition_authority_unavailable())?;
         rows.rows.iter().map(decode_definition_source_row).collect()
     }
+
+    fn load_disposition(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinitionDisposition>, WorkflowDefinitionAuthorityError> {
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(|_| definition_authority_unavailable())?;
+        let disposition =
+            disposition::load_disposition_tx(&transaction, definition_id, definition_version)
+                .map_err(|_| definition_authority_unavailable())?;
+        transaction
+            .commit()
+            .map_err(|_| definition_authority_unavailable())?;
+        Ok(disposition)
+    }
+
+    fn transition(
+        &self,
+        command: &WorkflowDefinitionLifecycleCommand,
+    ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError> {
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(|_| definition_authority_unavailable())?;
+        let outcome = match disposition::apply_lifecycle_transition(&transaction, command) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                let _ = transaction.rollback();
+                return Err(definition_authority_unavailable());
+            }
+        };
+        transaction
+            .commit()
+            .map_err(|_| definition_authority_unavailable())?;
+        Ok(outcome)
+    }
+
+    fn transition_history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError> {
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(|_| definition_authority_unavailable())?;
+        let entries =
+            disposition::transition_history_tx(&transaction, definition_id, definition_version)
+                .map_err(|_| definition_authority_unavailable())?;
+        transaction
+            .commit()
+            .map_err(|_| definition_authority_unavailable())?;
+        Ok(entries)
+    }
 }
 
 fn decode_definition_source_row(
@@ -233,7 +300,9 @@ fn require_workflow_schema(
                 "SELECT name, sql FROM sqlite_master
                  WHERE type = 'table'
                    AND name IN (
+                       'workflow_definition_disposition',
                        'workflow_definition_source_journal',
+                       'workflow_definition_transition_journal',
                        'workflow_effect_journal',
                        'workflow_handoffs',
                        'workflow_schema'
@@ -689,7 +758,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         let outcome = if persisted_identity.deadline().is_elapsed_at(ended_at) {
             WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut)
         } else {
-            effect_mutation::apply_workflow_effect(&transaction, &persisted_prepared)?
+            effect_mutation::apply_workflow_effect(&transaction, &persisted_prepared, ended_at)?
         };
         let terminal = WorkflowEffectTerminalV1::new(persisted_identity, ended_at, outcome)?;
         let terminal_payload =

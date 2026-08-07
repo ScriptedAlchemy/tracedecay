@@ -8,13 +8,17 @@ use tracedecay_tool_catalog::UseCaseId;
 
 use crate::{
     AuthorityReceipt, Deadline, EffectId, IdempotencyKey, RequestId, ResolvedScope,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionDisposition,
+    WorkflowDefinitionLifecycleCommand,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowEffectOperationV1 {
     RegisterDefinition,
+    ActivateDefinition,
+    RetireDefinition,
+    RejectDefinition,
     HandoffIssue,
     HandoffRedeem,
 }
@@ -23,6 +27,9 @@ impl WorkflowEffectOperationV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RegisterDefinition => "register_definition",
+            Self::ActivateDefinition => "activate_definition",
+            Self::RetireDefinition => "retire_definition",
+            Self::RejectDefinition => "reject_definition",
             Self::HandoffIssue => "handoff_issue",
             Self::HandoffRedeem => "handoff_redeem",
         }
@@ -238,6 +245,9 @@ pub struct WorkflowEffectPreparedV1 {
 #[serde(rename_all = "snake_case", tag = "operation", content = "input")]
 pub enum WorkflowEffectMutationV1 {
     RegisterDefinition(WorkflowDefinition),
+    ActivateDefinition(WorkflowDefinitionLifecycleCommand),
+    RetireDefinition(WorkflowDefinitionLifecycleCommand),
+    RejectDefinition(WorkflowDefinitionLifecycleCommand),
     HandoffIssue(TaskHandoffGrant),
     HandoffRedeem {
         token_digest: ManifestDigest,
@@ -255,6 +265,36 @@ impl WorkflowEffectPreparedV1 {
         Self {
             input_digest,
             mutation: WorkflowEffectMutationV1::RegisterDefinition(definition),
+        }
+    }
+
+    pub fn activate_definition(
+        input_digest: ManifestDigest,
+        command: WorkflowDefinitionLifecycleCommand,
+    ) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::ActivateDefinition(command),
+        }
+    }
+
+    pub fn retire_definition(
+        input_digest: ManifestDigest,
+        command: WorkflowDefinitionLifecycleCommand,
+    ) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::RetireDefinition(command),
+        }
+    }
+
+    pub fn reject_definition(
+        input_digest: ManifestDigest,
+        command: WorkflowDefinitionLifecycleCommand,
+    ) -> Self {
+        Self {
+            input_digest,
+            mutation: WorkflowEffectMutationV1::RejectDefinition(command),
         }
     }
 
@@ -301,6 +341,15 @@ impl WorkflowEffectPreparedV1 {
             WorkflowEffectMutationV1::RegisterDefinition(_) => {
                 Some(WorkflowEffectOperationV1::RegisterDefinition)
             }
+            WorkflowEffectMutationV1::ActivateDefinition(_) => {
+                Some(WorkflowEffectOperationV1::ActivateDefinition)
+            }
+            WorkflowEffectMutationV1::RetireDefinition(_) => {
+                Some(WorkflowEffectOperationV1::RetireDefinition)
+            }
+            WorkflowEffectMutationV1::RejectDefinition(_) => {
+                Some(WorkflowEffectOperationV1::RejectDefinition)
+            }
             WorkflowEffectMutationV1::HandoffIssue(_) => {
                 Some(WorkflowEffectOperationV1::HandoffIssue)
             }
@@ -324,6 +373,9 @@ impl WorkflowEffectPreparedV1 {
 #[serde(rename_all = "snake_case", tag = "outcome", content = "payload")]
 pub enum WorkflowEffectSuccessV1 {
     DefinitionRegistered(Box<WorkflowDefinition>),
+    DefinitionActivated(Box<WorkflowDefinitionDisposition>),
+    DefinitionRetired(Box<WorkflowDefinitionDisposition>),
+    DefinitionRejected(Box<WorkflowDefinitionDisposition>),
     HandoffIssued(Box<TaskHandoffGrant>),
     HandoffRedeemed(Box<TaskHandoffRedeemed>),
 }
@@ -389,6 +441,15 @@ impl WorkflowEffectTerminalV1 {
         let success_operation = match &self.outcome {
             WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(_)) => {
                 Some(WorkflowEffectOperationV1::RegisterDefinition)
+            }
+            WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionActivated(_)) => {
+                Some(WorkflowEffectOperationV1::ActivateDefinition)
+            }
+            WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRetired(_)) => {
+                Some(WorkflowEffectOperationV1::RetireDefinition)
+            }
+            WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRejected(_)) => {
+                Some(WorkflowEffectOperationV1::RejectDefinition)
             }
             WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(_)) => {
                 Some(WorkflowEffectOperationV1::HandoffIssue)

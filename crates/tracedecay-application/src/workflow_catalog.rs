@@ -13,19 +13,35 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 8] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 11] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
         "use-case.workflow.register_definition",
+    ),
+    (
+        "activate_definition",
+        "capability.workflow.activate_definition",
+        "use-case.workflow.activate_definition",
+    ),
+    (
+        "retire_definition",
+        "capability.workflow.retire_definition",
+        "use-case.workflow.retire_definition",
+    ),
+    (
+        "reject_definition",
+        "capability.workflow.reject_definition",
+        "use-case.workflow.reject_definition",
     ),
     (
         "validate_definition",
@@ -82,6 +98,18 @@ fn workflow_binding(
             WorkflowDefinitionRegisterRequest,
             tracedecay_domain::WorkflowDefinition,
         >(operation, "/application/workflow/register-definition"),
+        "activate_definition" => available::<
+            WorkflowDefinitionActivateRequest,
+            WorkflowDefinitionDisposition,
+        >(operation, "/application/workflow/activate-definition"),
+        "retire_definition" => available::<
+            WorkflowDefinitionRetireRequest,
+            WorkflowDefinitionDisposition,
+        >(operation, "/application/workflow/retire-definition"),
+        "reject_definition" => available::<
+            WorkflowDefinitionRejectRequest,
+            WorkflowDefinitionDisposition,
+        >(operation, "/application/workflow/reject-definition"),
         "validate_definition" => available::<
             WorkflowDefinitionValidateRequest,
             WorkflowDefinitionValidation,
@@ -290,12 +318,12 @@ mod tests {
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
-        assert_eq!(registry.iter().count(), 8);
+        assert_eq!(registry.iter().count(), 11);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 8);
+        assert_eq!(advertised.len(), 11);
         for binding in advertised {
             let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
                 binding.exposure()
@@ -308,7 +336,14 @@ mod tests {
 
     #[test]
     fn workflow_mutations_declare_durable_effect_semantics() {
-        for operation in ["register_definition", "handoff_issue", "handoff_redeem"] {
+        for operation in [
+            "register_definition",
+            "activate_definition",
+            "retire_definition",
+            "reject_definition",
+            "handoff_issue",
+            "handoff_redeem",
+        ] {
             let manifest = workflow_manifest(operation).unwrap();
             assert_eq!(manifest.effect(), EffectClass::Administrative);
             assert_eq!(manifest.lifecycle(), LifecycleClass::Resumable);

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec";
+    "sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkflowColumnContractV1 {
@@ -43,6 +43,90 @@ const WORKFLOW_DEFINITION_SOURCE_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     WorkflowColumnContractV1 {
         name: "payload_digest",
         sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+];
+
+const WORKFLOW_DEFINITION_DISPOSITION_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+    WorkflowColumnContractV1 {
+        name: "definition_id",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 1,
+    },
+    WorkflowColumnContractV1 {
+        name: "definition_version",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 2,
+    },
+    WorkflowColumnContractV1 {
+        name: "state",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "revision",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "transitioned_at",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 0,
+    },
+];
+
+const WORKFLOW_DEFINITION_TRANSITION_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+    WorkflowColumnContractV1 {
+        name: "definition_id",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 1,
+    },
+    WorkflowColumnContractV1 {
+        name: "definition_version",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 2,
+    },
+    WorkflowColumnContractV1 {
+        name: "to_revision",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 3,
+    },
+    WorkflowColumnContractV1 {
+        name: "from_revision",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "operation",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "from_state",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "to_state",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "transitioned_at",
+        sql_type: "INTEGER",
         not_null: 1,
         primary_key: 0,
     },
@@ -186,6 +270,35 @@ const WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1: &str =
     PRIMARY KEY (definition_id, definition_version)
 ) STRICT";
 
+const WORKFLOW_DEFINITION_DISPOSITION_SQL_V1: &str =
+    "CREATE TABLE workflow_definition_disposition (
+    definition_id TEXT NOT NULL,
+    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+    state TEXT NOT NULL CHECK (
+        state IN ('candidate', 'validated', 'active', 'retired', 'rejected')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    transitioned_at INTEGER NOT NULL,
+    PRIMARY KEY (definition_id, definition_version)
+) STRICT";
+
+const WORKFLOW_DEFINITION_TRANSITION_JOURNAL_SQL_V1: &str =
+    "CREATE TABLE workflow_definition_transition_journal (
+    definition_id TEXT NOT NULL,
+    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+    to_revision INTEGER NOT NULL CHECK (to_revision > 1),
+    from_revision INTEGER NOT NULL CHECK (from_revision > 0),
+    operation TEXT NOT NULL CHECK (operation IN ('activate', 'retire', 'reject')),
+    from_state TEXT NOT NULL CHECK (
+        from_state IN ('candidate', 'validated', 'active', 'retired', 'rejected')
+    ),
+    to_state TEXT NOT NULL CHECK (
+        to_state IN ('candidate', 'validated', 'active', 'retired', 'rejected')
+    ),
+    transitioned_at INTEGER NOT NULL,
+    PRIMARY KEY (definition_id, definition_version, to_revision)
+) STRICT";
+
 const WORKFLOW_EFFECT_JOURNAL_SQL_V1: &str = "CREATE TABLE workflow_effect_journal (
     idempotency_key TEXT NOT NULL PRIMARY KEY,
     identity_digest TEXT NOT NULL,
@@ -222,14 +335,24 @@ pub const WORKFLOW_SCHEMA_IDENTITY_V1: &str =
 VALUES (
     1,
     1,
-    'sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec'
+    'sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f'
 )";
 
 pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
     WorkflowTableContractV1 {
+        name: "workflow_definition_disposition",
+        sql: WORKFLOW_DEFINITION_DISPOSITION_SQL_V1,
+        columns: WORKFLOW_DEFINITION_DISPOSITION_COLUMNS_V1,
+    },
+    WorkflowTableContractV1 {
         name: "workflow_definition_source_journal",
         sql: WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1,
         columns: WORKFLOW_DEFINITION_SOURCE_COLUMNS_V1,
+    },
+    WorkflowTableContractV1 {
+        name: "workflow_definition_transition_journal",
+        sql: WORKFLOW_DEFINITION_TRANSITION_JOURNAL_SQL_V1,
+        columns: WORKFLOW_DEFINITION_TRANSITION_COLUMNS_V1,
     },
     WorkflowTableContractV1 {
         name: "workflow_effect_journal",

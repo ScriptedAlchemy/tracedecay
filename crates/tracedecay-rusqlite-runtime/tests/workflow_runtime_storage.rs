@@ -6,10 +6,12 @@ use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
     ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowEffectAuthorityPortV1,
-    WorkflowEffectIdentityV1, WorkflowEffectJournalStateV1, WorkflowEffectOperationV1,
-    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectReceiptContextV1,
-    WorkflowEffectSuccessV1,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityPort,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState,
+    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalStateV1,
+    WorkflowEffectOperationV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
+    WorkflowLifecycleOperation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
@@ -207,7 +209,9 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
             connection
                 .execute_batch(
                     "DROP TABLE workflow_handoffs;
+                 DROP TABLE workflow_definition_disposition;
                  DROP TABLE workflow_definition_source_journal;
+                 DROP TABLE workflow_definition_transition_journal;
                  DROP TABLE workflow_effect_journal;
                  DROP TABLE workflow_schema;",
                 )
@@ -256,7 +260,7 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
              ) VALUES (
                  2,
                  1,
-                 'sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec'
+                 'sha256:d097ae5180e6d7645c13e448193be25b5b23ee11b784aaf42dd3a3d9995cbc8f'
              );",
         ),
         (
@@ -957,4 +961,281 @@ fn concurrent_exact_replays_all_return_the_committed_terminal() {
 
     assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
     assert_eq!(store.count("workflow_definition_source_journal"), 1);
+}
+
+fn register(authority: &WorkflowSqliteAuthority, definition: &WorkflowDefinition, input: char) {
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        input,
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        definition.clone(),
+    );
+    WorkflowEffectAuthorityPortV1::execute_effect(authority, &identity, &prepared, UtcMicros(20))
+        .unwrap();
+}
+
+fn lifecycle_command(
+    definition: &WorkflowDefinition,
+    operation: WorkflowLifecycleOperation,
+    expected_revision: u64,
+    transitioned_at: i64,
+) -> WorkflowDefinitionLifecycleCommand {
+    WorkflowDefinitionLifecycleCommand {
+        definition_id: definition.definition_id().clone(),
+        definition_version: definition.definition_version(),
+        operation,
+        expected_revision,
+        transitioned_at: UtcMicros(transitioned_at),
+    }
+}
+
+fn lifecycle_effect(
+    authority: &WorkflowSqliteAuthority,
+    operation: WorkflowEffectOperationV1,
+    input: char,
+    command: WorkflowDefinitionLifecycleCommand,
+) -> WorkflowEffectOutcomeV1 {
+    let identity = effect_identity(operation, "actor.workflow.source", input);
+    let prepared = match operation {
+        WorkflowEffectOperationV1::ActivateDefinition => {
+            WorkflowEffectPreparedV1::activate_definition(identity.input_digest().clone(), command)
+        }
+        WorkflowEffectOperationV1::RetireDefinition => {
+            WorkflowEffectPreparedV1::retire_definition(identity.input_digest().clone(), command)
+        }
+        WorkflowEffectOperationV1::RejectDefinition => {
+            WorkflowEffectPreparedV1::reject_definition(identity.input_digest().clone(), command)
+        }
+        _ => panic!("not a lifecycle operation"),
+    };
+    WorkflowEffectAuthorityPortV1::execute_effect(authority, &identity, &prepared, UtcMicros(40))
+        .unwrap()
+        .terminal()
+        .unwrap()
+        .outcome()
+        .clone()
+}
+
+#[test]
+fn registration_seeds_a_candidate_disposition_that_activation_advances() {
+    let store = RegisteredWorkflowStore::start("workflow-lifecycle-activate");
+    let authority = authority(&store);
+    let definition = definition(1, "operation.prepare.v1");
+    register(&authority, &definition, 'p');
+
+    let candidate = WorkflowDefinitionAuthorityPort::load_disposition(
+        &authority,
+        definition.definition_id(),
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(candidate.state, WorkflowDefinitionLifecycleState::Candidate);
+    assert_eq!(candidate.revision, 1);
+
+    let activated = lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::ActivateDefinition,
+        'q',
+        lifecycle_command(&definition, WorkflowLifecycleOperation::Activate, 1, 50),
+    );
+    let WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionActivated(disposition)) =
+        activated
+    else {
+        panic!("activation must succeed from the candidate disposition");
+    };
+    assert_eq!(disposition.state, WorkflowDefinitionLifecycleState::Active);
+    assert_eq!(disposition.revision, 3);
+
+    // Plan 32 keeps `candidate -> validated -> active`, so the intermediate
+    // state is an immutable history entry of its own.
+    let history = WorkflowDefinitionAuthorityPort::transition_history(
+        &authority,
+        definition.definition_id(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| (entry.from_state, entry.to_state, entry.to_revision))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                WorkflowDefinitionLifecycleState::Candidate,
+                WorkflowDefinitionLifecycleState::Validated,
+                2
+            ),
+            (
+                WorkflowDefinitionLifecycleState::Validated,
+                WorkflowDefinitionLifecycleState::Active,
+                3
+            ),
+        ]
+    );
+
+    let retired = lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::RetireDefinition,
+        'r',
+        lifecycle_command(&definition, WorkflowLifecycleOperation::Retire, 3, 60),
+    );
+    let WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRetired(retired)) =
+        retired
+    else {
+        panic!("retirement must succeed from the active disposition");
+    };
+    assert_eq!(retired.state, WorkflowDefinitionLifecycleState::Retired);
+    assert_eq!(retired.revision, 4);
+}
+
+#[test]
+fn rejection_is_terminal_and_illegal_transitions_are_conflicts() {
+    let store = RegisteredWorkflowStore::start("workflow-lifecycle-reject");
+    let authority = authority(&store);
+    let definition = definition(1, "operation.prepare.v1");
+    register(&authority, &definition, 's');
+
+    let rejected = lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::RejectDefinition,
+        't',
+        lifecycle_command(&definition, WorkflowLifecycleOperation::Reject, 1, 70),
+    );
+    let WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRejected(rejected)) =
+        rejected
+    else {
+        panic!("rejection must succeed from the candidate disposition");
+    };
+    assert_eq!(rejected.state, WorkflowDefinitionLifecycleState::Rejected);
+
+    assert_eq!(
+        lifecycle_effect(
+            &authority,
+            WorkflowEffectOperationV1::ActivateDefinition,
+            'u',
+            lifecycle_command(&definition, WorkflowLifecycleOperation::Activate, 2, 71),
+        ),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        "a rejected disposition is terminal"
+    );
+    assert_eq!(
+        lifecycle_effect(
+            &authority,
+            WorkflowEffectOperationV1::RetireDefinition,
+            'v',
+            lifecycle_command(&definition, WorkflowLifecycleOperation::Retire, 2, 72),
+        ),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        "retirement has no edge out of a rejected disposition"
+    );
+
+    let unregistered = WorkflowDefinitionLifecycleCommand {
+        definition_id: definition.definition_id().clone(),
+        definition_version: 9,
+        operation: WorkflowLifecycleOperation::Activate,
+        expected_revision: 1,
+        transitioned_at: UtcMicros(73),
+    };
+    assert_eq!(
+        lifecycle_effect(
+            &authority,
+            WorkflowEffectOperationV1::ActivateDefinition,
+            'w',
+            unregistered,
+        ),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::NotFoundOrNotAuthorized)
+    );
+}
+
+#[test]
+fn a_replayed_lifecycle_command_appends_no_second_history_entry() {
+    let store = RegisteredWorkflowStore::start("workflow-lifecycle-replay");
+    let authority = authority(&store);
+    let definition = definition(1, "operation.prepare.v1");
+    register(&authority, &definition, 'x');
+    // Registration is replay-safe over the already seeded disposition.
+    register(&authority, &definition, 'x');
+
+    let command = lifecycle_command(&definition, WorkflowLifecycleOperation::Activate, 1, 80);
+    let first = lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::ActivateDefinition,
+        'y',
+        command.clone(),
+    );
+    // A fresh idempotency key replays the same compare-and-swap against an
+    // already advanced disposition; the journal, not the effect key, is what
+    // makes it observably identical.
+    let replayed = lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::ActivateDefinition,
+        'z',
+        command,
+    );
+    assert_eq!(first, replayed);
+
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::transition_history(
+            &authority,
+            definition.definition_id(),
+            1
+        )
+        .unwrap()
+        .len(),
+        2,
+        "replay must not append a second immutable history entry"
+    );
+    assert_eq!(
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT revision FROM workflow_definition_disposition
+                     WHERE definition_id = ?1 AND definition_version = 1",
+                    [definition.definition_id().as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        }),
+        3
+    );
+}
+
+#[test]
+fn a_stale_expected_revision_is_a_compare_and_swap_conflict() {
+    let store = RegisteredWorkflowStore::start("workflow-lifecycle-cas");
+    let authority = authority(&store);
+    let definition = definition(1, "operation.prepare.v1");
+    register(&authority, &definition, 'k');
+
+    lifecycle_effect(
+        &authority,
+        WorkflowEffectOperationV1::ActivateDefinition,
+        'l',
+        lifecycle_command(&definition, WorkflowLifecycleOperation::Activate, 1, 90),
+    );
+    assert_eq!(
+        lifecycle_effect(
+            &authority,
+            WorkflowEffectOperationV1::RetireDefinition,
+            'm',
+            lifecycle_command(&definition, WorkflowLifecycleOperation::Retire, 1, 91),
+        ),
+        WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::Conflict),
+        "retiring against a superseded revision must not silently overwrite"
+    );
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::load_disposition(
+            &authority,
+            definition.definition_id(),
+            1
+        )
+        .unwrap()
+        .unwrap()
+        .state,
+        WorkflowDefinitionLifecycleState::Active
+    );
 }

@@ -8,7 +8,10 @@ use tracedecay_application::{
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant,
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService,
     TaskHandoffToken, WorkflowCoordinationError, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowDefinitionService,
+    WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState,
+    WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
+    WorkflowDefinitionTransitionOutcome,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
@@ -104,6 +107,8 @@ struct FakeDefinitionAuthority {
 #[derive(Default)]
 struct DefinitionState {
     definitions: BTreeMap<(WorkflowDefinitionId, u64), WorkflowDefinition>,
+    dispositions: BTreeMap<(WorkflowDefinitionId, u64), WorkflowDefinitionDisposition>,
+    transitions: Vec<WorkflowDefinitionTransitionEntry>,
 }
 
 impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
@@ -119,7 +124,17 @@ impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
         if state.definitions.contains_key(&key) {
             return Err(WorkflowDefinitionAuthorityError::AlreadyExists);
         }
-        state.definitions.insert(key, definition.clone());
+        state.definitions.insert(key.clone(), definition.clone());
+        state
+            .dispositions
+            .entry(key)
+            .or_insert_with(|| WorkflowDefinitionDisposition {
+                definition_id: definition.definition_id().clone(),
+                definition_version: definition.definition_version(),
+                state: WorkflowDefinitionLifecycleState::Candidate,
+                revision: 1,
+                transitioned_at: UtcMicros(0),
+            });
         Ok(())
     }
 
@@ -150,6 +165,93 @@ impl WorkflowDefinitionAuthorityPort for FakeDefinitionAuthority {
             .filter(|definition| {
                 definition_id
                     .is_none_or(|definition_id| definition.definition_id() == definition_id)
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn load_disposition(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinitionDisposition>, WorkflowDefinitionAuthorityError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .dispositions
+            .get(&(definition_id.clone(), definition_version))
+            .cloned())
+    }
+
+    fn transition(
+        &self,
+        command: &WorkflowDefinitionLifecycleCommand,
+    ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError> {
+        let key = (command.definition_id.clone(), command.definition_version);
+        let mut state = self.state.lock().unwrap();
+        let Some(current) = state.dispositions.get(&key).cloned() else {
+            return Ok(WorkflowDefinitionTransitionOutcome::Missing);
+        };
+        if current.revision != command.expected_revision {
+            let replayed = state.transitions.iter().any(|entry| {
+                entry.definition_id == command.definition_id
+                    && entry.definition_version == command.definition_version
+                    && entry.from_revision == command.expected_revision
+                    && entry.operation == command.operation
+            });
+            return Ok(if replayed {
+                WorkflowDefinitionTransitionOutcome::Replayed(current)
+            } else {
+                WorkflowDefinitionTransitionOutcome::RevisionConflict(current)
+            });
+        }
+        let Some(path) = command.operation.path_from(current.state) else {
+            return Ok(WorkflowDefinitionTransitionOutcome::IllegalTransition(
+                current,
+            ));
+        };
+        let mut lifecycle = current.state;
+        let mut revision = current.revision;
+        for next in path {
+            state.transitions.push(WorkflowDefinitionTransitionEntry {
+                definition_id: command.definition_id.clone(),
+                definition_version: command.definition_version,
+                operation: command.operation,
+                from_state: lifecycle,
+                to_state: *next,
+                from_revision: revision,
+                to_revision: revision + 1,
+                transitioned_at: command.transitioned_at,
+            });
+            lifecycle = *next;
+            revision += 1;
+        }
+        let disposition = WorkflowDefinitionDisposition {
+            definition_id: command.definition_id.clone(),
+            definition_version: command.definition_version,
+            state: lifecycle,
+            revision,
+            transitioned_at: command.transitioned_at,
+        };
+        state.dispositions.insert(key, disposition.clone());
+        Ok(WorkflowDefinitionTransitionOutcome::Applied(disposition))
+    }
+
+    fn transition_history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .transitions
+            .iter()
+            .filter(|entry| {
+                entry.definition_id == *definition_id
+                    && entry.definition_version == definition_version
             })
             .cloned()
             .collect())
@@ -686,4 +788,192 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     assert!(schema["properties"].get("token").is_none());
     assert!(schema["properties"].get("secret").is_none());
     assert!(schema["properties"].get("token_digest").is_some());
+}
+
+fn lifecycle_service() -> (
+    FakeDefinitionAuthority,
+    WorkflowDefinitionService<FakeDefinitionAuthority>,
+    RequestContext,
+) {
+    let authority = FakeDefinitionAuthority::default();
+    let service = WorkflowDefinitionService::new(authority.clone());
+    let context = workflow_context(
+        id("actor.workflow.source"),
+        id("project.workflow.coordination"),
+        id("repository.workflow.coordination"),
+        id("worktree.workflow.coordination"),
+    );
+    (authority, service, context)
+}
+
+#[test]
+fn the_retained_lifecycle_runs_candidate_validated_active_then_retired() {
+    let (_authority, service, context) = lifecycle_service();
+    let registered = service.register(&context, definition(1)).unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    let candidate = service.disposition(&definition_id, 1).unwrap();
+    assert_eq!(candidate.state, WorkflowDefinitionLifecycleState::Candidate);
+    assert_eq!(candidate.revision, 1);
+
+    // `validate` stays the pure read Plan 32 advertises; activation is what
+    // durably clears the definition and records the validated disposition it
+    // had to pass through ("... reject before activation").
+    assert_eq!(
+        service.validate(registered.clone()).unwrap().definition,
+        registered
+    );
+
+    let active = service
+        .activate(&definition_id, 1, candidate.revision, UtcMicros(10))
+        .unwrap();
+    assert_eq!(active.state, WorkflowDefinitionLifecycleState::Active);
+    assert_eq!(active.revision, 3);
+
+    let history = service.lifecycle_history(&definition_id, 1).unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| (entry.from_state, entry.to_state))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                WorkflowDefinitionLifecycleState::Candidate,
+                WorkflowDefinitionLifecycleState::Validated
+            ),
+            (
+                WorkflowDefinitionLifecycleState::Validated,
+                WorkflowDefinitionLifecycleState::Active
+            ),
+        ]
+    );
+
+    let retired = service
+        .retire(&definition_id, 1, active.revision, UtcMicros(20))
+        .unwrap();
+    assert_eq!(retired.state, WorkflowDefinitionLifecycleState::Retired);
+    assert_eq!(retired.revision, 4);
+    assert!(retired.state.is_terminal());
+}
+
+#[test]
+fn rejection_is_a_terminal_disposition_for_an_unactivated_version() {
+    let (_authority, service, context) = lifecycle_service();
+    let registered = service.register(&context, definition(1)).unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    let rejected = service.reject(&definition_id, 1, 1, UtcMicros(30)).unwrap();
+    assert_eq!(rejected.state, WorkflowDefinitionLifecycleState::Rejected);
+    assert_eq!(rejected.revision, 2);
+    assert!(rejected.state.is_terminal());
+
+    // The rejected version stays readable and immutable; only its disposition
+    // is terminal.
+    assert_eq!(service.get(&definition_id, 1).unwrap(), registered);
+    assert_eq!(
+        service
+            .activate(&definition_id, 1, rejected.revision, UtcMicros(31))
+            .unwrap_err(),
+        WorkflowCoordinationError::IllegalLifecycleTransition
+    );
+}
+
+#[test]
+fn illegal_lifecycle_transitions_are_typed_conflicts() {
+    let (_authority, service, context) = lifecycle_service();
+    let registered = service.register(&context, definition(1)).unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    // Retiring a version that never reached `active` has no legal edge.
+    assert_eq!(
+        service
+            .retire(&definition_id, 1, 1, UtcMicros(40))
+            .unwrap_err(),
+        WorkflowCoordinationError::IllegalLifecycleTransition
+    );
+
+    // A stale expected revision is a compare-and-swap conflict, not a silent
+    // overwrite.
+    assert_eq!(
+        service
+            .activate(&definition_id, 1, 7, UtcMicros(41))
+            .unwrap_err(),
+        WorkflowCoordinationError::LifecycleRevisionConflict
+    );
+
+    let active = service
+        .activate(&definition_id, 1, 1, UtcMicros(42))
+        .unwrap();
+    let retired = service
+        .retire(&definition_id, 1, active.revision, UtcMicros(43))
+        .unwrap();
+
+    // Nothing mutates a retired disposition.
+    for error in [
+        service
+            .activate(&definition_id, 1, retired.revision, UtcMicros(44))
+            .unwrap_err(),
+        service
+            .retire(&definition_id, 1, retired.revision, UtcMicros(45))
+            .unwrap_err(),
+        service
+            .reject(&definition_id, 1, retired.revision, UtcMicros(46))
+            .unwrap_err(),
+    ] {
+        assert_eq!(error, WorkflowCoordinationError::IllegalLifecycleTransition);
+    }
+
+    // An unregistered version is never found, activated or otherwise.
+    assert_eq!(
+        service
+            .activate(&definition_id, 9, 1, UtcMicros(47))
+            .unwrap_err(),
+        WorkflowCoordinationError::DefinitionNotFound
+    );
+}
+
+#[test]
+fn every_lifecycle_transition_replays_without_a_second_effect() {
+    let (authority, service, context) = lifecycle_service();
+    let registered = service.register(&context, definition(1)).unwrap();
+    let definition_id = registered.definition_id().clone();
+
+    let activated = service
+        .activate(&definition_id, 1, 1, UtcMicros(50))
+        .unwrap();
+    assert_eq!(
+        service
+            .activate(&definition_id, 1, 1, UtcMicros(51))
+            .unwrap(),
+        activated,
+        "replayed activation must return the stored disposition unchanged"
+    );
+
+    let retired = service
+        .retire(&definition_id, 1, activated.revision, UtcMicros(52))
+        .unwrap();
+    assert_eq!(
+        service
+            .retire(&definition_id, 1, activated.revision, UtcMicros(53))
+            .unwrap(),
+        retired,
+        "replayed retirement must not advance a terminal disposition"
+    );
+    assert_eq!(
+        authority.state.lock().unwrap().transitions.len(),
+        3,
+        "replay must not append a second immutable history entry"
+    );
+
+    let second = service.register(&context, definition(2)).unwrap();
+    let rejected = service
+        .reject(second.definition_id(), 2, 1, UtcMicros(54))
+        .unwrap();
+    assert_eq!(
+        service
+            .reject(second.definition_id(), 2, 1, UtcMicros(55))
+            .unwrap(),
+        rejected,
+        "replayed rejection must return the stored terminal disposition"
+    );
 }
