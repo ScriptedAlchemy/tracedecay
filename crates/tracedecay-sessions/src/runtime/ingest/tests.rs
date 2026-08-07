@@ -283,41 +283,7 @@ fn parse_git_log_commits_empty_is_empty() {
     assert!(parse_git_log_commits("").is_empty());
 }
 
-/// Hermetic Git-evidence graph runtime: publishes each manifest into an
-/// in-memory verified snapshot and serves it back, standing in for the
-/// registered project graph runtime.
-struct MemoryEvidenceGraphRuntime {
-    snapshot: std::sync::Mutex<Option<tracedecay_graph_db::VerifiedGraphSnapshot>>,
-}
-
-impl git_correlation::GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &tracedecay_graph_db::GraphGenerationManifest,
-        _idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
-        _cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
-        let snapshot = tracedecay_graph_db::VerifiedGraphSnapshot::memory(
-            manifest.clone(),
-            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
-        )?;
-        *self.snapshot.lock().unwrap() = Some(snapshot.clone());
-        Ok(snapshot)
-    }
-
-    fn verified_snapshot(
-        &self,
-        _projection: &tracedecay_graph_db::GraphProjectionIdentity,
-        _cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
-        self.snapshot.lock().unwrap().clone().ok_or_else(|| {
-            tracedecay_graph_db::GraphDbError::Unavailable {
-                message: "graph projection is not recovered into an installed verified head"
-                    .to_owned(),
-            }
-        })
-    }
-}
+use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
 
 struct GraphBackedTestStore {
     connection: tracedecay_runtime_core::db::engine::TestConnection,
@@ -405,9 +371,7 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         connection: tracedecay_runtime_core::db::engine::TestConnection::open(
             &store_dir.path().join("sessions.db"),
         ),
-        graph: MemoryEvidenceGraphRuntime {
-            snapshot: std::sync::Mutex::new(None),
-        },
+        graph: MemoryEvidenceGraphRuntime::default(),
     };
 
     // A session recording "now" — the commit lands inside its span, exactly as

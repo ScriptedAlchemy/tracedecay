@@ -8,6 +8,7 @@ use tracedecay_runtime_core::db::engine::{
 };
 
 use super::*;
+use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
 use crate::runtime::git_correlation::{
     GitEvidenceGraphRuntimePort, ensure_git_correlation_receipt_schema_in_transaction,
 };
@@ -22,12 +23,14 @@ impl GitCorrelationWriteTxn for Transaction {
 
 struct TestStore {
     connection: TestConnection,
+    graph: MemoryEvidenceGraphRuntime,
 }
 
 impl TestStore {
     fn open(path: &Path) -> Self {
         Self {
             connection: TestConnection::open(path),
+            graph: MemoryEvidenceGraphRuntime::default(),
         }
     }
 }
@@ -54,9 +57,7 @@ impl GitCorrelationSessionStore for TestStore {
     }
 
     fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
-        Err(GitCorrelationError::Unavailable(
-            "bounded backfill tests require a verified graph runtime fixture".to_owned(),
-        ))
+        Ok(&self.graph)
     }
 }
 

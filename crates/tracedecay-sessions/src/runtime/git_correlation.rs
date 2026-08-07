@@ -5,9 +5,9 @@
 //! project graph runtime and every query is evaluated from its verified
 //! snapshot. SQLite retains only resumable-history receipts and watermarks.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::SessionMessageRecord;
@@ -196,8 +196,7 @@ impl GitEvidenceProjectionV1 {
             ));
         }
         if commit_sessions.windows(2).any(|pair| {
-            pair[0].commit_sha == pair[1].commit_sha
-                && pair[0].session_id == pair[1].session_id
+            pair[0].commit_sha == pair[1].commit_sha && pair[0].session_id == pair[1].session_id
         }) {
             return Err(GitCorrelationError::Contract(
                 "Git evidence commit/session relations must be unique".to_owned(),
@@ -217,7 +216,7 @@ impl GitEvidenceProjectionV1 {
                 "Git evidence relation references an absent span".to_owned(),
             ));
         }
-        canonical_providers(&spans, &mut commit_sessions)?;
+        canonical_providers(&mut spans, &mut commit_sessions)?;
         Ok(Self {
             source_watermark,
             spans,
@@ -254,10 +253,7 @@ impl GitEvidenceProjectionV1 {
         }
     }
 
-    pub fn session_ids_for_scope(
-        &self,
-        filter: &GitScopeFilter,
-    ) -> Option<Vec<(String, String)>> {
+    pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         if filter.is_empty() {
             return None;
         }
@@ -301,7 +297,10 @@ impl GitEvidenceProjectionV1 {
                 && query.since.is_none_or(|since| span.last_ts >= since)
                 && query.until.is_none_or(|until| span.first_ts <= until)
         }) {
-            grouped.entry(span.session_id.clone()).or_default().push(span);
+            grouped
+                .entry(span.session_id.clone())
+                .or_default()
+                .push(span);
         }
         let mut hits = grouped
             .into_values()
@@ -333,10 +332,14 @@ impl GitEvidenceProjectionV1 {
         }) {
             let candidate = commit_hit(record);
             match by_session.get_mut(&record.session_id) {
-                Some(existing) if commit_hit_strength(&candidate) > commit_hit_strength(existing) => {
+                Some(existing)
+                    if commit_hit_strength(&candidate) > commit_hit_strength(existing) =>
+                {
                     *existing = candidate;
                 }
-                Some(existing) if existing.provider.is_empty() && !candidate.provider.is_empty() => {
+                Some(existing)
+                    if existing.provider.is_empty() && !candidate.provider.is_empty() =>
+                {
                     existing.provider = candidate.provider;
                 }
                 Some(_) => {}
@@ -375,10 +378,7 @@ impl GitEvidenceProjectionV1 {
             })
     }
 
-    fn commit_identities_with_producer_fallback(
-        &self,
-        sha: &str,
-    ) -> BTreeMap<String, String> {
+    fn commit_identities_with_producer_fallback(&self, sha: &str) -> BTreeMap<String, String> {
         let matching = self
             .commit_sessions
             .iter()
@@ -664,10 +664,9 @@ pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanOb
         .iter()
         .filter_map(|message| {
             let timestamp = message.timestamp?;
-            let metadata = serde_json::from_str::<serde_json::Value>(
-                message.metadata_json.as_deref()?,
-            )
-            .ok()?;
+            let metadata =
+                serde_json::from_str::<serde_json::Value>(message.metadata_json.as_deref()?)
+                    .ok()?;
             let metadata = metadata.as_object()?;
             let worktree = metadata_worktree(metadata).filter(|path| !path.is_empty())?;
             Some(SpanObservation {
@@ -774,11 +773,16 @@ fn validate_commit_record(record: &CommitSessionRecord) -> Result<(), GitCorrela
 }
 
 fn canonical_providers(
-    spans: &[SessionGitSpan],
+    spans: &mut [SessionGitSpan],
     commits: &mut [CommitSessionRecord],
 ) -> Result<(), GitCorrelationError> {
     let providers = canonical_provider_map(spans, commits)?;
-    for record in commits {
+    for span in spans.iter_mut() {
+        if let Some(provider) = providers.get(&span.session_id) {
+            span.provider.clone_from(provider);
+        }
+    }
+    for record in commits.iter_mut() {
         if let Some(provider) = providers.get(&record.session_id) {
             record.provider.clone_from(provider);
         }
@@ -800,7 +804,9 @@ fn canonical_provider_map(
                 .map(|record| (&record.session_id, &record.provider)),
         )
     {
-        let current = providers.entry(session_id.clone()).or_insert_with(String::new);
+        let current = providers
+            .entry(session_id.clone())
+            .or_insert_with(String::new);
         if current.is_empty() {
             current.clone_from(provider);
         } else if !provider.is_empty() && current != provider {
@@ -875,7 +881,12 @@ fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
         .map(|span| format!("{:?}", span.source).to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     SessionGitCorrelationHit {
-        provider: providers.iter().next().copied().unwrap_or_default().to_owned(),
+        provider: providers
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or_default()
+            .to_owned(),
         session_id: spans[0].session_id.clone(),
         branch: one_value(branches),
         worktree: one_value(worktrees),
@@ -959,6 +970,8 @@ pub use store::{
     recover_git_evidence_projection,
 };
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
