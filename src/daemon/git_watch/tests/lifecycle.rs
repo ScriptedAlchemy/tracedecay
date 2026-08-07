@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::daemon::git_watch::ownership::retire_missing_repository_owners;
+
 #[tokio::test]
 async fn pinned_project_config_is_the_only_activation_authority() {
     let repo = temp_repo();
