@@ -151,6 +151,9 @@ pub struct RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    run_control: tracedecay_application::WorkRunControlService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 /// The Work product graph authority: its verified reads and its journaled
@@ -223,6 +226,19 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.attempts
+    }
+
+    /// The run-level pause/resume authority.
+    ///
+    /// It is a separate service from [`Self::attempts`] because the aggregate
+    /// it owns is separate: an attempt lease fences one attempt, while the run
+    /// control fences every future reservation of the run.
+    pub const fn run_control(
+        &self,
+    ) -> &tracedecay_application::WorkRunControlService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.run_control
     }
 }
 
@@ -340,6 +356,14 @@ impl RegisteredGlobalDb {
             session_relation_graph: OnceLock::new(),
         };
         database.validate_authority_schema_contract().await?;
+        // Retry backoff paces re-attempts within the mount that observed the
+        // projection failure; this fresh mount re-arms queued projections so
+        // the first catch-up pass replays commit-before-ack work immediately.
+        crate::observation_projection::rearm_queued_projection_retries(&database.write_connection)
+            .await
+            .map_err(|error| {
+                registered_error("rearm queued projection retries", error.durable_detail())
+            })?;
         Ok(database)
     }
 
@@ -644,6 +668,7 @@ impl RegisteredGlobalDb {
                 storage.clone(),
                 tracedecay_application::WorkService::new(storage.clone()),
             ),
+            run_control: tracedecay_application::WorkRunControlService::new(storage.clone()),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,

@@ -140,7 +140,7 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
 }
 
 #[tokio::test]
-async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
+async fn restart_rearms_projection_retries_and_failed_attempts_resume_backoff() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -177,9 +177,48 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         matches!(error, ProjectionStoreError::Storage { .. }),
         "initial storage failure surfaced as {error:?}"
     );
+    // The backoff paces re-attempts within this mount: the deferred head is
+    // hidden from catch-up and a direct attempt is a typed deferral that does
+    // not mutate the recorded retry state. Pin the recorded deadline far in
+    // the future first so suite load cannot race the real backoff clock (the
+    // reopened mount must clear even a distant deadline).
+    let pin_deadline = |conn: &rusqlite::Connection| {
+        let far_future = tracedecay_application::clock::now_micros()
+            .0
+            .saturating_add(3_600_000_000);
+        assert_eq!(
+            conn.execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?1
+                 WHERE observation_id = ?2",
+                rusqlite::params![far_future, candidate.observation_id().as_str()],
+            )
+            .unwrap(),
+            1
+        );
+    };
+    pin_deadline(&raw_conn);
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "catch-up must stop at a deferred head within the failing mount"
+    );
+    let deferred = store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("the failing mount must honor its own retry backoff");
+    match &deferred {
+        ProjectionStoreError::RetryDeferred {
+            attempt_count: 1,
+            last_error,
+            ..
+        } => assert_eq!(last_error, &exact_error),
+        _ => panic!("deferred retry surfaced as {deferred:?}"),
+    }
     drop(raw_conn);
     drop(runtime);
 
+    // A retry deadline is scoped to the mount that observed the failure. The
+    // fresh mount re-arms the queue so its first catch-up pass replays
+    // commit-before-ack work immediately, while the attempt history persists.
     let reopened_runtime = profile_runtime(&tmp).await;
     let reopened_store = reopened_runtime
         .observation_store(HostAdmissionScope::Profile)
@@ -199,33 +238,57 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
             },
         )
         .unwrap();
-    assert_eq!(retry.0, 1);
-    assert!(retry.1 > tracedecay_application::clock::now_micros().0);
-    assert_eq!(retry.2, exact_error);
-    assert!(
-        reopened_store
-            .next_queued_observation()
-            .await
-            .unwrap()
-            .is_none(),
-        "catch-up must stop at a deferred head after restart"
-    );
-    assert!(
-        reopened_store
-            .next_queued_observation()
-            .await
-            .unwrap()
-            .is_none(),
-        "repeated catch-up must not expose the unchanged deferred head"
+    assert_eq!(retry.0, 1, "re-arm must preserve the attempt history");
+    assert_eq!(retry.1, 0, "a fresh mount must re-arm the retry deadline");
+    assert_eq!(retry.2, exact_error, "re-arm must preserve the last error");
+    assert_eq!(
+        reopened_store.next_queued_observation().await.unwrap(),
+        Some(candidate.observation_id().clone()),
+        "the re-armed head must be immediately eligible after restart"
     );
 
+    // The injected trigger is durable, so the recovery attempt fails again and
+    // resumes the escalating backoff from the recorded attempt history.
+    let recovery_attempted_at = tracedecay_application::clock::now_micros().0;
+    let recovery_error = reopened_store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("the durable trigger must fail the recovery attempt");
+    assert!(
+        matches!(recovery_error, ProjectionStoreError::Storage { .. }),
+        "recovery attempt surfaced as {recovery_error:?}"
+    );
+    let rescheduled = retry_conn
+        .query_row(
+            "SELECT attempt_count, next_retry_at_micros FROM projection_queue
+             WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rescheduled.0, 2, "the failed recovery attempt escalates");
+    assert!(
+        rescheduled.1 > recovery_attempted_at,
+        "the failed recovery attempt re-arms a future deadline"
+    );
+    // Pin the deadline again so the within-mount deferral assertions cannot
+    // race the escalated (but still short) real backoff window under load.
+    pin_deadline(&retry_conn);
+    assert!(
+        reopened_store
+            .next_queued_observation()
+            .await
+            .unwrap()
+            .is_none(),
+        "within one mount the deferred head stays hidden from catch-up"
+    );
     let second_error = reopened_store
         .project_observation(candidate.observation_id())
         .await
-        .expect_err("restart must honor durable retry backoff");
+        .expect_err("within one mount the retry backoff is honored");
     match &second_error {
         ProjectionStoreError::RetryDeferred {
-            attempt_count: 1,
+            attempt_count: 2,
             last_error,
             ..
         } => assert_eq!(last_error, &exact_error),
@@ -239,11 +302,11 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         )
         .unwrap();
     assert_eq!(
-        unchanged_attempts, 1,
+        unchanged_attempts, 2,
         "deferred retry must not re-run projection or mutate retry state"
     );
 
-    for expected_attempt in 2..=9 {
+    for expected_attempt in 3..=9 {
         retry_conn
             .execute(
                 "UPDATE projection_queue SET next_retry_at_micros = 0

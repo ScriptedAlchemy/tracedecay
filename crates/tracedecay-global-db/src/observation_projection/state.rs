@@ -193,6 +193,23 @@ pub(super) async fn projection_retry_state(
     }))
 }
 
+/// A projection retry deadline paces re-attempts within the store mount that
+/// observed the failure. A fresh mount re-arms every queued projection for
+/// immediate replay so restart recovery drains commit-before-ack work on its
+/// first catch-up pass instead of waiting out a dead process's backoff.
+/// Attempt counts and last errors persist, so a projection that fails again
+/// resumes its escalating delay from the recorded attempt history.
+pub(crate) async fn rearm_queued_projection_retries(
+    conn: &impl Executor,
+) -> ProjectionStoreResult<u64> {
+    conn.execute(
+        "UPDATE projection_queue SET next_retry_at_micros = 0 WHERE next_retry_at_micros > 0",
+        params![],
+    )
+    .await
+    .map_err(|error| storage("rearm queued projection retries", error))
+}
+
 pub(super) async fn schedule_projection_retry(
     conn: &impl Executor,
     observation_id: &CanonicalObservationIdV1,
