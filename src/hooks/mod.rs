@@ -15,9 +15,6 @@ mod cursor;
 mod cursor_compact;
 mod daemon_ports;
 mod dispatch;
-// Only called through `application::hint_outcomes`, itself test-only; see
-// that module for the full rationale.
-#[cfg(test)]
 pub mod hint_outcomes;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

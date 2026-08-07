@@ -6,6 +6,10 @@ use tracedecay_application::{
     HintOutcomePortFuture, HintOutcomePortOperation, HintToolActivity,
 };
 
+use crate::analytics_bridge::HookImportSource;
+use crate::application::hint_outcomes::{
+    HintOutcomeSettlement, correlate_registered_hint_outcomes, settle_project_hint_outcomes,
+};
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
@@ -240,8 +244,14 @@ async fn outcome_events(
     .expect("query outcomes")
 }
 
+fn registered_profile_database(db: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
+    db.registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database")
+}
+
 async fn correlate(db: &HostAdmissionTestRuntimeV1, now_secs: i64) -> HintOutcomeStats {
-    db.correlate_hint_outcomes_for_test(HostAdmissionScope::Profile, PROJECT, now_secs)
+    let database = registered_profile_database(db);
+    correlate_registered_hint_outcomes(database, database, PROJECT, now_secs)
         .await
         .expect("correlate hint outcomes through application port")
 }
@@ -447,6 +457,152 @@ async fn correlation_is_idempotent_across_runs() {
         }
     );
     assert_eq!(outcome_events(&db).await.len(), 1);
+}
+
+#[tokio::test]
+async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir).await;
+    let database = registered_profile_database(&db);
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
+
+    // Hint injection wrote its JSONL row (the hooks' production write path)…
+    let jsonl_path = dir.path().join("hook_analytics.jsonl");
+    let row = serde_json::json!({
+        "agent": "claude",
+        "event": "hint_emitted",
+        "category": "search",
+        "hint_id": "hint-prod-1",
+        "session_id": "s1",
+        "ts_unix_ms": HINT_TS * 1000,
+    });
+    std::fs::write(&jsonl_path, format!("{row}\n")).unwrap();
+
+    // …and a matching tracedecay tool later fired in the ingested session.
+    seed_session(&db, "claude", "s1").await;
+    seed_message(
+        &db,
+        Msg::new("claude", "s1", HINT_TS + 60).tools("tracedecay_context"),
+    )
+    .await;
+
+    // The exact call the daemon transcript ingest makes after new session
+    // activity lands.
+    let settlement = settle_project_hint_outcomes(
+        Some(database),
+        Some(database),
+        vec![HookImportSource {
+            path: jsonl_path,
+            default_project_root: Some(project_root.clone()),
+        }],
+        &project_root,
+        HINT_TS + 120,
+    )
+    .await;
+    let HintOutcomeSettlement::Settled {
+        imported_events,
+        import_errors,
+        stats,
+    } = settlement
+    else {
+        panic!("expected a settled pass, got {settlement:?}");
+    };
+    assert_eq!(imported_events, 1);
+    assert!(import_errors.is_empty(), "no source may fail: {import_errors:?}");
+    assert_eq!(
+        stats,
+        HintOutcomeStats {
+            scanned: 1,
+            acted: 1,
+            ignored: 0,
+            unresolved: 0,
+        }
+    );
+
+    // The recorded outcome is retrievable through the existing read surface —
+    // the same counts + summary the `tracedecay_analytics` hints section and
+    // the dashboard analytics API serve.
+    let counts = database
+        .query_analytics_hint_counts(Some(&project_id), 0)
+        .await
+        .expect("query hint counts");
+    let summary = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
+    let by_category = summary["by_category"].as_array().expect("category rows");
+    let search = by_category
+        .iter()
+        .find(|row| row["category"] == "search")
+        .expect("search category row");
+    assert_eq!(search["emitted"], 1);
+    assert_eq!(search["followed"], 1);
+    assert_eq!(search["ignored"], 0);
+
+    // Idempotency across passes holds through the settlement entry point too.
+    let settlement = settle_project_hint_outcomes(
+        Some(database),
+        Some(database),
+        Vec::new(),
+        &project_root,
+        HINT_TS + 240,
+    )
+    .await;
+    let HintOutcomeSettlement::Settled { stats, .. } = settlement else {
+        panic!("expected a settled pass, got {settlement:?}");
+    };
+    assert_eq!(stats, HintOutcomeStats::default());
+}
+
+#[tokio::test]
+async fn settlement_without_a_mounted_authority_stays_typed_unavailable() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir).await;
+    let database = registered_profile_database(&db);
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+
+    let missing_accounting =
+        settle_project_hint_outcomes(None, Some(database), Vec::new(), &project_root, HINT_TS)
+            .await;
+    assert!(matches!(
+        missing_accounting,
+        HintOutcomeSettlement::Unavailable {
+            reason: "accounting_authority_unavailable",
+        }
+    ));
+    assert_eq!(
+        missing_accounting.as_json(),
+        serde_json::json!({
+            "status": "unavailable",
+            "reason": "accounting_authority_unavailable",
+        })
+    );
+
+    let missing_sessions =
+        settle_project_hint_outcomes(Some(database), None, Vec::new(), &project_root, HINT_TS)
+            .await;
+    assert!(matches!(
+        missing_sessions,
+        HintOutcomeSettlement::Unavailable {
+            reason: "project_session_authority_unavailable",
+        }
+    ));
+}
+
+#[test]
+fn failed_settlement_renders_the_typed_port_error() {
+    let failed = HintOutcomeSettlement::Failed(HintOutcomePortError::new(
+        HintOutcomePortOperation::AppendOutcomes,
+        "injected failure",
+    ));
+    assert_eq!(
+        failed.as_json(),
+        serde_json::json!({
+            "status": "failed",
+            "operation": "append_outcomes",
+            "detail": "injected failure",
+        })
+    );
 }
 
 #[tokio::test]

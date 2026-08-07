@@ -62,9 +62,8 @@ impl HintCategory {
     }
 
     /// The tracedecay MCP tools this category steers toward. Used by the
-    /// hint-outcome correlator (test-only; see `super::hint_outcomes`) to
-    /// decide whether a fired tool satisfied a hint.
-    #[cfg(test)]
+    /// hint-outcome correlator (`super::hint_outcomes`) to decide whether a
+    /// fired tool satisfied a hint.
     pub(crate) fn expected_tools(self) -> &'static [&'static str] {
         self.spec().expected_tools
     }
@@ -73,9 +72,7 @@ impl HintCategory {
 /// Machine-readable expected-tool list for a hint-category `key` (the value
 /// stored in `analytics_events.hint_category`), or `None` when the key is
 /// unknown. Lets the hint-outcome correlator map an emitted hint to the tools
-/// that would satisfy it without re-parsing hint prose. Test-only: the sole
-/// caller is `hooks::hint_outcomes`, which is itself `#[cfg(test)]`.
-#[cfg(test)]
+/// that would satisfy it without re-parsing hint prose.
 pub(crate) fn expected_tools_for_key(key: &str) -> Option<&'static [&'static str]> {
     HintCategory::from_key(key).map(HintCategory::expected_tools)
 }
@@ -89,13 +86,9 @@ struct HintCategorySpec {
     context: &'static str,
     /// Machine-readable list of the tracedecay MCP tools this hint steers the
     /// model toward, derived from the tools named in `context`. The
-    /// hint-outcome correlator (`super::hint_outcomes`, test-only) treats a
-    /// hint as "acted" when one of these tools fires in the session after the
-    /// hint, instead of re-parsing the prose. Keep in sync with `context`.
-    /// Read only by the test-only `expected_tools()` accessor and by
-    /// `tool_hints::tests`; kept unconditional (rather than `#[cfg(test)]`)
-    /// so every `CATEGORY_SPECS` literal below does not need per-field cfg.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// hint-outcome correlator (`super::hint_outcomes`) treats a hint as
+    /// "acted" when one of these tools fires in the session after the hint,
+    /// instead of re-parsing the prose. Keep in sync with `context`.
     expected_tools: &'static [&'static str],
     nonblocking: bool,
 }
