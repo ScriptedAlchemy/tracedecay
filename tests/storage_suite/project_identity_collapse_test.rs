@@ -293,7 +293,7 @@ async fn common_dir_aliases_mint_one_project_and_one_store_authority() {
             last_write_at: None,
         })
         .await
-        .is_none()
+        .is_err()
     );
 
     let context = db
