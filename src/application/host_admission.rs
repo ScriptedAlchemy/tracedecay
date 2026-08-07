@@ -6,7 +6,7 @@ use std::sync::Arc;
 pub use tracedecay_usecases::host_admission::*;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
@@ -117,8 +117,27 @@ impl HostAdmissionTestRuntimeV1 {
         let profile_registered = session_registry.profile_sessions().await?;
         let (project_id, project_registered) = if let Some((project_root, project_id)) = project {
             let registered = session_registry
-                .project_sessions(project_id.clone(), [project_root])
+                .project_sessions(project_id.clone(), [project_root.clone()])
                 .await?;
+            // Production project open binds the retained project graph
+            // runtime to the registered project-sessions authority before
+            // any ingest runs; persist-time git-evidence publication
+            // requires that mount, so the canonical test runtime provides
+            // the same composition.
+            let project_database = session_registry
+                .project_memory(project_id.clone(), [project_root])
+                .await?;
+            let graph_runtime = session_registry
+                .retain_project_graph_runtime(project_id.clone(), project_database)
+                .await?;
+            let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
+            registered
+                .bind_project_graph_runtime(graph_runtime)
+                .map_err(|_| TraceDecayError::Database {
+                    operation: "bind test runtime project graph".to_owned(),
+                    message: "project graph runtime was already mounted for project sessions"
+                        .to_owned(),
+                })?;
             (Some(project_id), Some(registered))
         } else {
             (None, None)
