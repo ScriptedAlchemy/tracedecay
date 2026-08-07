@@ -268,7 +268,7 @@ fn snapshots_can_cross_daemon_worker_boundaries() {
 
 fn walsync_db(dir: &tempfile::TempDir) -> Arc<GraphDb> {
     GraphDb::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(dir.path().join("graph")),
+        location: GraphDbLocation::Persistent(dir.path().join("graph.grafeo")),
         expected_format: GraphFormatVersion::new(2).unwrap(),
         durability: GraphDurability::WalSync,
         cancellation: Arc::new(NeverCancelled),
