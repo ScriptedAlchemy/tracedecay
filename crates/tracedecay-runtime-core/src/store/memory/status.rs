@@ -7,17 +7,17 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreResult, ProjectMemoryFeedbackRepairProgressV1,
-    ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
-    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1,
+    FactStoreResult, ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryMemoryAlgebraV1,
+    ProjectMemoryMemoryFeedbackFunnelV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1, ProjectMemoryResult,
 };
 
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION,
     compatibility_source_store_id, nonnegative_u64, row_i64, storage_error, storage_message,
 };
 
-async fn compatibility_owner_status_counts_tx(
+async fn project_memory_owner_status_counts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> FactStoreResult<(u64, u64, u64, [u64; 4], u64, u64, u64, u64, u64, u64)> {
@@ -54,65 +54,65 @@ async fn compatibility_owner_status_counts_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility status is missing",
             )
         })?;
     let fact_count = nonnegative_u64(
-        row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
         "fact count",
     )?;
     let trust = [
         nonnegative_u64(
-            row_i64(&row, 1, COMPATIBILITY_WRITE_OPERATION)?,
+            row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?,
             "trust count",
         )?,
         nonnegative_u64(
-            row_i64(&row, 2, COMPATIBILITY_WRITE_OPERATION)?,
+            row_i64(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?,
             "trust count",
         )?,
         nonnegative_u64(
-            row_i64(&row, 3, COMPATIBILITY_WRITE_OPERATION)?,
+            row_i64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?,
             "trust count",
         )?,
         nonnegative_u64(
-            row_i64(&row, 4, COMPATIBILITY_WRITE_OPERATION)?,
+            row_i64(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
             "trust count",
         )?,
     ];
     let below_default = nonnegative_u64(
-        row_i64(&row, 5, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 5, PROJECT_MEMORY_WRITE_OPERATION)?,
         "trust count",
     )?;
     let helpful = nonnegative_u64(
-        row_i64(&row, 6, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 6, PROJECT_MEMORY_WRITE_OPERATION)?,
         "helpful count",
     )?;
     let unhelpful = nonnegative_u64(
-        row_i64(&row, 7, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 7, PROJECT_MEMORY_WRITE_OPERATION)?,
         "unhelpful count",
     )?;
     let retrieval_total = nonnegative_u64(
-        row_i64(&row, 8, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 8, PROJECT_MEMORY_WRITE_OPERATION)?,
         "retrieval total",
     )?;
     let access_total = nonnegative_u64(
-        row_i64(&row, 9, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 9, PROJECT_MEMORY_WRITE_OPERATION)?,
         "access total",
     )?;
     let retrieved_fact_count = nonnegative_u64(
-        row_i64(&row, 10, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 10, PROJECT_MEMORY_WRITE_OPERATION)?,
         "retrieved fact count",
     )?;
     let rated_fact_count = nonnegative_u64(
-        row_i64(&row, 11, COMPATIBILITY_WRITE_OPERATION)?,
+        row_i64(&row, 11, PROJECT_MEMORY_WRITE_OPERATION)?,
         "rated fact count",
     )?;
     Ok((
@@ -144,18 +144,18 @@ async fn compatibility_owner_has_dirty_banks_tx(
             params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     Ok(rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .is_some())
 }
 
-pub(super) async fn compatibility_memory_status_tx(
+pub(super) async fn project_memory_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1> {
+) -> ProjectMemoryResult<ProjectMemoryMemoryStatusV1> {
     let (
         fact_count,
         helpful_count,
@@ -167,7 +167,7 @@ pub(super) async fn compatibility_memory_status_tx(
         retrieved_fact_count,
         rated_fact_count,
         feedback_total,
-    ) = compatibility_owner_status_counts_tx(transaction, owner).await?;
+    ) = project_memory_owner_status_counts_tx(transaction, owner).await?;
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let mut entity_rows = transaction
@@ -188,19 +188,19 @@ pub(super) async fn compatibility_memory_status_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let entity_row = entity_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility entity count is missing",
             )
         })?;
     let entity_count = nonnegative_u64(
-        row_i64(&entity_row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&entity_row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "entity count",
     )?;
     let mut missing_rows = transaction
@@ -236,19 +236,19 @@ pub(super) async fn compatibility_memory_status_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let missing_row = missing_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility missing vector count is missing",
             )
         })?;
     let missing_vector_count = nonnegative_u64(
-        row_i64(&missing_row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&missing_row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "missing vector count",
     )?;
     let dirty_banks = compatibility_owner_has_dirty_banks_tx(transaction, owner).await?;
@@ -260,19 +260,19 @@ pub(super) async fn compatibility_memory_status_tx(
             params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let bank_row = bank_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility bank count is missing",
             )
         })?;
     let bank_count = nonnegative_u64(
-        row_i64(&bank_row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&bank_row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "bank count",
     )?;
     let projection_state = if missing_vector_count == 0 && !dirty_banks {

@@ -73,11 +73,11 @@ pub enum FactProposalStoreError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FactCompatibilityStoreError {
+pub enum ProjectMemoryStoreError {
     #[error(transparent)]
     Store(#[from] FactStoreError),
     #[error(transparent)]
     Proposal(#[from] FactProposalStoreError),
 }
 
-pub type FactCompatibilityResult<T> = Result<T, FactCompatibilityStoreError>;
+pub type ProjectMemoryResult<T> = Result<T, ProjectMemoryStoreError>;

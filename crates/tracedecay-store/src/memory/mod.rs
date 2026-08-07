@@ -12,8 +12,8 @@ mod traits;
 mod write;
 
 pub use error::{
-    FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
-    FactStoreResult,
+    FactProposalStoreError, FactStoreError, FactStoreResult, ProjectMemoryResult,
+    ProjectMemoryStoreError,
 };
 pub use project_memory::{
     FactProposalPromotionStateV1, ProjectMemoryDashboardEntityV1,
@@ -35,19 +35,19 @@ pub use project_memory::{
     ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
-    ProjectMemoryFactRelationV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRepairVectorV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
-    ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchHitV1, ProjectMemoryFactSearchKindV1,
-    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1, ProjectMemoryFactSourceV1,
-    ProjectMemoryFactTargetV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
-    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryRelationProvenanceV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRelationV1,
+    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
+    ProjectMemoryFactRepairVectorV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchHitV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
+    ProjectMemoryFactSourceV1, ProjectMemoryFactTargetV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1, ProjectMemoryLegacyEntityTargetV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryRelationProvenanceV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use queries::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
@@ -64,12 +64,12 @@ pub use telemetry::{
     ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
     ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1,
 };
-pub use traits::{FactCompatibilityStore, FactProposalStore, FactStore};
+pub use traits::{FactProposalStore, FactStore, ProjectMemoryFactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};
 
 #[cfg(test)]
 use project_memory::dashboard::{
-    MAX_COMPATIBILITY_DASHBOARD_OPLOG, MAX_COMPATIBILITY_DASHBOARD_VECTORS,
+    MAX_PROJECT_MEMORY_DASHBOARD_OPLOG, MAX_PROJECT_MEMORY_DASHBOARD_VECTORS,
 };
 #[cfg(test)]
 use queries::MAX_LINEAGE_LIMIT;
@@ -81,9 +81,9 @@ use tracedecay_domain::{
 #[cfg(test)]
 use write::{MAX_FACT_WRITE_BATCH_EVENTS, MAX_FACT_WRITE_BATCH_NEW_ANCHORS};
 
-const MAX_COMPATIBILITY_SEARCH_BYTES: usize = 4 * 1024;
+const MAX_PROJECT_MEMORY_SEARCH_BYTES: usize = 4 * 1024;
 
-const MAX_COMPATIBILITY_REASON_BYTES: usize = 4 * 1024;
+const MAX_PROJECT_MEMORY_REASON_BYTES: usize = 4 * 1024;
 
 /// Deterministic current or as-of projection of one fact's lineage.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

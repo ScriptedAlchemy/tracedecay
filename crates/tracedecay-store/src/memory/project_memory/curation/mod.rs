@@ -3,9 +3,9 @@ mod merge;
 mod operations;
 mod validate;
 
-const MAX_COMPATIBILITY_CURATION_OPERATIONS: usize = 256;
+const MAX_PROJECT_MEMORY_CURATION_OPERATIONS: usize = 256;
 
-pub(super) const MAX_COMPATIBILITY_CURATION_TARGETS: usize = 256;
+pub(super) const MAX_PROJECT_MEMORY_CURATION_TARGETS: usize = 256;
 
 pub use fact_commands::{
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,

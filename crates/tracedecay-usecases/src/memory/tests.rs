@@ -195,11 +195,11 @@ impl FactProposalStore for FakeAuthority {
     }
 }
 
-impl FactCompatibilityStore for FakeAuthority {
-    async fn list_compatibility_facts(
+impl ProjectMemoryFactStore for FakeAuthority {
+    async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
-    ) -> Result<ProjectMemoryFactPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("list");
         Ok(ProjectMemoryFactPageV1::new(
             query.owner().clone(),
@@ -208,10 +208,10 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn search_compatibility_facts(
+    async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("search");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
@@ -220,10 +220,10 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn probe_compatibility_facts(
+    async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("probe");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
@@ -232,10 +232,10 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn related_compatibility_facts(
+    async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("related");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
@@ -244,10 +244,10 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn reason_compatibility_facts(
+    async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("reason");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
@@ -256,10 +256,10 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn find_compatibility_contradictions(
+    async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
-    ) -> Result<ProjectMemoryFactContradictionPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactContradictionPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -270,18 +270,18 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn get_compatibility_fact(
+    async fn get_project_memory_fact(
         &self,
         _target: ProjectMemoryFactTargetV1,
-    ) -> Result<Option<ProjectMemoryFactProjectionV1>, FactCompatibilityStoreError> {
+    ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("get");
         Ok(None)
     }
 
-    async fn compatibility_fact_history(
+    async fn project_memory_fact_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
-    ) -> Result<ProjectMemoryFactHistoryV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactHistoryV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("history");
         let Some(fact_id) = query.target().canonical_fact_id() else {
             return Err(compatibility_fixture_error());
@@ -294,26 +294,26 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn compatibility_memory_status(
+    async fn project_memory_status(
         &self,
         owner: FactOwnerV1,
-    ) -> Result<ProjectMemoryMemoryStatusV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("status");
-        compatibility_memory_status(owner)
+        project_memory_status(owner)
     }
 
-    async fn inspect_compatibility_fact(
+    async fn inspect_project_memory_fact(
         &self,
         _target: ProjectMemoryFactTargetV1,
-    ) -> Result<Option<ProjectMemoryFactInspectionV1>, FactCompatibilityStoreError> {
+    ) -> Result<Option<ProjectMemoryFactInspectionV1>, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("inspect");
         Ok(None)
     }
 
-    async fn add_compatibility_fact(
+    async fn add_project_memory_fact(
         &self,
         _request: ProjectMemoryFactAddCommandV1,
-    ) -> Result<ProjectMemoryFactAddOutcomeV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactAddOutcomeV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("add");
         Ok(ProjectMemoryFactAddOutcomeV1::new(
             None,
@@ -324,35 +324,35 @@ impl FactCompatibilityStore for FakeAuthority {
         )?)
     }
 
-    async fn update_compatibility_fact(
+    async fn update_project_memory_fact(
         &self,
         _request: ProjectMemoryFactUpdateCommandV1,
-    ) -> Result<ProjectMemoryFactUpdateOutcomeV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("update");
         Err(compatibility_fixture_error())
     }
 
-    async fn remove_compatibility_fact(
+    async fn remove_project_memory_fact(
         &self,
         _request: ProjectMemoryFactRemoveCommandV1,
-    ) -> Result<ProjectMemoryFactRemoveOutcomeV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("remove");
         Err(compatibility_fixture_error())
     }
 
-    async fn record_compatibility_fact_feedback(
+    async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
-    ) -> Result<ProjectMemoryFactFeedbackOutcomeV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("feedback");
         self.feedback_requests.lock().unwrap().push(request);
         Err(compatibility_fixture_error())
     }
 
-    async fn compatibility_fact_feedback_history(
+    async fn project_memory_fact_feedback_history(
         &self,
         _query: ProjectMemoryFactFeedbackHistoryQueryV1,
-    ) -> Result<ProjectMemoryFactFeedbackHistoryV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -364,10 +364,10 @@ impl FactCompatibilityStore for FakeAuthority {
             .ok_or_else(compatibility_fixture_error)
     }
 
-    async fn find_compatibility_fact_by_content_digest(
+    async fn find_project_memory_fact_by_content_digest(
         &self,
         _query: ProjectMemoryFactContentDigestQueryV1,
-    ) -> Result<Option<ProjectMemoryFactProjectionV1>, FactCompatibilityStoreError> {
+    ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -375,34 +375,34 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(None)
     }
 
-    async fn apply_compatibility_fact_curation(
+    async fn apply_project_memory_fact_curation(
         &self,
         _request: ProjectMemoryFactCurationBatchV1,
-    ) -> Result<ProjectMemoryFactCurationReceiptV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactCurationReceiptV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("curation");
         Err(compatibility_fixture_error())
     }
 
-    async fn merge_compatibility_facts(
+    async fn merge_project_memory_facts(
         &self,
         _request: ProjectMemoryFactMergeCommandV1,
-    ) -> Result<ProjectMemoryFactMergeOutcomeV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactMergeOutcomeV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("merge");
         Err(compatibility_fixture_error())
     }
 
-    async fn repair_compatibility_memory(
+    async fn repair_project_memory(
         &self,
         _request: ProjectMemoryMemoryRepairCommandV1,
-    ) -> Result<ProjectMemoryMemoryRepairStatsV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryMemoryRepairStatsV1, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("repair");
         Ok(ProjectMemoryMemoryRepairStatsV1::default())
     }
 
-    async fn dashboard_compatibility_memory_overview(
+    async fn dashboard_project_memory_overview(
         &self,
         _query: ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -410,10 +410,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn dashboard_compatibility_fact_detail(
+    async fn dashboard_project_memory_fact_detail(
         &self,
         _query: ProjectMemoryDashboardFactDetailQueryV1,
-    ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, FactCompatibilityStoreError> {
+    ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -421,10 +421,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(None)
     }
 
-    async fn dashboard_compatibility_vector_points(
+    async fn dashboard_project_memory_vector_points(
         &self,
         _query: ProjectMemoryDashboardVectorPointsQueryV1,
-    ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, FactCompatibilityStoreError> {
+    ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -432,10 +432,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(vec![])
     }
 
-    async fn dashboard_compatibility_memory_oplog(
+    async fn dashboard_project_memory_oplog(
         &self,
         _query: ProjectMemoryDashboardOplogQueryV1,
-    ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, FactCompatibilityStoreError> {
+    ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -443,20 +443,20 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(vec![])
     }
 
-    async fn record_compatibility_fact_retrieval(
+    async fn record_project_memory_fact_retrieval(
         &self,
         _request: ProjectMemoryFactRetrievalCommandV1,
-    ) -> Result<Vec<ProjectMemoryFactProjectionV1>, FactCompatibilityStoreError> {
+    ) -> Result<Vec<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
         self.compatibility_calls.lock().unwrap().push("retrieval");
         Ok(vec![])
     }
 
-    async fn submit_compatibility_fact_proposal(
+    async fn submit_project_memory_fact_proposal(
         &self,
         _proposal_id: ProvenanceId,
         _request: ProjectMemoryFactAddCommandV1,
         _submitter: Option<ActorId>,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -464,11 +464,11 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn get_compatibility_fact_proposal(
+    async fn get_project_memory_fact_proposal(
         &self,
         _owner: FactOwnerV1,
         _proposal_id: ProvenanceId,
-    ) -> Result<Option<ProjectMemoryFactProposalRecordV1>, FactCompatibilityStoreError> {
+    ) -> Result<Option<ProjectMemoryFactProposalRecordV1>, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -476,13 +476,13 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(None)
     }
 
-    async fn list_compatibility_fact_proposals(
+    async fn list_project_memory_fact_proposals(
         &self,
         _owner: FactOwnerV1,
         _state: Option<ProjectMemoryFactProposalStateV1>,
         _after_proposal_id: Option<ProvenanceId>,
         _limit: usize,
-    ) -> Result<ProjectMemoryFactProposalPageV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactProposalPageV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -490,10 +490,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn count_pending_compatibility_fact_proposals(
+    async fn count_pending_project_memory_fact_proposals(
         &self,
         _owner: FactOwnerV1,
-    ) -> Result<u64, FactCompatibilityStoreError> {
+    ) -> Result<u64, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -501,14 +501,14 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(0)
     }
 
-    async fn reject_compatibility_fact_proposal(
+    async fn reject_project_memory_fact_proposal(
         &self,
         _owner: FactOwnerV1,
         _proposal_id: ProvenanceId,
         _expected_revision: ProjectMemoryFactProposalRevisionV1,
         _reviewer: ActorId,
         _reason: String,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -516,10 +516,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn promote_compatibility_fact_proposal(
+    async fn promote_project_memory_fact_proposal(
         &self,
         _request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -527,10 +527,10 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn promote_compatibility_fact_proposal_with_disposition(
+    async fn promote_project_memory_fact_proposal_with_disposition(
         &self,
         _request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalPromotionResultV1, FactCompatibilityStoreError> {
+    ) -> Result<ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryStoreError> {
         self.compatibility_calls
             .lock()
             .unwrap()
@@ -539,15 +539,15 @@ impl FactCompatibilityStore for FakeAuthority {
     }
 }
 
-fn compatibility_fixture_error() -> FactCompatibilityStoreError {
-    FactCompatibilityStoreError::Store(FactStoreError::Contract(DomainError::NonCanonical {
+fn compatibility_fixture_error() -> ProjectMemoryStoreError {
+    ProjectMemoryStoreError::Store(FactStoreError::Contract(DomainError::NonCanonical {
         field: "fake compatibility authority",
     }))
 }
 
-fn compatibility_memory_status(
+fn project_memory_status(
     owner: FactOwnerV1,
-) -> Result<ProjectMemoryMemoryStatusV1, FactCompatibilityStoreError> {
+) -> Result<ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError> {
     Ok(ProjectMemoryMemoryStatusV1::new(
         owner,
         0,
@@ -834,7 +834,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
 
     assert!(
         application
-            .list_compatibility_facts(
+            .list_project_memory_facts(
                 ProjectMemoryFactListQueryV1::new(owner(), None, None, None, 10).unwrap(),
             )
             .await
@@ -844,7 +844,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     );
     assert!(
         application
-            .search_compatibility_facts(search)
+            .search_project_memory_facts(search)
             .await
             .unwrap()
             .hits()
@@ -852,7 +852,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     );
     assert!(
         application
-            .get_compatibility_fact(target.clone())
+            .get_project_memory_fact(target.clone())
             .await
             .unwrap()
             .is_none()
@@ -868,16 +868,12 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
             .is_empty()
     );
     assert_eq!(
-        application
-            .compatibility_memory_status()
-            .await
-            .unwrap()
-            .owner(),
+        application.project_memory_status().await.unwrap().owner(),
         &owner()
     );
     assert!(
         application
-            .inspect_compatibility_fact(target)
+            .inspect_project_memory_fact(target)
             .await
             .unwrap()
             .is_none()
@@ -897,7 +893,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
 async fn compatibility_read_owner_mismatch_never_reaches_authority() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let error = application
-        .list_compatibility_facts(
+        .list_project_memory_facts(
             ProjectMemoryFactListQueryV1::new(FactOwnerV1::Profile, None, None, None, 10).unwrap(),
         )
         .await

@@ -3,7 +3,7 @@ use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId}
 use super::super::queries::MAX_CURRENT_LIMIT;
 use super::super::{
     FactCommitOutcome, FactStoreError, FactStoreResult, FactWriteBatch,
-    MAX_COMPATIBILITY_REASON_BYTES, validate_owned_fact_id,
+    MAX_PROJECT_MEMORY_REASON_BYTES, validate_owned_fact_id,
 };
 use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactMappingV1};
 
@@ -222,7 +222,7 @@ impl ProjectMemoryFactProposalRecordV1 {
             reviewer.validate()?;
         }
         if reason.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact proposal reason",

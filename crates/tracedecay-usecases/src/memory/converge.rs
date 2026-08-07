@@ -14,7 +14,7 @@
 use tracedecay_application::{
     DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1, converge_derived_memory,
 };
-use tracedecay_store::{FactCompatibilityStore, ProjectMemoryFeedbackRepairProgressV1};
+use tracedecay_store::{ProjectMemoryFactStore, ProjectMemoryFeedbackRepairProgressV1};
 
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;
@@ -47,7 +47,7 @@ const fn feedback_history_repair(
     }
 }
 
-impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A> {
+impl<A: ProjectMemoryFactStore> DerivedMemoryRepairPort for MemoryApplication<A> {
     type Error = MemoryApplicationError;
 
     async fn repair_derived_memory(
@@ -65,7 +65,7 @@ impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A>
     }
 }
 
-impl<A: FactCompatibilityStore> MemoryApplication<A> {
+impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Runs exactly one bounded compatibility-memory repair pass.
     ///
     /// `action` names the trigger (e.g. `"dashboard-startup-repair"`) used

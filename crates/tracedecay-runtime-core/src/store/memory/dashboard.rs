@@ -10,34 +10,34 @@ use serde_json::Value;
 
 use tracedecay_domain::{FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreError, LegacyFactQuery,
-    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
-    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
-    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
-    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactTargetV1,
+    FactStoreError, LegacyFactQuery, ProjectMemoryDashboardFactDetailQueryV1,
+    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryResult,
 };
 
-use super::crud::compatibility_fact_history_tx;
+use super::crud::project_memory_fact_history_tx;
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, OwnerKey, compatibility_source_store_id, from_json,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, compatibility_source_store_id, from_json,
     nonnegative_u64, row_i64, row_optional_i64, row_optional_string, row_string, storage_error,
     storage_message,
 };
 use super::projection::{
-    compatibility_legacy_mapping_tx, load_compatibility_projection_tx,
-    load_compatibility_projections_tx, resolve_compatibility_target_tx,
+    load_project_memory_projection_tx, load_project_memory_projections_tx,
+    project_memory_legacy_mapping_tx, resolve_project_memory_target_tx,
 };
 
 // Dashboard reads deliberately start from the immutable owner-bound V1 mapping.
 // The legacy tables remain a compatibility projection, never an alternate fact
 // authority or a source for ownerless rows.
-async fn dashboard_compatibility_fact_summaries_tx(
+async fn dashboard_project_memory_fact_summaries_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: usize,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardFactSummaryV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardFactSummaryV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(limit).map_err(|_| FactStoreError::InvalidQueryLimit {
@@ -67,18 +67,18 @@ async fn dashboard_compatibility_fact_summaries_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut mapped = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let fact_id = FactId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+        let fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
             .map_err(FactStoreError::from)?;
         mapped.push((
             fact_id,
-            row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)? != 0,
+            row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)? != 0,
         ));
     }
     drop(rows);
@@ -86,10 +86,10 @@ async fn dashboard_compatibility_fact_summaries_tx(
         .iter()
         .map(|(fact_id, _)| fact_id.clone())
         .collect::<Vec<_>>();
-    let projections = load_compatibility_projections_tx(transaction, owner, &fact_ids).await?;
+    let projections = load_project_memory_projections_tx(transaction, owner, &fact_ids).await?;
     if projections.len() != mapped.len() {
         return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             "owner-bound dashboard mapping has no canonical fact projection",
         )
         .into());
@@ -107,11 +107,11 @@ async fn dashboard_compatibility_fact_summaries_tx(
         .collect())
 }
 
-async fn dashboard_compatibility_entities_tx(
+async fn dashboard_project_memory_entities_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: usize,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(limit).map_err(|_| FactStoreError::InvalidQueryLimit {
@@ -148,28 +148,28 @@ async fn dashboard_compatibility_entities_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut entities = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         let aliases = from_json::<Vec<String>>(
-            &row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?,
-            COMPATIBILITY_READ_OPERATION,
+            &row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
+            PROJECT_MEMORY_READ_OPERATION,
         )?;
         entities.push(tracedecay_store::ProjectMemoryDashboardEntityV1::new(
             tracedecay_store::ProjectMemoryLegacyEntityTargetV1::new(
                 owner.clone(),
-                row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             )?,
-            row_string(&row, 1, COMPATIBILITY_READ_OPERATION)?,
-            row_string(&row, 2, COMPATIBILITY_READ_OPERATION)?,
+            row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
+            row_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
             aliases,
-            UtcMicros(row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?),
+            UtcMicros(row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?),
             nonnegative_u64(
-                row_i64(&row, 5, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard entity fact count",
             )?,
         )?);
@@ -177,13 +177,13 @@ async fn dashboard_compatibility_entities_tx(
     Ok(entities)
 }
 
-async fn dashboard_compatibility_fact_entity_links_tx(
+async fn dashboard_project_memory_fact_entity_links_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_ids: &BTreeSet<String>,
     entity_ids: &BTreeSet<i64>,
     limit: usize,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardFactEntityLinkV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardFactEntityLinkV1>> {
     if fact_ids.is_empty() || entity_ids.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
@@ -218,15 +218,15 @@ async fn dashboard_compatibility_fact_entity_links_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut links = Vec::with_capacity(usize::try_from(fetch_limit).unwrap_or_default());
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let fact_id = row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?;
-        let entity_id = row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?;
+        let fact_id = row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?;
+        let entity_id = row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?;
         if !fact_ids.contains(&fact_id) || !entity_ids.contains(&entity_id) {
             continue;
         }
@@ -244,11 +244,11 @@ async fn dashboard_compatibility_fact_entity_links_tx(
     Ok(links)
 }
 
-async fn dashboard_compatibility_owner_count_tx(
+async fn dashboard_project_memory_owner_count_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_count: bool,
-) -> FactCompatibilityResult<u64> {
+) -> ProjectMemoryResult<u64> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let sql = if entity_count {
@@ -283,19 +283,19 @@ async fn dashboard_compatibility_owner_count_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility dashboard owner count is missing",
             )
         })?;
     nonnegative_u64(
-        row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "compatibility dashboard owner count",
     )
     .map_err(Into::into)
@@ -308,11 +308,11 @@ enum ProjectMemoryDashboardNamedCountKind {
     TrustBucket,
 }
 
-async fn dashboard_compatibility_named_counts_tx(
+async fn dashboard_project_memory_named_counts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     kind: ProjectMemoryDashboardNamedCountKind,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardNamedCountV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardNamedCountV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let (sql, limit) = match kind {
@@ -379,26 +379,26 @@ async fn dashboard_compatibility_named_counts_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut counts = Vec::with_capacity(limit);
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         let name = match kind {
             ProjectMemoryDashboardNamedCountKind::TrustBucket => {
-                format!("trust-{}", row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+                format!("trust-{}", row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
             }
             ProjectMemoryDashboardNamedCountKind::Category
             | ProjectMemoryDashboardNamedCountKind::EntityType => {
-                row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?
+                row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?
             }
         };
         counts.push(tracedecay_store::ProjectMemoryDashboardNamedCountV1::new(
             name,
             nonnegative_u64(
-                row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
                 "compatibility dashboard named count",
             )?,
         )?);
@@ -406,20 +406,18 @@ async fn dashboard_compatibility_named_counts_tx(
     Ok(counts)
 }
 
-fn dashboard_compatibility_dimension(
-    dimension: Option<i64>,
-) -> FactCompatibilityResult<Option<u32>> {
+fn dashboard_compatibility_dimension(dimension: Option<i64>) -> ProjectMemoryResult<Option<u32>> {
     dimension
         .map(|value| {
             let value = u32::try_from(value).map_err(|_| {
                 storage_message(
-                    COMPATIBILITY_READ_OPERATION,
+                    PROJECT_MEMORY_READ_OPERATION,
                     "dashboard HRR dimension is outside u32 range",
                 )
             })?;
             if value == 0 {
                 return Err(storage_message(
-                    COMPATIBILITY_READ_OPERATION,
+                    PROJECT_MEMORY_READ_OPERATION,
                     "dashboard HRR dimension must be positive",
                 ));
             }
@@ -432,7 +430,7 @@ fn dashboard_compatibility_dimension(
 async fn dashboard_compatibility_hrr_coverage_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardHrrCoverageV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardHrrCoverageV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
@@ -472,24 +470,24 @@ async fn dashboard_compatibility_hrr_coverage_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut coverage = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let category = row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?;
+        let category = row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?;
         let fact_count = nonnegative_u64(
-            row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
+            row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard category fact count",
         )?;
         let vector_count = nonnegative_u64(
-            row_i64(&row, 2, COMPATIBILITY_READ_OPERATION)?,
+            row_i64(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard category vector count",
         )?;
-        let has_bank = row_i64(&row, 3, COMPATIBILITY_READ_OPERATION)? != 0;
-        let dirty = row_i64(&row, 6, COMPATIBILITY_READ_OPERATION)? != 0;
+        let has_bank = row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)? != 0;
+        let dirty = row_i64(&row, 6, PROJECT_MEMORY_READ_OPERATION)? != 0;
         let state = if vector_count < fact_count {
             tracedecay_store::ProjectMemoryDashboardHrrStateV1::MissingVectors
         } else if !has_bank {
@@ -513,9 +511,9 @@ async fn dashboard_compatibility_hrr_coverage_tx(
             dashboard_compatibility_dimension(row_optional_i64(
                 &row,
                 4,
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
             )?)?,
-            row_optional_i64(&row, 5, COMPATIBILITY_READ_OPERATION)?.map(UtcMicros),
+            row_optional_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?.map(UtcMicros),
             state,
         )?);
     }
@@ -524,19 +522,23 @@ async fn dashboard_compatibility_hrr_coverage_tx(
 
 fn dashboard_compatibility_memory_bank_from_row(
     row: &crate::db::engine::Row,
-) -> FactCompatibilityResult<tracedecay_store::ProjectMemoryDashboardMemoryBankV1> {
+) -> ProjectMemoryResult<tracedecay_store::ProjectMemoryDashboardMemoryBankV1> {
     tracedecay_store::ProjectMemoryDashboardMemoryBankV1::new(
-        row_string(row, 0, COMPATIBILITY_READ_OPERATION)?,
-        dashboard_compatibility_dimension(row_optional_i64(row, 1, COMPATIBILITY_READ_OPERATION)?)?,
+        row_string(row, 0, PROJECT_MEMORY_READ_OPERATION)?,
+        dashboard_compatibility_dimension(row_optional_i64(
+            row,
+            1,
+            PROJECT_MEMORY_READ_OPERATION,
+        )?)?,
         nonnegative_u64(
-            row_i64(row, 3, COMPATIBILITY_READ_OPERATION)?,
+            row_i64(row, 3, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard bank fact count",
         )?,
         nonnegative_u64(
-            row_i64(row, 4, COMPATIBILITY_READ_OPERATION)?,
+            row_i64(row, 4, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard bank bundled fact count",
         )?,
-        row_optional_i64(row, 2, COMPATIBILITY_READ_OPERATION)?.map(UtcMicros),
+        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?.map(UtcMicros),
     )
     .map_err(Into::into)
 }
@@ -544,7 +546,7 @@ fn dashboard_compatibility_memory_bank_from_row(
 async fn dashboard_compatibility_memory_banks_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardMemoryBankV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardMemoryBankV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -559,22 +561,22 @@ async fn dashboard_compatibility_memory_banks_tx(
             params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut banks = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         banks.push(dashboard_compatibility_memory_bank_from_row(&row)?);
     }
     Ok(banks)
 }
 
-async fn dashboard_compatibility_growth_tx(
+async fn dashboard_project_memory_growth_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardGrowthPointV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardGrowthPointV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
@@ -624,21 +626,21 @@ async fn dashboard_compatibility_growth_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut growth = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         growth.push(tracedecay_store::ProjectMemoryDashboardGrowthPointV1::new(
-            row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?,
+            row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             nonnegative_u64(
-                row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard daily fact count",
             )?,
             nonnegative_u64(
-                row_i64(&row, 2, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard cumulative fact count",
             )?,
         )?);
@@ -646,17 +648,17 @@ async fn dashboard_compatibility_growth_tx(
     Ok(growth)
 }
 
-pub(super) async fn dashboard_compatibility_memory_overview_tx(
+pub(super) async fn dashboard_project_memory_overview_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardMemoryOverviewQueryV1,
-) -> FactCompatibilityResult<ProjectMemoryDashboardMemoryOverviewV1> {
+) -> ProjectMemoryResult<ProjectMemoryDashboardMemoryOverviewV1> {
     let owner = query.owner();
-    let fact_count = dashboard_compatibility_owner_count_tx(transaction, owner, false).await?;
-    let entity_count = dashboard_compatibility_owner_count_tx(transaction, owner, true).await?;
+    let fact_count = dashboard_project_memory_owner_count_tx(transaction, owner, false).await?;
+    let entity_count = dashboard_project_memory_owner_count_tx(transaction, owner, true).await?;
     let facts =
-        dashboard_compatibility_fact_summaries_tx(transaction, owner, query.fact_limit()).await?;
+        dashboard_project_memory_fact_summaries_tx(transaction, owner, query.fact_limit()).await?;
     let entities =
-        dashboard_compatibility_entities_tx(transaction, owner, query.graph_limit()).await?;
+        dashboard_project_memory_entities_tx(transaction, owner, query.graph_limit()).await?;
     let fact_ids = facts
         .iter()
         .map(|fact| fact.fact.fact_id().as_str().to_owned())
@@ -665,7 +667,7 @@ pub(super) async fn dashboard_compatibility_memory_overview_tx(
         .iter()
         .map(|entity| entity.target.legacy_entity_id())
         .collect::<BTreeSet<_>>();
-    let fact_entity_links = dashboard_compatibility_fact_entity_links_tx(
+    let fact_entity_links = dashboard_project_memory_fact_entity_links_tx(
         transaction,
         owner,
         &fact_ids,
@@ -673,13 +675,13 @@ pub(super) async fn dashboard_compatibility_memory_overview_tx(
         query.graph_limit(),
     )
     .await?;
-    let categories = dashboard_compatibility_named_counts_tx(
+    let categories = dashboard_project_memory_named_counts_tx(
         transaction,
         owner,
         ProjectMemoryDashboardNamedCountKind::Category,
     )
     .await?;
-    let entity_types = dashboard_compatibility_named_counts_tx(
+    let entity_types = dashboard_project_memory_named_counts_tx(
         transaction,
         owner,
         ProjectMemoryDashboardNamedCountKind::EntityType,
@@ -687,13 +689,13 @@ pub(super) async fn dashboard_compatibility_memory_overview_tx(
     .await?;
     let hrr_coverage = dashboard_compatibility_hrr_coverage_tx(transaction, owner).await?;
     let memory_banks = dashboard_compatibility_memory_banks_tx(transaction, owner).await?;
-    let trust_histogram = dashboard_compatibility_named_counts_tx(
+    let trust_histogram = dashboard_project_memory_named_counts_tx(
         transaction,
         owner,
         ProjectMemoryDashboardNamedCountKind::TrustBucket,
     )
     .await?;
-    let growth = dashboard_compatibility_growth_tx(transaction, owner).await?;
+    let growth = dashboard_project_memory_growth_tx(transaction, owner).await?;
     ProjectMemoryDashboardMemoryOverviewV1::new(
         owner.clone(),
         fact_count,
@@ -712,11 +714,11 @@ pub(super) async fn dashboard_compatibility_memory_overview_tx(
     .map_err(Into::into)
 }
 
-async fn dashboard_compatibility_entities_for_fact_tx(
+async fn dashboard_project_memory_entities_for_fact_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
+) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
@@ -759,27 +761,27 @@ async fn dashboard_compatibility_entities_for_fact_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut entities = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         entities.push(tracedecay_store::ProjectMemoryDashboardEntityV1::new(
             tracedecay_store::ProjectMemoryLegacyEntityTargetV1::new(
                 owner.clone(),
-                row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             )?,
-            row_string(&row, 1, COMPATIBILITY_READ_OPERATION)?,
-            row_string(&row, 2, COMPATIBILITY_READ_OPERATION)?,
+            row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
+            row_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
             from_json::<Vec<String>>(
-                &row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?,
-                COMPATIBILITY_READ_OPERATION,
+                &row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
+                PROJECT_MEMORY_READ_OPERATION,
             )?,
-            UtcMicros(row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?),
+            UtcMicros(row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?),
             nonnegative_u64(
-                row_i64(&row, 5, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard entity fact count",
             )?,
         )?);
@@ -787,28 +789,28 @@ async fn dashboard_compatibility_entities_for_fact_tx(
     Ok(entities)
 }
 
-pub(super) async fn dashboard_compatibility_fact_detail_tx(
+pub(super) async fn dashboard_project_memory_fact_detail_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardFactDetailQueryV1,
-) -> FactCompatibilityResult<Option<ProjectMemoryDashboardFactDetailV1>> {
+) -> ProjectMemoryResult<Option<ProjectMemoryDashboardFactDetailV1>> {
     let owner = query.target().owner();
-    let Some(fact_id) = resolve_compatibility_target_tx(transaction, query.target()).await? else {
+    let Some(fact_id) = resolve_project_memory_target_tx(transaction, query.target()).await? else {
         return Ok(None);
     };
-    if compatibility_legacy_mapping_tx(transaction, owner, &fact_id)
+    if project_memory_legacy_mapping_tx(transaction, owner, &fact_id)
         .await?
         .is_none()
     {
         return Ok(None);
     }
-    let Some(fact) = load_compatibility_projection_tx(transaction, owner, &fact_id).await? else {
+    let Some(fact) = load_project_memory_projection_tx(transaction, owner, &fact_id).await? else {
         return Ok(None);
     };
     let entities =
-        dashboard_compatibility_entities_for_fact_tx(transaction, owner, &fact_id).await?;
+        dashboard_project_memory_entities_for_fact_tx(transaction, owner, &fact_id).await?;
     let target =
         ProjectMemoryFactTargetV1::Canonical(ProjectMemoryFactIdV1::new(owner.clone(), fact_id)?);
-    let history = compatibility_fact_history_tx(
+    let history = project_memory_fact_history_tx(
         transaction,
         &ProjectMemoryFactHistoryQueryV1::new(target, None, 128)?,
     )
@@ -818,7 +820,7 @@ pub(super) async fn dashboard_compatibility_fact_detail_tx(
         .map_err(Into::into)
 }
 
-fn dashboard_compatibility_like_pattern(search: &str) -> String {
+fn dashboard_project_memory_like_pattern(search: &str) -> String {
     let escaped = search
         .replace('\\', "\\\\")
         .replace('%', "\\%")
@@ -826,10 +828,10 @@ fn dashboard_compatibility_like_pattern(search: &str) -> String {
     format!("%{escaped}%")
 }
 
-pub(super) async fn dashboard_compatibility_vector_points_tx(
+pub(super) async fn dashboard_project_memory_vector_points_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardVectorPointsQueryV1,
-) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
     let key = OwnerKey::new(query.owner())?;
     let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(query.limit()).map_err(|_| FactStoreError::InvalidQueryLimit {
@@ -839,7 +841,7 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
     let search = query
         .search()
         .filter(|search| !search.trim().is_empty())
-        .map(dashboard_compatibility_like_pattern);
+        .map(dashboard_project_memory_like_pattern);
     let mut rows = transaction
         .query(
             // The V1 dashboard reported a fact's graph connections as its
@@ -881,14 +883,14 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut raw_points = Vec::with_capacity(query.limit());
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let fact_id = FactId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+        let fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
             .map_err(FactStoreError::from)?;
         let vector = match row.get::<crate::db::engine::Value>(1) {
             Ok(crate::db::engine::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
@@ -903,13 +905,13 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
         raw_points.push((
             fact_id,
             vector,
-            row_optional_string(&row, 2, COMPATIBILITY_READ_OPERATION)?,
+            row_optional_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
             nonnegative_u64(
-                row_i64(&row, 3, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard vector entity count",
             )?,
             nonnegative_u64(
-                row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?,
+                row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?,
                 "dashboard vector connection count",
             )?,
         ));
@@ -919,10 +921,10 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
         .iter()
         .map(|(fact_id, ..)| fact_id.clone())
         .collect::<Vec<_>>();
-    let facts = load_compatibility_projections_tx(transaction, query.owner(), &fact_ids).await?;
+    let facts = load_project_memory_projections_tx(transaction, query.owner(), &fact_ids).await?;
     if facts.len() != raw_points.len() {
         return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             "owner-bound dashboard vector mapping has no canonical fact projection",
         )
         .into());
@@ -948,7 +950,7 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
     Ok(points)
 }
 
-fn dashboard_compatibility_oplog_operation(value: &str) -> String {
+fn dashboard_project_memory_oplog_operation(value: &str) -> String {
     match value {
         "add" | "update" | "remove" | "feedback" | "reject_secret_like" | "curate_apply" => {
             value.to_owned()
@@ -957,7 +959,7 @@ fn dashboard_compatibility_oplog_operation(value: &str) -> String {
     }
 }
 
-fn dashboard_compatibility_oplog_details(
+fn dashboard_project_memory_oplog_details(
     raw: Option<String>,
 ) -> tracedecay_store::ProjectMemoryDashboardOplogDetailsV1 {
     match raw {
@@ -968,10 +970,10 @@ fn dashboard_compatibility_oplog_details(
     }
 }
 
-pub(super) async fn dashboard_compatibility_memory_oplog_tx(
+pub(super) async fn dashboard_project_memory_oplog_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardOplogQueryV1,
-) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
+) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
     let key = OwnerKey::new(query.owner())?;
     let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(query.limit()).map_err(|_| FactStoreError::InvalidQueryLimit {
@@ -1001,31 +1003,31 @@ pub(super) async fn dashboard_compatibility_memory_oplog_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut entries = Vec::with_capacity(query.limit());
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let legacy_fact_id = row_i64(&row, 3, COMPATIBILITY_READ_OPERATION)?;
+        let legacy_fact_id = row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?;
         entries.push(ProjectMemoryDashboardOplogEntryV1::new(
-            row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
-            UtcMicros(row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?),
-            dashboard_compatibility_oplog_operation(&row_string(
+            row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
+            UtcMicros(row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?),
+            dashboard_project_memory_oplog_operation(&row_string(
                 &row,
                 2,
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
             )?),
             Some(ProjectMemoryFactTargetV1::Legacy(LegacyFactQuery::new(
                 query.owner().clone(),
                 source_store_id.clone(),
                 legacy_fact_id,
             )?)),
-            dashboard_compatibility_oplog_details(row_optional_string(
+            dashboard_project_memory_oplog_details(row_optional_string(
                 &row,
                 4,
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
             )?),
         )?);
     }

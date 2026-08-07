@@ -2,9 +2,9 @@ use tracedecay_domain::{ActorId, DomainError, FactOwnerV1, ProvenanceId};
 
 use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::{
-    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_compatibility_text,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_project_memory_text,
 };
-use super::MAX_COMPATIBILITY_CURATION_TARGETS;
+use super::MAX_PROJECT_MEMORY_CURATION_TARGETS;
 use super::validate::validate_curation_fact_target;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,12 +33,12 @@ impl ProjectMemoryFactMergeCommandV1 {
             actor.validate()?;
         }
         if let Some(content) = &merged_content {
-            validate_compatibility_text(content, "compatibility merge content")?;
+            validate_project_memory_text(content, "compatibility merge content")?;
         }
-        if losers.is_empty() || losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
+        if losers.is_empty() || losers.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: losers.len(),
-                max: MAX_COMPATIBILITY_CURATION_TARGETS,
+                max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
             });
         }
         for (index, loser) in losers.iter().enumerate() {
@@ -101,7 +101,7 @@ impl ProjectMemoryFactMergeOutcomeV1 {
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if winner.owner() != &owner
-            || deleted_losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS
+            || deleted_losers.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS
             || deleted_losers
                 .iter()
                 .any(|mapping| mapping.owner() != &owner)

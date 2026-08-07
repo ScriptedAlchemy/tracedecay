@@ -14,9 +14,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    FactCompatibilityStore, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalStateV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, ProjectMemoryFactStore,
 };
 
 use super::config_error;
@@ -221,7 +220,7 @@ fn fact_proposal_store_lock(dashboard_root: &Path) -> Arc<tokio::sync::Mutex<()>
     lock
 }
 
-pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
+pub async fn record_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     run_id: &str,
@@ -287,7 +286,7 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
         }
         let authoritative_id = ProvenanceId::new(proposal_id.clone()).map_err(store_error)?;
         let proposal = memory
-            .submit_compatibility_fact_proposal(authoritative_id, command, Some(submitter.clone()))
+            .submit_project_memory_fact_proposal(authoritative_id, command, Some(submitter.clone()))
             .await
             .map_err(memory_error)?;
         if !submitted_proposal_ids.insert(proposal.proposal_id().as_str().to_string()) {
@@ -338,7 +337,7 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
     Ok(records)
 }
 
-pub async fn list_fact_proposals<A: FactCompatibilityStore>(
+pub async fn list_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     state: Option<FactProposalState>,
@@ -349,7 +348,7 @@ pub async fn list_fact_proposals<A: FactCompatibilityStore>(
     }
     let limit = limit.min(MAX_FACT_PROPOSAL_PAGE_SIZE);
     let page = memory
-        .list_compatibility_fact_proposals(state.map(compatibility_state), None, limit)
+        .list_project_memory_fact_proposals(state.map(compatibility_state), None, limit)
         .await
         .map_err(memory_error)?;
     let projection = load_fact_proposal_store(dashboard_root)
@@ -388,14 +387,14 @@ pub async fn list_fact_proposals<A: FactCompatibilityStore>(
     Ok(rendered)
 }
 
-pub async fn load_fact_proposal<A: FactCompatibilityStore>(
+pub async fn load_fact_proposal<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     proposal_id: &str,
 ) -> Result<Option<FactProposalRecord>> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let proposal = memory
-        .get_compatibility_fact_proposal(proposal_id)
+        .get_project_memory_fact_proposal(proposal_id)
         .await
         .map_err(memory_error)?;
     let projection = load_fact_proposal_store(dashboard_root)
@@ -411,14 +410,14 @@ pub async fn load_fact_proposal<A: FactCompatibilityStore>(
 }
 
 /// There is deliberately no authoritative `Applying` state.
-pub async fn list_applying_fact_proposals<A: FactCompatibilityStore>(
+pub async fn list_applying_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
 ) -> Result<Vec<FactProposalRecord>> {
     Ok(Vec::new())
 }
 
-pub async fn apply_fact_proposal<A: FactCompatibilityStore>(
+pub async fn apply_fact_proposal<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     proposal_id: &str,
@@ -439,7 +438,7 @@ pub struct FactProposalApplyResult {
     pub newly_promoted: bool,
 }
 
-pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
+pub async fn apply_fact_proposal_with_result<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     proposal_id: &str,
@@ -447,7 +446,7 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
 ) -> Result<FactProposalApplyResult> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
-        .get_compatibility_fact_proposal(proposal_id.clone())
+        .get_project_memory_fact_proposal(proposal_id.clone())
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
@@ -471,7 +470,7 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
     )
     .map_err(store_error)?;
     let promotion = memory
-        .promote_compatibility_fact_proposal_with_disposition(request)
+        .promote_project_memory_fact_proposal_with_disposition(request)
         .await
         .map_err(memory_error)?;
     let proposal = promotion.proposal();
@@ -506,7 +505,7 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
     })
 }
 
-pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
+pub async fn reject_fact_proposal<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     proposal_id: &str,
@@ -515,7 +514,7 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
 ) -> Result<FactProposalRecord> {
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
-        .get_compatibility_fact_proposal(proposal_id.clone())
+        .get_project_memory_fact_proposal(proposal_id.clone())
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
@@ -530,7 +529,12 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
     let reviewer_actor = proposal_actor("automation:proposal-review")?;
     let reason = sanitized_reason(reason);
     let proposal = memory
-        .reject_compatibility_fact_proposal(proposal_id, current.revision(), reviewer_actor, reason)
+        .reject_project_memory_fact_proposal(
+            proposal_id,
+            current.revision(),
+            reviewer_actor,
+            reason,
+        )
         .await
         .map_err(memory_error)?;
     let display_reviewer = bounded_metadata_text(reviewer.as_deref(), 160);

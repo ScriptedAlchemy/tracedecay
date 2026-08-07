@@ -8,14 +8,14 @@ use tracedecay_domain::{
 use super::super::super::queries::validate_limit;
 use super::super::super::{FactStoreError, FactStoreResult, ProjectMemoryMemoryRepairStatsV1};
 use super::super::{
-    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_compatibility_metadata,
-    validate_compatibility_text,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_project_memory_metadata,
+    validate_project_memory_text,
 };
 use super::validate::{
     validate_curation_confidence, validate_curation_entity_target, validate_curation_evidence,
     validate_curation_fact_target,
 };
-use super::{MAX_COMPATIBILITY_CURATION_OPERATIONS, MAX_COMPATIBILITY_CURATION_TARGETS};
+use super::{MAX_PROJECT_MEMORY_CURATION_OPERATIONS, MAX_PROJECT_MEMORY_CURATION_TARGETS};
 
 /// Stable, owner-scoped identity for a historical integer entity row. This is
 /// only a compatibility target; it is never derived from a path or label.
@@ -84,14 +84,14 @@ impl ProjectMemoryFactNormalizeTagsV1 {
         evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
-        if tags.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
+        if tags.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: tags.len(),
-                max: MAX_COMPATIBILITY_CURATION_TARGETS,
+                max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
             });
         }
         for tag in &tags {
-            validate_compatibility_text(tag, "compatibility curation tag")?;
+            validate_project_memory_text(tag, "compatibility curation tag")?;
         }
         Ok(Self {
             fact,
@@ -174,7 +174,7 @@ impl ProjectMemoryFactAddAliasV1 {
         evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
-        validate_compatibility_text(&alias, "compatibility curation alias")?;
+        validate_project_memory_text(&alias, "compatibility curation alias")?;
         Ok(Self {
             entity,
             alias,
@@ -217,7 +217,7 @@ impl ProjectMemoryRelationProvenanceV1 {
         metadata: Value,
         sanitization_receipt: SanitizationReceiptV1,
     ) -> FactStoreResult<Self> {
-        validate_compatibility_metadata(&metadata, "compatibility relation provenance metadata")?;
+        validate_project_memory_metadata(&metadata, "compatibility relation provenance metadata")?;
         if !matches!(
             sanitization_receipt.disposition(),
             SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
@@ -295,7 +295,7 @@ impl ProjectMemoryFactLinkV1 {
                 field: "compatibility curation relation endpoints",
             }));
         }
-        validate_compatibility_text(&source_label, "compatibility curation relation source")?;
+        validate_project_memory_text(&source_label, "compatibility curation relation source")?;
         Ok(Self {
             source,
             target,
@@ -442,7 +442,7 @@ impl ProjectMemoryFactCurationBatchV1 {
         if let Some(actor) = &actor {
             actor.validate()?;
         }
-        validate_limit(operations.len(), MAX_COMPATIBILITY_CURATION_OPERATIONS)?;
+        validate_limit(operations.len(), MAX_PROJECT_MEMORY_CURATION_OPERATIONS)?;
         for operation in &operations {
             operation.validate_for(&owner, min_confidence)?;
         }
@@ -501,7 +501,7 @@ impl ProjectMemoryFactCurationReceiptV1 {
         derived_repair: ProjectMemoryMemoryRepairStatsV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
-        if changed_facts.len() > MAX_COMPATIBILITY_CURATION_TARGETS
+        if changed_facts.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS
             || changed_facts
                 .iter()
                 .any(|mapping| mapping.owner() != &owner)
@@ -564,10 +564,10 @@ fn validate_entity_merge(
     winner: &ProjectMemoryLegacyEntityTargetV1,
     losers: &[ProjectMemoryLegacyEntityTargetV1],
 ) -> FactStoreResult<()> {
-    if losers.is_empty() || losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
+    if losers.is_empty() || losers.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
         return Err(FactStoreError::InvalidQueryLimit {
             limit: losers.len(),
-            max: MAX_COMPATIBILITY_CURATION_TARGETS,
+            max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
         });
     }
     for (index, loser) in losers.iter().enumerate() {

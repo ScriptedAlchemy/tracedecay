@@ -5,13 +5,13 @@ use super::super::crud::{
     load_current_fact_tx,
 };
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_event_time,
-    compatibility_legacy_timestamp, compatibility_source_label, row_string, storage_error,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
+    project_memory_event_time, project_memory_source_label, row_string, storage_error,
     storage_message, to_json,
 };
 use super::super::projection::{
-    compatibility_required_mapping_tx, compatibility_source_for_fact_tx,
-    resolve_compatibility_target_tx,
+    project_memory_required_mapping_tx, project_memory_source_for_fact_tx,
+    resolve_project_memory_target_tx,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -40,7 +40,7 @@ struct LegacyRelationProvenanceErrorV1 {
     source: serde_json::Error,
 }
 
-pub(super) fn compatibility_relation_label(relation: ProjectMemoryFactRelationV1) -> &'static str {
+pub(super) fn project_memory_relation_label(relation: ProjectMemoryFactRelationV1) -> &'static str {
     match relation {
         ProjectMemoryFactRelationV1::Supports => "supports",
         ProjectMemoryFactRelationV1::Contradicts => "contradicts",
@@ -49,7 +49,7 @@ pub(super) fn compatibility_relation_label(relation: ProjectMemoryFactRelationV1
     }
 }
 
-fn compatibility_relations_conflict(
+fn project_memory_relations_conflict(
     left: ProjectMemoryFactRelationV1,
     right: ProjectMemoryFactRelationV1,
 ) -> bool {
@@ -65,7 +65,7 @@ fn compatibility_relations_conflict(
     )
 }
 
-fn compatibility_normalize_tags(tags: &[String]) -> Vec<String> {
+fn project_memory_normalize_tags(tags: &[String]) -> Vec<String> {
     tags.iter()
         .map(|tag| {
             tag.trim()
@@ -81,15 +81,15 @@ fn compatibility_normalize_tags(tags: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
+pub(in crate::store::memory) async fn project_memory_available_curation_fact_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<(FactId, StoredFactV1, ProjectMemoryFactMappingV1)> {
-    let fact_id = resolve_compatibility_target_tx(transaction, target)
+    let fact_id = resolve_project_memory_target_tx(transaction, target)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility curation target is missing",
             )
         })?;
@@ -98,14 +98,14 @@ pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility curation target is unavailable",
             )
         })?;
     if fact.payload().is_none() {
         return Err(FactStoreError::PayloadAccessMismatch);
     }
-    let mapping = compatibility_required_mapping_tx(transaction, target.owner(), &fact_id).await?;
+    let mapping = project_memory_required_mapping_tx(transaction, target.owner(), &fact_id).await?;
     let mapping = ProjectMemoryFactMappingV1::new(
         ProjectMemoryFactIdV1::new(target.owner().clone(), fact_id.clone())?,
         Some(mapping),
@@ -113,7 +113,7 @@ pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
     Ok((fact_id, fact, mapping))
 }
 
-pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
+pub(in crate::store::memory) async fn project_memory_curation_evidence_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     evidence: &[ProjectMemoryFactTargetV1],
@@ -124,10 +124,11 @@ pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
         if target.owner() != owner {
             return Err(FactStoreError::OwnerMismatch);
         }
-        let (fact_id, _, _) = compatibility_available_curation_fact_tx(transaction, target).await?;
+        let (fact_id, _, _) =
+            project_memory_available_curation_fact_tx(transaction, target).await?;
         if !seen.insert(fact_id.clone()) {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility curation evidence resolved to duplicate facts",
             ));
         }
@@ -136,7 +137,7 @@ pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
     Ok(ids)
 }
 
-pub(super) async fn compatibility_record_curated_correction_provenance_tx(
+pub(super) async fn project_memory_record_curated_correction_provenance_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     corrected_fact_id: &FactId,
@@ -155,8 +156,8 @@ pub(super) async fn compatibility_record_curated_correction_provenance_tx(
         "serialize curated correction evidence facts",
     )?;
     let source_label =
-        compatibility_source_label(Some(&format!("compatibility_curation_{operation}")))?;
-    let provenance = compatibility_sanitized_relation_provenance(&json!({
+        project_memory_source_label(Some(&format!("compatibility_curation_{operation}")))?;
+    let provenance = project_memory_sanitized_relation_provenance(&json!({
         "actor_id": actor.map(ActorId::as_str),
         "operation": operation,
     }))
@@ -167,7 +168,7 @@ pub(super) async fn compatibility_record_curated_correction_provenance_tx(
         .any(|evidence_fact_id| evidence_fact_id == corrected_fact_id)
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "curated correction evidence cannot be the corrected fact",
         ));
     }
@@ -198,12 +199,12 @@ pub(super) async fn compatibility_record_curated_correction_provenance_tx(
                 ],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     }
     Ok(())
 }
 
-pub(super) async fn compatibility_curation_mappings_from_ids_tx(
+pub(super) async fn project_memory_curation_mappings_from_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     ids: &[FactId],
@@ -214,7 +215,8 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
         if !seen.insert(fact_id.clone()) {
             continue;
         }
-        let legacy_mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
+        let legacy_mapping =
+            project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
         mappings.push(ProjectMemoryFactMappingV1::new(
             ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
             Some(legacy_mapping),
@@ -223,38 +225,38 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
     Ok(mappings)
 }
 
-pub(super) async fn compatibility_sanitized_relation_provenance(
+pub(super) async fn project_memory_sanitized_relation_provenance(
     metadata: &Value,
 ) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
     match sanitize_memory_fact_payload(metadata.clone())
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         MemoryFactSanitizationV1::Durable { payload, receipt } => {
             ProjectMemoryRelationProvenanceV1::new(payload, receipt)
         }
         MemoryFactSanitizationV1::Quarantined => Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility relation metadata was rejected by the privacy sanitizer",
         )),
     }
 }
 
-pub(super) async fn compatibility_legacy_relation_provenance(
+pub(super) async fn project_memory_legacy_relation_provenance(
     value: &Value,
 ) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
     if value.get("metadata").is_some() || value.get("sanitization_receipt").is_some() {
         return serde_json::from_value(value.clone()).map_err(|source| {
             storage_error(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 LegacyRelationProvenanceErrorV1 { source },
             )
         });
     }
-    compatibility_sanitized_relation_provenance(value).await
+    project_memory_sanitized_relation_provenance(value).await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn compatibility_upsert_legacy_relation_tx(
+pub(super) async fn project_memory_upsert_legacy_relation_tx(
     transaction: &Transaction<'_>,
     source_legacy_fact_id: i64,
     target_legacy_fact_id: i64,
@@ -265,7 +267,7 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
     timestamp: i64,
 ) -> FactStoreResult<()> {
     verify_memory_fact_sanitization(provenance.metadata(), provenance.sanitization_receipt())
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut rows = transaction
         .query(
             "SELECT relation FROM memory_fact_relations
@@ -273,27 +275,27 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
             params![source_legacy_fact_id, target_legacy_fact_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
-        let stored = match row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?.as_str() {
+        let stored = match row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?.as_str() {
             "supports" => ProjectMemoryFactRelationV1::Supports,
             "contradicts" => ProjectMemoryFactRelationV1::Contradicts,
             "supersedes" => ProjectMemoryFactRelationV1::Supersedes,
             "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
             _ => {
                 return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "legacy compatibility relation has an unsupported kind",
                 ));
             }
         };
-        if compatibility_relations_conflict(stored, relation) {
+        if project_memory_relations_conflict(stored, relation) {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility relation conflicts with an existing relation",
             ));
         }
@@ -312,7 +314,7 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
             params![
                 source_legacy_fact_id,
                 target_legacy_fact_id,
-                compatibility_relation_label(relation),
+                project_memory_relation_label(relation),
                 confidence.as_f64(),
                 source_label,
                 to_json(provenance, "serialize compatibility relation provenance")?,
@@ -320,11 +322,11 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     Ok(())
 }
 
-pub(super) async fn compatibility_link_facts_tx(
+pub(super) async fn project_memory_link_facts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
@@ -335,21 +337,21 @@ pub(super) async fn compatibility_link_facts_tx(
         operation.provenance().metadata(),
         operation.provenance().sanitization_receipt(),
     )
-    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let (source_fact_id, source_fact, source_mapping) =
-        compatibility_available_curation_fact_tx(transaction, operation.source()).await?;
+        project_memory_available_curation_fact_tx(transaction, operation.source()).await?;
     let (target_fact_id, _, target_mapping) =
-        compatibility_available_curation_fact_tx(transaction, operation.target()).await?;
+        project_memory_available_curation_fact_tx(transaction, operation.target()).await?;
     if source_fact_id == target_fact_id {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility curation relation cannot target itself",
         ));
     }
     let evidence_fact_ids =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
+        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
-    let source_label = compatibility_source_label(Some(operation.source_label()))?;
+    let source_label = project_memory_source_label(Some(operation.source_label()))?;
     let provenance = operation.provenance();
     let key = OwnerKey::new(owner)?;
     let evidence_fact_ids_json = to_json(
@@ -378,7 +380,7 @@ pub(super) async fn compatibility_link_facts_tx(
                 key.project_id.as_str(),
                 source_fact_id.as_str(),
                 target_fact_id.as_str(),
-                compatibility_relation_label(operation.relation()),
+                project_memory_relation_label(operation.relation()),
                 operation.confidence().as_f64(),
                 source_label.clone(),
                 provenance_json,
@@ -387,7 +389,7 @@ pub(super) async fn compatibility_link_facts_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let event_id = match operation.relation() {
         ProjectMemoryFactRelationV1::Supports | ProjectMemoryFactRelationV1::DerivedFrom => None,
         ProjectMemoryFactRelationV1::Contradicts | ProjectMemoryFactRelationV1::Supersedes => {
@@ -426,7 +428,7 @@ pub(super) async fn compatibility_link_facts_tx(
             Some(receipt.last_event_id().clone())
         }
     };
-    compatibility_upsert_legacy_relation_tx(
+    project_memory_upsert_legacy_relation_tx(
         transaction,
         source_mapping
             .legacy_fact_id()
@@ -444,7 +446,7 @@ pub(super) async fn compatibility_link_facts_tx(
     Ok((vec![source_fact_id, target_fact_id], event_id))
 }
 
-pub(super) fn compatibility_curated_correction_batch(
+pub(super) fn project_memory_curated_correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,
     actor: Option<ActorId>,
@@ -477,7 +479,7 @@ pub(super) fn compatibility_curated_correction_batch(
             action: FactCurationActionV1::Retained,
             evidence_ids: Vec::new(),
         },
-        compatibility_event_time(now, 1)?,
+        project_memory_event_time(now, 1)?,
         actor,
     )?;
     FactWriteBatch::new(
@@ -492,7 +494,7 @@ pub(super) fn compatibility_curated_correction_batch(
     )
 }
 
-pub(super) async fn compatibility_normalize_tags_tx(
+pub(super) async fn project_memory_normalize_tags_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -501,14 +503,14 @@ pub(super) async fn compatibility_normalize_tags_tx(
     now: UtcMicros,
 ) -> FactStoreResult<FactId> {
     let evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
+        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let (fact_id, fact, mapping) =
-        compatibility_available_curation_fact_tx(transaction, operation.fact()).await?;
+        project_memory_available_curation_fact_tx(transaction, operation.fact()).await?;
     let payload = fact
         .payload()
         .ok_or(FactStoreError::PayloadAccessMismatch)?;
-    let tags = compatibility_normalize_tags(operation.tags());
+    let tags = project_memory_normalize_tags(operation.tags());
     let Some(sanitized) = compatibility_sanitize_payload(
         payload.content(),
         payload.category(),
@@ -518,25 +520,25 @@ pub(super) async fn compatibility_normalize_tags_tx(
     )?
     else {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility normalized tags were rejected by the privacy sanitizer",
         ));
     };
-    let source = compatibility_source_for_fact_tx(
+    let source = project_memory_source_for_fact_tx(
         transaction,
         mapping
             .legacy_mapping()
             .ok_or(FactStoreError::FactMismatch)?,
     )
     .await?;
-    let batch = compatibility_curated_correction_batch(
+    let batch = project_memory_curated_correction_batch(
         &fact,
         sanitized.payload.clone(),
         actor.cloned(),
         now,
     )?;
     compatibility_commit_batch_tx(transaction, &batch).await?;
-    compatibility_record_curated_correction_provenance_tx(
+    project_memory_record_curated_correction_provenance_tx(
         transaction,
         owner,
         &fact_id,

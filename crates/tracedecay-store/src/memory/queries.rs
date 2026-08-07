@@ -5,7 +5,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    FactStoreError, FactStoreResult, MAX_COMPATIBILITY_SEARCH_BYTES,
+    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_BYTES,
     ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactTargetV1, StoredFactV1, validate_owned_fact_id,
 };
@@ -500,7 +500,7 @@ impl ProjectMemoryFactSearchQuery {
         owner.validate()?;
         kind.validate()?;
         if let Some(query) = &query {
-            if query.trim().is_empty() || query.len() > MAX_COMPATIBILITY_SEARCH_BYTES {
+            if query.trim().is_empty() || query.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
                     field: "compatibility fact search query",
                 }));

@@ -17,9 +17,9 @@ pub(super) const COMMIT_OPERATION: &str = "commit canonical memory fact";
 
 pub(super) const QUERY_OPERATION: &str = "query canonical memory facts";
 
-pub(super) const COMPATIBILITY_READ_OPERATION: &str = "read compatibility memory facts";
+pub(super) const PROJECT_MEMORY_READ_OPERATION: &str = "read compatibility memory facts";
 
-pub(super) const COMPATIBILITY_WRITE_OPERATION: &str = "write compatibility memory facts";
+pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write compatibility memory facts";
 
 const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
 
@@ -32,7 +32,7 @@ pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResul
     })
 }
 
-pub(super) fn compatibility_category_label(category: FactCategoryV1) -> &'static str {
+pub(super) fn project_memory_category_label(category: FactCategoryV1) -> &'static str {
     match category {
         FactCategoryV1::General => "general",
         FactCategoryV1::UserPref => "user_pref",
@@ -43,13 +43,13 @@ pub(super) fn compatibility_category_label(category: FactCategoryV1) -> &'static
     }
 }
 
-pub(super) fn compatibility_now() -> FactStoreResult<UtcMicros> {
+pub(super) fn project_memory_now() -> FactStoreResult<UtcMicros> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let micros = i64::try_from(elapsed.as_micros()).map_err(|_| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility clock exceeds supported timestamp range",
         )
     })?;
@@ -60,11 +60,11 @@ pub(super) fn compatibility_source_store_id() -> FactStoreResult<SourceStoreId> 
     SourceStoreId::new(COMPATIBILITY_SOURCE_STORE.to_owned()).map_err(FactStoreError::from)
 }
 
-pub(super) fn compatibility_source_label(source: Option<&str>) -> FactStoreResult<String> {
+pub(super) fn project_memory_source_label(source: Option<&str>) -> FactStoreResult<String> {
     let source = source.unwrap_or("manual");
     sanitize_provider_metadata_text(source).ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility source is not eligible for persistence",
         )
     })
@@ -74,10 +74,10 @@ pub(super) fn compatibility_legacy_timestamp(now: UtcMicros) -> i64 {
     now.0.div_euclid(1_000_000)
 }
 
-pub(super) fn compatibility_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
+pub(super) fn project_memory_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
     now.0.checked_add(offset).map(UtcMicros).ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility event timestamp overflow",
         )
     })

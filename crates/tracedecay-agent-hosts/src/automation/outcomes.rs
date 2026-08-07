@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use tracedecay_store::{
     ProjectMemoryFactAvailabilityV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
     ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1, FactCompatibilityStore,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
 };
 
 use super::backend::AgentTaskKind;
@@ -352,7 +352,7 @@ pub async fn refresh_skill_outcomes(
 
 /// Recomputes fact outcomes after authoritative compatibility reads, then
 /// persists the derived sidecar snapshot (skills half untouched).
-pub async fn refresh_fact_outcomes<A: FactCompatibilityStore>(
+pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     dashboard_root: &Path,
     application: &MemoryApplication<A>,
     now_unix: i64,
@@ -386,7 +386,7 @@ pub fn compute_skill_outcomes(
         .collect()
 }
 
-pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
+pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
     application: &MemoryApplication<A>,
     now_unix: i64,
 ) -> Result<Vec<FactOutcomeRecord>> {
@@ -395,7 +395,7 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
 
     loop {
         let page = application
-            .list_compatibility_fact_proposals(
+            .list_project_memory_fact_proposals(
                 Some(ProjectMemoryFactProposalStateV1::Applied),
                 after_proposal_id.clone(),
                 FACT_OUTCOME_PAGE_LIMIT,
@@ -421,7 +421,7 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
                     })?,
             );
             let projection = application
-                .get_compatibility_fact(target.clone())
+                .get_project_memory_fact(target.clone())
                 .await
                 .map_err(|error| {
                     config_error(format!(
@@ -505,7 +505,7 @@ fn fact_outcome_input(
 
 /// The compatibility promotion batch starts its immutable lineage at the
 /// promotion timestamp, which remains available after payload deletion.
-async fn applied_at_from_lineage<A: FactCompatibilityStore>(
+async fn applied_at_from_lineage<A: ProjectMemoryFactStore>(
     application: &MemoryApplication<A>,
     target: &ProjectMemoryFactTargetV1,
     proposal: &ProjectMemoryFactProposalRecordV1,

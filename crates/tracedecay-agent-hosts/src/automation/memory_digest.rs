@@ -33,7 +33,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_store::ProjectMemoryFactStore;
 
 use super::config_error;
 use crate::application::memory::MemoryApplication;
@@ -853,7 +853,7 @@ fn project_label_for_root(project_root: &Path) -> String {
 
 /// Regenerates the project's digest section from the memory store and
 /// re-exports the snapshot into all recorded host channels.
-pub async fn refresh_project_memory_digest<A: FactCompatibilityStore>(
+pub async fn refresh_project_memory_digest<A: ProjectMemoryFactStore>(
     profile_root: &Path,
     memory: &MemoryApplication<A>,
     project_root: &Path,
@@ -881,7 +881,7 @@ pub async fn refresh_project_memory_digest<A: FactCompatibilityStore>(
 /// automation config allows export. When disabled, any existing section for
 /// that project is removed and recorded host channels are refreshed so stale
 /// facts disappear from prompts.
-pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactCompatibilityStore>(
+pub async fn refresh_memory_digest_after_memory_change_for_profile<A: ProjectMemoryFactStore>(
     profile_root: &Path,
     memory: &MemoryApplication<A>,
     project_root: &Path,
@@ -904,7 +904,7 @@ pub async fn refresh_memory_digest_after_memory_change_for_profile<A: FactCompat
 /// Non-fatal wrapper for memory-mutating apply paths: resolves the profile
 /// root from the environment, honors the config gate, and logs (rather than
 /// propagates) failures so digest refresh never breaks an apply.
-pub async fn refresh_memory_digest_after_memory_change<A: FactCompatibilityStore>(
+pub async fn refresh_memory_digest_after_memory_change<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     project_root: &Path,
 ) {

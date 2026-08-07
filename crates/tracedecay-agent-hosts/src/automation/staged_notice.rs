@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_store::ProjectMemoryFactStore;
 
 use super::config_error;
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
@@ -148,10 +148,10 @@ pub async fn save_notice_state(dashboard_root: &Path, state: &AutomationNoticeSt
 /// A read failure yields [`PendingReviewCount::Unreadable`], never a zero: the
 /// caller may still serve its request, but it has to say the queue is unknown
 /// rather than report an empty one.
-pub async fn count_pending_fact_proposals<A: FactCompatibilityStore>(
+pub async fn count_pending_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
 ) -> PendingReviewCount {
-    match memory.count_pending_compatibility_fact_proposals().await {
+    match memory.count_pending_project_memory_fact_proposals().await {
         Ok(count) => match usize::try_from(count) {
             Ok(count) => PendingReviewCount::Counted(count),
             Err(error) => PendingReviewCount::unreadable(format!(
@@ -187,7 +187,7 @@ pub async fn count_pending_managed_skills(profile_root: &Path) -> PendingReviewC
 
 /// Reads both review queues. Independent reads: an unavailable fact authority
 /// leaves the skill count intact and vice versa.
-pub async fn count_pending_automation_output<A: FactCompatibilityStore>(
+pub async fn count_pending_automation_output<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     profile_root: &Path,
 ) -> AutomationPendingCounts {
@@ -270,7 +270,7 @@ pub fn staged_notice_message(counts: &AutomationPendingCounts) -> Option<String>
 /// One-shot check used by the MCP server: derives pending counts, dedupes
 /// against the persisted notice state, and returns the notice line to surface
 /// (persisting the new state) when a new automation batch awaits review.
-pub async fn maybe_automation_staged_notice<A: FactCompatibilityStore>(
+pub async fn maybe_automation_staged_notice<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
     profile_root: &Path,

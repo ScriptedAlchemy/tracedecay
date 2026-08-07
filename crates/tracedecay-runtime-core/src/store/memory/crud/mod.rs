@@ -6,7 +6,7 @@ pub(super) const PROMOTE_OPERATION: &str = "promote canonical memory proposal";
 
 pub(super) const DEFAULT_TRUST: f64 = 0.5;
 
-const COMPATIBILITY_RETENTION_CLASS: &str = "compatibility-runtime-v1";
+const PROJECT_MEMORY_RETENTION_CLASS: &str = "compatibility-runtime-v1";
 
 mod commands;
 mod commit;

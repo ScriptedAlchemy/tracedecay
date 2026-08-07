@@ -19,15 +19,15 @@ use tracedecay_store::{
 };
 
 use super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION, compatibility_source_label,
-    compatibility_source_store_id, from_json, nonnegative_u64, parse_payload_access, row_i64,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, QUERY_OPERATION, compatibility_source_store_id,
+    from_json, nonnegative_u64, parse_payload_access, project_memory_source_label, row_i64,
     row_optional_f64, row_optional_i64, row_optional_string, row_string, storage_error,
     storage_message,
 };
 
-const COMPATIBILITY_PROJECTION_BATCH_SIZE: usize = 400;
+const PROJECT_MEMORY_PROJECTION_BATCH_SIZE: usize = 400;
 
-fn compatibility_projection_state(value: &str) -> FactStoreResult<ProjectMemoryProjectionStateV1> {
+fn project_memory_projection_state(value: &str) -> FactStoreResult<ProjectMemoryProjectionStateV1> {
     match value {
         "ready" => Ok(ProjectMemoryProjectionStateV1::Ready),
         "rebuilding" => Ok(ProjectMemoryProjectionStateV1::Rebuilding),
@@ -40,7 +40,7 @@ fn compatibility_projection_state(value: &str) -> FactStoreResult<ProjectMemoryP
     }
 }
 
-fn compatibility_unavailable(
+fn project_memory_unavailable(
     access: Option<PayloadAccessState>,
 ) -> ProjectMemoryFactAvailabilityV1 {
     match access {
@@ -50,7 +50,7 @@ fn compatibility_unavailable(
     }
 }
 
-pub(super) async fn compatibility_fact_status_tx(
+pub(super) async fn project_memory_fact_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -86,7 +86,7 @@ pub(super) async fn compatibility_fact_status_tx(
         return Ok(None);
     };
     let access = parse_payload_access(&row_string(&row, 0, QUERY_OPERATION)?)?;
-    let state = compatibility_projection_state(&row_string(&row, 1, QUERY_OPERATION)?)?;
+    let state = project_memory_projection_state(&row_string(&row, 1, QUERY_OPERATION)?)?;
     let watermark = row_optional_string(&row, 3, QUERY_OPERATION)?
         .as_deref()
         .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
@@ -102,7 +102,7 @@ pub(super) async fn compatibility_fact_status_tx(
     .map(Some)
 }
 
-pub(super) async fn compatibility_legacy_mapping_tx(
+pub(super) async fn project_memory_legacy_mapping_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -141,7 +141,7 @@ pub(super) async fn compatibility_legacy_mapping_tx(
     )?))
 }
 
-pub(super) async fn compatibility_projection_metadata_tx(
+pub(super) async fn project_memory_projection_metadata_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
@@ -229,13 +229,13 @@ pub(super) async fn compatibility_projection_metadata_tx(
     ))
 }
 
-pub(super) async fn load_compatibility_projection_tx(
+pub(super) async fn load_project_memory_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
     Ok(
-        load_compatibility_projections_tx(transaction, owner, std::slice::from_ref(fact_id))
+        load_project_memory_projections_tx(transaction, owner, std::slice::from_ref(fact_id))
             .await?
             .pop(),
     )
@@ -243,9 +243,9 @@ pub(super) async fn load_compatibility_projection_tx(
 
 /// Loads many compatibility projections with one joined query per bounded
 /// batch. Search, list, and dashboard vector reads used to call
-/// [`load_compatibility_projection_tx`] once per fact, multiplying each result
+/// [`load_project_memory_projection_tx`] once per fact, multiplying each result
 /// into up to six serialized actor queries while holding one read snapshot.
-pub(super) async fn load_compatibility_projections_tx(
+pub(super) async fn load_project_memory_projections_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_ids: &[FactId],
@@ -257,7 +257,7 @@ pub(super) async fn load_compatibility_projections_tx(
     let source_store_id = compatibility_source_store_id()?;
     let mut projections = BTreeMap::new();
 
-    for batch in fact_ids.chunks(COMPATIBILITY_PROJECTION_BATCH_SIZE) {
+    for batch in fact_ids.chunks(PROJECT_MEMORY_PROJECTION_BATCH_SIZE) {
         let mut values = vec![
             Value::Text(key.kind.to_string()),
             Value::Text(key.project_id.clone()),
@@ -323,7 +323,7 @@ pub(super) async fn load_compatibility_projections_tx(
                 owner.clone(),
                 Some(fact_id.clone()),
                 Some(access),
-                compatibility_projection_state(&row_string(&row, 2, QUERY_OPERATION)?)?,
+                project_memory_projection_state(&row_string(&row, 2, QUERY_OPERATION)?)?,
                 Some(UtcMicros(row_i64(&row, 3, QUERY_OPERATION)?)),
                 row_optional_string(&row, 4, QUERY_OPERATION)?
                     .as_deref()
@@ -360,7 +360,7 @@ pub(super) async fn load_compatibility_projections_tx(
                     ProjectMemoryFactProjectionV1::Unavailable(
                         ProjectMemoryFactUnavailableV1::new(
                             compatibility_id,
-                            compatibility_unavailable(status.payload_access()),
+                            project_memory_unavailable(status.payload_access()),
                             status,
                         )?,
                     ),
@@ -397,7 +397,7 @@ pub(super) async fn load_compatibility_projections_tx(
                     ProjectMemoryFactProjectionV1::Unavailable(
                         ProjectMemoryFactUnavailableV1::new(
                             compatibility_id,
-                            compatibility_unavailable(status.payload_access()),
+                            project_memory_unavailable(status.payload_access()),
                             status,
                         )?,
                     ),
@@ -445,7 +445,7 @@ pub(super) async fn load_compatibility_projections_tx(
         .collect())
 }
 
-pub(super) async fn resolve_compatibility_target_tx(
+pub(super) async fn resolve_project_memory_target_tx(
     transaction: &Transaction<'_>,
     target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<Option<FactId>> {
@@ -457,7 +457,7 @@ pub(super) async fn resolve_compatibility_target_tx(
     }
 }
 
-pub(super) async fn compatibility_fact_for_legacy_id_tx(
+pub(super) async fn project_memory_fact_for_legacy_id_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     legacy_fact_id: i64,
@@ -490,22 +490,22 @@ pub(super) async fn compatibility_fact_for_legacy_id_tx(
         .map_err(FactStoreError::from)
 }
 
-pub(super) async fn compatibility_required_mapping_tx(
+pub(super) async fn project_memory_required_mapping_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
 ) -> FactStoreResult<LegacyFactMappingV1> {
-    compatibility_legacy_mapping_tx(transaction, owner, fact_id)
+    project_memory_legacy_mapping_tx(transaction, owner, fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility fact has no fixed legacy-memory-v1 mapping",
             )
         })
 }
 
-pub(super) async fn compatibility_source_for_fact_tx(
+pub(super) async fn project_memory_source_for_fact_tx(
     transaction: &Transaction<'_>,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<String> {
@@ -515,16 +515,16 @@ pub(super) async fn compatibility_source_for_fact_tx(
             params![mapping.legacy_fact_id()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let source = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
-        .map(|row| row_optional_string(&row, 0, COMPATIBILITY_WRITE_OPERATION))
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+        .map(|row| row_optional_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION))
         .transpose()?
         .flatten()
         .unwrap_or_else(|| "manual".to_owned());
-    compatibility_source_label(Some(source.as_str()))
+    project_memory_source_label(Some(source.as_str()))
 }
 
 pub(super) async fn resolve_legacy_fact_tx(

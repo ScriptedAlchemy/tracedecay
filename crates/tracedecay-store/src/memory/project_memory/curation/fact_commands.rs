@@ -5,12 +5,12 @@ use tracedecay_domain::{
 };
 
 use super::super::super::{
-    FactStoreError, FactStoreResult, MAX_COMPATIBILITY_REASON_BYTES,
+    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_REASON_BYTES,
     ProjectMemoryFactFeedbackActionV1,
 };
 use super::super::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
-    validate_compatibility_text,
+    validate_project_memory_text,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,7 +55,7 @@ impl ProjectMemoryFactAddCommandV1 {
             }));
         }
         if source.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact add source",
@@ -133,7 +133,7 @@ impl ProjectMemoryFactAddCommandV1 {
         &self.sanitization_receipt
     }
     pub fn with_automation_run_id(mut self, run_id: String) -> FactStoreResult<Self> {
-        validate_compatibility_text(&run_id, "compatibility fact automation run identity")?;
+        validate_project_memory_text(&run_id, "compatibility fact automation run identity")?;
         self.automation_run_id = Some(run_id);
         Ok(self)
     }
@@ -191,7 +191,7 @@ impl ProjectMemoryFactUpdatePatchV1 {
         }
         if source.as_ref().is_some_and(|value| {
             value.as_ref().is_some_and(|source| {
-                source.trim().is_empty() || source.len() > MAX_COMPATIBILITY_REASON_BYTES
+                source.trim().is_empty() || source.len() > MAX_PROJECT_MEMORY_REASON_BYTES
             })
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -355,14 +355,14 @@ impl ProjectMemoryFactFeedbackCommandV1 {
             actor.validate()?;
         }
         if source.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact feedback source",
             }));
         }
         if reason.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact feedback reason",
@@ -429,7 +429,7 @@ impl ProjectMemoryFactAddOutcomeV1 {
     ) -> FactStoreResult<Self> {
         if similarity_millionths.is_some_and(|value| value > 1_000_000)
             || reason.as_ref().is_some_and(|value| {
-                value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+                value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
             })
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {

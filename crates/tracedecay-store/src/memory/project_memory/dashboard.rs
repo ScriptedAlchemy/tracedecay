@@ -2,19 +2,19 @@ use tracedecay_domain::{DomainError, FactOwnerV1, UtcMicros};
 
 use super::super::queries::validate_limit;
 use super::super::{FactStoreError, FactStoreResult};
-use super::curation::MAX_COMPATIBILITY_CURATION_TARGETS;
+use super::curation::MAX_PROJECT_MEMORY_CURATION_TARGETS;
 use super::{
     ProjectMemoryFactHistoryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryLegacyEntityTargetV1, validate_compatibility_text,
+    ProjectMemoryLegacyEntityTargetV1, validate_project_memory_text,
 };
 
-const MAX_COMPATIBILITY_DASHBOARD_FACTS: usize = 100;
+const MAX_PROJECT_MEMORY_DASHBOARD_FACTS: usize = 100;
 
-const MAX_COMPATIBILITY_DASHBOARD_GRAPH: usize = 1_000;
+const MAX_PROJECT_MEMORY_DASHBOARD_GRAPH: usize = 1_000;
 
-pub(in crate::memory) const MAX_COMPATIBILITY_DASHBOARD_VECTORS: usize = 2_000;
+pub(in crate::memory) const MAX_PROJECT_MEMORY_DASHBOARD_VECTORS: usize = 2_000;
 
-pub(in crate::memory) const MAX_COMPATIBILITY_DASHBOARD_OPLOG: usize = 300;
+pub(in crate::memory) const MAX_PROJECT_MEMORY_DASHBOARD_OPLOG: usize = 300;
 
 /// Explicit, bounded dashboard overview request. It is intentionally not a
 /// general query language: the dashboard receives one finite snapshot shape.
@@ -28,8 +28,8 @@ pub struct ProjectMemoryDashboardMemoryOverviewQueryV1 {
 impl ProjectMemoryDashboardMemoryOverviewQueryV1 {
     pub fn new(owner: FactOwnerV1, fact_limit: usize, graph_limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
-        validate_limit(fact_limit, MAX_COMPATIBILITY_DASHBOARD_FACTS)?;
-        validate_limit(graph_limit, MAX_COMPATIBILITY_DASHBOARD_GRAPH)?;
+        validate_limit(fact_limit, MAX_PROJECT_MEMORY_DASHBOARD_FACTS)?;
+        validate_limit(graph_limit, MAX_PROJECT_MEMORY_DASHBOARD_GRAPH)?;
         Ok(Self {
             owner,
             fact_limit,
@@ -78,16 +78,16 @@ impl ProjectMemoryDashboardEntityV1 {
         fact_count: u64,
     ) -> FactStoreResult<Self> {
         target.validate()?;
-        validate_compatibility_text(&name, "dashboard entity name")?;
-        validate_compatibility_text(&entity_type, "dashboard entity type")?;
-        if aliases.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
+        validate_project_memory_text(&name, "dashboard entity name")?;
+        validate_project_memory_text(&entity_type, "dashboard entity type")?;
+        if aliases.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: aliases.len(),
-                max: MAX_COMPATIBILITY_CURATION_TARGETS,
+                max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
             });
         }
         for alias in &aliases {
-            validate_compatibility_text(alias, "dashboard entity alias")?;
+            validate_project_memory_text(alias, "dashboard entity alias")?;
         }
         Ok(Self {
             target,
@@ -128,7 +128,7 @@ pub struct ProjectMemoryDashboardNamedCountV1 {
 
 impl ProjectMemoryDashboardNamedCountV1 {
     pub fn new(name: String, count: u64) -> FactStoreResult<Self> {
-        validate_compatibility_text(&name, "dashboard count name")?;
+        validate_project_memory_text(&name, "dashboard count name")?;
         Ok(Self { name, count })
     }
 }
@@ -167,8 +167,8 @@ impl ProjectMemoryDashboardHrrCoverageV1 {
         updated_at: Option<UtcMicros>,
         state: ProjectMemoryDashboardHrrStateV1,
     ) -> FactStoreResult<Self> {
-        validate_compatibility_text(&category, "dashboard HRR category")?;
-        validate_compatibility_text(&bank_name, "dashboard HRR bank name")?;
+        validate_project_memory_text(&category, "dashboard HRR category")?;
+        validate_project_memory_text(&bank_name, "dashboard HRR bank name")?;
         if coverage_basis_points > 10_000 {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "dashboard HRR coverage",
@@ -205,7 +205,7 @@ impl ProjectMemoryDashboardMemoryBankV1 {
         bundled_fact_count: u64,
         updated_at: Option<UtcMicros>,
     ) -> FactStoreResult<Self> {
-        validate_compatibility_text(&name, "dashboard memory bank name")?;
+        validate_project_memory_text(&name, "dashboard memory bank name")?;
         Ok(Self {
             name,
             dimension,
@@ -229,7 +229,7 @@ impl ProjectMemoryDashboardGrowthPointV1 {
         fact_count: u64,
         cumulative_fact_count: u64,
     ) -> FactStoreResult<Self> {
-        validate_compatibility_text(&period, "dashboard growth period")?;
+        validate_project_memory_text(&period, "dashboard growth period")?;
         Ok(Self {
             period,
             fact_count,
@@ -280,10 +280,10 @@ impl ProjectMemoryDashboardMemoryOverviewV1 {
                 return Err(FactStoreError::OwnerMismatch);
             }
         }
-        if facts.len() > MAX_COMPATIBILITY_DASHBOARD_FACTS {
+        if facts.len() > MAX_PROJECT_MEMORY_DASHBOARD_FACTS {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: facts.len(),
-                max: MAX_COMPATIBILITY_DASHBOARD_FACTS,
+                max: MAX_PROJECT_MEMORY_DASHBOARD_FACTS,
             });
         }
         let bounded = entities
@@ -295,10 +295,10 @@ impl ProjectMemoryDashboardMemoryOverviewV1 {
             .max(memory_banks.len())
             .max(trust_histogram.len())
             .max(growth.len());
-        if bounded > MAX_COMPATIBILITY_DASHBOARD_GRAPH {
+        if bounded > MAX_PROJECT_MEMORY_DASHBOARD_GRAPH {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: bounded,
-                max: MAX_COMPATIBILITY_DASHBOARD_GRAPH,
+                max: MAX_PROJECT_MEMORY_DASHBOARD_GRAPH,
             });
         }
         for entity in &entities {
@@ -360,10 +360,10 @@ impl ProjectMemoryDashboardFactDetailV1 {
         entities: Vec<ProjectMemoryDashboardEntityV1>,
         history: Option<ProjectMemoryFactHistoryV1>,
     ) -> FactStoreResult<Self> {
-        if entities.len() > MAX_COMPATIBILITY_DASHBOARD_GRAPH {
+        if entities.len() > MAX_PROJECT_MEMORY_DASHBOARD_GRAPH {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: entities.len(),
-                max: MAX_COMPATIBILITY_DASHBOARD_GRAPH,
+                max: MAX_PROJECT_MEMORY_DASHBOARD_GRAPH,
             });
         }
         let owner = fact.owner();
@@ -396,9 +396,9 @@ pub struct ProjectMemoryDashboardVectorPointsQueryV1 {
 impl ProjectMemoryDashboardVectorPointsQueryV1 {
     pub fn new(owner: FactOwnerV1, search: Option<String>, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
-        validate_limit(limit, MAX_COMPATIBILITY_DASHBOARD_VECTORS)?;
+        validate_limit(limit, MAX_PROJECT_MEMORY_DASHBOARD_VECTORS)?;
         if let Some(search) = &search {
-            validate_compatibility_text(search, "dashboard vector search")?;
+            validate_project_memory_text(search, "dashboard vector search")?;
         }
         Ok(Self {
             owner,
@@ -447,7 +447,7 @@ impl ProjectMemoryDashboardVectorPointV1 {
             }));
         }
         if let Some(bank_name) = &bank_name {
-            validate_compatibility_text(bank_name, "dashboard vector bank name")?;
+            validate_project_memory_text(bank_name, "dashboard vector bank name")?;
         }
         if matches!(fact.fact, ProjectMemoryFactProjectionV1::Unavailable(_)) && vector.is_some() {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -473,7 +473,7 @@ pub struct ProjectMemoryDashboardOplogQueryV1 {
 impl ProjectMemoryDashboardOplogQueryV1 {
     pub fn new(owner: FactOwnerV1, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
-        validate_limit(limit, MAX_COMPATIBILITY_DASHBOARD_OPLOG)?;
+        validate_limit(limit, MAX_PROJECT_MEMORY_DASHBOARD_OPLOG)?;
         Ok(Self { owner, limit })
     }
 
@@ -495,7 +495,7 @@ pub enum ProjectMemoryDashboardOplogDetailsV1 {
 
 impl ProjectMemoryDashboardOplogDetailsV1 {
     pub fn available(summary: String) -> FactStoreResult<Self> {
-        validate_compatibility_text(&summary, "dashboard oplog detail")?;
+        validate_project_memory_text(&summary, "dashboard oplog detail")?;
         Ok(Self::Available { summary })
     }
 }
@@ -522,7 +522,7 @@ impl ProjectMemoryDashboardOplogEntryV1 {
                 field: "dashboard oplog id",
             }));
         }
-        validate_compatibility_text(&operation, "dashboard oplog operation")?;
+        validate_project_memory_text(&operation, "dashboard oplog operation")?;
         if let Some(fact) = &fact {
             fact.validate()?;
         }

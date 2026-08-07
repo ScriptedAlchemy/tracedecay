@@ -5,8 +5,8 @@ use tracedecay_domain::{
 
 use super::queries::MAX_LINEAGE_LIMIT;
 use super::{
-    FactLineageCursor, FactStoreError, FactStoreResult, MAX_COMPATIBILITY_REASON_BYTES,
-    MAX_COMPATIBILITY_SEARCH_BYTES, validate_owned_fact_id,
+    FactLineageCursor, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_REASON_BYTES,
+    MAX_PROJECT_MEMORY_SEARCH_BYTES, validate_owned_fact_id,
 };
 
 /// Counters and timestamps V1 clients expose.  They are non-negative by type
@@ -291,7 +291,7 @@ pub struct ProjectMemoryMemoryAlgebraV1 {
 
 impl ProjectMemoryMemoryAlgebraV1 {
     pub fn new(name: String, hrr_dim: u64, estimated_capacity: u64) -> FactStoreResult<Self> {
-        if name.trim().is_empty() || name.len() > MAX_COMPATIBILITY_SEARCH_BYTES {
+        if name.trim().is_empty() || name.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility memory algebra name",
             }));
@@ -498,9 +498,9 @@ impl ProjectMemoryFactFeedbackHistoryEntryV1 {
     ) -> FactStoreResult<Self> {
         event_id.validate()?;
         if source.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) || note.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact feedback history details",

@@ -5,20 +5,20 @@ use super::super::crud::{
     compatibility_mirror_update_tx, compatibility_sanitize_payload, load_current_fact_tx,
 };
 use super::super::envelope::{
-    CompatibilityOperationReceiptV1, compatibility_receipt_u64, compatibility_target_digest,
+    ProjectMemoryOperationReceiptV1, project_memory_receipt_u64, project_memory_target_digest,
 };
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, from_json, row_i64,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp, from_json, row_i64,
     row_string, storage_error, storage_message, to_json,
 };
 use super::super::projection::{
-    compatibility_required_mapping_tx, compatibility_source_for_fact_tx,
+    project_memory_required_mapping_tx, project_memory_source_for_fact_tx,
 };
-use super::super::proposals::compatibility_proposal_category;
+use super::super::proposals::project_memory_proposal_category;
 use super::{
-    compatibility_curated_correction_batch, compatibility_curation_evidence_ids_tx,
-    compatibility_curation_mappings_from_ids_tx,
-    compatibility_record_curated_correction_provenance_tx, compatibility_relation_label,
+    project_memory_curated_correction_batch, project_memory_curation_evidence_ids_tx,
+    project_memory_curation_mappings_from_ids_tx,
+    project_memory_record_curated_correction_provenance_tx, project_memory_relation_label,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -27,12 +27,12 @@ use crate::memory::entities::normalize_entity;
 use serde_json::{Value, json};
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactAddAliasV1,
+    FactStoreError, FactStoreResult, ProjectMemoryFactAddAliasV1,
     ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
     ProjectMemoryFactMappingV1, ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
 };
-async fn compatibility_owner_entity_tx(
+async fn project_memory_owner_entity_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
@@ -61,21 +61,21 @@ async fn compatibility_owner_entity_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut foreign_links = foreign_links;
     let row = foreign_links
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility entity ownership count is missing",
             )
         })?;
-    if row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)? != 0 {
+    if row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)? != 0 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility curation entity is shared outside this owner",
         ));
     }
@@ -86,27 +86,27 @@ async fn compatibility_owner_entity_tx(
             params![entity_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility curation entity is missing",
             )
         })?;
     Ok((
-        row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
+        row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
         from_json::<Vec<String>>(
-            &row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?,
-            COMPATIBILITY_WRITE_OPERATION,
+            &row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?,
+            PROJECT_MEMORY_WRITE_OPERATION,
         )?,
     ))
 }
 
-async fn compatibility_entity_linked_to_evidence_tx(
+async fn project_memory_entity_linked_to_evidence_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_id: i64,
@@ -140,22 +140,22 @@ async fn compatibility_entity_linked_to_evidence_tx(
     let mut rows = transaction
         .query(&sql, values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         .is_none()
     {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility curation entity is not linked to supplied evidence",
         ));
     }
     Ok(())
 }
 
-async fn compatibility_owner_entity_fact_ids_tx(
+async fn project_memory_owner_entity_fact_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     entity_ids: &[i64],
@@ -187,28 +187,28 @@ async fn compatibility_owner_entity_fact_ids_tx(
     let mut rows = transaction
         .query(&sql, values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut fact_ids = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         fact_ids.push(
-            FactId::new(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)
+            FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)
                 .map_err(FactStoreError::from)?,
         );
     }
     if fact_ids.len() > 256 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility entity curation exceeds the fixed 256-fact bound",
         ));
     }
     Ok(fact_ids)
 }
 
-async fn compatibility_fact_entities_tx(
+async fn project_memory_fact_entities_tx(
     transaction: &Transaction<'_>,
     legacy_fact_id: i64,
 ) -> FactStoreResult<Vec<String>> {
@@ -222,19 +222,19 @@ async fn compatibility_fact_entities_tx(
             params![legacy_fact_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut entities = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
-        entities.push(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?);
+        entities.push(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?);
     }
     Ok(entities)
 }
 
-pub(super) async fn compatibility_merge_entities_tx(
+pub(super) async fn project_memory_merge_entities_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -243,24 +243,25 @@ pub(super) async fn compatibility_merge_entities_tx(
     now: UtcMicros,
 ) -> FactStoreResult<Vec<FactId>> {
     let evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
+        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let winner_id = operation.winner().legacy_entity_id();
     let (winner_name, winner_aliases) =
-        compatibility_owner_entity_tx(transaction, owner, winner_id).await?;
-    compatibility_entity_linked_to_evidence_tx(transaction, owner, winner_id, &evidence).await?;
+        project_memory_owner_entity_tx(transaction, owner, winner_id).await?;
+    project_memory_entity_linked_to_evidence_tx(transaction, owner, winner_id, &evidence).await?;
     let mut entity_ids = vec![winner_id];
     let mut aliases = winner_aliases;
     for loser in operation.losers() {
         let loser_id = loser.legacy_entity_id();
         let (name, loser_aliases) =
-            compatibility_owner_entity_tx(transaction, owner, loser_id).await?;
-        compatibility_entity_linked_to_evidence_tx(transaction, owner, loser_id, &evidence).await?;
+            project_memory_owner_entity_tx(transaction, owner, loser_id).await?;
+        project_memory_entity_linked_to_evidence_tx(transaction, owner, loser_id, &evidence)
+            .await?;
         entity_ids.push(loser_id);
         aliases.push(name);
         aliases.extend(loser_aliases);
     }
-    let fact_ids = compatibility_owner_entity_fact_ids_tx(transaction, owner, &entity_ids).await?;
+    let fact_ids = project_memory_owner_entity_fact_ids_tx(transaction, owner, &entity_ids).await?;
     let mut normalized_aliases = std::collections::BTreeMap::new();
     for alias in aliases {
         let alias = normalize_entity(&alias);
@@ -283,7 +284,7 @@ pub(super) async fn compatibility_merge_entities_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     for loser in operation.losers() {
         let loser_id = loser.legacy_entity_id();
         transaction
@@ -293,14 +294,14 @@ pub(super) async fn compatibility_merge_entities_tx(
                 params![winner_id, loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_fact_entities WHERE entity_id = ?1",
                 params![loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         transaction
             .execute(
                 "DELETE FROM memory_entities WHERE entity_id = ?1
@@ -308,7 +309,7 @@ pub(super) async fn compatibility_merge_entities_tx(
                 params![loser_id],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     }
     let owner_key = OwnerKey::new(owner)?;
     for fact_id in &fact_ids {
@@ -319,9 +320,9 @@ pub(super) async fn compatibility_merge_entities_tx(
         let Some(payload) = fact.payload() else {
             continue;
         };
-        let mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
+        let mapping = project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
         let entities =
-            compatibility_fact_entities_tx(transaction, mapping.legacy_fact_id()).await?;
+            project_memory_fact_entities_tx(transaction, mapping.legacy_fact_id()).await?;
         let Some(sanitized) = compatibility_sanitize_payload(
             payload.content(),
             payload.category(),
@@ -331,12 +332,12 @@ pub(super) async fn compatibility_merge_entities_tx(
         )?
         else {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility merged entities were rejected by the privacy sanitizer",
             ));
         };
-        let source = compatibility_source_for_fact_tx(transaction, &mapping).await?;
-        let batch = compatibility_curated_correction_batch(
+        let source = project_memory_source_for_fact_tx(transaction, &mapping).await?;
+        let batch = project_memory_curated_correction_batch(
             &fact,
             sanitized.payload.clone(),
             actor.cloned(),
@@ -354,7 +355,7 @@ pub(super) async fn compatibility_merge_entities_tx(
             .cloned()
             .collect::<Vec<_>>();
         if !fact_evidence.is_empty() {
-            compatibility_record_curated_correction_provenance_tx(
+            project_memory_record_curated_correction_provenance_tx(
                 transaction,
                 owner,
                 fact_id,
@@ -381,7 +382,7 @@ pub(super) async fn compatibility_merge_entities_tx(
     Ok(fact_ids)
 }
 
-pub(super) async fn compatibility_add_entity_alias_tx(
+pub(super) async fn project_memory_add_entity_alias_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -389,15 +390,15 @@ pub(super) async fn compatibility_add_entity_alias_tx(
     now: UtcMicros,
 ) -> FactStoreResult<Vec<FactId>> {
     let evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
+        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let entity_id = operation.entity().legacy_entity_id();
-    let (name, mut aliases) = compatibility_owner_entity_tx(transaction, owner, entity_id).await?;
-    compatibility_entity_linked_to_evidence_tx(transaction, owner, entity_id, &evidence).await?;
+    let (name, mut aliases) = project_memory_owner_entity_tx(transaction, owner, entity_id).await?;
+    project_memory_entity_linked_to_evidence_tx(transaction, owner, entity_id, &evidence).await?;
     let alias = normalize_entity(operation.alias());
     if alias.is_empty() || alias.eq_ignore_ascii_case(&name) {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility alias is not distinct from its entity",
         ));
     }
@@ -424,47 +425,51 @@ pub(super) async fn compatibility_add_entity_alias_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    let fact_ids = compatibility_owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let fact_ids =
+        project_memory_owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await?;
     for fact_id in &fact_ids {
-        let mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
+        let mapping = project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
         let mut rows = transaction
             .query(
                 "SELECT category FROM memory_facts WHERE fact_id = ?1",
                 params![mapping.legacy_fact_id()],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         let row = rows
             .next()
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility alias fact is missing from the legacy mirror",
                 )
             })?;
-        let category =
-            compatibility_proposal_category(&row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)?;
+        let category = project_memory_proposal_category(&row_string(
+            &row,
+            0,
+            PROJECT_MEMORY_WRITE_OPERATION,
+        )?)?;
         compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, category, now).await?;
     }
     Ok(fact_ids)
 }
 
-pub(super) fn compatibility_curation_operation_digest(
+pub(super) fn project_memory_curation_operation_digest(
     operation: &ProjectMemoryFactCurationOperationV1,
 ) -> FactStoreResult<Value> {
     let evidence = |targets: &[ProjectMemoryFactTargetV1]| {
         targets
             .iter()
-            .map(compatibility_target_digest)
+            .map(project_memory_target_digest)
             .collect::<FactStoreResult<Vec<_>>>()
     };
     match operation {
         ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => Ok(json!({
             "kind": "normalize_tags",
-            "fact": compatibility_target_digest(operation.fact())?,
+            "fact": project_memory_target_digest(operation.fact())?,
             "tags": operation.tags(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
@@ -485,9 +490,9 @@ pub(super) fn compatibility_curation_operation_digest(
         })),
         ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => Ok(json!({
             "kind": "link_facts",
-            "source": compatibility_target_digest(operation.source())?,
-            "target": compatibility_target_digest(operation.target())?,
-            "relation": compatibility_relation_label(operation.relation()),
+            "source": project_memory_target_digest(operation.source())?,
+            "target": project_memory_target_digest(operation.target())?,
+            "relation": project_memory_relation_label(operation.relation()),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
             "source_label": operation.source_label(),
@@ -495,14 +500,14 @@ pub(super) fn compatibility_curation_operation_digest(
         })),
         ProjectMemoryFactCurationOperationV1::RepairVector(operation) => Ok(json!({
             "kind": "repair_vector",
-            "fact": compatibility_target_digest(operation.fact())?,
+            "fact": project_memory_target_digest(operation.fact())?,
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
     }
 }
 
-pub(super) async fn compatibility_record_oplog_tx(
+pub(super) async fn project_memory_record_oplog_tx(
     transaction: &Transaction<'_>,
     operation: &str,
     mapping: Option<&ProjectMemoryFactMappingV1>,
@@ -520,22 +525,22 @@ pub(super) async fn compatibility_record_oplog_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     Ok(())
 }
 
-pub(super) async fn compatibility_replay_curation_tx(
+pub(super) async fn project_memory_replay_curation_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1> {
+    receipt: &ProjectMemoryOperationReceiptV1,
+) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
     let ids = receipt
         .receipt
         .get("changed_fact_ids")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility curation receipt changed facts are malformed",
             )
         })?;
@@ -544,7 +549,7 @@ pub(super) async fn compatibility_replay_curation_tx(
         fact_ids.push(
             FactId::new(id.as_str().ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility curation receipt fact id is malformed",
                 )
             })?)
@@ -552,19 +557,19 @@ pub(super) async fn compatibility_replay_curation_tx(
         );
     }
     let mappings =
-        compatibility_curation_mappings_from_ids_tx(transaction, owner, &fact_ids).await?;
+        project_memory_curation_mappings_from_ids_tx(transaction, owner, &fact_ids).await?;
     let derived_repair = ProjectMemoryMemoryRepairStatsV1::new(
-        compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
-        compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?,
+        project_memory_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
+        project_memory_receipt_u64(&receipt.receipt, "banks_rebuilt")?,
     );
     ProjectMemoryFactCurationReceiptV1::new(
         owner.clone(),
         mappings,
-        compatibility_receipt_u64(&receipt.receipt, "normalized_tags")?,
-        compatibility_receipt_u64(&receipt.receipt, "merged_entities")?,
-        compatibility_receipt_u64(&receipt.receipt, "aliases_added")?,
-        compatibility_receipt_u64(&receipt.receipt, "facts_linked")?,
-        compatibility_receipt_u64(&receipt.receipt, "vectors_repaired")?,
+        project_memory_receipt_u64(&receipt.receipt, "normalized_tags")?,
+        project_memory_receipt_u64(&receipt.receipt, "merged_entities")?,
+        project_memory_receipt_u64(&receipt.receipt, "aliases_added")?,
+        project_memory_receipt_u64(&receipt.receipt, "facts_linked")?,
+        project_memory_receipt_u64(&receipt.receipt, "vectors_repaired")?,
         derived_repair,
     )
     .map_err(Into::into)

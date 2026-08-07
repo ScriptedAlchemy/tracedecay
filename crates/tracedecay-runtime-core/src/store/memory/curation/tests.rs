@@ -5,8 +5,7 @@ use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
 use tracedecay_store::{
-    FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError,
-    ProjectMemoryRelationProvenanceV1,
+    FactStoreError, ProjectMemoryRelationProvenanceV1, ProjectMemoryResult, ProjectMemoryStoreError,
 };
 
 async fn seed_fact(db: &crate::db::Database, owner: &FactOwnerV1, fact_id: &FactId) {
@@ -58,9 +57,9 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
         let source = source.clone();
         let evidence = evidence.clone();
         store
-            .compatibility_write(move |transaction| {
+            .project_memory_write(move |transaction| {
                 Box::pin(async move {
-                    compatibility_record_curated_correction_provenance_tx(
+                    project_memory_record_curated_correction_provenance_tx(
                         transaction,
                         &owner,
                         &source,
@@ -154,10 +153,10 @@ async fn curated_correction_provenance_rolls_back_with_its_transaction() {
     seed_fact(&db, &owner, &evidence).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: ProjectMemoryResult<()> = store
+        .project_memory_write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                project_memory_record_curated_correction_provenance_tx(
                     transaction,
                     &owner,
                     &source,
@@ -211,10 +210,10 @@ async fn curated_correction_provenance_rejects_cross_owner_evidence() {
     seed_fact(&db, &evidence_owner, &evidence).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: ProjectMemoryResult<()> = store
+        .project_memory_write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                project_memory_record_curated_correction_provenance_tx(
                     transaction,
                     &source_owner,
                     &source,
@@ -263,10 +262,10 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
     seed_fact(&db, &owner, &source).await;
 
     let store = DatabaseFactStore::new(&db);
-    let failed: FactCompatibilityResult<()> = store
-        .compatibility_write(move |transaction| {
+    let failed: ProjectMemoryResult<()> = store
+        .project_memory_write(move |transaction| {
             Box::pin(async move {
-                compatibility_record_curated_correction_provenance_tx(
+                project_memory_record_curated_correction_provenance_tx(
                     transaction,
                     &owner,
                     &source,
@@ -281,7 +280,7 @@ async fn curated_correction_rejects_self_only_evidence_without_writing_provenanc
             })
         })
         .await;
-    let FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. }) =
+    let ProjectMemoryStoreError::Store(FactStoreError::Storage { source, .. }) =
         failed.unwrap_err()
     else {
         panic!("self-only correction must fail as a storage contract violation");

@@ -2,18 +2,18 @@
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
-    FactCompatibilityStore, ProjectMemoryDashboardFactDetailQueryV1,
-    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddAliasV1,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackHistoryQueryV1,
-    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
-    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRepairVectorV1,
-    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddAliasV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeEntitiesV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactNormalizeTagsV1,
+    ProjectMemoryFactRepairVectorV1, ProjectMemoryFactStore, ProjectMemoryLegacyEntityTargetV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -29,7 +29,7 @@ use super::sanitize::{
     sanitize_curation_metadata, sanitize_curation_text, sanitize_curation_texts,
 };
 
-impl<A: FactCompatibilityStore> MemoryApplication<A> {
+impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Finite dashboard overview; the dashboard never opens a memory database
     /// or constructs a store query itself.
     pub async fn dashboard_overview_v1(
@@ -39,13 +39,11 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, MemoryApplicationError> {
         let overview = self
             .authority
-            .dashboard_compatibility_memory_overview(
-                ProjectMemoryDashboardMemoryOverviewQueryV1::new(
-                    self.owner.clone(),
-                    fact_limit,
-                    graph_limit,
-                )?,
-            )
+            .dashboard_project_memory_overview(ProjectMemoryDashboardMemoryOverviewQueryV1::new(
+                self.owner.clone(),
+                fact_limit,
+                graph_limit,
+            )?)
             .await?;
         if overview.owner != self.owner
             || overview.facts.len() > fact_limit
@@ -80,7 +78,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         let target = self.legacy_compatibility_target(fact_id)?;
         let detail = self
             .authority
-            .dashboard_compatibility_fact_detail(ProjectMemoryDashboardFactDetailQueryV1::new(
+            .dashboard_project_memory_fact_detail(ProjectMemoryDashboardFactDetailQueryV1::new(
                 target.clone(),
             )?)
             .await?;
@@ -122,7 +120,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn dashboard_memory_status_v1(
         &self,
     ) -> Result<ProjectMemoryMemoryStatusV1, MemoryApplicationError> {
-        self.compatibility_memory_status().await
+        self.project_memory_status().await
     }
 
     /// Capped vector inputs for dashboard-side PCA and similarity. Pair scoring
@@ -134,7 +132,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, MemoryApplicationError> {
         let points = self
             .authority
-            .dashboard_compatibility_vector_points(ProjectMemoryDashboardVectorPointsQueryV1::new(
+            .dashboard_project_memory_vector_points(ProjectMemoryDashboardVectorPointsQueryV1::new(
                 self.owner.clone(),
                 search,
                 limit,
@@ -158,7 +156,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, MemoryApplicationError> {
         let entries = self
             .authority
-            .dashboard_compatibility_memory_oplog(ProjectMemoryDashboardOplogQueryV1::new(
+            .dashboard_project_memory_oplog(ProjectMemoryDashboardOplogQueryV1::new(
                 self.owner.clone(),
                 limit,
             )?)
@@ -185,7 +183,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         self.ensure_owner(request.owner())?;
         let receipt = self
             .authority
-            .apply_compatibility_fact_curation(request)
+            .apply_project_memory_fact_curation(request)
             .await?;
         if receipt.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
@@ -341,7 +339,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         request: ProjectMemoryFactMergeCommandV1,
     ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
-        let outcome = self.authority.merge_compatibility_facts(request).await?;
+        let outcome = self.authority.merge_project_memory_facts(request).await?;
         if outcome.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "dashboard merge outcome owner",
@@ -396,7 +394,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: MemoryOperationContext,
     ) -> Result<ProjectMemoryMemoryRepairStatsV1, MemoryApplicationError> {
         self.authority
-            .repair_compatibility_memory(ProjectMemoryMemoryRepairCommandV1::new(
+            .repair_project_memory(ProjectMemoryMemoryRepairCommandV1::new(
                 self.owner.clone(),
                 context.operation_id().clone(),
                 context.actor().cloned(),

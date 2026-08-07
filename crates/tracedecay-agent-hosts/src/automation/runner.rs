@@ -1792,12 +1792,12 @@ mod tests {
         let rejected_id =
             tracedecay_domain::ProvenanceId::new(records[1].proposal_id.clone()).unwrap();
         let rejected = memory
-            .get_compatibility_fact_proposal(rejected_id.clone())
+            .get_project_memory_fact_proposal(rejected_id.clone())
             .await
             .unwrap()
             .unwrap();
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_project_memory_fact_proposal(
                 rejected_id,
                 rejected.revision(),
                 tracedecay_domain::ActorId::new("test:reviewer".to_string()).unwrap(),

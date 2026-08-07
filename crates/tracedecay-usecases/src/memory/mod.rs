@@ -22,9 +22,7 @@ mod tests;
 pub use anchors::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
-pub use compatibility::{
-    automation_fact_proposal_add_command, with_automation_run_id,
-};
+pub use compatibility::{automation_fact_proposal_add_command, with_automation_run_id};
 pub use context::MemoryOperationContext;
 pub use error::{
     MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
@@ -39,9 +37,8 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::memory::types::{FeedbackAction, FeedbackRequest};
 #[cfg(test)]
 use tracedecay_store::{
-    CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCompatibilityStore,
-    FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
+    CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
+    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
@@ -59,11 +56,11 @@ use tracedecay_store::{
     ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
     ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
-    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFeedbackRepairProgressV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, PromoteFactProposal, PromoteFactProposalOutcome,
-    RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError,
+    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing

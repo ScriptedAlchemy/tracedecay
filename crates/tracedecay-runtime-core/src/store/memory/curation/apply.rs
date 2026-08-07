@@ -5,31 +5,31 @@ use super::super::crud::{
     compatibility_sanitize_payload, load_current_projection,
 };
 use super::super::envelope::{
-    CompatibilityOperationReceiptV1, compatibility_digest,
-    compatibility_lookup_operation_receipt_tx, compatibility_record_operation_receipt_tx,
-    compatibility_target_digest,
+    ProjectMemoryOperationReceiptV1, project_memory_digest,
+    project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
+    project_memory_target_digest,
 };
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_event_time,
-    compatibility_legacy_timestamp, compatibility_now, compatibility_source_label, from_json,
-    row_f64, row_i64, row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp, from_json,
+    project_memory_event_time, project_memory_now, project_memory_source_label, row_f64, row_i64,
+    row_string, storage_error, storage_message,
 };
 use super::super::projection::{
-    compatibility_fact_for_legacy_id_tx, compatibility_required_mapping_tx,
-    compatibility_source_for_fact_tx, resolve_compatibility_target_tx,
+    project_memory_fact_for_legacy_id_tx, project_memory_required_mapping_tx,
+    project_memory_source_for_fact_tx, resolve_project_memory_target_tx,
 };
-use super::super::proposals::compatibility_proposal_category;
+use super::super::proposals::project_memory_proposal_category;
 use super::super::repair::{
     COMPATIBILITY_REPAIR_VECTOR_BATCH, compatibility_rebuild_dirty_banks_tx,
     compatibility_repair_missing_vectors_tx, compatibility_repair_vector_for_fact_tx,
 };
 use super::{
-    compatibility_add_entity_alias_tx, compatibility_available_curation_fact_tx,
-    compatibility_curated_correction_batch, compatibility_curation_mappings_from_ids_tx,
-    compatibility_curation_operation_digest, compatibility_legacy_relation_provenance,
-    compatibility_link_facts_tx, compatibility_merge_entities_tx, compatibility_normalize_tags_tx,
-    compatibility_record_oplog_tx, compatibility_replay_curation_tx,
-    compatibility_upsert_legacy_relation_tx,
+    project_memory_add_entity_alias_tx, project_memory_available_curation_fact_tx,
+    project_memory_curated_correction_batch, project_memory_curation_mappings_from_ids_tx,
+    project_memory_curation_operation_digest, project_memory_legacy_relation_provenance,
+    project_memory_link_facts_tx, project_memory_merge_entities_tx,
+    project_memory_normalize_tags_tx, project_memory_record_oplog_tx,
+    project_memory_replay_curation_tx, project_memory_upsert_legacy_relation_tx,
 };
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -41,27 +41,27 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreError, FactStoreResult, FactWriteBatch,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1, ProjectMemoryMemoryRepairStatsV1,
+    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
 };
-pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
+pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
-) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1> {
-    let request_digest = compatibility_digest(json!({
+) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
+    let request_digest = project_memory_digest(json!({
         "owner": request.owner(),
         "actor": request.actor().map(ActorId::as_str),
         "min_confidence": request.min_confidence().as_f64(),
         "operations": request
             .operations()
             .iter()
-            .map(compatibility_curation_operation_digest)
+            .map(project_memory_curation_operation_digest)
             .collect::<FactStoreResult<Vec<_>>>()?,
     }))?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -70,9 +70,9 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     )
     .await?
     {
-        return compatibility_replay_curation_tx(transaction, request.owner(), &receipt).await;
+        return project_memory_replay_curation_tx(transaction, request.owner(), &receipt).await;
     }
-    let now = compatibility_now()?;
+    let now = project_memory_now()?;
     let mut changed = Vec::new();
     let mut normalized_tags = 0_u64;
     let mut merged_entities = 0_u64;
@@ -83,7 +83,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
         match operation {
             ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
                 changed.push(
-                    compatibility_normalize_tags_tx(
+                    project_memory_normalize_tags_tx(
                         db,
                         transaction,
                         request.owner(),
@@ -97,7 +97,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
             }
             ProjectMemoryFactCurationOperationV1::MergeEntities(operation) => {
                 changed.extend(
-                    compatibility_merge_entities_tx(
+                    project_memory_merge_entities_tx(
                         db,
                         transaction,
                         request.owner(),
@@ -111,7 +111,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
             }
             ProjectMemoryFactCurationOperationV1::AddAlias(operation) => {
                 changed.extend(
-                    compatibility_add_entity_alias_tx(
+                    project_memory_add_entity_alias_tx(
                         db,
                         transaction,
                         request.owner(),
@@ -123,7 +123,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
                 aliases_added = aliases_added.saturating_add(1);
             }
             ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
-                let (fact_ids, _) = compatibility_link_facts_tx(
+                let (fact_ids, _) = project_memory_link_facts_tx(
                     transaction,
                     request.owner(),
                     request.actor(),
@@ -159,10 +159,11 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     let banks_rebuilt =
         compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
     let mappings =
-        compatibility_curation_mappings_from_ids_tx(transaction, request.owner(), &changed).await?;
+        project_memory_curation_mappings_from_ids_tx(transaction, request.owner(), &changed)
+            .await?;
     if mappings.len() > 256 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility curation changes exceed the fixed 256-fact receipt bound",
         )
         .into());
@@ -177,7 +178,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
         "missing_vectors_repaired": missing_vectors_repaired,
         "banks_rebuilt": banks_rebuilt,
     });
-    compatibility_record_operation_receipt_tx(
+    project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -190,7 +191,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     )
     .await?;
     if let Some(mapping) = mappings.first() {
-        compatibility_record_oplog_tx(
+        project_memory_record_oplog_tx(
             transaction,
             "curate_apply",
             Some(mapping),
@@ -218,7 +219,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     .map_err(Into::into)
 }
 
-fn compatibility_merge_removal_batch(
+fn project_memory_merge_removal_batch(
     owner: &FactOwnerV1,
     fact_id: &FactId,
     previous: PayloadAccessState,
@@ -246,7 +247,7 @@ fn compatibility_merge_removal_batch(
             previous,
             current: PayloadAccessState::Deleted,
         },
-        compatibility_event_time(now, 1)?,
+        project_memory_event_time(now, 1)?,
         actor,
     )?;
     FactWriteBatch::new(
@@ -271,32 +272,32 @@ async fn compatibility_mirror_category_tx(
             params![legacy_fact_id],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility legacy mirror fact is missing",
             )
         })?;
-    compatibility_proposal_category(&row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)
+    project_memory_proposal_category(&row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)
 }
 
-async fn compatibility_replay_merge_tx(
+async fn project_memory_replay_merge_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1> {
+    receipt: &ProjectMemoryOperationReceiptV1,
+) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
     let winner_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility merge receipt winner is missing",
         )
     })?;
-    let winner = compatibility_curation_mappings_from_ids_tx(
+    let winner = project_memory_curation_mappings_from_ids_tx(
         transaction,
         owner,
         std::slice::from_ref(winner_id),
@@ -306,7 +307,7 @@ async fn compatibility_replay_merge_tx(
     .next()
     .ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility merge receipt winner mapping is missing",
         )
     })?;
@@ -316,7 +317,7 @@ async fn compatibility_replay_merge_tx(
         .and_then(Value::as_array)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility merge receipt deleted losers are malformed",
             )
         })?;
@@ -325,7 +326,7 @@ async fn compatibility_replay_merge_tx(
         ids.push(
             FactId::new(id.as_str().ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility merge receipt loser id is malformed",
                 )
             })?)
@@ -333,14 +334,14 @@ async fn compatibility_replay_merge_tx(
         );
     }
     let deleted_losers =
-        compatibility_curation_mappings_from_ids_tx(transaction, owner, &ids).await?;
+        project_memory_curation_mappings_from_ids_tx(transaction, owner, &ids).await?;
     let content_updated = receipt
         .receipt
         .get("content_updated")
         .and_then(Value::as_bool)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility merge receipt content flag is malformed",
             )
         })?;
@@ -348,7 +349,7 @@ async fn compatibility_replay_merge_tx(
         .map_err(Into::into)
 }
 
-async fn compatibility_rewire_merge_relations_tx(
+async fn project_memory_rewire_merge_relations_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     winner_fact_id: &FactId,
@@ -387,29 +388,29 @@ async fn compatibility_rewire_merge_relations_tx(
     let mut legacy_rows = transaction
         .query(&legacy_sql, legacy_values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut legacy_relations = Vec::new();
     while let Some(row) = legacy_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         legacy_relations.push((
-            row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
-            row_i64(&row, 1, COMPATIBILITY_WRITE_OPERATION)?,
-            row_string(&row, 2, COMPATIBILITY_WRITE_OPERATION)?,
-            Confidence::new(row_f64(&row, 3, COMPATIBILITY_WRITE_OPERATION)?)?,
-            row_string(&row, 4, COMPATIBILITY_WRITE_OPERATION)?,
+            row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
+            row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?,
+            row_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?,
+            Confidence::new(row_f64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?)?,
+            row_string(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
             from_json::<Value>(
-                &row_string(&row, 5, COMPATIBILITY_WRITE_OPERATION)?,
-                COMPATIBILITY_WRITE_OPERATION,
+                &row_string(&row, 5, PROJECT_MEMORY_WRITE_OPERATION)?,
+                PROJECT_MEMORY_WRITE_OPERATION,
             )?,
         ));
     }
     drop(legacy_rows);
     if legacy_relations.len() > 256 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility merge relation rewiring exceeds the fixed 256-relation bound",
         ));
     }
@@ -419,12 +420,12 @@ async fn compatibility_rewire_merge_relations_tx(
         .collect::<BTreeSet<_>>();
     for (source, target, _, _, _, _) in &legacy_relations {
         for endpoint in [source, target] {
-            if compatibility_fact_for_legacy_id_tx(transaction, owner, *endpoint)
+            if project_memory_fact_for_legacy_id_tx(transaction, owner, *endpoint)
                 .await?
                 .is_none()
             {
                 return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility merge relation crosses an owner boundary",
                 ));
             }
@@ -455,7 +456,7 @@ async fn compatibility_rewire_merge_relations_tx(
             },
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     for (source, target, relation, confidence, source_label, metadata) in legacy_relations {
         let source = if loser_legacy.contains(&source) {
             winner_legacy_fact_id
@@ -477,19 +478,19 @@ async fn compatibility_rewire_merge_relations_tx(
             "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
             _ => {
                 return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility merge found an unsupported legacy relation",
                 ));
             }
         };
-        compatibility_upsert_legacy_relation_tx(
+        project_memory_upsert_legacy_relation_tx(
             transaction,
             source,
             target,
             relation,
             confidence,
-            &compatibility_source_label(Some(&source_label))?,
-            &compatibility_legacy_relation_provenance(&metadata).await?,
+            &project_memory_source_label(Some(&source_label))?,
+            &project_memory_legacy_relation_provenance(&metadata).await?,
             compatibility_legacy_timestamp(now),
         )
         .await?;
@@ -522,28 +523,28 @@ async fn compatibility_rewire_merge_relations_tx(
     let mut canonical_rows = transaction
         .query(&canonical_sql, canonical_values)
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut canonical_relations = Vec::new();
     while let Some(row) = canonical_rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         canonical_relations.push((
-            FactId::new(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)?,
-            FactId::new(row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?)?,
-            row_string(&row, 2, COMPATIBILITY_WRITE_OPERATION)?,
-            Confidence::new(row_f64(&row, 3, COMPATIBILITY_WRITE_OPERATION)?)?,
-            row_string(&row, 4, COMPATIBILITY_WRITE_OPERATION)?,
-            row_string(&row, 5, COMPATIBILITY_WRITE_OPERATION)?,
-            row_string(&row, 6, COMPATIBILITY_WRITE_OPERATION)?,
-            row_i64(&row, 7, COMPATIBILITY_WRITE_OPERATION)?,
+            FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)?,
+            FactId::new(row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?)?,
+            row_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?,
+            Confidence::new(row_f64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?)?,
+            row_string(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
+            row_string(&row, 5, PROJECT_MEMORY_WRITE_OPERATION)?,
+            row_string(&row, 6, PROJECT_MEMORY_WRITE_OPERATION)?,
+            row_i64(&row, 7, PROJECT_MEMORY_WRITE_OPERATION)?,
         ));
     }
     drop(canonical_rows);
     if canonical_relations.len() > 256 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "canonical merge relation rewiring exceeds the fixed 256-relation bound",
         ));
     }
@@ -569,7 +570,7 @@ async fn compatibility_rewire_merge_relations_tx(
             },
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     for (
         source,
         target,
@@ -614,7 +615,7 @@ async fn compatibility_rewire_merge_relations_tx(
                     target.as_str(),
                     relation,
                     confidence.as_f64(),
-                    compatibility_source_label(Some(&source_label))?,
+                    project_memory_source_label(Some(&source_label))?,
                     provenance_json,
                     evidence_json,
                     occurred_at,
@@ -622,28 +623,28 @@ async fn compatibility_rewire_merge_relations_tx(
                 ],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     }
     Ok(())
 }
 
-pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
+pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactMergeCommandV1,
-) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1> {
-    let request_digest = compatibility_digest(json!({
+) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
+    let request_digest = project_memory_digest(json!({
         "owner": request.owner(),
-        "winner": compatibility_target_digest(request.winner())?,
+        "winner": project_memory_target_digest(request.winner())?,
         "losers": request
             .losers()
             .iter()
-            .map(compatibility_target_digest)
+            .map(project_memory_target_digest)
             .collect::<FactStoreResult<Vec<_>>>()?,
         "merged_content": request.merged_content(),
         "actor": request.actor().map(ActorId::as_str),
     }))?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+    if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -652,11 +653,11 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     )
     .await?
     {
-        return compatibility_replay_merge_tx(transaction, request.owner(), &receipt).await;
+        return project_memory_replay_merge_tx(transaction, request.owner(), &receipt).await;
     }
-    let now = compatibility_now()?;
+    let now = project_memory_now()?;
     let (winner_id, winner_fact, winner_mapping) =
-        compatibility_available_curation_fact_tx(transaction, request.winner()).await?;
+        project_memory_available_curation_fact_tx(transaction, request.winner()).await?;
     let mut content_updated = false;
     if let Some(content) = request.merged_content() {
         let payload = winner_fact
@@ -671,19 +672,19 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
         )?
         else {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility merged content was rejected by the privacy sanitizer",
             )
             .into());
         };
-        let source = compatibility_source_for_fact_tx(
+        let source = project_memory_source_for_fact_tx(
             transaction,
             winner_mapping
                 .legacy_mapping()
                 .ok_or(FactStoreError::FactMismatch)?,
         )
         .await?;
-        let batch = compatibility_curated_correction_batch(
+        let batch = project_memory_curated_correction_batch(
             &winner_fact,
             sanitized.payload.clone(),
             request.actor().cloned(),
@@ -710,7 +711,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     let mut loser_legacy_ids = Vec::with_capacity(request.losers().len());
     let mut pending_deletes = Vec::with_capacity(request.losers().len());
     for target in request.losers() {
-        let loser_id = resolve_compatibility_target_tx(transaction, target)
+        let loser_id = resolve_project_memory_target_tx(transaction, target)
             .await?
             .ok_or_else(|| {
                 let loser_label = target
@@ -723,13 +724,13 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
                     })
                     .unwrap_or_else(|| "unknown".to_string());
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     format!("compatibility merge loser fact {loser_label} not found"),
                 )
             })?;
         if loser_id == winner_id {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility merge winner cannot be a loser",
             )
             .into());
@@ -738,12 +739,12 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
             .await?
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     "compatibility merge loser projection is missing",
                 )
             })?;
         let mapping =
-            compatibility_required_mapping_tx(transaction, request.owner(), &loser_id).await?;
+            project_memory_required_mapping_tx(transaction, request.owner(), &loser_id).await?;
         loser_ids.push(loser_id.clone());
         loser_legacy_ids.push(mapping.legacy_fact_id());
         if projection.access != PayloadAccessState::Deleted {
@@ -758,7 +759,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
             ));
         }
     }
-    compatibility_rewire_merge_relations_tx(
+    project_memory_rewire_merge_relations_tx(
         transaction,
         request.owner(),
         &winner_id,
@@ -772,7 +773,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     .await?;
     let mut deleted_ids = Vec::new();
     for (loser_id, previous_access, expected_last_event_id, mapping, category) in pending_deletes {
-        let batch = compatibility_merge_removal_batch(
+        let batch = project_memory_merge_removal_batch(
             request.owner(),
             &loser_id,
             previous_access,
@@ -793,7 +794,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
         .await?;
         deleted_ids.push(loser_id);
     }
-    let winner = compatibility_curation_mappings_from_ids_tx(
+    let winner = project_memory_curation_mappings_from_ids_tx(
         transaction,
         request.owner(),
         std::slice::from_ref(&winner_id),
@@ -803,18 +804,18 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     .next()
     .ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility merge winner mapping is missing",
         )
     })?;
     let deleted_losers =
-        compatibility_curation_mappings_from_ids_tx(transaction, request.owner(), &deleted_ids)
+        project_memory_curation_mappings_from_ids_tx(transaction, request.owner(), &deleted_ids)
             .await?;
     let receipt = json!({
         "content_updated": content_updated,
         "deleted_loser_fact_ids": deleted_ids.iter().map(FactId::as_str).collect::<Vec<_>>(),
     });
-    compatibility_record_operation_receipt_tx(
+    project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -826,7 +827,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
         now,
     )
     .await?;
-    compatibility_record_oplog_tx(
+    project_memory_record_oplog_tx(
         transaction,
         "curate_apply",
         Some(&winner),

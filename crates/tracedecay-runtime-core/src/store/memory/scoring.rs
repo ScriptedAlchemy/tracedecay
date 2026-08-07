@@ -7,7 +7,7 @@ use crate::memory::encoding::HolographicEncoder;
 use tracedecay_domain::UtcMicros;
 use tracedecay_store::ProjectMemoryFactV1;
 
-pub(super) fn compatibility_tokens(text: &str) -> Vec<String> {
+pub(super) fn project_memory_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     for character in text.chars() {
@@ -29,16 +29,19 @@ pub(super) fn compatibility_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-pub(super) fn compatibility_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<String> {
-    let mut tokens = fact.content().map(compatibility_tokens).unwrap_or_default();
+pub(super) fn project_memory_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<String> {
+    let mut tokens = fact
+        .content()
+        .map(project_memory_tokens)
+        .unwrap_or_default();
     if let Some(tags) = fact.tags() {
         for tag in tags {
-            tokens.extend(compatibility_tokens(tag));
+            tokens.extend(project_memory_tokens(tag));
         }
     }
     if let Some(entities) = fact.entities() {
         for entity in entities {
-            tokens.extend(compatibility_tokens(entity));
+            tokens.extend(project_memory_tokens(entity));
         }
     }
     tokens.sort_unstable();
@@ -46,7 +49,7 @@ pub(super) fn compatibility_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<Strin
     tokens
 }
 
-pub(super) fn compatibility_term_coverage(query: &[String], fact: &[String]) -> f64 {
+pub(super) fn project_memory_term_coverage(query: &[String], fact: &[String]) -> f64 {
     if query.is_empty() {
         return 0.0;
     }
@@ -62,7 +65,7 @@ pub(super) fn compatibility_term_coverage(query: &[String], fact: &[String]) -> 
     matched as f64 / query.len() as f64
 }
 
-pub(super) fn compatibility_jaccard(left: &[String], right: &[String]) -> f64 {
+pub(super) fn project_memory_jaccard(left: &[String], right: &[String]) -> f64 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
@@ -76,7 +79,7 @@ pub(super) fn compatibility_jaccard(left: &[String], right: &[String]) -> f64 {
     }
 }
 
-pub(super) fn compatibility_holographic_score(
+pub(super) fn project_memory_holographic_score(
     encoder: &HolographicEncoder,
     query_vector: &[f64],
     fact: &ProjectMemoryFactV1,
@@ -88,11 +91,11 @@ pub(super) fn compatibility_holographic_score(
     f64::midpoint(encoder.similarity(query_vector, &fact_vector), 1.0).clamp(0.0, 1.0)
 }
 
-pub(super) fn compatibility_millionths(value: f64) -> u32 {
+pub(super) fn project_memory_millionths(value: f64) -> u32 {
     (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
 }
 
-pub(super) fn compatibility_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {
+pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {
     let age_micros = now.0.saturating_sub(updated_at.0).max(0) as f64;
     let age_days = age_micros / 86_400_000_000.0;
     0.5_f64.powf(age_days / 365.0).clamp(0.10, 1.0)

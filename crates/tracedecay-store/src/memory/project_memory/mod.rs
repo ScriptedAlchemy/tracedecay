@@ -9,7 +9,7 @@ use tracedecay_domain::{
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
 use super::{
     FactLineageCursor, FactStoreError, FactStoreResult, LegacyFactQuery,
-    MAX_COMPATIBILITY_REASON_BYTES, MAX_COMPATIBILITY_SEARCH_BYTES, ProjectMemoryFactStatusV1,
+    MAX_PROJECT_MEMORY_REASON_BYTES, MAX_PROJECT_MEMORY_SEARCH_BYTES, ProjectMemoryFactStatusV1,
     ProjectMemoryFactTelemetryV1, StoredFactV1, validate_owned_fact_id,
 };
 
@@ -43,11 +43,11 @@ pub use dashboard::{
     ProjectMemoryDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    FactProposalPromotionStateV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    FactProposalPromotionStateV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use search::{
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
@@ -57,11 +57,11 @@ pub use search::{
 };
 
 fn validate_project_memory_entity(value: &str) -> FactStoreResult<()> {
-    validate_compatibility_text(value, "compatibility fact entity")
+    validate_project_memory_text(value, "compatibility fact entity")
 }
 
-fn validate_compatibility_text(value: &str, field: &'static str) -> FactStoreResult<()> {
-    if !is_canonical_text_within(value, MAX_COMPATIBILITY_SEARCH_BYTES) {
+fn validate_project_memory_text(value: &str, field: &'static str) -> FactStoreResult<()> {
+    if !is_canonical_text_within(value, MAX_PROJECT_MEMORY_SEARCH_BYTES) {
         return Err(FactStoreError::Contract(DomainError::NonCanonical {
             field,
         }));
@@ -69,9 +69,9 @@ fn validate_compatibility_text(value: &str, field: &'static str) -> FactStoreRes
     Ok(())
 }
 
-fn validate_compatibility_metadata(value: &Value, field: &'static str) -> FactStoreResult<()> {
+fn validate_project_memory_metadata(value: &Value, field: &'static str) -> FactStoreResult<()> {
     if serde_json::to_vec(value)
-        .map(|encoded| encoded.len() > MAX_COMPATIBILITY_SEARCH_BYTES)
+        .map(|encoded| encoded.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES)
         .unwrap_or(true)
     {
         return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -232,7 +232,7 @@ impl ProjectMemoryFactV1 {
 
     pub fn with_source_label(mut self, source_label: Option<String>) -> FactStoreResult<Self> {
         if source_label.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact source label",

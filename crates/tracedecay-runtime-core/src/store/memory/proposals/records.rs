@@ -1,13 +1,13 @@
 //! Proposal request parsing, record projection, and read queries.
 
 use super::super::crud::{compatibility_payload_metadata, compatibility_value_strings};
-use super::super::envelope::compatibility_digest;
+use super::super::envelope::project_memory_digest;
 use super::super::primitives::{
-    COMPATIBILITY_READ_OPERATION, OwnerKey, compatibility_category_label, from_json,
-    nonnegative_u64, row_i64, row_optional_string, row_string, storage_error, storage_message,
-    to_json,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, from_json, nonnegative_u64,
+    project_memory_category_label, row_i64, row_optional_string, row_string, storage_error,
+    storage_message, to_json,
 };
-use super::super::projection::compatibility_legacy_mapping_tx;
+use super::super::projection::project_memory_legacy_mapping_tx;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use serde_json::{Value, json};
@@ -16,14 +16,13 @@ use tracedecay_domain::{
     SanitizationReceiptV1,
 };
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1,
+    FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, ProjectMemoryResult,
 };
-const COMPATIBILITY_PROPOSAL_PAGE_LIMIT: usize = 1_000;
+const PROJECT_MEMORY_PROPOSAL_PAGE_LIMIT: usize = 1_000;
 
-pub(super) fn compatibility_proposal_state_label(
+pub(super) fn project_memory_proposal_state_label(
     state: ProjectMemoryFactProposalStateV1,
 ) -> &'static str {
     match state {
@@ -35,7 +34,7 @@ pub(super) fn compatibility_proposal_state_label(
     }
 }
 
-fn compatibility_proposal_state(value: &str) -> FactStoreResult<ProjectMemoryFactProposalStateV1> {
+fn project_memory_proposal_state(value: &str) -> FactStoreResult<ProjectMemoryFactProposalStateV1> {
     match value {
         "pending" => Ok(ProjectMemoryFactProposalStateV1::PendingApproval),
         "applying" => Ok(ProjectMemoryFactProposalStateV1::Applying),
@@ -43,13 +42,13 @@ fn compatibility_proposal_state(value: &str) -> FactStoreResult<ProjectMemoryFac
         "rejected" => Ok(ProjectMemoryFactProposalStateV1::Rejected),
         "quarantined" => Ok(ProjectMemoryFactProposalStateV1::Quarantined),
         _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             format!("unknown compatibility proposal state {value:?}"),
         )),
     }
 }
 
-pub(in crate::store::memory) fn compatibility_proposal_category(
+pub(in crate::store::memory) fn project_memory_proposal_category(
     value: &str,
 ) -> FactStoreResult<FactCategoryV1> {
     match value {
@@ -60,13 +59,13 @@ pub(in crate::store::memory) fn compatibility_proposal_category(
         "decision" => Ok(FactCategoryV1::Decision),
         "code_area" => Ok(FactCategoryV1::CodeArea),
         _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             format!("unknown compatibility proposal category {value:?}"),
         )),
     }
 }
 
-fn compatibility_proposal_required_string(
+fn project_memory_proposal_required_string(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
 ) -> FactStoreResult<String> {
@@ -76,13 +75,13 @@ fn compatibility_proposal_required_string(
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 format!("compatibility proposal {field} is missing or malformed"),
             )
         })
 }
 
-fn compatibility_proposal_optional_string(
+fn project_memory_proposal_optional_string(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
 ) -> FactStoreResult<Option<String>> {
@@ -90,20 +89,20 @@ fn compatibility_proposal_optional_string(
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             format!("compatibility proposal {field} is malformed"),
         )),
     }
 }
 
-pub(super) fn compatibility_proposal_request_value(
+pub(super) fn project_memory_proposal_request_value(
     request: &ProjectMemoryFactAddCommandV1,
 ) -> Value {
     json!({
         "owner": request.owner(),
         "operation_id": request.operation_id().as_str(),
         "content": request.content(),
-        "category": compatibility_category_label(request.category()),
+        "category": project_memory_category_label(request.category()),
         "source": request.source(),
         "tags": request.tags(),
         "entities": request.entities(),
@@ -115,13 +114,13 @@ pub(super) fn compatibility_proposal_request_value(
     })
 }
 
-fn compatibility_proposal_request_from_value(
+fn project_memory_proposal_request_from_value(
     owner: &FactOwnerV1,
     value: Value,
 ) -> FactStoreResult<ProjectMemoryFactAddCommandV1> {
     let object = value.as_object().ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             "compatibility proposal request is not an object",
         )
     })?;
@@ -129,31 +128,31 @@ fn compatibility_proposal_request_from_value(
         &to_json(
             object.get("owner").ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_READ_OPERATION,
+                    PROJECT_MEMORY_READ_OPERATION,
                     "compatibility proposal request owner is missing",
                 )
             })?,
             "serialize compatibility proposal request owner",
         )?,
-        COMPATIBILITY_READ_OPERATION,
+        PROJECT_MEMORY_READ_OPERATION,
     )?;
     if &stored_owner != owner {
         return Err(FactStoreError::OwnerMismatch);
     }
-    let operation_id = ProvenanceId::new(compatibility_proposal_required_string(
+    let operation_id = ProvenanceId::new(project_memory_proposal_required_string(
         object,
         "operation_id",
     )?)
     .map_err(FactStoreError::from)?;
-    let content = compatibility_proposal_required_string(object, "content")?;
-    let category = compatibility_proposal_category(&compatibility_proposal_required_string(
+    let content = project_memory_proposal_required_string(object, "content")?;
+    let category = project_memory_proposal_category(&project_memory_proposal_required_string(
         object, "category",
     )?)?;
-    let source = compatibility_proposal_optional_string(object, "source")?;
+    let source = project_memory_proposal_optional_string(object, "source")?;
     let tags = compatibility_value_strings(
         object.get("tags").ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal request tags are missing",
             )
         })?,
@@ -162,7 +161,7 @@ fn compatibility_proposal_request_from_value(
     let entities = compatibility_value_strings(
         object.get("entities").ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal request entities are missing",
             )
         })?,
@@ -171,7 +170,7 @@ fn compatibility_proposal_request_from_value(
     let metadata =
         compatibility_payload_metadata(&object.get("metadata").cloned().ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal request metadata is missing",
             )
         })?);
@@ -179,28 +178,28 @@ fn compatibility_proposal_request_from_value(
         &to_json(
             object.get("sanitization_receipt").ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_READ_OPERATION,
+                    PROJECT_MEMORY_READ_OPERATION,
                     "compatibility proposal request sanitization receipt is missing",
                 )
             })?,
             "serialize compatibility proposal sanitization receipt",
         )?,
-        COMPATIBILITY_READ_OPERATION,
+        PROJECT_MEMORY_READ_OPERATION,
     )?;
-    let automation_run_id = compatibility_proposal_optional_string(object, "automation_run_id")?;
+    let automation_run_id = project_memory_proposal_optional_string(object, "automation_run_id")?;
     let trust = Confidence::new(
         object
             .get("default_trust")
             .and_then(Value::as_f64)
             .ok_or_else(|| {
                 storage_message(
-                    COMPATIBILITY_READ_OPERATION,
+                    PROJECT_MEMORY_READ_OPERATION,
                     "compatibility proposal request default trust is missing",
                 )
             })?,
     )
     .map_err(FactStoreError::from)?;
-    let actor = compatibility_proposal_optional_string(object, "actor")?
+    let actor = project_memory_proposal_optional_string(object, "actor")?
         .map(ActorId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
@@ -223,16 +222,16 @@ fn compatibility_proposal_request_from_value(
     }
 }
 
-pub(in crate::store::memory) fn compatibility_proposal_action_id(
+pub(in crate::store::memory) fn project_memory_proposal_action_id(
     kind: &'static str,
     material: Value,
 ) -> FactStoreResult<ProvenanceId> {
-    let digest = compatibility_digest(material)?;
+    let digest = project_memory_digest(material)?;
     ProvenanceId::new(format!("compatibility-{kind}:{digest}")).map_err(FactStoreError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn compatibility_proposal_transition_json(
+pub(super) fn project_memory_proposal_transition_json(
     proposal_id: &ProvenanceId,
     previous_state: Option<&str>,
     current_state: &str,
@@ -257,11 +256,11 @@ pub(super) fn compatibility_proposal_transition_json(
     )
 }
 
-pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
+pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>> {
+) -> ProjectMemoryResult<Option<ProjectMemoryFactProposalRecordV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -285,47 +284,48 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
             params![proposal_id.as_str(), key.kind, key.project_id.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     else {
         return Ok(None);
     };
-    let stored_id = ProvenanceId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+    let stored_id = ProvenanceId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
         .map_err(FactStoreError::from)?;
     if &stored_id != proposal_id {
         return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
+            PROJECT_MEMORY_READ_OPERATION,
             "compatibility proposal identity mismatch",
         )
         .into());
     }
-    if row_string(&row, 1, COMPATIBILITY_READ_OPERATION)? != key.json {
+    if row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)? != key.json {
         return Err(FactStoreError::OwnerMismatch.into());
     }
-    let request = compatibility_proposal_request_from_value(
+    let request = project_memory_proposal_request_from_value(
         owner,
         from_json::<Value>(
-            &row_string(&row, 2, COMPATIBILITY_READ_OPERATION)?,
-            COMPATIBILITY_READ_OPERATION,
+            &row_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
+            PROJECT_MEMORY_READ_OPERATION,
         )?,
     )?;
-    let state = compatibility_proposal_state(&row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?)?;
+    let state =
+        project_memory_proposal_state(&row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION)?)?;
     let revision = ProjectMemoryFactProposalRevisionV1::new(
-        u64::try_from(row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?).map_err(|_| {
+        u64::try_from(row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?).map_err(|_| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal revision is negative",
             )
         })?,
     )?;
-    let reviewer = row_optional_string(&row, 5, COMPATIBILITY_READ_OPERATION)?
-        .map(|value| from_json::<ActorId>(&value, COMPATIBILITY_READ_OPERATION))
+    let reviewer = row_optional_string(&row, 5, PROJECT_MEMORY_READ_OPERATION)?
+        .map(|value| from_json::<ActorId>(&value, PROJECT_MEMORY_READ_OPERATION))
         .transpose()?;
-    let reason = row_optional_string(&row, 6, COMPATIBILITY_READ_OPERATION)?
-        .map(|value| from_json::<Value>(&value, COMPATIBILITY_READ_OPERATION))
+    let reason = row_optional_string(&row, 6, PROJECT_MEMORY_READ_OPERATION)?
+        .map(|value| from_json::<Value>(&value, PROJECT_MEMORY_READ_OPERATION))
         .transpose()?
         .and_then(|value| {
             value
@@ -333,31 +333,31 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         });
-    let applied_fact_id = row_optional_string(&row, 7, COMPATIBILITY_READ_OPERATION)?
+    let applied_fact_id = row_optional_string(&row, 7, PROJECT_MEMORY_READ_OPERATION)?
         .map(FactId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
     let applied_mapping = match (&state, &applied_fact_id) {
         (ProjectMemoryFactProposalStateV1::Applied, Some(fact_id)) => Some(
-            compatibility_legacy_mapping_tx(transaction, owner, fact_id)
+            project_memory_legacy_mapping_tx(transaction, owner, fact_id)
                 .await?
                 .ok_or_else(|| {
                     storage_message(
-                        COMPATIBILITY_READ_OPERATION,
+                        PROJECT_MEMORY_READ_OPERATION,
                         "applied compatibility proposal is missing its fixed legacy mapping",
                     )
                 })?,
         ),
         (ProjectMemoryFactProposalStateV1::Applied, None) => {
             return Err(storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "applied compatibility proposal is missing its promoted fact",
             )
             .into());
         }
         (_, Some(_)) => {
             return Err(storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "non-applied compatibility proposal has a promoted fact",
             )
             .into());
@@ -372,7 +372,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
         (None, None) => None,
         _ => {
             return Err(storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal mapping and fact identity disagree",
             )
             .into());
@@ -393,25 +393,25 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
     .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn get_compatibility_fact_proposal_tx(
+pub(in crate::store::memory) async fn get_project_memory_fact_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>> {
-    compatibility_proposal_record_tx(transaction, owner, proposal_id).await
+) -> ProjectMemoryResult<Option<ProjectMemoryFactProposalRecordV1>> {
+    project_memory_proposal_record_tx(transaction, owner, proposal_id).await
 }
 
-pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
+pub(in crate::store::memory) async fn list_project_memory_fact_proposals_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     state: Option<ProjectMemoryFactProposalStateV1>,
     after_proposal_id: Option<&ProvenanceId>,
     limit: usize,
-) -> FactCompatibilityResult<ProjectMemoryFactProposalPageV1> {
-    if limit == 0 || limit > COMPATIBILITY_PROPOSAL_PAGE_LIMIT {
+) -> ProjectMemoryResult<ProjectMemoryFactProposalPageV1> {
+    if limit == 0 || limit > PROJECT_MEMORY_PROPOSAL_PAGE_LIMIT {
         return Err(FactStoreError::InvalidQueryLimit {
             limit,
-            max: COMPATIBILITY_PROPOSAL_PAGE_LIMIT,
+            max: PROJECT_MEMORY_PROPOSAL_PAGE_LIMIT,
         }
         .into());
     }
@@ -419,9 +419,9 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
     let fetch_limit =
         i64::try_from(limit.saturating_add(1)).map_err(|_| FactStoreError::InvalidQueryLimit {
             limit,
-            max: COMPATIBILITY_PROPOSAL_PAGE_LIMIT,
+            max: PROJECT_MEMORY_PROPOSAL_PAGE_LIMIT,
         })?;
-    let state_label = state.map(compatibility_proposal_state_label);
+    let state_label = state.map(project_memory_proposal_state_label);
     let mut rows = match (state_label, after_proposal_id) {
         (Some(state), Some(after)) => {
             transaction
@@ -513,15 +513,15 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
                 .await
         }
     }
-    .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+    .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let mut ids = Vec::with_capacity(limit.saturating_add(1));
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
         ids.push(
-            ProvenanceId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+            ProvenanceId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
                 .map_err(FactStoreError::from)?,
         );
     }
@@ -531,11 +531,11 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
     let mut proposals = Vec::with_capacity(ids.len());
     for proposal_id in &ids {
         proposals.push(
-            compatibility_proposal_record_tx(transaction, owner, proposal_id)
+            project_memory_proposal_record_tx(transaction, owner, proposal_id)
                 .await?
                 .ok_or_else(|| {
                     storage_message(
-                        COMPATIBILITY_READ_OPERATION,
+                        PROJECT_MEMORY_READ_OPERATION,
                         "compatibility proposal disappeared from its read snapshot",
                     )
                 })?,
@@ -549,10 +549,10 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
     .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn count_pending_compatibility_fact_proposals_tx(
+pub(in crate::store::memory) async fn count_pending_project_memory_fact_proposals_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<u64> {
+) -> ProjectMemoryResult<u64> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -567,19 +567,19 @@ pub(in crate::store::memory) async fn count_pending_compatibility_fact_proposals
             params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
     let row = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
         .ok_or_else(|| {
             storage_message(
-                COMPATIBILITY_READ_OPERATION,
+                PROJECT_MEMORY_READ_OPERATION,
                 "compatibility proposal count returned no row",
             )
         })?;
     nonnegative_u64(
-        row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)?,
+        row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "pending proposal count",
     )
     .map_err(Into::into)

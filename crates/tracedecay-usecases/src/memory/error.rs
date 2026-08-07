@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use tracedecay_domain::{DomainError, FactOwnerV1, SourceStoreId};
 use tracedecay_store::{
-    FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
-    ProjectMemoryFeedbackRepairProgressV1,
+    FactProposalStoreError, FactStoreError, ProjectMemoryFeedbackRepairProgressV1,
+    ProjectMemoryStoreError,
 };
 
 use super::anchors::EvidenceAnchorResolutionError;
@@ -26,7 +26,7 @@ pub enum MemoryApplicationError {
     #[error("memory authority operation failed")]
     Authority(#[from] FactProposalStoreError),
     #[error("memory compatibility authority operation failed")]
-    Compatibility(#[from] FactCompatibilityStoreError),
+    Compatibility(#[from] ProjectMemoryStoreError),
     #[error("memory compatibility input is invalid: {invariant}")]
     InvalidCompatibilityInput { invariant: &'static str },
     #[error("memory compatibility projection cannot be represented by the V1 surface: {invariant}")]

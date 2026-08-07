@@ -9,25 +9,26 @@ use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactRepairVectorV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    FactStoreError, FactStoreResult, ProjectMemoryFactRepairVectorV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
 };
 
 use super::crud::{
     compatibility_mark_owner_banks_dirty_tx, compatibility_mirror_vector, load_current_fact_tx,
 };
 use super::curation::{
-    compatibility_available_curation_fact_tx, compatibility_curation_evidence_ids_tx,
+    project_memory_available_curation_fact_tx, project_memory_curation_evidence_ids_tx,
 };
 use super::envelope::{
-    compatibility_digest, compatibility_lookup_operation_receipt_tx, compatibility_receipt_u64,
-    compatibility_record_operation_receipt_tx,
+    project_memory_digest, project_memory_lookup_operation_receipt_tx, project_memory_receipt_u64,
+    project_memory_record_operation_receipt_tx,
 };
 use super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, compatibility_now,
-    compatibility_source_store_id, row_i64, row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
+    compatibility_source_store_id, project_memory_now, row_i64, row_string, storage_error,
+    storage_message,
 };
-use super::projection::compatibility_required_mapping_tx;
+use super::projection::project_memory_required_mapping_tx;
 
 /// Per-repair-pass batch caps. The daemon scheduler treats a pass that hits
 /// either cap as incomplete and keeps ticking rather than going idle with a
@@ -56,10 +57,10 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
     now: UtcMicros,
 ) -> FactStoreResult<FactId> {
     let _evidence =
-        compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
+        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let (fact_id, fact, mapping) =
-        compatibility_available_curation_fact_tx(transaction, operation.fact()).await?;
+        project_memory_available_curation_fact_tx(transaction, operation.fact()).await?;
     let payload = fact
         .payload()
         .ok_or(FactStoreError::PayloadAccessMismatch)?;
@@ -80,10 +81,10 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     if changed != 1 {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility vector target is missing from the legacy mirror",
         ));
     }
@@ -92,22 +93,22 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
     Ok(fact_id)
 }
 
-pub(super) fn compatibility_repair_request_digest(
+pub(super) fn project_memory_repair_request_digest(
     request: &ProjectMemoryMemoryRepairCommandV1,
 ) -> FactStoreResult<String> {
-    compatibility_digest(json!({
+    project_memory_digest(json!({
         "owner": request.owner(),
         "actor": request.actor().map(ActorId::as_str),
     }))
 }
 
-pub(super) async fn repair_compatibility_memory_tx(
+pub(super) async fn repair_project_memory_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryMemoryRepairCommandV1,
-) -> FactCompatibilityResult<ProjectMemoryMemoryRepairStatsV1> {
-    let request_digest = compatibility_repair_request_digest(request)?;
-    if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
+) -> ProjectMemoryResult<ProjectMemoryMemoryRepairStatsV1> {
+    let request_digest = project_memory_repair_request_digest(request)?;
+    if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -117,8 +118,8 @@ pub(super) async fn repair_compatibility_memory_tx(
     .await?
     {
         let missing_vectors_repaired =
-            compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?;
-        let banks_rebuilt = compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
+            project_memory_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?;
+        let banks_rebuilt = project_memory_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
         return Ok(
             ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
                 .with_saturated(compatibility_repair_batches_saturated(
@@ -127,7 +128,7 @@ pub(super) async fn repair_compatibility_memory_tx(
                 )),
         );
     }
-    let now = compatibility_now()?;
+    let now = project_memory_now()?;
     let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
         db,
         transaction,
@@ -142,7 +143,7 @@ pub(super) async fn repair_compatibility_memory_tx(
         "missing_vectors_repaired": missing_vectors_repaired,
         "banks_rebuilt": banks_rebuilt,
     });
-    compatibility_record_operation_receipt_tx(
+    project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
@@ -212,20 +213,20 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut fact_ids = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         fact_ids.push(
-            FactId::new(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?)
+            FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)
                 .map_err(FactStoreError::from)?,
         );
     }
     drop(rows);
-    let now = compatibility_now()?;
+    let now = project_memory_now()?;
     let mut repaired = 0_u64;
     for fact_id in fact_ids {
         let Some(fact) = load_current_fact_tx(transaction, &key, owner, &fact_id).await? else {
@@ -234,7 +235,7 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
         let Some(payload) = fact.payload() else {
             continue;
         };
-        let mapping = compatibility_required_mapping_tx(transaction, owner, &fact_id).await?;
+        let mapping = project_memory_required_mapping_tx(transaction, owner, &fact_id).await?;
         let vector = compatibility_mirror_vector(payload)?;
         let changed = transaction
             .execute(
@@ -252,10 +253,10 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
                 ],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         if changed != 1 {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility vector target is missing from the legacy mirror",
             ));
         }
@@ -305,12 +306,12 @@ async fn compatibility_mark_absent_banks_dirty_tx(
             params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let bank_count = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
-        .map(|row| row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION))
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+        .map(|row| row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION))
         .transpose()?
         .unwrap_or(0);
     drop(rows);
@@ -333,14 +334,14 @@ async fn compatibility_mark_absent_banks_dirty_tx(
             params![key.kind, key.project_id.as_str()],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut bank_names = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
-        bank_names.push(row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?);
+        bank_names.push(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?);
     }
     drop(rows);
     if bank_names.is_empty() {
@@ -350,7 +351,7 @@ async fn compatibility_mark_absent_banks_dirty_tx(
     for bank_name in bank_names {
         db.mark_memory_v2_bank_dirty_in_transaction(transaction, owner, &bank_name, now)
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     }
     Ok(())
 }
@@ -377,20 +378,20 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let mut dirty = Vec::new();
     while let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     {
         dirty.push((
-            row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?,
-            UtcMicros(row_i64(&row, 1, COMPATIBILITY_WRITE_OPERATION)?),
+            row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
+            UtcMicros(row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?),
         ));
     }
     drop(rows);
-    let now = compatibility_now()?;
+    let now = project_memory_now()?;
     let mut rebuilt = 0_u64;
     for (bank_name, dirty_updated_at) in dirty {
         if bank_name != "all"
@@ -400,7 +401,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
             )
         {
             return Err(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "compatibility dirty bank has an unsupported category",
             ));
         }
@@ -440,16 +441,16 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                 ],
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         let mut decoded = Vec::new();
         let mut malformed_legacy_fact_ids = Vec::new();
         while let Some(row) = vectors
             .next()
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         {
-            let legacy_fact_id = row_i64(&row, 0, COMPATIBILITY_WRITE_OPERATION)?;
-            let fact_id = FactId::new(row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?)
+            let legacy_fact_id = row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?;
+            let fact_id = FactId::new(row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?)
                 .map_err(FactStoreError::from)?;
             let vector = match row.get::<crate::db::engine::Value>(2) {
                 Ok(crate::db::engine::Value::Blob(bytes)) => {
@@ -502,7 +503,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                             ],
                         )
                         .await
-                        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+                        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
                     decoded.push(decoded_vector);
                 }
                 None => {
@@ -521,17 +522,17 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                             ],
                         )
                         .await
-                        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+                        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
                 }
             }
         }
         if decoded.is_empty() {
             db.delete_memory_v2_bank_in_transaction(transaction, owner, bank_name.as_str())
                 .await
-                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+                .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         } else {
             let vector = HolographicEncoder::serialize(&compatibility_average_vectors(&decoded))
-                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+                .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
             db.upsert_memory_v2_bank_in_transaction(
                 transaction,
                 owner,
@@ -541,7 +542,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                 now,
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
         }
         if db
             .clear_memory_v2_bank_dirty_in_transaction(
@@ -551,7 +552,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                 dirty_updated_at,
             )
             .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
         {
             rebuilt = rebuilt.saturating_add(1);
         }

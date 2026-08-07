@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use tracedecay_domain::PayloadAccessState;
 use tracedecay_store::{
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1, FactCompatibilityStore,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
 };
 
 use crate::application::memory::MemoryApplication;
@@ -11,7 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
 use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
 
-pub(crate) async fn validate_fact_proposals<A: FactCompatibilityStore>(
+pub(crate) async fn validate_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
@@ -138,7 +138,7 @@ impl EvidenceCitationSet {
     }
 }
 
-async fn validate_fact_proposal<A: FactCompatibilityStore>(
+async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     proposal: &Value,
     citations: &EvidenceCitationSet,

@@ -290,7 +290,8 @@ impl AgentTaskBackend for JsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
         Ok(AgentTaskResponse {

@@ -50,11 +50,11 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
     );
 
     let first = memory
-        .submit_compatibility_fact_proposal(proposal_id.clone(), command.clone(), None)
+        .submit_project_memory_fact_proposal(proposal_id.clone(), command.clone(), None)
         .await
         .unwrap();
     let replay = memory
-        .submit_compatibility_fact_proposal(proposal_id.clone(), command, None)
+        .submit_project_memory_fact_proposal(proposal_id.clone(), command, None)
         .await
         .unwrap();
     assert_eq!(first.proposal_id(), replay.proposal_id());
@@ -72,7 +72,7 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
 
     let reviewer = proposal_actor("test:reviewer").unwrap();
     let rejected = memory
-        .reject_compatibility_fact_proposal(
+        .reject_project_memory_fact_proposal(
             proposal_id.clone(),
             first.revision(),
             reviewer.clone(),
@@ -83,7 +83,7 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
     assert_eq!(rejected.state(), ProjectMemoryFactProposalStateV1::Rejected);
     assert!(
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_project_memory_fact_proposal(
                 proposal_id,
                 first.revision(),
                 reviewer,
@@ -156,7 +156,7 @@ async fn authority_collapses_duplicate_semantic_submissions_and_preserves_submis
     );
 
     let canonical = memory
-        .list_compatibility_fact_proposals(None, None, 10)
+        .list_project_memory_fact_proposals(None, None, 10)
         .await
         .unwrap();
     assert_eq!(canonical.proposals().len(), 2);
@@ -197,7 +197,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
     let proposal_id = ProvenanceId::new("proposal-promotion".to_string()).unwrap();
     let submitted = memory
-        .submit_compatibility_fact_proposal(
+        .submit_project_memory_fact_proposal(
             proposal_id.clone(),
             live_command(
                 owner.clone(),
@@ -210,7 +210,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .await
         .unwrap();
     let promoted = memory
-        .promote_compatibility_fact_proposal_with_disposition(
+        .promote_project_memory_fact_proposal_with_disposition(
             ProjectMemoryFactProposalPromotionV1::new(
                 owner.clone(),
                 proposal_id.clone(),
@@ -232,7 +232,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
     assert!(promoted.proposal().applied_fact_id().is_some());
 
     let replayed = memory
-        .promote_compatibility_fact_proposal_with_disposition(
+        .promote_project_memory_fact_proposal_with_disposition(
             ProjectMemoryFactProposalPromotionV1::new(
                 owner.clone(),
                 proposal_id.clone(),
@@ -250,7 +250,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
 
     assert!(
         memory
-            .promote_compatibility_fact_proposal_with_disposition(
+            .promote_project_memory_fact_proposal_with_disposition(
                 ProjectMemoryFactProposalPromotionV1::new(
                     owner.clone(),
                     proposal_id.clone(),
@@ -266,7 +266,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
 
     assert!(
         memory
-            .reject_compatibility_fact_proposal(
+            .reject_project_memory_fact_proposal(
                 proposal_id,
                 submitted.revision(),
                 proposal_actor("test:reviewer").unwrap(),

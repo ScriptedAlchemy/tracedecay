@@ -602,14 +602,14 @@ fn dashboard_queries_bound_the_finite_read_surface() {
         ProjectMemoryDashboardVectorPointsQueryV1::new(
             FactOwnerV1::Profile,
             None,
-            MAX_COMPATIBILITY_DASHBOARD_VECTORS + 1,
+            MAX_PROJECT_MEMORY_DASHBOARD_VECTORS + 1,
         ),
         Err(FactStoreError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
         ProjectMemoryDashboardOplogQueryV1::new(
             FactOwnerV1::Profile,
-            MAX_COMPATIBILITY_DASHBOARD_OPLOG + 1,
+            MAX_PROJECT_MEMORY_DASHBOARD_OPLOG + 1,
         ),
         Err(FactStoreError::InvalidQueryLimit { .. })
     ));

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_domain::FactOwnerV1;
-use tracedecay_store::FactCompatibilityStore;
+use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
 use crate::application::memory::MemoryApplication;
@@ -167,7 +167,7 @@ pub(super) fn build_session_reflector_prompt(evidence: &Value) -> String {
     )
 }
 
-pub(super) async fn validate_session_fact_proposals<A: FactCompatibilityStore>(
+pub(super) async fn validate_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
@@ -175,7 +175,7 @@ pub(super) async fn validate_session_fact_proposals<A: FactCompatibilityStore>(
     validate_fact_proposals(memory, proposals, evidence).await
 }
 
-pub(super) async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>(
+pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     dashboard_root: &std::path::Path,
@@ -210,7 +210,7 @@ pub(super) async fn auto_apply_session_fact_proposals<A: FactCompatibilityStore>
     Ok((applied, newly_promoted))
 }
 
-async fn refresh_auto_apply_digest_for_new_promotions<A: FactCompatibilityStore>(
+async fn refresh_auto_apply_digest_for_new_promotions<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     newly_promoted: bool,
@@ -276,7 +276,7 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) proposals: &'a [Value],
 }
 
-pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore>(
+pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
@@ -433,7 +433,7 @@ pub(super) async fn finalize_session_reflector_success<A: FactCompatibilityStore
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_session_reflector_for_store<A: FactCompatibilityStore>(
+pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     dashboard_root: PathBuf,
     sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,

@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{
-    FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError, FactStoreResult,
-    ProjectMemoryFactTargetV1,
+    FactStoreError, FactStoreResult, ProjectMemoryFactTargetV1, ProjectMemoryResult,
+    ProjectMemoryStoreError,
 };
 
 use super::DatabaseFactStore;
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION, QUERY_OPERATION,
     from_json, row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 
@@ -45,13 +45,13 @@ pub(super) async fn finish_read_snapshot<T>(
 }
 
 #[derive(Clone)]
-pub(super) struct CompatibilityOperationReceiptV1 {
+pub(super) struct ProjectMemoryOperationReceiptV1 {
     pub(super) fact_id: Option<FactId>,
     pub(super) event_id: Option<FactEventId>,
     pub(super) receipt: Value,
 }
 
-pub(super) fn compatibility_digest(material: Value) -> FactStoreResult<String> {
+pub(super) fn project_memory_digest(material: Value) -> FactStoreResult<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let encoded = to_json(&material, "serialize compatibility request digest")?;
     let digest = Sha256::digest(encoded.as_bytes());
@@ -63,13 +63,13 @@ pub(super) fn compatibility_digest(material: Value) -> FactStoreResult<String> {
     Ok(value)
 }
 
-pub(super) async fn compatibility_lookup_operation_receipt_tx(
+pub(super) async fn project_memory_lookup_operation_receipt_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
     expected_kind: &'static str,
     request_digest: &str,
-) -> FactStoreResult<Option<CompatibilityOperationReceiptV1>> {
+) -> FactStoreResult<Option<ProjectMemoryOperationReceiptV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -101,41 +101,41 @@ pub(super) async fn compatibility_lookup_operation_receipt_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     let Some(row) = rows
         .next()
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
     else {
         return Ok(None);
     };
-    let operation_kind = row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?;
-    let stored_digest = row_string(&row, 1, COMPATIBILITY_WRITE_OPERATION)?;
+    let operation_kind = row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?;
+    let stored_digest = row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?;
     if operation_kind != expected_kind || stored_digest != request_digest {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility operation id was reused with a different request",
         ));
     }
-    let fact_id = row_optional_string(&row, 2, COMPATIBILITY_WRITE_OPERATION)?
+    let fact_id = row_optional_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?
         .map(FactId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
-    let event_id = row_optional_string(&row, 3, COMPATIBILITY_WRITE_OPERATION)?
+    let event_id = row_optional_string(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?
         .map(FactEventId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
     if event_id.is_some() && fact_id.is_none() {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility receipt has an event without a fact",
         ));
     }
     let receipt = from_json::<Value>(
-        &row_string(&row, 4, COMPATIBILITY_WRITE_OPERATION)?,
-        COMPATIBILITY_WRITE_OPERATION,
+        &row_string(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
+        PROJECT_MEMORY_WRITE_OPERATION,
     )?;
-    Ok(Some(CompatibilityOperationReceiptV1 {
+    Ok(Some(ProjectMemoryOperationReceiptV1 {
         fact_id,
         event_id,
         receipt,
@@ -143,7 +143,7 @@ pub(super) async fn compatibility_lookup_operation_receipt_tx(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn compatibility_record_operation_receipt_tx(
+pub(super) async fn project_memory_record_operation_receipt_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation_id: &ProvenanceId,
@@ -156,7 +156,7 @@ pub(super) async fn compatibility_record_operation_receipt_tx(
 ) -> FactStoreResult<()> {
     if event_id.is_some() && fact_id.is_none() {
         return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             "compatibility receipt cannot reference an event without a fact",
         ));
     }
@@ -180,11 +180,11 @@ pub(super) async fn compatibility_record_operation_receipt_tx(
             ],
         )
         .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     Ok(())
 }
 
-pub(super) fn compatibility_target_digest(
+pub(super) fn project_memory_target_digest(
     target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<Value> {
     match target {
@@ -198,43 +198,39 @@ pub(super) fn compatibility_target_digest(
     }
 }
 
-pub(super) fn compatibility_receipt_u64(
+pub(super) fn project_memory_receipt_u64(
     receipt: &Value,
     field: &'static str,
 ) -> FactStoreResult<u64> {
     receipt.get(field).and_then(Value::as_u64).ok_or_else(|| {
         storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
+            PROJECT_MEMORY_WRITE_OPERATION,
             format!("compatibility receipt {field} is malformed"),
         )
     })
 }
 
 impl DatabaseFactStore<'_> {
-    pub(super) async fn compatibility_read<T>(
+    pub(super) async fn project_memory_read<T>(
         &self,
         work: impl for<'tx> FnOnce(
             &'tx Transaction<'_>,
-        ) -> Pin<
-            Box<dyn Future<Output = FactCompatibilityResult<T>> + Send + 'tx>,
-        >,
-    ) -> FactCompatibilityResult<T> {
+        )
+            -> Pin<Box<dyn Future<Output = ProjectMemoryResult<T>> + Send + 'tx>>,
+    ) -> ProjectMemoryResult<T> {
         let snapshot = self
             .db
-            .begin_memory_read_transaction(COMPATIBILITY_READ_OPERATION)
+            .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
             .await
             .map_err(|error| {
-                FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_READ_OPERATION,
-                    error,
-                ))
+                ProjectMemoryStoreError::Store(storage_error(PROJECT_MEMORY_READ_OPERATION, error))
             })?;
         let result = work(&snapshot).await;
         match result {
             Ok(value) => {
                 snapshot.commit().await.map_err(|error| {
-                    FactCompatibilityStoreError::Store(storage_error(
-                        COMPATIBILITY_READ_OPERATION,
+                    ProjectMemoryStoreError::Store(storage_error(
+                        PROJECT_MEMORY_READ_OPERATION,
                         error,
                     ))
                 })?;
@@ -242,8 +238,8 @@ impl DatabaseFactStore<'_> {
             }
             Err(error) => match snapshot.rollback().await {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_READ_OPERATION,
+                Err(rollback) => Err(ProjectMemoryStoreError::Store(storage_error(
+                    PROJECT_MEMORY_READ_OPERATION,
                     std::io::Error::other(format!(
                         "{error}; read snapshot rollback also failed: {rollback}"
                     )),
@@ -252,33 +248,29 @@ impl DatabaseFactStore<'_> {
         }
     }
 
-    pub(super) async fn compatibility_write<T>(
+    pub(super) async fn project_memory_write<T>(
         &self,
         work: impl for<'tx> FnOnce(
             &'tx Transaction<'_>,
-        ) -> Pin<
-            Box<dyn Future<Output = FactCompatibilityResult<T>> + Send + 'tx>,
-        >,
-    ) -> FactCompatibilityResult<T> {
+        )
+            -> Pin<Box<dyn Future<Output = ProjectMemoryResult<T>> + Send + 'tx>>,
+    ) -> ProjectMemoryResult<T> {
         if self
             .write_control
             .as_ref()
             .is_some_and(super::FactWriteControl::interrupted)
         {
-            return Err(FactCompatibilityStoreError::Store(storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
+            return Err(ProjectMemoryStoreError::Store(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
                 "fact write was interrupted before transaction admission",
             )));
         }
         let transaction = self
             .db
-            .begin_memory_write_transaction(COMPATIBILITY_WRITE_OPERATION)
+            .begin_memory_write_transaction(PROJECT_MEMORY_WRITE_OPERATION)
             .await
             .map_err(|error| {
-                FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    error,
-                ))
+                ProjectMemoryStoreError::Store(storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
             })?;
         let result = work(&transaction).await;
         match result {
@@ -289,12 +281,12 @@ impl DatabaseFactStore<'_> {
                     .is_some_and(|control| !control.try_begin_commit())
                 {
                     return match transaction.rollback().await {
-                        Ok(()) => Err(FactCompatibilityStoreError::Store(storage_message(
-                            COMPATIBILITY_WRITE_OPERATION,
+                        Ok(()) => Err(ProjectMemoryStoreError::Store(storage_message(
+                            PROJECT_MEMORY_WRITE_OPERATION,
                             "fact write was interrupted before durable commit",
                         ))),
-                        Err(rollback) => Err(FactCompatibilityStoreError::Store(storage_error(
-                            COMPATIBILITY_WRITE_OPERATION,
+                        Err(rollback) => Err(ProjectMemoryStoreError::Store(storage_error(
+                            PROJECT_MEMORY_WRITE_OPERATION,
                             std::io::Error::other(format!(
                                 "fact write was interrupted before durable commit; transaction rollback also failed: {rollback}"
                             )),
@@ -302,8 +294,8 @@ impl DatabaseFactStore<'_> {
                     };
                 }
                 transaction.commit().await.map_err(|error| {
-                    FactCompatibilityStoreError::Store(storage_error(
-                        COMPATIBILITY_WRITE_OPERATION,
+                    ProjectMemoryStoreError::Store(storage_error(
+                        PROJECT_MEMORY_WRITE_OPERATION,
                         error,
                     ))
                 })?;
@@ -311,8 +303,8 @@ impl DatabaseFactStore<'_> {
             }
             Err(error) => match transaction.rollback().await {
                 Ok(()) => Err(error),
-                Err(rollback) => Err(FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_WRITE_OPERATION,
+                Err(rollback) => Err(ProjectMemoryStoreError::Store(storage_error(
+                    PROJECT_MEMORY_WRITE_OPERATION,
                     std::io::Error::other(format!(
                         "{error}; transaction rollback also failed: {rollback}"
                     )),

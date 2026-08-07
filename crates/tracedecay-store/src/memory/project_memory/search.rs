@@ -4,7 +4,7 @@ use tracedecay_domain::{
 
 use super::super::queries::{MAX_CURRENT_LIMIT, validate_limit};
 use super::super::{
-    FactStoreError, FactStoreResult, MAX_COMPATIBILITY_REASON_BYTES, validate_owned_fact_id,
+    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_REASON_BYTES, validate_owned_fact_id,
 };
 use super::{ProjectMemoryFactTargetV1, ProjectMemoryFactV1, validate_project_memory_entity};
 
@@ -203,7 +203,7 @@ impl ProjectMemoryFactSearchHitV1 {
         why: Option<String>,
     ) -> FactStoreResult<Self> {
         if why.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact search why",
@@ -369,7 +369,7 @@ impl ProjectMemoryFactContradictionV1 {
             }));
         }
         if why.as_ref().is_some_and(|value| {
-            value.trim().is_empty() || value.len() > MAX_COMPATIBILITY_REASON_BYTES
+            value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "compatibility fact contradiction reason",
