@@ -814,7 +814,10 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         status, 200,
         "the installed production client must commit the project mutation: {applied}"
     );
-    let applied_payload = &applied["payload"];
+    // The PATCH answers ProjectSettingsPatchResponseV1: the committed
+    // application outcome plus the refreshed settings envelope under
+    // `current`, so the snapshot reads live one level down from the GET's.
+    let applied_payload = &applied["current"]["payload"];
     assert_eq!(applied_payload["resync_recommended"], true);
     assert_eq!(
         applied_payload["project"]["config"]["max_file_size"], 2048,
