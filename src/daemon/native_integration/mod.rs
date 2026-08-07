@@ -10,6 +10,4 @@ mod store;
 
 pub(crate) use registry::{
     DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry,
-    DaemonProjectNativeIntegrationService,
 };
-pub(crate) use store::SharedDaemonNativeIntegrationStore;
