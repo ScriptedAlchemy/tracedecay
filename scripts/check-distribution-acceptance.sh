@@ -308,11 +308,19 @@ cargo build \
   --bins
 
 echo "distribution acceptance: packaging every workspace crate"
+# Every workspace member is publish = false: releases ship GitHub-release
+# artifacts, never crates.io uploads. Packaging is used here only to produce
+# the per-crate source trees the acceptance battery runs against, so skip the
+# per-package lockfile: generating it would resolve the unpublished internal
+# dependencies against crates.io and fail. Nothing downstream reads the
+# embedded lock — every extracted tree resolves through the [patch.crates-io]
+# path overlay below, and the install step builds from a path, not an archive.
 cargo package \
   --manifest-path "$repo/Cargo.toml" \
   --workspace \
   --allow-dirty \
-  --no-verify
+  --no-verify \
+  --exclude-lockfile
 
 metadata="$work/metadata.json"
 cargo metadata \
