@@ -66,7 +66,8 @@ pub(super) struct DaemonEngine {
     /// but never owns its cadence or lifecycle.
     maintenance_coordinator: maintenance::MaintenanceCoordinator,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
-    pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    pr_autotrack_task:
+        Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,
 }
 
 /// Retain one daemon-owned Git index transaction service for the project store
@@ -172,7 +173,10 @@ impl DaemonEngine {
         self
     }
 
-    pub(super) async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
+    pub(super) async fn with_pr_autotrack_task(
+        self,
+        task: crate::daemon::pr_autotrack::PrAutotrackTask,
+    ) -> Self {
         *self.pr_autotrack_task.lock().await = Some(task);
         self
     }
@@ -861,9 +865,8 @@ impl DaemonEngine {
                 &[("failures", watcher_shutdown.failures().len().to_string())],
             );
         }
-        if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
+        if let Some(task) = self.pr_autotrack_task.lock().await.take() {
+            task.shutdown().await;
         }
     }
 

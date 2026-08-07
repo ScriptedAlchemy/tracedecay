@@ -41,17 +41,21 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
 
 use crate::branch::{BranchAdminAction, BranchAdminOutcome};
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
+mod runtime;
+pub(super) use runtime::spawn_with_administration;
+pub use runtime::{PrAutotrackTask, spawn, teardown_disabled_project};
+
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
     daemon: &'a StoreAdministration,
     graph: Option<&'a std::sync::Arc<crate::tracedecay::TraceDecay>>,
+    command_control: &'a PrCommandControl,
 }
 
 impl<'a> PrStoreAdministration<'a> {
@@ -62,6 +66,19 @@ impl<'a> PrStoreAdministration<'a> {
         Self {
             daemon,
             graph: Some(graph),
+            command_control: default_pr_command_control(),
+        }
+    }
+
+    fn with_control(
+        daemon: &'a StoreAdministration,
+        graph: &'a std::sync::Arc<crate::tracedecay::TraceDecay>,
+        command_control: &'a PrCommandControl,
+    ) -> Self {
+        Self {
+            daemon,
+            graph: Some(graph),
+            command_control,
         }
     }
 
@@ -70,6 +87,7 @@ impl<'a> PrStoreAdministration<'a> {
         Self {
             daemon,
             graph: None,
+            command_control: default_pr_command_control(),
         }
     }
 }
@@ -80,9 +98,33 @@ const STATE_FILENAME: &str = "pr-autotrack.json";
 /// Maximum number of *new* PR branches tracked per poll cycle, so a repo with
 /// 100 open PRs ramps up gradually instead of forking 100 syncs at once.
 const MAX_NEW_TRACKS_PER_CYCLE: usize = 10;
-/// Base cadence of the poll loop; per-project intervals are honored on top of
-/// this floor via a last-run map.
-const BASE_TICK: Duration = Duration::from_mins(1);
+const PR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const PR_COMMAND_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+const PR_COMMAND_STDERR_LIMIT: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+struct PrCommandControl {
+    cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
+    command_timeout: Duration,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+}
+
+impl Default for PrCommandControl {
+    fn default() -> Self {
+        Self {
+            cancellation: None,
+            command_timeout: PR_COMMAND_TIMEOUT,
+            max_stdout_bytes: PR_COMMAND_STDOUT_LIMIT,
+            max_stderr_bytes: PR_COMMAND_STDERR_LIMIT,
+        }
+    }
+}
+
+fn default_pr_command_control() -> &'static PrCommandControl {
+    static CONTROL: std::sync::OnceLock<PrCommandControl> = std::sync::OnceLock::new();
+    CONTROL.get_or_init(PrCommandControl::default)
+}
 
 /// A PR head discovered on the origin remote that we can track (same-repo).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,11 +350,31 @@ fn map_pull_heads_to_branches(
     discovery
 }
 
-fn run_git(repo_root: &Path, args: &[&str]) -> Option<std::process::Output> {
+fn run_git_with_control(
+    repo_root: &Path,
+    args: &[&str],
+    control: &PrCommandControl,
+) -> Result<std::process::Output, tracedecay_runtime_core::git::GitCommandError> {
     let mut command = std::process::Command::new(crate::git::git_program());
     command.args(args).current_dir(repo_root);
     disable_git_credential_prompt(&mut command);
-    command.output().ok().filter(|o| o.status.success())
+    let bounds = tracedecay_runtime_core::git::GitCommandBounds {
+        deadline: std::time::Instant::now() + control.command_timeout,
+        cancel: control.cancellation.clone(),
+        max_stdout_bytes: control.max_stdout_bytes,
+        max_stderr_bytes: control.max_stderr_bytes,
+    };
+    tracedecay_runtime_core::git::bounded_command_output(command, None, &bounds)
+}
+
+fn successful_git_with_control(
+    repo_root: &Path,
+    args: &[&str],
+    control: &PrCommandControl,
+) -> Option<std::process::Output> {
+    run_git_with_control(repo_root, args, control)
+        .ok()
+        .filter(|output| output.status.success())
 }
 
 /// Forbids interactive credential prompts on a spawned git/gh subprocess. The
@@ -332,7 +394,7 @@ fn disable_git_credential_prompt(command: &mut std::process::Command) {
 /// `git remote get-url origin` every poll cycle (once per project, every minute)
 /// only re-decides a constant. A rare remote-URL change is picked up on the next
 /// daemon restart.
-fn origin_is_github(repo_root: &Path) -> bool {
+fn origin_is_github(repo_root: &Path, control: &PrCommandControl) -> bool {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, bool>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -341,7 +403,7 @@ fn origin_is_github(repo_root: &Path) -> bool {
     {
         return cached;
     }
-    let result = run_git(repo_root, &["remote", "get-url", "origin"])
+    let result = successful_git_with_control(repo_root, &["remote", "get-url", "origin"], control)
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .is_some_and(|url| url.contains("github.com"));
     if let Ok(mut map) = cache.lock() {
@@ -359,13 +421,27 @@ const GH_PR_LIST_LIMIT: usize = 1000;
 /// answer is a property of the host binary, not of any repo, so probing it every
 /// poll cycle (once per enabled project, every minute) only re-decides a
 /// constant. The daemon restarts to pick up a newly installed `gh`.
-fn gh_available() -> bool {
+fn gh_available(control: &PrCommandControl) -> bool {
+    if control
+        .cancellation
+        .as_ref()
+        .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
+    {
+        return false;
+    }
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         let mut command = std::process::Command::new("gh");
         command.arg("--version");
         disable_git_credential_prompt(&mut command);
-        command.output().is_ok_and(|o| o.status.success())
+        let bounds = tracedecay_runtime_core::git::GitCommandBounds {
+            deadline: std::time::Instant::now() + control.command_timeout,
+            cancel: control.cancellation.clone(),
+            max_stdout_bytes: control.max_stdout_bytes,
+            max_stderr_bytes: control.max_stderr_bytes,
+        };
+        tracedecay_runtime_core::git::bounded_command_output(command, None, &bounds)
+            .is_ok_and(|output| output.status.success())
     })
 }
 
@@ -382,18 +458,25 @@ fn gh_available() -> bool {
 /// mass-untrack the managed set. An empty `Ok` result means the remote genuinely
 /// has no open PRs.
 pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
-    if origin_is_github(repo_root)
-        && gh_available()
-        && let Some(discovery) = discover_via_gh(repo_root)
+    discover_open_prs_with_control(repo_root, default_pr_command_control())
+}
+
+fn discover_open_prs_with_control(
+    repo_root: &Path,
+    control: &PrCommandControl,
+) -> Result<PrDiscovery, String> {
+    if origin_is_github(repo_root, control)
+        && gh_available(control)
+        && let Some(discovery) = discover_via_gh(repo_root, control)
     {
         return Ok(discovery);
     }
     // GitHub discovery was inapplicable, unavailable, or failed. `ls-remote`
     // propagates its own failure as `Err` rather than empty.
-    discover_via_ls_remote(repo_root)
+    discover_via_ls_remote(repo_root, control)
 }
 
-fn discover_via_gh(repo_root: &Path) -> Option<PrDiscovery> {
+fn discover_via_gh(repo_root: &Path, control: &PrCommandControl) -> Option<PrDiscovery> {
     let limit = GH_PR_LIST_LIMIT.to_string();
     let mut command = std::process::Command::new("gh");
     command
@@ -409,18 +492,34 @@ fn discover_via_gh(repo_root: &Path) -> Option<PrDiscovery> {
         ])
         .current_dir(repo_root);
     disable_git_credential_prompt(&mut command);
-    let output = command.output().ok().filter(|o| o.status.success())?;
+    let bounds = tracedecay_runtime_core::git::GitCommandBounds {
+        deadline: std::time::Instant::now() + control.command_timeout,
+        cancel: control.cancellation.clone(),
+        max_stdout_bytes: control.max_stdout_bytes,
+        max_stderr_bytes: control.max_stderr_bytes,
+    };
+    let output = tracedecay_runtime_core::git::bounded_command_output(command, None, &bounds)
+        .ok()
+        .filter(|output| output.status.success())?;
     let json = String::from_utf8(output.stdout).ok()?;
     parse_gh_pr_list(&json, GH_PR_LIST_LIMIT).ok()
 }
 
-fn discover_via_ls_remote(repo_root: &Path) -> Result<PrDiscovery, String> {
-    let pull_out = run_git(repo_root, &["ls-remote", "origin", "refs/pull/*/head"])
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .ok_or_else(|| "git ls-remote of PR head refs failed".to_string())?;
-    let heads_out = run_git(repo_root, &["ls-remote", "--heads", "origin"])
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .ok_or_else(|| "git ls-remote of head refs failed".to_string())?;
+fn discover_via_ls_remote(
+    repo_root: &Path,
+    control: &PrCommandControl,
+) -> Result<PrDiscovery, String> {
+    let pull_out = successful_git_with_control(
+        repo_root,
+        &["ls-remote", "origin", "refs/pull/*/head"],
+        control,
+    )
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .ok_or_else(|| "git ls-remote of PR head refs failed".to_string())?;
+    let heads_out =
+        successful_git_with_control(repo_root, &["ls-remote", "--heads", "origin"], control)
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .ok_or_else(|| "git ls-remote of head refs failed".to_string())?;
     let pull_heads = parse_ls_remote_pull_heads(&pull_out);
     let head_shas = parse_ls_remote_heads(&heads_out);
     Ok(map_pull_heads_to_branches(&pull_heads, &head_shas))
@@ -706,15 +805,37 @@ async fn track_pr(
         .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, &label, &meta))
         .is_some_and(|path| path.is_file());
     let branch_ref = format!("refs/heads/{label}");
-    let branch_ready = ref_points_to(repo_root, &branch_ref, &pr.head_sha);
-    let tracking_ref_ready = ref_points_to(repo_root, &tracking_ref, &pr.head_sha);
-    let worktree_ready = ref_points_to(&worktree, "HEAD", &pr.head_sha)
-        && crate::branch::current_branch(&worktree).as_deref() == Some(label.as_str());
+    let branch_ready = ref_points_to(
+        repo_root,
+        &branch_ref,
+        &pr.head_sha,
+        administration.command_control,
+    );
+    let tracking_ref_ready = ref_points_to(
+        repo_root,
+        &tracking_ref,
+        &pr.head_sha,
+        administration.command_control,
+    );
+    let worktree_ready = ref_points_to(
+        &worktree,
+        "HEAD",
+        &pr.head_sha,
+        administration.command_control,
+    ) && crate::branch::current_branch(&worktree).as_deref()
+        == Some(label.as_str());
     let validated_orphan =
         branch_ready && tracking_ref_ready && (!worktree.exists() || worktree_ready);
     if graph_ready || validated_orphan {
         remove_pr_store(repo_root, data_root, &label, administration).await?;
-        cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
+        cleanup_pr_worktree(
+            repo_root,
+            data_root,
+            pr.number,
+            &pr.head_sha,
+            true,
+            administration.command_control,
+        );
     }
 
     let repo = repo_root.to_path_buf();
@@ -722,11 +843,19 @@ async fn track_pr(
     let tref = tracking_ref.clone();
     let label_for_prep = label.clone();
     let expected_head = pr.head_sha.clone();
+    let command_control = administration.command_control.clone();
     // git operations are blocking; keep them off the reactor. A failed fetch or
     // worktree add can still have left owned artifacts behind, so reconcile its
     // store through the coordinator before attempting Git cleanup.
     match tokio::task::spawn_blocking(move || {
-        prepare_pr_worktree(&repo, &wt, &tref, &label_for_prep, &expected_head)
+        prepare_pr_worktree(
+            &repo,
+            &wt,
+            &tref,
+            &label_for_prep,
+            &expected_head,
+            &command_control,
+        )
     })
     .await
     {
@@ -864,7 +993,14 @@ async fn cleanup_failed_track(
 ) -> std::result::Result<ManagedPr, String> {
     match remove_pr_store(repo_root, data_root, label, administration).await {
         Ok(()) => {
-            cleanup_pr_worktree(repo_root, data_root, pr, head_sha, true);
+            cleanup_pr_worktree(
+                repo_root,
+                data_root,
+                pr,
+                head_sha,
+                true,
+                administration.command_control,
+            );
             Err(original_reason.to_string())
         }
         Err(cleanup_reason) => Err(format!(
@@ -886,6 +1022,7 @@ fn prepare_pr_worktree(
     tracking_ref: &str,
     label: &str,
     expected_head: &str,
+    command_control: &PrCommandControl,
 ) -> std::result::Result<(), String> {
     let pr_ref_spec = {
         // tracking_ref is refs/tracedecay/pr/<N>; derive the pull ref from it.
@@ -896,13 +1033,18 @@ fn prepare_pr_worktree(
             .to_string();
         format!("+refs/pull/{n}/head:{tracking_ref}")
     };
-    let fetch = run_git(repo_root, &["fetch", "--no-tags", "origin", &pr_ref_spec]);
+    let fetch = successful_git_with_control(
+        repo_root,
+        &["fetch", "--no-tags", "origin", &pr_ref_spec],
+        command_control,
+    );
     if fetch.is_none() {
         return Err("fetch of PR head failed".to_string());
     }
-    let fetched_head = run_git(repo_root, &["rev-parse", tracking_ref])
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|sha| sha.trim().to_string());
+    let fetched_head =
+        successful_git_with_control(repo_root, &["rev-parse", tracking_ref], command_control)
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|sha| sha.trim().to_string());
     if fetched_head.as_deref() != Some(expected_head) {
         return Err("PR head changed during reconciliation".to_string());
     }
@@ -912,7 +1054,7 @@ fn prepare_pr_worktree(
     }
     // Clear any stale worktree registration/dir so `worktree add` is idempotent
     // and frees the synthetic branch for reset.
-    remove_worktree(repo_root, worktree);
+    remove_worktree(repo_root, worktree, command_control);
 
     // Adopt (reset) rather than fail if the synthetic branch survived an
     // interrupted prior cycle (daemon death between `worktree add` and
@@ -922,7 +1064,7 @@ fn prepare_pr_worktree(
     // fetched head; a plain `-b` would wedge the PR forever with
     // "branch already exists" once the head advanced past the orphan.
     let wt_str = worktree.to_string_lossy();
-    let add = run_git(
+    let add = successful_git_with_control(
         repo_root,
         &[
             "worktree",
@@ -933,6 +1075,7 @@ fn prepare_pr_worktree(
             &wt_str,
             tracking_ref,
         ],
+        command_control,
     );
     if add.is_none() {
         return Err("worktree add failed".to_string());
@@ -972,6 +1115,7 @@ async fn untrack_pr(
         managed.pr,
         &managed.head_sha,
         !is_legacy,
+        administration.command_control,
     );
     Ok(())
 }
@@ -1013,7 +1157,14 @@ async fn sweep_orphan_pr_worktrees(
         let label = pr_label(number);
         match remove_pr_store(repo_root, data_root, &label, administration).await {
             Ok(()) => {
-                cleanup_pr_worktree(repo_root, data_root, number, "", true);
+                cleanup_pr_worktree(
+                    repo_root,
+                    data_root,
+                    number,
+                    "",
+                    true,
+                    administration.command_control,
+                );
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -1035,12 +1186,13 @@ fn cleanup_pr_worktree(
     pr: u64,
     expected_head: &str,
     remove_synthetic_branch: bool,
+    command_control: &PrCommandControl,
 ) {
     let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
     let tracking_ref = pr_tracking_ref(pr);
     let owned_head = if expected_head.is_empty() {
-        let ref_head = ref_sha(repo_root, &tracking_ref);
-        let worktree_head = ref_sha(&worktree, "HEAD");
+        let ref_head = ref_sha(repo_root, &tracking_ref, command_control);
+        let worktree_head = ref_sha(&worktree, "HEAD", command_control);
         match (ref_head, worktree_head) {
             (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
             _ => None,
@@ -1048,241 +1200,65 @@ fn cleanup_pr_worktree(
     } else {
         Some(expected_head.to_string())
     };
-    remove_worktree(repo_root, &worktree);
+    remove_worktree(repo_root, &worktree, command_control);
     let label = pr_label(pr);
     let branch_ref = format!("refs/heads/{label}");
     if let Some(owned_head) = owned_head {
-        if remove_synthetic_branch && ref_points_to(repo_root, &branch_ref, &owned_head) {
-            let _ = run_git(repo_root, &["branch", "-D", &label]);
+        if remove_synthetic_branch
+            && ref_points_to(repo_root, &branch_ref, &owned_head, command_control)
+        {
+            let _ =
+                successful_git_with_control(repo_root, &["branch", "-D", &label], command_control);
         }
-        if ref_points_to(repo_root, &tracking_ref, &owned_head) {
-            let _ = run_git(repo_root, &["update-ref", "-d", &tracking_ref]);
+        if ref_points_to(repo_root, &tracking_ref, &owned_head, command_control) {
+            let _ = successful_git_with_control(
+                repo_root,
+                &["update-ref", "-d", &tracking_ref],
+                command_control,
+            );
         }
     }
 }
 
-fn ref_points_to(repo_root: &Path, reference: &str, expected_head: &str) -> bool {
-    ref_sha(repo_root, reference).is_some_and(|sha| sha == expected_head)
+fn ref_points_to(
+    repo_root: &Path,
+    reference: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> bool {
+    ref_sha(repo_root, reference, command_control).is_some_and(|sha| sha == expected_head)
 }
 
-fn ref_sha(repo_root: &Path, reference: &str) -> Option<String> {
-    run_git(repo_root, &["rev-parse", reference])
+fn ref_sha(
+    repo_root: &Path,
+    reference: &str,
+    command_control: &PrCommandControl,
+) -> Option<String> {
+    successful_git_with_control(repo_root, &["rev-parse", reference], command_control)
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|sha| sha.trim().to_string())
 }
 
-fn remove_worktree(repo_root: &Path, worktree: &Path) {
+fn remove_worktree(repo_root: &Path, worktree: &Path, command_control: &PrCommandControl) {
     let wt_str = worktree.to_string_lossy();
     // `worktree remove` unregisters and deletes the checkout; prune tidies any
     // dangling administrative entry if the dir was removed out from under git.
-    let _ = run_git(repo_root, &["worktree", "remove", "--force", &wt_str]);
-    let _ = run_git(repo_root, &["worktree", "prune"]);
+    let _ = successful_git_with_control(
+        repo_root,
+        &["worktree", "remove", "--force", &wt_str],
+        command_control,
+    );
+    let _ = successful_git_with_control(repo_root, &["worktree", "prune"], command_control);
+    if command_control
+        .cancellation
+        .as_ref()
+        .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
+    {
+        return;
+    }
     if worktree.exists() {
         let _ = std::fs::remove_dir_all(worktree);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Poll loop (daemon wiring)
-// ---------------------------------------------------------------------------
-
-/// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
-/// has the feature enabled — each tick consults only daemon-published snapshots.
-pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
-    spawn_with_administration(global_db_path, StoreAdministration::default())
-}
-
-/// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator.
-/// The coordinator serializes PR additions and destructive branch administration
-/// with every other daemon connection that owns the same store family.
-pub(super) fn spawn_with_administration(
-    _global_db_path: Option<PathBuf>,
-    administration: StoreAdministration,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        run(administration).await;
-    })
-}
-
-async fn run(administration: StoreAdministration) {
-    let Ok(database) = administration.registered_profile_database().await else {
-        return;
-    };
-    let mut last_poll: HashMap<PathBuf, Instant> = HashMap::new();
-    loop {
-        tick(database.as_ref(), &mut last_poll, &administration).await;
-        tokio::time::sleep(BASE_TICK).await;
-    }
-}
-
-async fn tick(
-    database: &crate::global_db::RegisteredGlobalDb,
-    last_poll: &mut HashMap<PathBuf, Instant>,
-    administration: &StoreAdministration,
-) {
-    let window = 14 * 86_400;
-    let cap = 64;
-    let cutoff = crate::tracedecay::current_timestamp().saturating_sub(window);
-    let Ok(records) = database.list_code_projects(cap).await else {
-        return;
-    };
-    for record in records
-        .into_iter()
-        .filter(|record| record.last_seen_at >= cutoff)
-    {
-        let root = PathBuf::from(&record.canonical_root);
-        if !root.is_dir() {
-            continue;
-        }
-        // A poll loop has no right to turn an arbitrary project path into
-        // configuration authority. Missing/pending daemon snapshot means no
-        // poll and, critically, no destructive disabled-state teardown.
-        let Ok(cfg) =
-            crate::config::cached_runtime_configuration_for_project_id(&root, &record.project_id)
-                .map(|configuration| configuration.config.sync)
-        else {
-            continue;
-        };
-        let interval = Duration::from_secs(cfg.effective_auto_track_pr_poll_secs());
-        let due = last_poll.get(&root).is_none_or(|t| t.elapsed() >= interval);
-        if !due {
-            continue;
-        }
-        last_poll.insert(root.clone(), Instant::now());
-        if cfg.auto_track_pr_branches {
-            poll_project(root, administration).await;
-        } else {
-            // Feature disabled: if it left managed PR state behind (it was on,
-            // then turned off), tear that state down once instead of stranding
-            // worktrees/refs/branches/stores forever. Gated on the poll cadence
-            // (via last_poll above) so a disabled project isn't probed each tick.
-            teardown_disabled_project_with_administration(&root, administration).await;
-        }
-    }
-}
-
-async fn retained_project_graph(
-    administration: &StoreAdministration,
-    project_root: &Path,
-) -> Option<std::sync::Arc<crate::tracedecay::TraceDecay>> {
-    let canonical = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    administration
-        .mounted_project_graphs()
-        .await
-        .into_iter()
-        .find(|graph| graph.project_root() == canonical)
-}
-
-/// Runs one discovery + reconcile pass for a project and logs a poll summary.
-async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) {
-    let Some(graph) = retained_project_graph(administration, &repo_root).await else {
-        return; // not indexed — nothing to attach PR branches to yet
-    };
-    let data_root = graph.store_layout().data_root.clone();
-
-    let repo_for_discovery = repo_root.clone();
-    let discovery =
-        match tokio::task::spawn_blocking(move || discover_open_prs(&repo_for_discovery)).await {
-            Ok(Ok(discovery)) => discovery,
-            Ok(Err(reason)) => {
-                // Discovery command failed (auth/network/credentials). Skip the
-                // whole reconcile cycle — never reconcile against a discovery
-                // produced by a failed command, or a transient failure would
-                // untrack every managed PR as if the repo had zero open PRs.
-                log_daemon_event(
-                    "pr_autotrack",
-                    &[
-                        ("project", repo_root.display().to_string()),
-                        ("action", "poll".to_string()),
-                        ("outcome", "error".to_string()),
-                        ("reason", reason),
-                    ],
-                );
-                return;
-            }
-            Err(_) => return, // join error (task panicked/cancelled)
-        };
-
-    let report = reconcile_project_with_administration(
-        &repo_root,
-        &data_root,
-        &discovery,
-        MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration, &graph),
-    )
-    .await;
-    let managed = load_state(&data_root).managed.len();
-    log_daemon_event(
-        "pr_autotrack",
-        &[
-            ("project", repo_root.display().to_string()),
-            ("action", "poll".to_string()),
-            ("tracked_now", managed.to_string()),
-            ("new_tracked", report.tracked.len().to_string()),
-            ("untracked", report.untracked.len().to_string()),
-            ("skipped_forks", report.skipped_forks.len().to_string()),
-        ],
-    );
-}
-
-/// Tears down all managed PR state for a project whose `auto_track_pr_branches`
-/// is now disabled.
-///
-/// When the feature is turned off after it has tracked PRs, every managed
-/// worktree, `refs/tracedecay/pr/*` ref, synthetic `pr/<N>` branch and
-/// per-branch store would otherwise be stranded forever (surfacing stale graphs
-/// in `branch_list` and consuming disk). This runs one removals-only reconcile
-/// (empty desired set) to clean the managed set down to empty. Cheap and inert
-/// once nothing is managed, so it is safe to call every poll cadence.
-pub async fn teardown_disabled_project(
-    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
-    repo_root: &Path,
-) {
-    let Ok(administration) = StoreAdministration::for_retained_project_graph(&graph).await else {
-        return;
-    };
-    teardown_disabled_project_with_graph(repo_root, graph, &administration).await;
-}
-
-async fn teardown_disabled_project_with_administration(
-    repo_root: &Path,
-    administration: &StoreAdministration,
-) {
-    let Some(graph) = retained_project_graph(administration, repo_root).await else {
-        return; // not indexed — no managed state to tear down
-    };
-    teardown_disabled_project_with_graph(repo_root, graph, administration).await;
-}
-
-async fn teardown_disabled_project_with_graph(
-    repo_root: &Path,
-    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
-    administration: &StoreAdministration,
-) {
-    let data_root = graph.store_layout().data_root.clone();
-    if load_state(&data_root).managed.is_empty() {
-        return; // nothing stranded — the common case, kept cheap
-    }
-    // Empty (complete, non-partial) discovery → every managed entry is stale →
-    // untracked and cleaned up.
-    let report = reconcile_project_with_administration(
-        repo_root,
-        &data_root,
-        &PrDiscovery::default(),
-        MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration, &graph),
-    )
-    .await;
-    log_daemon_event(
-        "pr_autotrack",
-        &[
-            ("project", repo_root.display().to_string()),
-            ("action", "teardown".to_string()),
-            ("untracked", report.untracked.len().to_string()),
-        ],
-    );
 }
 
 #[cfg(test)]
