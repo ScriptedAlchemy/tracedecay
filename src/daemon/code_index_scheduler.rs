@@ -2721,7 +2721,6 @@ mod tests;
 mod activation;
 pub(super) mod branch_generations;
 mod cadence;
-pub(super) mod branch_generations;
 mod classification;
 mod git_tree_capture;
 mod graph_activation;
