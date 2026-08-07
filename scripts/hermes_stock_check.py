@@ -230,14 +230,24 @@ def main():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
-    compressed = engine.compress(messages, current_tokens=50)
-    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts
-    # as the live transcript; the raw tracedecay result stays on the engine.
+    compressed = engine.compress(list(messages), current_tokens=50)
+    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts as
+    # the live transcript. Hermes exposes no authentic raw-compression
+    # protocol, so the daemon-owned LCM authority reports host raw compaction
+    # as a typed unavailable capability and the transcript passes through
+    # unchanged (the transcript itself still ingests through the daemon).
     assert isinstance(compressed, list), type(compressed)
-    assert all(isinstance(m, dict) and m.get("role") for m in compressed), compressed
+    assert compressed == messages, compressed
     result = engine.last_compress_result
-    assert isinstance(result, dict) and result.get("status") == "ok", result
-    ok("compress returns a message list offline", f"status={result.get('status')}")
+    assert isinstance(result, dict) and result == {
+        "status": "unavailable",
+        "reason": "host_raw_compression_unavailable",
+        "semantic_error": True,
+    }, result
+    ok(
+        "compress returns the unchanged transcript with typed unavailability",
+        f"reason={result.get('reason')}",
+    )
 
     # 3. Memory provider: stock discovers providers via plugins/memory and the
     #    memory.provider config key (the general PluginContext has no
