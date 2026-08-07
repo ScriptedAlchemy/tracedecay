@@ -137,7 +137,6 @@ use bootstrap_route::{
 };
 mod branch_add;
 mod branch_admin;
-mod branch_query;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;

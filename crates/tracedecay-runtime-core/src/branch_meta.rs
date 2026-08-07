@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::BranchGraphPublicationEpochV1;
 
 use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 
@@ -27,6 +28,25 @@ pub struct BranchEntry {
     /// has no matching git ref.
     #[serde(default)]
     pub gc_protected: bool,
+    /// Exact source identity of the graph published by the last successful
+    /// sync. Older metadata omits this evidence and is not branch-query
+    /// eligible until the next sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_source: Option<BranchGraphSourceV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BranchGraphSourceV1 {
+    /// Monotonic graph-local mutation epoch. Every writer advances this before
+    /// exposing any row mutation, including semantic no-op rewrites.
+    pub publication_epoch: BranchGraphPublicationEpochV1,
+    pub project_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub worktree_root: String,
+    pub reference: String,
+    pub source_oid: String,
 }
 
 /// Top-level branch metadata for a project.
@@ -74,6 +94,7 @@ impl BranchMeta {
                 created_at: timestamp.to_string(),
                 last_synced_at: timestamp.to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         Self {
@@ -93,6 +114,7 @@ impl BranchMeta {
                 created_at: now.clone(),
                 last_synced_at: now,
                 gc_protected: false,
+                graph_source: None,
             },
         );
     }
@@ -109,6 +131,13 @@ impl BranchMeta {
     pub fn touch_synced(&mut self, name: &str) {
         if let Some(entry) = self.branches.get_mut(name) {
             entry.last_synced_at = now_unix_str();
+        }
+    }
+
+    pub fn publish_graph_source(&mut self, name: &str, source: BranchGraphSourceV1) {
+        if let Some(entry) = self.branches.get_mut(name) {
+            entry.last_synced_at = now_unix_str();
+            entry.graph_source = Some(source);
         }
     }
 
@@ -315,6 +344,26 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
 /// add, removal, GC, and pending deletion recovery.
 pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
     update_synced_timestamp_with(tracedecay_dir, branch, || {});
+}
+
+/// Atomically publishes the exact worktree/ref/OID identity that produced a
+/// tracked branch graph.
+pub fn publish_graph_source(
+    tracedecay_dir: &Path,
+    branch: &str,
+    source: BranchGraphSourceV1,
+) -> std::io::Result<bool> {
+    let _branch_lock = crate::branch::acquire_branch_lock_blocking(tracedecay_dir)
+        .map_err(std::io::Error::other)?;
+    let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
+        return Ok(false);
+    };
+    if !meta.is_tracked(branch) {
+        return Ok(false);
+    }
+    meta.publish_graph_source(branch, source);
+    save_branch_meta(tracedecay_dir, &meta)?;
+    Ok(true)
 }
 
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
@@ -538,6 +587,32 @@ mod tests {
         // No branch-meta.json present; must silently no-op.
         update_synced_timestamp(dir.path(), "main");
         assert!(load_branch_meta(dir.path()).is_none());
+    }
+
+    #[test]
+    fn graph_source_publication_round_trips_exact_worktree_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = BranchMeta::new_for_dir(dir.path(), "main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+        let source = BranchGraphSourceV1 {
+            publication_epoch: BranchGraphPublicationEpochV1::new(1).unwrap(),
+            project_id: "project.fixture".to_owned(),
+            repository_id: "repository.fixture".to_owned(),
+            worktree_id: "worktree.linked".to_owned(),
+            worktree_root: "/fixture/linked".to_owned(),
+            reference: "refs/heads/main".to_owned(),
+            source_oid: "a".repeat(40),
+        };
+        assert!(publish_graph_source(dir.path(), "main", source.clone()).unwrap());
+        assert_eq!(
+            load_branch_meta(dir.path())
+                .unwrap()
+                .branches
+                .get("main")
+                .unwrap()
+                .graph_source,
+            Some(source)
+        );
     }
 
     #[test]

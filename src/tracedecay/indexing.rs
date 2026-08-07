@@ -19,8 +19,11 @@ use crate::types::*;
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 pub(super) mod controlled_sync;
+mod branch_publication;
+pub(super) use branch_publication::BranchGraphMutationV1;
 
 const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";
+pub(crate) const BRANCH_QUERY_GRAPH_SOURCE_KEY: &str = "branch_query_graph_source_v1";
 const GRAPH_REBUILD_CHECKPOINT_DIR: &str = "graph-rebuild-checkpoint-v1";
 const GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE: usize = 1_024;
 static GRAPH_REBUILD_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
@@ -784,6 +787,9 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("full index", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
+        let branch_publication = self
+            .invalidate_branch_query_publication(&live_branch)
+            .await?;
         #[cfg(any(test, feature = "test-transport"))]
         if rebuild_availability.is_some() {
             let hold_ms = GRAPH_REBUILD_TEST_HOLD_LEASE_MS.load(Ordering::SeqCst);
@@ -961,8 +967,9 @@ impl TraceDecay {
         transaction.commit().await?;
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref(), &branch_publication)
+            .await?;
 
         let result = IndexResult {
             file_count: files.len(),
@@ -1115,6 +1122,9 @@ impl TraceDecay {
         use crate::sync as sync_mod;
 
         self.ensure_branch_writable_with("sync files", live_branch)?;
+        let branch_publication = self
+            .invalidate_branch_query_publication(live_branch)
+            .await?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1217,8 +1227,9 @@ impl TraceDecay {
         // Advance the watcher's diff base even for targeted file syncs: if
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(live_branch, source_oid.as_deref(), &branch_publication)
+            .await?;
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1440,6 +1451,9 @@ impl TraceDecay {
         let live_branch = self.branch_memo();
         self.ensure_branch_writable_with("sync", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
+        let branch_publication = self
+            .invalidate_branch_query_publication(&live_branch)
+            .await?;
         let start = Instant::now();
 
         on_progress(0, 0, "scanning files");
@@ -1642,8 +1656,13 @@ impl TraceDecay {
             self.db
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
-            self.stamp_last_synced_commit().await;
-            self.touch_branch_meta_synced(&live_branch);
+            let source_oid = self.stamp_last_synced_commit().await;
+            self.publish_branch_meta_synced(
+                &live_branch,
+                source_oid.as_deref(),
+                &branch_publication,
+            )
+            .await?;
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1784,8 +1803,9 @@ impl TraceDecay {
             .set_metadata("last_sync_at", &current_timestamp().to_string())
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
-        self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
+        let source_oid = self.stamp_last_synced_commit().await;
+        self.publish_branch_meta_synced(&live_branch, source_oid.as_deref(), &branch_publication)
+            .await?;
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1954,39 +1974,26 @@ impl TraceDecay {
         walk.filter_map(std::result::Result::ok).count()
     }
 
-    /// Stamps the current git HEAD commit id into the `last_synced_commit`
-    /// metadata key so the git-metadata watcher can diff-scope future syncs
-    /// (see [`stale_files_since_commit`](Self::stale_files_since_commit)).
+    /// Stamps the current git HEAD commit id for watcher diff scoping.
     ///
-    /// Called on the success path of every sync alongside `last_sync_at`. On
-    /// any gix error (not a repo, detached/unborn HEAD, unreadable object)
-    /// this is a silent no-op — a missing/stale stamp only forces the watcher
-    /// to fall back to a full tree walk, never a failed sync.
-    /// Best-effort branch-meta freshness stamp on every successful sync, so
-    /// `branch_list` reflects real sync recency rather than branch-add time
-    /// only. No-op when the active branch cannot be resolved (detached HEAD)
-    /// or the branch is untracked.
-    fn touch_branch_meta_synced(&self, live_branch: &crate::branch::BranchMemo) {
-        if let Some(branch) = live_branch.resolve_for(&self.project_root) {
-            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
-        }
-    }
-
-    async fn stamp_last_synced_commit(&self) {
+    /// Missing native Git evidence remains a typed absence to the branch
+    /// publication caller and forces branch queries to stay unavailable.
+    async fn stamp_last_synced_commit(&self) -> Option<String> {
         // Scope the gix values so they drop before the `.await`:
         // `gix::Repository`/`Commit` are `!Send`, and holding them across the
         // await would make every sync future `!Send`, breaking `tokio::spawn`
         // of anything that syncs (sync-on-read, scheduler, git watcher).
         let hex_oid = {
             let Ok(repo) = gix::open(&self.project_root) else {
-                return;
+                return None;
             };
             let Ok(head) = repo.head_commit() else {
-                return;
+                return None;
             };
             head.id().to_hex().to_string()
         };
         let _ = self.db.set_metadata("last_synced_commit", &hex_oid).await;
+        Some(hex_oid)
     }
 
     /// Returns the git HEAD commit id recorded at the last successful sync,

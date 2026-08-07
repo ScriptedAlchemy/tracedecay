@@ -74,10 +74,11 @@ mod reconcile_tests;
 #[cfg(test)]
 mod test_support;
 
-// `move_symbol.rs` (a sibling of this module) imports these eight names via
+// `move_symbol.rs` (a sibling of this module) imports these edit authorities via
 // `use super::edits::{...}` — the re-exports below keep that import path
 // stable across the split, resolving each name at `crate::tracedecay::edits`
 // exactly as it did when they were all defined directly in `edits.rs`.
+pub(in crate::tracedecay) use file_authority::SourceEditFileAuthority;
 pub(in crate::tracedecay) use plan::{
     capture_planned_source_edit, publish_planned_source_edit, rollback_planned_source_edit_files,
     validate_planned_source_edit,

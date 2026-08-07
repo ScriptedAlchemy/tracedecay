@@ -893,7 +893,6 @@ impl McpServer {
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_ref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
-                branch_query_port: self.branch_query_port.as_deref(),
                 workflow_index_reads: workflow_index_reads
                     .as_ref()
                     .map(|service| service as &dyn WorkflowIndexReadPort),

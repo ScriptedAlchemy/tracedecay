@@ -22,7 +22,7 @@ use crate::errors::{Result, TraceDecayError};
 
 static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct SourceEditFileAuthority {
+pub(in crate::tracedecay) struct SourceEditFileAuthority {
     root: Dir,
     parent: Dir,
     parent_relative: PathBuf,
@@ -30,7 +30,7 @@ pub(super) struct SourceEditFileAuthority {
 }
 
 impl SourceEditFileAuthority {
-    pub(super) fn open(project_root: &Path, relative: &Path) -> Result<Self> {
+    pub(in crate::tracedecay) fn open(project_root: &Path, relative: &Path) -> Result<Self> {
         let relative = normalize_source_edit_relative_path(relative)?;
         let root = Dir::open_ambient_dir(project_root, ambient_authority())
             .map_err(|error| source_edit_path_error("open authorized source edit root", error))?;

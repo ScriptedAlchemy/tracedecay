@@ -117,9 +117,13 @@ impl TraceDecay {
             .map(|path| path.to_string_lossy().replace('\\', "/"))
     }
 
-    /// Re-indexes a single file after an edit.
-    pub(super) async fn reindex_file(
+    /// Re-indexes one file inside a caller-owned graph mutation epoch.
+    ///
+    /// Multi-file edit authorities use this to keep the graph unavailable
+    /// until the entire file family, including any rollback, is coherent.
+    pub(in crate::tracedecay) async fn reindex_file_within_graph_mutation(
         &self,
+        _mutation: &super::super::indexing::BranchGraphMutationV1,
         file_path: &str,
         source: &str,
         file: &SourceEditFileAuthority,
@@ -212,6 +216,7 @@ impl TraceDecay {
             )));
         }
         validate_planned_source_edit(rel_path, Some(original), Some(modified))?;
+        let mutation = self.begin_branch_graph_mutation("source edit").await?;
         file.publish(
             rel_path,
             Some(original),
@@ -219,7 +224,9 @@ impl TraceDecay {
             modified,
             || {},
         )?;
-        self.reindex_file(rel_path, modified, file).await?;
+        self.reindex_file_within_graph_mutation(&mutation, rel_path, modified, file)
+            .await?;
+        self.commit_branch_graph_mutation(mutation).await?;
         Ok(None)
     }
 

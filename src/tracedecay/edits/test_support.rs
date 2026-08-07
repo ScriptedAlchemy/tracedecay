@@ -113,6 +113,18 @@ pub(super) fn git(project_root: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} must succeed");
 }
 
+pub(super) async fn graph_publication_epoch(graph: &TraceDecay) -> u64 {
+    let encoded = graph
+        .db
+        .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
+        .await
+        .unwrap()
+        .expect("published branch graph source");
+    serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded)
+        .expect("typed branch graph source")
+        .publication_epoch
+        .get()
+}
 pub(super) fn fixture_request() -> SourceEditEffectRequestV1 {
     fixture_request_for_edit(
         SourceEditRequest::StrReplace {

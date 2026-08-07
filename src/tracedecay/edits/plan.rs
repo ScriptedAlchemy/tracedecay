@@ -46,6 +46,9 @@ impl TraceDecay {
             self.sync().await?;
             return Ok(());
         }
+        let mutation = self
+            .begin_branch_graph_mutation("source edit preimage recovery")
+            .await?;
         for file in files {
             let expected = file
                 .expected
@@ -55,9 +58,15 @@ impl TraceDecay {
                 })?;
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file(&file.relative_path, expected, &authority)
-                .await?;
+            self.reindex_file_within_graph_mutation(
+                &mutation,
+                &file.relative_path,
+                expected,
+                &authority,
+            )
+            .await?;
         }
+        self.commit_branch_graph_mutation(mutation).await?;
         self.sync().await?;
         Ok(())
     }
@@ -75,6 +84,9 @@ impl TraceDecay {
             self.sync().await?;
             return Ok(());
         }
+        let mutation = self
+            .begin_branch_graph_mutation("source edit postimage recovery")
+            .await?;
         for file in files {
             let intended = file
                 .intended
@@ -84,9 +96,15 @@ impl TraceDecay {
                 })?;
             let authority =
                 SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file(&file.relative_path, intended, &authority)
-                .await?;
+            self.reindex_file_within_graph_mutation(
+                &mutation,
+                &file.relative_path,
+                intended,
+                &authority,
+            )
+            .await?;
         }
+        self.commit_branch_graph_mutation(mutation).await?;
         self.sync().await?;
         Ok(())
     }

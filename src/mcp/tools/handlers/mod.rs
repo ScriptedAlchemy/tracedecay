@@ -211,9 +211,6 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
-    /// Daemon-owned exact branch snapshot query authority. Direct MCP servers
-    /// leave this absent and receive a typed unavailable result.
-    pub(crate) branch_query_port: Option<&'a dyn tracedecay_application::BranchQueryPort>,
     /// Daemon-owned workflow-index reads. `None` is an unavailable retained
     /// project-session authority, not a successful empty index.
     pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
@@ -267,7 +264,6 @@ impl Default for ToolCallRegistryOptions<'_> {
         Self {
             global_db: None,
             project_registry_reads: None,
-            branch_query_port: None,
             workflow_index_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
