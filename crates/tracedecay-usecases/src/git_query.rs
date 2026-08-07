@@ -37,8 +37,7 @@ use tracedecay_code_index::git_projection::{
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::git::{
     GitBlameV1, GitChangeKindV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1,
-    GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitOidV1, GitOperationStateV1, GitStatusEntryV1,
-    HunkRefV1,
+    GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitOidV1, GitStatusEntryV1, HunkRefV1,
 };
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, canonical_sha256};
 use tracedecay_graph_db::GraphCancellation;
@@ -635,7 +634,7 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    use tracedecay_domain::git::{GitDegradationV1, HunkDirectionV1};
+    use tracedecay_domain::git::{GitDegradationV1, GitOperationStateV1, HunkDirectionV1};
     use tracedecay_domain::research::WorktreeId;
 
     use crate::git_intelligence::NativeGitIntelligence;
