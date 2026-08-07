@@ -27,14 +27,14 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay::errors::Result as TdResult;
-use tracedecay::storage::{default_profile_project_id, default_profile_root};
+use tracedecay::storage::{PrivateStoreIo, default_profile_project_id, default_profile_root};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v4";
+const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v5";
 
 const EMPTY_FLAVOR: &str = "empty";
 const INDEXED_FLAVOR: &str = "indexed";
@@ -178,6 +178,10 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
             "store data dir already exists",
         ));
     }
+    // The profile root and store data dirs are owner-private in production;
+    // seed them through the same private-store authority so fail-closed
+    // permission validation accepts the template copy under any umask.
+    PrivateStoreIo::create_dir_all(&data_dest)?;
     copy_tree(&src_data, &data_dest)?;
 
     rewrite_json(&data_dest.join("config.json"), |config| {
@@ -191,7 +195,7 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
 
     if !targets.global_db_path.exists() {
         if let Some(parent) = targets.global_db_path.parent() {
-            fs::create_dir_all(parent)?;
+            PrivateStoreIo::create_dir_all(parent)?;
         }
         copy_db_files(&src_home.join("global.db"), &targets.global_db_path)?;
     }
@@ -331,11 +335,38 @@ fn purge_configuration(database_path: &Path) -> io::Result<()> {
 }
 
 fn purge_configuration_rows(conn: &Connection) -> io::Result<()> {
+    // Append-only enforcement triggers block the DELETEs below, so drop them
+    // for the purge and recreate them verbatim afterwards: production opens
+    // the seeded store fail-closed against the exact final schema object set,
+    // triggers included.
     let configuration_triggers = {
         let mut statement = conn
             .prepare(
-                "SELECT name FROM sqlite_master
+                "SELECT name, sql FROM sqlite_master
                  WHERE type = 'trigger' AND tbl_name LIKE 'configuration_%'",
+            )
+            .map_err(io_other)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(io_other)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_other)?
+    };
+    for (trigger, _) in &configuration_triggers {
+        let quoted = trigger.replace('"', "\"\"");
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{quoted}\";"))
+            .map_err(io_other)?;
+    }
+    // Enumerate the live configuration tables instead of hand-maintaining a
+    // list; a hard-coded inventory silently breaks the template build every
+    // time the configuration schema adds, drops, or renames a table.
+    let configuration_tables = {
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'configuration_%'",
             )
             .map_err(io_other)?;
         statement
@@ -344,33 +375,21 @@ fn purge_configuration_rows(conn: &Connection) -> io::Result<()> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(io_other)?
     };
-    for trigger in configuration_triggers {
-        let quoted = trigger.replace('"', "\"\"");
-        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{quoted}\";"))
-            .map_err(io_other)?;
+    let mut purge = String::from("PRAGMA foreign_keys = OFF;\n");
+    for table in configuration_tables {
+        // The singleton format marker is schema, not state: production
+        // refuses to open a store whose marker row is missing.
+        if table == "configuration_format" {
+            continue;
+        }
+        let quoted = table.replace('"', "\"\"");
+        purge.push_str(&format!("DELETE FROM \"{quoted}\";\n"));
     }
-    conn.execute_batch(
-        "PRAGMA foreign_keys = OFF;
-         DELETE FROM configuration_component_activation_events;
-         DELETE FROM configuration_credential_references;
-         DELETE FROM configuration_migration_receipts;
-         DELETE FROM configuration_migration_quarantine;
-         DELETE FROM configuration_audit_redaction_keys;
-         DELETE FROM configuration_audit_events;
-         DELETE FROM configuration_mutation_receipts;
-         DELETE FROM configuration_change_plan_events;
-         DELETE FROM configuration_change_plan_operations;
-         DELETE FROM configuration_change_plans;
-         DELETE FROM configuration_access_rules;
-         DELETE FROM configuration_source_bindings;
-         DELETE FROM configuration_topology_protected_refs;
-         DELETE FROM configuration_topology_roots;
-         DELETE FROM configuration_topology_policies;
-         DELETE FROM configuration_entries;
-         DELETE FROM configuration_revisions;
-         PRAGMA foreign_keys = ON;",
-    )
-    .map_err(io_other)?;
+    purge.push_str("PRAGMA foreign_keys = ON;");
+    conn.execute_batch(&purge).map_err(io_other)?;
+    for (_, sql) in &configuration_triggers {
+        conn.execute_batch(sql).map_err(io_other)?;
+    }
     Ok(())
 }
 

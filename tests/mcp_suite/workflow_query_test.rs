@@ -13,7 +13,6 @@ use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 use tracedecay::tracedecay::TraceDecay;
-use tracedecay_domain::ProjectId;
 
 use crate::common;
 
@@ -208,25 +207,19 @@ async fn call(
     extract_json(&result)
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
     let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
-    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let (_env, project_root) = common::IsolatedEnv::acquire().await;
     let cg = TraceDecay::init(&project_root)
         .await
         .unwrap_or_else(|error| panic!("init project: {error}"));
-    let marker = tracedecay::storage::read_enrollment_marker(cg.project_root())
-        .unwrap_or_else(|error| panic!("read project identity: {error}"))
-        .unwrap_or_else(|| panic!("project enrollment marker"));
-    let project_id =
-        ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        env.home().join(".tracedecay"),
-        cg.project_root(),
-        project_id,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
+    // Reuse the runtime retained by init. A second HostAdmissionTestRuntimeV1
+    // daemon scope on the same profile overlaps the init-held authority.
+    let runtime = cg
+        .test_runtime_for_test()
+        .expect("init retains registered project session runtime");
     runtime
         .drop_project_workflow_schema_for_test()
         .await
@@ -257,6 +250,7 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
 
 /// Ingests the on-disk fixture and drives the three `tracedecay_workflows`
 /// modes plus the git-scope list end to end.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
     let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
@@ -272,22 +266,11 @@ async fn workflows_query_surface_end_to_end() {
     // so the ingest sweep attributes the run to this project.
     write_workflow_fixture(&home, cg.project_root());
 
-    // The isolated fixture checkout is not a git repository, so the repository
-    // identity marker (which lives in the git common dir) never exists here.
-    // The enrollment marker `init` wrote is this checkout's naming authority
-    // and carries the same project id the store was opened under.
-    let marker = tracedecay::storage::read_enrollment_marker(cg.project_root())
-        .unwrap_or_else(|error| panic!("read project identity: {error}"))
-        .unwrap_or_else(|| panic!("project enrollment marker"));
-    let project_id =
-        ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        env.home().join(".tracedecay"),
-        cg.project_root(),
-        project_id,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("registered session runtime: {error}"));
+    // Reuse the runtime retained by init (same overlap reason as the missing-
+    // schema workflow query above).
+    let runtime = cg
+        .test_runtime_for_test()
+        .expect("init retains registered project session runtime");
 
     let stats = runtime
         .ingest_workflows_for_test(cg.project_root())

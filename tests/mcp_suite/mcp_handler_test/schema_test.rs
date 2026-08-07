@@ -290,20 +290,19 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .find(|tool| tool.name == "tracedecay_lcm_doctor")
         .expect("tracedecay_lcm_doctor definition");
     assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
-    assert_eq!(doctor.input_schema["required"], json!(["provider"]));
+    // Daemon-owned doctor reads a redacted temporal-store health report with
+    // no provider filter: hosts cannot smuggle retired repair/clean modes or
+    // provider selectors. Shared transport properties (format, storage_scope)
+    // are still injected for every LCM surface.
+    assert!(doctor.input_schema.get("required").is_none());
+    assert!(doctor.input_schema["properties"].get("provider").is_none());
+    assert!(doctor.input_schema["properties"].get("session_id").is_none());
+    assert!(doctor.input_schema["properties"].get("format").is_some());
     assert_eq!(
-        doctor.input_schema["properties"],
-        json!({
-            "provider": {
-                "type": "string",
-                "description": "Specific provider id to inspect. Required; 'all' is not accepted."
-            },
-            "session_id": {
-                "type": "string",
-                "description": "Optional provider-local session id filter."
-            }
-        })
+        doctor.input_schema["properties"]["storage_scope"]["enum"],
+        json!(["project", "user"])
     );
+    assert_eq!(doctor.input_schema["additionalProperties"], false);
 }
 
 #[test]

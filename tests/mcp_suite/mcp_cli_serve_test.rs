@@ -42,7 +42,9 @@ use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::default_profile_sharded_layout;
 #[cfg(unix)]
-use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
+use tracedecay::storage::{
+    EnrollmentMarker, PrivateStoreIo, StorageMode, write_enrollment_marker,
+};
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
@@ -151,9 +153,14 @@ async fn create_read_only_project_db(
 ) -> (PathBuf, PathBuf) {
     let project_root = canonical_existing_path(project);
     let profile_root = profile_root(home);
-    let data_root = profile_root.join(format!("projects/{project_id}"));
-    let db_path = data_root.join("tracedecay.db");
+    // Profile identity validation requires an owner-private root (0700). Seed
+    // it through PrivateStoreIo before any store paths are created under it.
+    PrivateStoreIo::create_dir_all(&profile_root).expect("create owner-private profile root");
 
+    // Pin enrollment identity before init so the store lands under the exact
+    // project id the caller named. Init (not a bare graph DB publish) is what
+    // admits a canonical configuration revision — open_read_only fails closed
+    // without one.
     write_enrollment_marker(
         &project_root,
         &EnrollmentMarker {
@@ -162,11 +169,15 @@ async fn create_read_only_project_db(
         },
     )
     .unwrap();
-    let (db, _) = crate::common::initialize_test_database(&db_path)
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    let cg = TraceDecay::init_with_options(&project_root, open_options)
         .await
-        .unwrap();
-    db.checkpoint().await.unwrap();
-    db.close();
+        .expect("seed read-only fixture through production init");
+    let db_path = cg.store_layout().graph_db_path.clone();
+    cg.close();
     if let Some(version) = user_version {
         set_user_version(&db_path, version).await;
     }

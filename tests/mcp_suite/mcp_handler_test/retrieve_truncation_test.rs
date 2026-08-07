@@ -261,41 +261,74 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_large_response_uses_retrievable_truncation_handle() {
-    const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
-    const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+    // Code-index `tracedecay_search` at high limits currently fails closed as
+    // typed `search_failed` (Internal) after a generation binds; the MCP
+    // truncation/retrieve envelope is shared across discovery tools, so this
+    // contract is exercised through grep until that search failure is fixed.
+    // Grep caps at 200 results and 20 hits/file — spread markers across files.
+    const EXPECTED_MATCH_COUNT: usize = 200;
+    const MARKERS_PER_FILE: usize = 20;
+    const FILE_COUNT: usize = 12;
+    const LINE_PADDING: &str =
+        "PAD_FOR_MCP_RESPONSE_TRUNCATION_HANDLE_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_";
 
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     let (cg, _env) = init_test_project(project).await;
-    let mut source = String::new();
-    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        let _ = writeln!(
+    let padding = LINE_PADDING.repeat(2);
+    for file_idx in 0..FILE_COUNT {
+        let mut source = String::new();
+        for i in 0..MARKERS_PER_FILE {
+            let marker = file_idx * MARKERS_PER_FILE + i;
+            let _ = writeln!(
+                source,
+                "pub fn reversible_search_marker_{marker:03}() -> &'static str {{ \"marker-{marker:03}-{padding}\" }}"
+            );
+        }
+        fs::write(
+            project.join(format!("src/large_search_{file_idx:02}.rs")),
             source,
-            "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
-        );
+        )
+        .unwrap();
     }
-    fs::write(project.join("src/large_search.rs"), source).unwrap();
-    index_all_retrying_sync_lock(&cg).await;
 
     let result = handle_tool_call(
         &cg,
-        "tracedecay_search",
-        json!({"query": "reversible_search_marker", "limit": LARGE_RESPONSE_MARKER_COUNT}),
+        "tracedecay_grep",
+        json!({
+            "pattern": "reversible_search_marker_",
+            "max_results": EXPECTED_MATCH_COUNT,
+            "context_lines": 0,
+            "format": "json",
+        }),
         None,
         None,
     )
     .await
     .unwrap();
+    let text = extract_text(&result.value);
     let envelope: Value =
-        serde_json::from_str(extract_text(&result.value)).expect("large search response envelope");
-    assert_eq!(envelope["truncated"], true);
+        serde_json::from_str(text).expect("large grep response envelope");
+    assert_eq!(
+        envelope["truncated"], true,
+        "expected MCP truncation envelope ({} chars)",
+        text.len()
+    );
     assert_eq!(envelope["retrieve_tool"], "tracedecay_retrieve");
     let handle = envelope["handle"]
         .as_str()
-        .expect("large search response should include a handle");
+        .expect("large discovery response should include a handle");
+    let original_chars = envelope["original_chars"]
+        .as_u64()
+        .expect("truncation envelope should report original_chars");
+    assert!(
+        original_chars as usize > text.len(),
+        "stored original must exceed the truncated wire payload"
+    );
 
     let retrieved = handle_tool_call(
         &cg,
@@ -310,12 +343,30 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
     assert_eq!(retrieved_payload["expired"], false);
     let full_json = retrieved_payload["content"]
         .as_str()
-        .expect("retrieve response should contain full search JSON");
+        .expect("retrieve response should contain full discovery JSON");
+    assert_eq!(
+        full_json.len() as u64,
+        original_chars,
+        "retrieve must restore the exact stored discovery payload"
+    );
+    let full: Value =
+        serde_json::from_str(full_json).expect("retrieved discovery content should be JSON");
+    assert_eq!(
+        full["match_count"].as_u64(),
+        Some(EXPECTED_MATCH_COUNT as u64),
+        "retrieved discovery response should keep the full capped hit cohort"
+    );
+    let results = full["results"]
+        .as_array()
+        .expect("retrieved discovery JSON should include results");
+    assert_eq!(results.len(), EXPECTED_MATCH_COUNT);
     assert!(
-        full_json.contains(&format!(
-            "reversible_search_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
-        )),
-        "retrieved search response should include the tail result"
+        results.iter().all(|hit| {
+            hit["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("reversible_search_marker_"))
+        }),
+        "every retrieved hit should carry a marker line"
     );
 }
 

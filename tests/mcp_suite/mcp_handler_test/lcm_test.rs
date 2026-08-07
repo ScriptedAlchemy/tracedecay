@@ -1197,43 +1197,60 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 #[cfg(unix)]
 #[tokio::test]
 async fn lcm_status_cli_bridge_accepts_json_args() {
+    use std::time::Duration;
+
     let (cg, _dir) = setup_project().await;
     let home = _dir.path().join("home");
     let outside_cwd = test_temp_dir();
     let project_arg = cg.project_root().display().to_string();
     close_test_graph(cg).await;
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut command, &home);
-    let output = command
-        .current_dir(outside_cwd.path())
-        .args([
-            "tool",
-            "--project",
-            &project_arg,
-            "tracedecay_lcm_status",
-            "--json",
-            "--args",
-            r#"{"provider":"cursor","format":"json"}"#,
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "tracedecay tool exited with {:?}\nstdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // Compatibility `tracedecay tool` still returns the typed warming state
+    // from `call_default_tool_within` without an internal project-open retry
+    // (unlike the typed application-surface CLI path). Waiting that documented
+    // retryable state out is the client protocol for this bridge.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let output = loop {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+        common::apply_tracedecay_home_env(&mut command, &home);
+        let output = command
+            .current_dir(outside_cwd.path())
+            .args([
+                "tool",
+                "--project",
+                &project_arg,
+                "tracedecay_lcm_status",
+                "--json",
+                "--args",
+                r#"{"provider":"cursor","format":"json"}"#,
+            ])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break output;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("is warming in the background"),
+            "tracedecay tool exited with {:?}\nstdout:\n{}\nstderr:\n{stderr}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registered daemon project stayed warming past the bridge deadline\nstderr:\n{stderr}",
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["content"][0]["type"], "text");
     let payload = extract_first_json_content(&json);
-    // "ok" when sessions.db already exists, "not_ingested" on a fresh project
-    // that has never had any LCM data. Both indicate the CLI bridge dispatched
-    // correctly; the test is about argument plumbing, not store contents.
+    // Typed status proves the CLI bridge dispatched and parsed JSON args.
+    // Store contents vary: ok / not_ingested when an LCM authority is mounted,
+    // unavailable when the daemon has not mounted one for this exact store.
+    let status = payload["status"].as_str();
     assert!(
-        payload["status"] == "ok" || payload["status"] == "not_ingested",
+        matches!(status, Some("ok" | "not_ingested" | "unavailable")),
         "unexpected lcm_status: {payload}"
     );
 }

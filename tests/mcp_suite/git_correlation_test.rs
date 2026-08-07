@@ -12,8 +12,8 @@ use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_domain::ProjectId;
 
 use crate::common;
 
@@ -137,6 +137,7 @@ async fn call(
 /// reported distinctly from "no sessions matched", both through
 /// `tracedecay_sessions_for` and the `tracedecay_diagnostics` health block, so
 /// callers never mistake an unpopulated index for an answered-and-empty query.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     let dir = common::tempdir_or_panic();
@@ -147,7 +148,8 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     let (project_root, _worktree_root) = setup_linked_worktree_under(&base);
 
     let profile_root = base.join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap_or_else(|e| panic!("create profile root: {e}"));
+    PrivateStoreIo::create_dir_all(&profile_root)
+        .unwrap_or_else(|e| panic!("create profile root: {e}"));
     let profile_root = profile_root
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize profile root: {e}"));
@@ -165,16 +167,13 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
 
     // Seed sessions and messages but record NO git spans: the correlation
     // index exists (schema is ensured on open) yet holds nothing.
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
-        .expect("active project identity should be available");
-    let runtime = HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
-        .await
-        .unwrap_or_else(|e| panic!("open registered project session runtime: {e}"));
+    // Reuse the runtime retained by init — opening a second daemon-scoped
+    // HostAdmissionTestRuntimeV1 against the same profile overlaps the
+    // maintenance/daemon scope maps under default features and is redundant
+    // under test-transport (init already mounted the project sessions).
+    let runtime = cg
+        .test_runtime_for_test()
+        .expect("init retains registered project session runtime");
     assert!(
         runtime
             .upsert_session_for_test(

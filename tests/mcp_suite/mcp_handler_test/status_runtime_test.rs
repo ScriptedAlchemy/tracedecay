@@ -385,7 +385,14 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
 // ---------------------------------------------------------------------------
 // Session start / end tests
 // ---------------------------------------------------------------------------
+//
+// These tools require the retained project session observation authority
+// (`active_project_session_db`). The mcp_suite `handle_tool_call` helper mounts
+// that authority through the in-process MCP server constructor, which lives
+// behind `test-transport` — matching production daemon mounts and CI
+// (`--features test-transport`).
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_session_start() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -400,6 +407,7 @@ async fn test_session_start() {
     assert!(baseline_path.exists(), "baseline file should exist");
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_session_end() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -421,6 +429,7 @@ async fn test_session_end() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_session_end_no_baseline() {
     let (cg, _env, _dir) = setup_empty_project().await;

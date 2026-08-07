@@ -32,6 +32,7 @@ use tracedecay::mcp::ToolResult;
 use tracedecay::mcp::{McpServer, McpTransport};
 #[cfg(feature = "test-transport")]
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
@@ -296,23 +297,19 @@ pub(crate) async fn handle_tool_call(
     // The project-session server path needs the test-transport feature (the
     // in-process MCP harness and the for-test server constructor live behind
     // it); without the feature these tools take the generic path below.
+    //
+    // Always mount the retained project session runtime for these tools. Falling
+    // through when `sessions.db` is not yet a regular file left
+    // `active_project_session_db` unset, so session_start/end failed closed with
+    // "health-delta observation authority is unavailable" even though the test
+    // graph still retained a registered session authority (production mounts
+    // that authority before dispatching the same tools).
     #[cfg(feature = "test-transport")]
     if matches!(
         tool_name,
         "tracedecay_message_search" | "tracedecay_session_start" | "tracedecay_session_end"
     ) || tool_name.starts_with("tracedecay_lcm_")
     {
-        let session_db_path = project_session_db_path(cg);
-        if !session_db_path.is_file() {
-            return tracedecay::mcp::handle_tool_call(
-                cg,
-                tool_name,
-                args,
-                server_stats,
-                scope_prefix,
-            )
-            .await;
-        }
         let runtime = open_active_project_scoped_runtime(cg).await;
         let server = McpServer::new_with_host_admission_test_runtime_for_test(
             TraceDecay::open(cg.project_root()).await?,
@@ -597,6 +594,15 @@ pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    // The DB parent doubles as the profile store root; create it through the
+    // owner-private authority so production fail-closed permission validation
+    // accepts a root the fixture created first (any umask).
+    PrivateStoreIo::create_dir_all(parent).unwrap_or_else(|err| {
+        panic!(
+            "failed to create private test directory '{}': {err}",
+            parent.display()
+        )
+    });
     canonicalize_test_dir(parent).join(
         path.file_name()
             .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
