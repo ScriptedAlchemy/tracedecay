@@ -5862,6 +5862,7 @@ dependencies = [
 name = "tracedecay-global-db"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "criterion",
  "futures-util",
  "getrandom 0.2.17",
@@ -5983,6 +5984,7 @@ dependencies = [
  "tracedecay-automation",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
