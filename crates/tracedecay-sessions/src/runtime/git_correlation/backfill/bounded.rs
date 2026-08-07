@@ -580,7 +580,6 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
                     &row,
                     candidate_frontier,
                     &progress,
-                    opts,
                     control,
                     stats,
                     committed,
@@ -799,67 +798,6 @@ async fn dry_run_segment(
         }
     }
     Ok(emitted)
-}
-
-async fn record_span_in_transaction<T: GitCorrelationWriteTxn>(
-    transaction: &T,
-    branch: Option<&str>,
-    row: &SessionActivityRow,
-    worktree: &str,
-    timestamp: i64,
-    merge_gap_secs: i64,
-    control: &BoundedGitControl,
-) -> Result<(), BoundedBackfillInterruption> {
-    control.check()?;
-    super::super::record_span_observation_in_transaction(
-        transaction,
-        &SpanObservation {
-            provider: row.provider.clone(),
-            session_id: row.session_id.clone(),
-            thread_id: None,
-            branch: branch.map(str::to_owned),
-            worktree: worktree.to_owned(),
-            ts: timestamp,
-            source: SpanSource::Backfill,
-        },
-        merge_gap_secs,
-    )
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    control.check()
-}
-
-async fn record_commit_in_transaction<T: GitCorrelationWriteTxn>(
-    transaction: &T,
-    row: &SessionActivityRow,
-    branch: Option<&str>,
-    worktree: &str,
-    sha: &str,
-    committed_at: i64,
-    control: &BoundedGitControl,
-) -> Result<bool, BoundedBackfillInterruption> {
-    control.check()?;
-    let inserted = super::super::upsert_commit_session(
-        transaction,
-        &CommitSessionRecord {
-            commit_sha: sha.to_owned(),
-            provider: row.provider.clone(),
-            session_id: row.session_id.clone(),
-            branch: branch.map(str::to_owned),
-            worktree: Some(worktree.to_owned()),
-            committed_at,
-            span_overlap_kind: SpanOverlapKind::WithinSpan,
-            span_id: None,
-            relation: CommitRelation::Observed,
-            evidence: CommitEvidence::ReflogOverlap,
-            confidence: 30,
-            evidence_message_id: None,
-        },
-    )
-    .await
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    control.check()?;
-    Ok(inserted)
 }
 
 async fn persist_frontier<S: GitCorrelationSessionStore>(

@@ -109,6 +109,7 @@ pub async fn expand_query(
                     &grep_request,
                     &LcmGrepFilters::default(),
                     Some(&request.session_id),
+                    grep::LcmGitScopeSessions::Unscoped,
                     &query_plan,
                     max_results,
                 )
@@ -134,6 +135,7 @@ pub async fn expand_query(
                         &grep_request,
                         &LcmGrepFilters::default(),
                         Some(&request.session_id),
+                        grep::LcmGitScopeSessions::Unscoped,
                         &query_plan,
                         remaining,
                     )

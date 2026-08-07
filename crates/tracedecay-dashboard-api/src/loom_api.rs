@@ -1,12 +1,10 @@
 //! Authorized Loom temporal projection over the retained project session store.
 //!
-//! The endpoint composes existing authorities; it does not collect new data:
-//! `sessions`/`session_messages` provide thread bounds, `commit_sessions`
-//! provides persisted commit attribution, `session_git_spans` provides
-//! coalesced branch/worktree activity, and `sessions.metadata_json` provides
-//! provider-native edited-file rollups. PR/review/CI/release rows belong to the
-//! shared Delivery projection and remain explicitly unsupported here until that
-//! route exposes session-linked rows.
+//! The endpoint composes existing authorities; it does not collect new data.
+//! `sessions`/`session_messages` provide thread bounds and
+//! `sessions.metadata_json` provides provider-native edited-file rollups. Git
+//! correlation belongs to the registered graph read authority and is reported
+//! unavailable until that typed projection is supplied to this route.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,6 +32,9 @@ review_comments, ci_checks, failure_localization, and releases rows";
 const DELIVERY_REASON: &str = "the shared Delivery overview is mounted, but its outcome \
 projections are unavailable or unsupported and do not expose session-linked rows; Loom does not \
 duplicate them";
+const GIT_CORRELATION_AUTHORITY: &str = "typed Git correlation graph read port";
+const GIT_CORRELATION_REASON: &str = "Git correlation is owned by the registered graph runtime; \
+the retained session snapshot cannot query or infer commit, branch, or worktree relationships";
 
 const PAGE_CTE: &str = "
     WITH page AS (
@@ -282,32 +283,6 @@ async fn read_temporal(
         }
     }
 
-    let commit_sql = format!(
-        "{PAGE_CTE}
-         SELECT c.provider,
-                c.session_id, c.commit_sha, c.committed_at, c.branch, c.worktree,
-                c.relation, c.evidence, c.confidence, c.span_overlap_kind
-         FROM commit_sessions c
-         JOIN page p ON p.session_id = c.session_id AND p.provider = c.provider
-         ORDER BY c.committed_at, c.commit_sha"
-    );
-    let commits = query_rows(conn, &commit_sql, params![limit, offset]).await?;
-    let commit_eligible_sql = format!(
-        "{PAGE_CTE}
-         SELECT COUNT(*) AS eligible
-         FROM commit_sessions c
-         WHERE EXISTS (
-             SELECT 1 FROM page p WHERE p.session_id = c.session_id
-         )"
-    );
-    let commit_eligible = query_count(
-        conn,
-        &commit_eligible_sql,
-        params![limit, offset],
-        "eligible",
-    )
-    .await?;
-
     let edited_file_sql = format!(
         "{PAGE_CTE}
          SELECT p.provider, p.session_id,
@@ -340,33 +315,6 @@ async fn read_temporal(
     )
     .await?;
 
-    let branch_sql = format!(
-        "{PAGE_CTE}
-         SELECT span.provider,
-                span.session_id, span.branch, span.worktree,
-                span.first_ts AS first_at, span.last_ts AS last_at,
-                span.event_count, span.source
-         FROM session_git_spans span
-         JOIN page p ON p.session_id = span.session_id AND p.provider = span.provider
-         ORDER BY span.first_ts, span.span_id"
-    );
-    let branch_spans = query_rows(conn, &branch_sql, params![limit, offset]).await?;
-    let branch_eligible_sql = format!(
-        "{PAGE_CTE}
-         SELECT COUNT(*) AS eligible
-         FROM session_git_spans span
-         WHERE EXISTS (
-             SELECT 1 FROM page p WHERE p.session_id = span.session_id
-         )"
-    );
-    let branch_eligible = query_count(
-        conn,
-        &branch_eligible_sql,
-        params![limit, offset],
-        "eligible",
-    )
-    .await?;
-
     let generation_sql = format!(
         "{PAGE_CTE}
          SELECT COUNT(*) AS active_generations, MAX(generation.activated_at) AS latest_activated_at
@@ -385,21 +333,26 @@ async fn read_temporal(
         .and_then(Value::as_i64);
 
     let statuses = vec![
-        source_status(SourceStatusInput {
+        LoomSourceStatusV1 {
             id: "session_commit",
             label: "Session ↔ commit",
-            state: relation_state(commit_eligible, commits.len()),
-            authority: Some("commit_sessions"),
+            state: DashboardDomainStateV1::Unknown,
+            authority: None,
             granularity: "commit attribution",
-            rows: &commits,
-            reason: None,
-            required_authority: None,
-            coverage: relation_coverage(
-                commit_eligible,
-                commits.len(),
-                "provider-qualified commit_sessions rows for the displayed session page",
-            ),
-        }),
+            providers: Vec::new(),
+            item_count: None,
+            reason: Some(GIT_CORRELATION_REASON.to_string()),
+            required_authority: Some(GIT_CORRELATION_AUTHORITY),
+            coverage: LoomSourceCoverageV1 {
+                completeness: "unknown",
+                eligible: None,
+                examined: None,
+                matched: None,
+                omitted: None,
+                unit: None,
+                reason: GIT_CORRELATION_REASON.to_string(),
+            },
+        },
         source_status(SourceStatusInput {
             id: "session_file",
             label: "Session → edited file",
@@ -424,21 +377,26 @@ async fn read_temporal(
                     .to_string(),
             },
         }),
-        source_status(SourceStatusInput {
+        LoomSourceStatusV1 {
             id: "branch_worktree",
             label: "Branch & worktree spans",
-            state: relation_state(branch_eligible, branch_spans.len()),
-            authority: Some("session_git_spans"),
+            state: DashboardDomainStateV1::Unknown,
+            authority: None,
             granularity: "coalesced activity span",
-            rows: &branch_spans,
-            reason: None,
-            required_authority: None,
-            coverage: relation_coverage(
-                branch_eligible,
-                branch_spans.len(),
-                "provider-qualified session_git_spans rows for the displayed session page",
-            ),
-        }),
+            providers: Vec::new(),
+            item_count: None,
+            reason: Some(GIT_CORRELATION_REASON.to_string()),
+            required_authority: Some(GIT_CORRELATION_AUTHORITY),
+            coverage: LoomSourceCoverageV1 {
+                completeness: "unknown",
+                eligible: None,
+                examined: None,
+                matched: None,
+                omitted: None,
+                unit: None,
+                reason: GIT_CORRELATION_REASON.to_string(),
+            },
+        },
         LoomSourceStatusV1 {
             id: "delivery_outcomes",
             label: "Pull request, review, CI & release outcomes",
@@ -474,9 +432,9 @@ async fn read_temporal(
             total,
             sessions: decode_rows(sessions, "Loom sessions")?,
             source_statuses: statuses,
-            commits: decode_rows(commits, "Loom commits")?,
+            commits: Vec::new(),
             edited_files: decode_rows(edited_files, "Loom edited files")?,
-            branch_spans: decode_rows(branch_spans, "Loom branch spans")?,
+            branch_spans: Vec::new(),
             temporal_refresh: LoomTemporalRefreshV1 {
                 state: refresh_state,
                 active_generations,
@@ -524,28 +482,6 @@ pub async fn sessions_for_edited_file(
         matched_sessions: matched_sessions(&sessions),
         sessions,
     })
-}
-
-fn relation_state(eligible: u64, returned: usize) -> DashboardDomainStateV1 {
-    if eligible == returned as u64 {
-        DashboardDomainStateV1::Ready
-    } else {
-        DashboardDomainStateV1::Partial
-    }
-}
-
-fn relation_coverage(eligible: u64, returned: usize, reason: &str) -> LoomSourceCoverageV1 {
-    let returned = returned as u64;
-    let omitted = eligible.saturating_sub(returned);
-    LoomSourceCoverageV1 {
-        completeness: if omitted == 0 { "complete" } else { "partial" },
-        eligible: Some(eligible),
-        examined: Some(eligible),
-        matched: Some(returned),
-        omitted: Some(omitted),
-        unit: Some("stored relation rows"),
-        reason: reason.to_string(),
-    }
 }
 
 struct SourceStatusInput<'a> {
@@ -644,15 +580,35 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
             reason: reason.to_string(),
         },
     };
+    let unavailable_required = |id, label, required_authority, granularity| LoomSourceStatusV1 {
+        id,
+        label,
+        state: DashboardDomainStateV1::Unknown,
+        authority: None,
+        granularity,
+        providers: Vec::new(),
+        item_count: None,
+        reason: Some(reason.to_string()),
+        required_authority: Some(required_authority),
+        coverage: LoomSourceCoverageV1 {
+            completeness: "unknown",
+            eligible: None,
+            examined: None,
+            matched: None,
+            omitted: None,
+            unit: None,
+            reason: reason.to_string(),
+        },
+    };
     LoomTemporalPayloadV1 {
         available: false,
         total: 0,
         sessions: Vec::new(),
         source_statuses: vec![
-            unavailable(
+            unavailable_required(
                 "session_commit",
                 "Session ↔ commit",
-                "commit_sessions",
+                GIT_CORRELATION_AUTHORITY,
                 "commit attribution",
             ),
             unavailable(
@@ -661,10 +617,10 @@ fn unavailable_payload(reason: &str) -> LoomTemporalPayloadV1 {
                 "sessions.metadata_json $.edited_files[]",
                 "recorded file rollup",
             ),
-            unavailable(
+            unavailable_required(
                 "branch_worktree",
                 "Branch & worktree spans",
-                "session_git_spans",
+                GIT_CORRELATION_AUTHORITY,
                 "coalesced activity span",
             ),
             LoomSourceStatusV1 {
@@ -724,5 +680,23 @@ mod tests {
             .expect("delivery status");
         assert_eq!(delivery.state, DashboardDomainStateV1::Unsupported);
         assert_eq!(delivery.required_authority, Some(DELIVERY_AUTHORITY));
+    }
+
+    #[test]
+    fn git_sources_name_graph_authority_instead_of_legacy_tables() {
+        let payload = unavailable_payload("session authority unavailable");
+        for id in ["session_commit", "branch_worktree"] {
+            let source = payload
+                .source_statuses
+                .iter()
+                .find(|source| source.id == id)
+                .expect("Git source status");
+            assert_eq!(source.authority, None);
+            assert_eq!(
+                source.required_authority,
+                Some(GIT_CORRELATION_AUTHORITY)
+            );
+            assert_eq!(source.state, DashboardDomainStateV1::Unknown);
+        }
     }
 }

@@ -41,6 +41,14 @@ impl GitCorrelationSessionStore for TestStore {
             .await
             .map_err(GitCorrelationError::from)
     }
+
+    fn graph_runtime(
+        &self,
+    ) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
+        Err(GitCorrelationError::Unavailable(
+            "failure receipt tests do not mount graph evidence".to_owned(),
+        ))
+    }
 }
 
 fn failure(activity_timestamp: i64) -> GitHistoryFailureRow {

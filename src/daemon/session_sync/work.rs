@@ -1,4 +1,13 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracedecay_code_index::git_projection::{
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, build_git_topology_manifest_checked,
+    git_topology_idempotency_key, git_topology_namespace, git_topology_projection_identity,
+};
+use tracedecay_graph_db::{GraphDbError, GraphProjectorRevision};
+
+use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
 #[derive(Clone, Copy)]
 pub(super) enum SessionSyncInterruption {
@@ -711,6 +720,78 @@ impl SessionSyncProjectContext {
         }
     }
 
+    async fn publish_git_topology(
+        &self,
+        request: &SessionSyncRequestV1,
+        shutdown: &crate::application::observation::ObservationCancellation,
+    ) -> Result<(), String> {
+        let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+            &self.project_root,
+            &self.project_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let runtime = self
+            .project_sessions
+            .project_graph_runtime()
+            .cloned()
+            .ok_or_else(|| "project graph runtime is unavailable".to_owned())?;
+        let project_root = self.project_root.clone();
+        let repository = scope.repository_id;
+        let worktree = scope.worktree_id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
+            let projection = adapter
+                .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
+                .map_err(|error| error.to_string())?;
+            let revision =
+                GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+                    .map_err(|error| error.to_string())?;
+            let identity = git_topology_projection_identity(
+                git_topology_namespace(&repository).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let check = || {
+                if worker_cancelled.load(Ordering::Relaxed) {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            let manifest =
+                build_git_topology_manifest_checked(identity, &projection, &revision, &check)
+                    .map_err(|error| error.to_string())?;
+            let idempotency = git_topology_idempotency_key(&projection, &revision)
+                .map_err(|error| error.to_string())?;
+            runtime
+                .publish_verified_manifest(
+                    &manifest,
+                    idempotency,
+                    Arc::clone(&worker_cancelled),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        tokio::pin!(worker);
+        loop {
+            tokio::select! {
+                result = &mut worker => {
+                    return result
+                        .map_err(|error| format!("Git topology worker failed: {error}"))?;
+                }
+                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
+                    if shutdown.is_cancelled()
+                        || request.cancellation().is_cancelled()
+                        || request.deadline().is_elapsed_at(now_micros())
+                    {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
     pub(super) async fn synchronize_git(
         &self,
         request: &SessionSyncRequestV1,
@@ -759,7 +840,13 @@ impl SessionSyncProjectContext {
                 }
             }
         };
-        match result {
+        let topology_result =
+            if result.is_ok() && requested_interruption.is_none() && !options.dry_run() {
+                self.publish_git_topology(request, shutdown).await
+            } else {
+                Ok(())
+            };
+        let work = match result {
             Ok(outcome) => git_sync_work_result(&self.project_id, outcome, requested_interruption),
             Err(error) => {
                 tracing::warn!(%error, "session git sync failed");
@@ -775,6 +862,44 @@ impl SessionSyncProjectContext {
                     failure_codes: vec!["git_sync_failed".to_owned()],
                 }
             }
+        };
+        git_sync_with_topology_result(work, topology_result)
+    }
+}
+
+fn git_sync_with_topology_result(
+    work: SessionSyncWorkResult,
+    topology_result: Result<(), String>,
+) -> SessionSyncWorkResult {
+    let Err(error) = topology_result else {
+        return work;
+    };
+    tracing::warn!(%error, "session Git topology publication failed");
+    match work {
+        SessionSyncWorkResult::Finished {
+            interruption,
+            committed,
+            stats,
+            mut coverage,
+            source_frontiers,
+            mut failure_codes,
+        } => {
+            coverage.push(SessionSyncSourceCoverageV1 {
+                store_scope: "git_topology".to_owned(),
+                coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+            });
+            failure_codes.push("git_topology_projection_unavailable".to_owned());
+            SessionSyncWorkResult::Finished {
+                interruption,
+                committed,
+                stats,
+                coverage,
+                source_frontiers,
+                failure_codes,
+            }
+        }
+        SessionSyncWorkResult::Interrupted(interruption) => {
+            SessionSyncWorkResult::Interrupted(interruption)
         }
     }
 }

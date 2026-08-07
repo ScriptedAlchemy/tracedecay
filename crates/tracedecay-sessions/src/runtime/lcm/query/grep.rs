@@ -5,6 +5,12 @@ use crate::runtime::SessionMessageType;
 
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum LcmGitScopeSessions<'a> {
+    Unscoped,
+    Scoped(&'a [(String, String)]),
+}
+
 pub(super) fn contains_cjk(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
@@ -23,6 +29,7 @@ pub async fn grep(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
+    git_scope_session_ids: Option<&[(String, String)]>,
 ) -> Result<LcmGrepOutcome, LcmError> {
     let query_plan = grep_query_plan(&request.query);
     if query_plan.is_empty() {
@@ -33,12 +40,17 @@ pub async fn grep(
     if matches!(request.scope, LcmScope::Current | LcmScope::Session) && session_filter.is_none() {
         return Ok(LcmGrepOutcome::default());
     }
-    // A git-scoped grep against a store predating the git-correlation schema
-    // can never match; short-circuit rather than issue a `no such table`
-    // EXISTS subquery.
-    if !request.git_filter.is_empty() && !lcm_table_exists(conn, "session_git_spans").await? {
-        return Ok(LcmGrepOutcome::default());
-    }
+    let git_scope_session_ids = if request.git_filter.is_empty() {
+        LcmGitScopeSessions::Unscoped
+    } else {
+        let session_ids = git_scope_session_ids.ok_or_else(|| {
+            LcmError::Db("Git scope session authority is unavailable".to_string())
+        })?;
+        if session_ids.len() > crate::runtime::git_correlation::MAX_SESSIONS_FOR_LIMIT {
+            return Err(LcmError::BudgetExhausted);
+        }
+        LcmGitScopeSessions::Scoped(session_ids)
+    };
 
     let raw_only_filters = request.role.is_some()
         || request.start_time.is_some()
@@ -55,6 +67,7 @@ pub async fn grep(
         &request,
         &retrieval_filters,
         session_filter,
+        git_scope_session_ids,
         &query_plan,
         fetch_limit,
     )
@@ -67,6 +80,7 @@ pub async fn grep(
                 &request,
                 &retrieval_filters,
                 session_filter,
+                git_scope_session_ids,
                 &query_plan,
                 remaining,
             )
@@ -185,6 +199,7 @@ pub(super) async fn raw_grep_hits(
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
@@ -194,6 +209,7 @@ pub(super) async fn raw_grep_hits(
             request,
             retrieval_filters,
             session_id,
+            git_scope_session_ids,
             query_plan,
             limit,
         )
@@ -206,6 +222,7 @@ pub(super) async fn raw_grep_hits(
         request,
         *retrieval_filters,
         session_id,
+        git_scope_session_ids,
         &mut filters,
         &mut values,
     );
@@ -246,6 +263,7 @@ pub(super) async fn summary_grep_hits(
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
@@ -255,6 +273,7 @@ pub(super) async fn summary_grep_hits(
             request,
             retrieval_filters,
             session_id,
+            git_scope_session_ids,
             query_plan,
             limit,
         )
@@ -267,6 +286,7 @@ pub(super) async fn summary_grep_hits(
         request,
         *retrieval_filters,
         session_id,
+        git_scope_session_ids,
         &mut filters,
         &mut values,
     );
@@ -300,6 +320,7 @@ async fn raw_like_grep_hits(
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
@@ -315,6 +336,7 @@ async fn raw_like_grep_hits(
         request,
         *retrieval_filters,
         session_id,
+        git_scope_session_ids,
         &mut filters,
         &mut values,
     );
@@ -366,6 +388,7 @@ async fn summary_like_grep_hits(
     request: &LcmGrepRequest,
     retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
@@ -381,6 +404,7 @@ async fn summary_like_grep_hits(
         request,
         *retrieval_filters,
         session_id,
+        git_scope_session_ids,
         &mut filters,
         &mut values,
     );
@@ -418,6 +442,7 @@ fn push_raw_grep_filters(
     request: &LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
 ) {
@@ -464,13 +489,20 @@ fn push_raw_grep_filters(
         "r.session_id",
         filters,
     );
-    push_grep_git_scope_filter(request, "r.session_id", filters, values);
+    push_grep_git_scope_filter(
+        git_scope_session_ids,
+        "r.provider",
+        "r.session_id",
+        filters,
+        values,
+    );
 }
 
 fn push_summary_grep_filters(
     request: &LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,
     session_id: Option<&str>,
+    git_scope_session_ids: LcmGitScopeSessions<'_>,
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
 ) {
@@ -505,7 +537,13 @@ fn push_summary_grep_filters(
         "n.session_id",
         filters,
     );
-    push_grep_git_scope_filter(request, "n.session_id", filters, values);
+    push_grep_git_scope_filter(
+        git_scope_session_ids,
+        "n.provider",
+        "n.session_id",
+        filters,
+        values,
+    );
 }
 
 fn message_type_predicate_sql(
@@ -556,24 +594,33 @@ fn push_grep_relationship_scope_filter(
     ));
 }
 
-/// Appends the request's git-scope constraint (branch/worktree/commit) as an
-/// EXISTS predicate correlated to the outer row via `session_column`. No-op
-/// when the filter is empty.
+/// Appends the provider-qualified session set preselected by the canonical Git
+/// correlation graph authority. An authoritative empty selection emits a false
+/// predicate.
 fn push_grep_git_scope_filter(
-    request: &LcmGrepRequest,
+    scope: LcmGitScopeSessions<'_>,
+    provider_column: &str,
     session_column: &str,
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
 ) {
-    if let Some((predicate, predicate_values)) =
-        crate::runtime::git_correlation::git_scope_exists_predicate(
-            &request.git_filter,
-            session_column,
-        )
-    {
-        filters.push(predicate);
-        values.extend(predicate_values);
+    let session_ids = match scope {
+        LcmGitScopeSessions::Unscoped => return,
+        LcmGitScopeSessions::Scoped(session_ids) => session_ids,
+    };
+    if session_ids.is_empty() {
+        filters.push("0".to_string());
+        return;
     }
+    let mut selected = Vec::with_capacity(session_ids.len());
+    for (provider, session_id) in session_ids {
+        selected.push(format!(
+            "({provider_column} = ? AND {session_column} = ?)"
+        ));
+        values.push(Value::Text(provider.clone()));
+        values.push(Value::Text(session_id.clone()));
+    }
+    filters.push(format!("({})", selected.join(" OR ")));
 }
 
 fn grep_provider_filter(request: &LcmGrepRequest) -> Option<&str> {

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_domain::{
@@ -187,6 +189,7 @@ fn participant_generation(
 pub struct GlobalDbTemporalReadPort<'a> {
     read: TemporalSqlRead<'a>,
     relation_authority: Option<SessionReadRelationAuthority<'a>>,
+    git_scope_session_ids: Option<&'a BTreeSet<(String, String)>>,
 }
 
 struct SessionReadRelationAuthority<'a> {
@@ -200,6 +203,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Self {
             read: TemporalSqlRead::engine_connection(read),
             relation_authority: None,
+            git_scope_session_ids: None,
         }
     }
 
@@ -208,6 +212,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Self {
             read: TemporalSqlRead::registered(read),
             relation_authority: None,
+            git_scope_session_ids: None,
         }
     }
 
@@ -220,6 +225,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Self {
             read: TemporalSqlRead::engine_connection(read),
             relation_authority: Some(SessionReadRelationAuthority { scope, store }),
+            git_scope_session_ids: None,
         }
     }
 
@@ -231,7 +237,18 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         Self {
             read: TemporalSqlRead::registered(read),
             relation_authority: Some(SessionReadRelationAuthority { scope, store }),
+            git_scope_session_ids: None,
         }
+    }
+
+    /// Supplies the provider-qualified session IDs selected by the canonical
+    /// Git correlation graph authority for the request's Git scope.
+    pub const fn with_git_scope_session_ids(
+        mut self,
+        session_ids: &'a BTreeSet<(String, String)>,
+    ) -> Self {
+        self.git_scope_session_ids = Some(session_ids);
+        self
     }
 
     async fn candidate_matches_filter(
@@ -289,6 +306,25 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         provider: &str,
         filter: &TemporalCandidateFilterV1,
     ) -> Result<bool, TemporalPortError> {
+        if filter.git_branch.is_some()
+            || filter.git_worktree.is_some()
+            || filter.git_commit.is_some()
+        {
+            let selected = self.git_scope_session_ids.ok_or_else(|| {
+                read_message(
+                    CANDIDATE_OPERATION,
+                    "Git scope session authority is unavailable",
+                )
+            })?;
+            if !selected
+                .iter()
+                .any(|(selected_provider, selected_session_id)| {
+                    selected_provider == provider && selected_session_id == session_id
+                })
+            {
+                return Ok(false);
+            }
+        }
         let mut sql = "SELECT EXISTS (
             SELECT 1 FROM sessions AS s
             WHERE s.session_id = ?1 AND s.provider = ?2"
@@ -308,41 +344,37 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 format_args!(" AND (s.project_key = ?{index} OR s.project_path = ?{index})"),
             );
         }
-        if let Some(branch) = &filter.git_branch {
-            let index = bind(branch.clone());
+        if let Some(parent) = &filter.parent_session_id {
+            let index = bind(parent.clone());
             let _ = std::fmt::Write::write_fmt(
                 &mut sql,
-                format_args!(
-                    " AND EXISTS (SELECT 1 FROM session_git_spans g \
-                     WHERE g.session_id = s.session_id AND g.branch = ?{index})"
-                ),
+                format_args!(" AND s.parent_session_id = ?{index}"),
             );
         }
-        if let Some(worktree) = &filter.git_worktree {
-            let index = bind(worktree.clone());
-            let _ = std::fmt::Write::write_fmt(
-                &mut sql,
-                format_args!(
-                    " AND EXISTS (SELECT 1 FROM session_git_spans g \
-                     WHERE g.session_id = s.session_id AND g.worktree = ?{index})"
-                ),
-            );
+        match filter.session_scope {
+            TemporalSessionScopeFilterV1::All => {}
+            TemporalSessionScopeFilterV1::ParentsOnly => sql.push_str(" AND s.is_subagent = 0"),
+            TemporalSessionScopeFilterV1::SubagentsOnly => sql.push_str(" AND s.is_subagent <> 0"),
         }
-        if let Some(commit) = &filter.git_commit {
-            let exact = bind(commit.clone());
-            let prefix = bind(format!("{commit}%"));
+        if let Some(run_id) = &filter.workflow_run {
+            let run = bind(run_id.clone());
             let _ = std::fmt::Write::write_fmt(
                 &mut sql,
                 format_args!(
-                    " AND EXISTS (SELECT 1 FROM commit_sessions c \
-                     WHERE c.session_id = s.session_id \
-                       AND (c.commit_sha = ?{exact} OR c.commit_sha LIKE ?{prefix}) \
-                       AND (c.relation = 'produced' OR NOT EXISTS ( \
-                           SELECT 1 FROM commit_sessions p \
-                           WHERE (p.commit_sha = ?{exact} OR p.commit_sha LIKE ?{prefix}) \
-                             AND p.relation = 'produced')))"
+                    " AND EXISTS (SELECT 1 FROM workflow_agents wa \
+                     WHERE wa.run_id = ?{run} \
+                       AND (wa.agent_session_id = s.session_id \
+                            OR wa.transcript_path = s.transcript_path)"
                 ),
             );
+            if let Some(agent) = &filter.workflow_agent {
+                let agent = bind(agent.clone());
+                let _ = std::fmt::Write::write_fmt(
+                    &mut sql,
+                    format_args!(" AND wa.agent_label = ?{agent}"),
+                );
+            }
+            sql.push(')');
         }
         sql.push_str(" LIMIT 1)");
         let mut rows = self

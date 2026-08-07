@@ -8,28 +8,38 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    GitCommitMetadataV1, GitHeadStateV1, GitHistoryV1, GitOidV1, ManifestDigest, RefId,
-    RepositoryId, canonical_sha256,
+    GitCommitMetadataV1, GitCoverageV1, GitHeadStateV1, GitHistoryV1, GitOidV1, ManifestDigest,
+    RefId, RepositoryId, canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
-    GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, SourceGeneration,
-    TraversalRequest, VerifiedGraphSnapshot,
+    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
+    GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 
 const GIT_PROJECTION: &str = "git-topology";
 const COMMIT_LABEL: &str = "GitCommit";
 const BOUNDARY_COMMIT_LABEL: &str = "GitBoundaryCommit";
 const REF_LABEL: &str = "GitRef";
+const METADATA_LABEL: &str = "GitTopologyMetadata";
 const COMMIT_RECORD_PROPERTY: &str = "commit-record";
 const COMMIT_OID_PROPERTY: &str = "commit-oid";
 const REF_RECORD_PROPERTY: &str = "ref-record";
+const METADATA_RECORD_PROPERTY: &str = "metadata-record";
 const PARENT_RELATION: &str = "GitParent";
 const REF_TARGET_RELATION: &str = "GitRefTarget";
 
 pub const GIT_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "git-topology-projector.v1";
+
+struct NeverCancelled;
+
+impl GraphCancellation for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +58,14 @@ pub struct GitTopologyProjectionV1 {
     pub ref_watermark: ManifestDigest,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GitTopologyMetadataV1 {
+    repository: RepositoryId,
+    ref_watermark: ManifestDigest,
+    coverage: GitCoverageV1,
+}
+
 impl GitTopologyProjectionV1 {
     pub fn validate(&self) -> Result<(), GitTopologyProjectionError> {
         self.repository
@@ -62,23 +80,10 @@ impl GitTopologyProjectionV1 {
         if self.history.repository != self.repository {
             return Err(GitTopologyProjectionError::RepositoryMismatch);
         }
-        for reference in &self.refs {
-            reference
-                .reference
-                .validate()
-                .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
-            if let Some(target) = &reference.target {
-                target
-                    .validate()
-                    .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
-            }
-        }
-        if self
-            .refs
-            .windows(2)
-            .any(|pair| pair[0].reference >= pair[1].reference)
-        {
-            return Err(GitTopologyProjectionError::NonCanonicalRefs);
+        validate_refs(&self.refs)?;
+        let expected = git_topology_ref_watermark(&self.repository, &self.head, &self.refs)?;
+        if self.ref_watermark != expected {
+            return Err(GitTopologyProjectionError::RefWatermarkMismatch);
         }
         Ok(())
     }
@@ -92,8 +97,15 @@ pub enum GitTopologyProjectionError {
     RepositoryMismatch,
     #[error("Git topology refs are duplicated or out of order")]
     NonCanonicalRefs,
+    #[error("Git topology ref watermark does not match its canonical ref snapshot")]
+    RefWatermarkMismatch,
     #[error("Git topology generation does not match")]
     GenerationMismatch,
+    #[error("Git topology projection is stale")]
+    Stale {
+        projected: ManifestDigest,
+        current: ManifestDigest,
+    },
     #[error("Git topology operation was cancelled")]
     Cancelled,
     #[error("Git topology traversal budget was exhausted")]
@@ -135,6 +147,32 @@ pub fn git_topology_projection_identity(
     ))
 }
 
+pub fn git_topology_namespace(
+    repository: &RepositoryId,
+) -> Result<GraphNamespace, GitTopologyProjectionError> {
+    repository
+        .validate()
+        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+    let digest = canonical_sha256(&("tracedecay.git-topology-namespace.v1", repository))
+        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+    GraphNamespace::new(format!("git-scope:{}", digest.as_str())).map_err(Into::into)
+}
+
+pub fn git_topology_ref_watermark(
+    repository: &RepositoryId,
+    head: &GitHeadStateV1,
+    refs: &[GitTopologyRefV1],
+) -> Result<ManifestDigest, GitTopologyProjectionError> {
+    repository
+        .validate()
+        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+    head.validate()
+        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+    validate_refs(refs)?;
+    canonical_sha256(&("tracedecay.git-topology-ref-watermark.v1", repository, head, refs))
+        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))
+}
+
 pub fn git_topology_generation_id(
     projection: &GitTopologyProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -147,6 +185,14 @@ pub fn git_topology_generation_id(
     ))
     .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
     GraphGenerationId::new(format!("git-topology:{}", digest.as_str())).map_err(Into::into)
+}
+
+pub fn git_topology_idempotency_key(
+    projection: &GitTopologyProjectionV1,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphIdempotencyKey, GitTopologyProjectionError> {
+    let generation = git_topology_generation_id(projection, projector_revision)?;
+    GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
 pub fn build_git_topology_manifest_checked(
@@ -181,7 +227,13 @@ pub fn build_git_topology_manifest_checked(
             .filter_map(|reference| reference.target.clone()),
     );
 
-    let mut entities = Vec::with_capacity(all_oids.len().saturating_add(projection.refs.len()));
+    let mut entities = Vec::with_capacity(
+        all_oids
+            .len()
+            .saturating_add(projection.refs.len())
+            .saturating_add(1),
+    );
+    entities.push(metadata_entity(projection)?);
     for oid in all_oids {
         entities.push(commit_entity(oid.clone(), commits.get(&oid).copied())?);
     }
@@ -233,6 +285,9 @@ pub struct GitTopologyProjectionStore {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection: GraphProjectionIdentity,
     generation: GraphGenerationId,
+    repository: RepositoryId,
+    ref_watermark: ManifestDigest,
+    coverage: GitCoverageV1,
 }
 
 impl fmt::Debug for GitTopologyProjectionStore {
@@ -241,6 +296,8 @@ impl fmt::Debug for GitTopologyProjectionStore {
             .debug_struct("GitTopologyProjectionStore")
             .field("projection", &self.projection)
             .field("generation", &self.generation)
+            .field("repository", &self.repository)
+            .field("ref_watermark", &self.ref_watermark)
             .finish_non_exhaustive()
     }
 }
@@ -256,11 +313,60 @@ impl GitTopologyProjectionStore {
         if snapshot.generation() != &expected {
             return Err(GitTopologyProjectionError::GenerationMismatch);
         }
+        let store = Self::from_verified_snapshot_verified(snapshot, Arc::new(NeverCancelled))?;
+        if store.repository != projection.repository
+            || store.ref_watermark != projection.ref_watermark
+            || store.coverage != projection.history.coverage
+        {
+            return Err(GitTopologyProjectionError::GenerationMismatch);
+        }
+        Ok(store)
+    }
+
+    pub fn from_verified_snapshot_verified(
+        snapshot: VerifiedGraphSnapshot,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Self, GitTopologyProjectionError> {
+        if snapshot.projection().projection.as_str() != GIT_PROJECTION {
+            return Err(GitTopologyProjectionError::Contract(
+                "verified snapshot uses a foreign Git topology projector".to_owned(),
+            ));
+        }
+        let metadata = read_metadata(&snapshot, cancellation)?;
         Ok(Self {
             projection: snapshot.projection().clone(),
-            generation: expected,
+            generation: snapshot.generation().clone(),
+            repository: metadata.repository,
+            ref_watermark: metadata.ref_watermark,
+            coverage: metadata.coverage,
             snapshot: Arc::new(snapshot),
         })
+    }
+
+    pub fn repository(&self) -> &RepositoryId {
+        &self.repository
+    }
+
+    pub fn ref_watermark(&self) -> &ManifestDigest {
+        &self.ref_watermark
+    }
+
+    pub fn coverage(&self) -> &GitCoverageV1 {
+        &self.coverage
+    }
+
+    pub fn verify_ref_watermark(
+        &self,
+        current: &ManifestDigest,
+    ) -> Result<(), GitTopologyProjectionError> {
+        if &self.ref_watermark == current {
+            Ok(())
+        } else {
+            Err(GitTopologyProjectionError::Stale {
+                projected: self.ref_watermark.clone(),
+                current: current.clone(),
+            })
+        }
     }
 
     pub fn ancestors(
@@ -423,6 +529,84 @@ fn validate_budget(max_depth: usize, max_results: usize) -> Result<(), GitTopolo
     }
 }
 
+fn validate_refs(refs: &[GitTopologyRefV1]) -> Result<(), GitTopologyProjectionError> {
+    for reference in refs {
+        reference
+            .reference
+            .validate()
+            .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+        if let Some(target) = &reference.target {
+            target
+                .validate()
+                .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
+        }
+    }
+    if refs
+        .windows(2)
+        .any(|pair| pair[0].reference >= pair[1].reference)
+    {
+        return Err(GitTopologyProjectionError::NonCanonicalRefs);
+    }
+    Ok(())
+}
+
+fn metadata_entity(
+    projection: &GitTopologyProjectionV1,
+) -> Result<GraphEntity, GitTopologyProjectionError> {
+    let metadata = GitTopologyMetadataV1 {
+        repository: projection.repository.clone(),
+        ref_watermark: projection.ref_watermark.clone(),
+        coverage: projection.history.coverage.clone(),
+    };
+    GraphEntity::new(
+        metadata_entity_id()?,
+        BTreeSet::from([GraphLabel::new(METADATA_LABEL)?]),
+        BTreeMap::from([(
+            GraphPropertyName::new(METADATA_RECORD_PROPERTY)?,
+            GraphProperty::Bytes(serialize(&metadata)?),
+        )]),
+    )
+    .map_err(Into::into)
+}
+
+fn read_metadata(
+    snapshot: &VerifiedGraphSnapshot,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<GitTopologyMetadataV1, GitTopologyProjectionError> {
+    let reference = GraphEntityRef::new(snapshot.projection().clone(), metadata_entity_id()?);
+    let entity = snapshot.entity(&reference, cancellation)?.ok_or_else(|| {
+        GitTopologyProjectionError::Corrupt("Git topology metadata is missing".to_owned())
+    })?;
+    let property = entity
+        .properties
+        .get(&GraphPropertyName::new(METADATA_RECORD_PROPERTY)?)
+        .ok_or_else(|| {
+            GitTopologyProjectionError::Corrupt(
+                "Git topology metadata record is missing".to_owned(),
+            )
+        })?;
+    let GraphProperty::Bytes(encoded) = property else {
+        return Err(GitTopologyProjectionError::Corrupt(
+            "Git topology metadata record has the wrong type".to_owned(),
+        ));
+    };
+    let metadata: GitTopologyMetadataV1 = serde_json::from_slice(encoded)
+        .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
+    metadata
+        .repository
+        .validate()
+        .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
+    metadata
+        .ref_watermark
+        .validate()
+        .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
+    metadata
+        .coverage
+        .validate()
+        .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
+    Ok(metadata)
+}
+
 fn commit_entity(
     oid: GitOidV1,
     commit: Option<&GitCommitMetadataV1>,
@@ -498,6 +682,10 @@ fn commit_entity_id(oid: &GitOidV1) -> Result<GraphEntityId, GitTopologyProjecti
 
 fn ref_entity_id(reference: &RefId) -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("ref", reference.as_str())).map_err(Into::into)
+}
+
+fn metadata_entity_id() -> Result<GraphEntityId, GitTopologyProjectionError> {
+    GraphEntityId::new(stable_identity("metadata", GIT_PROJECTION)).map_err(Into::into)
 }
 
 fn stable_identity(kind: &str, value: &str) -> String {

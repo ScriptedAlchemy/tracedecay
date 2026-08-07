@@ -292,8 +292,31 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             .failures
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
-    if !cancelled {
-        finalize_project_ingest(registered, &canonical_project_id, project_root).await;
+    if !cancelled
+        && let Err(error) =
+            finalize_project_ingest(registered, &canonical_project_id, project_root).await
+    {
+        let retryable = matches!(
+            &error,
+            git_correlation::GitCorrelationError::Db(_)
+                | git_correlation::GitCorrelationError::Unavailable(_)
+                | git_correlation::GitCorrelationError::Cancelled
+                | git_correlation::GitCorrelationError::BudgetExhausted
+        );
+        tracing::warn!(%error, "project Git evidence attribution remains pending");
+        provider_runs.deferred_units = provider_runs.deferred_units.saturating_add(1);
+        provider_runs.failures.push(TranscriptCatchUpFailure::new(
+            "git",
+            "attribution",
+            "git_evidence_publication_failed",
+            retryable,
+        ));
+        source_outcome.coverage = merge_project_provider_backpressure(
+            source_outcome.coverage,
+            source_outcome.units_admitted,
+            provider_runs.units_admitted,
+            provider_runs.deferred_units,
+        );
     }
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
@@ -304,10 +327,11 @@ pub(super) async fn finalize_project_ingest<A: SessionIngestAuthority>(
     db: &A,
     project_id: &ProjectId,
     project_root: &Path,
-) {
+) -> Result<(), git_correlation::GitCorrelationError> {
     // Now that messages have landed, attribute any commits that fell inside a
-    // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
-    attribute_commits_after_ingest(db).await;
+    // recorded session span. Graph failure is returned as retryable catch-up
+    // state; it is never disguised as a successful empty attribution.
+    let attribution = attribute_commits_after_ingest(db).await;
     // Index Claude Code workflow runs + their agents last, so the parent
     // sessions' git spans already exist and each run inherits them. Fail-open:
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
@@ -321,34 +345,32 @@ pub(super) async fn finalize_project_ingest<A: SessionIngestAuthority>(
         )
         .await;
     }
+    attribution
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
 /// For each `(branch, worktree)` pair touched since the last sweep, scans that
 /// branch's git log inside the pair's span window (widened by the merge gap)
-/// and attributes overlapping commits to their sessions. Fail-open.
-async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(db: &A) {
+/// and attributes overlapping commits to their sessions.
+async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
+    db: &A,
+) -> Result<(), git_correlation::GitCorrelationError> {
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let result = commit_attribution_sweep(&db.git_correlation_store(), gap).await;
-    if let Err(error) = result {
-        tracing::debug!(%error, "commit attribution sweep skipped");
-    }
+    commit_attribution_sweep(&db.git_correlation_store(), gap)
+        .await
+        .map(|_| ())
 }
 
-/// One bounded sweep inside a single write transaction, so the sweep watermark
-/// can only advance together with the attribution rows it describes.
+/// One bounded sweep over the verified span projection. Any changed attribution
+/// set is published as one immutable graph generation.
 async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
     store: &S,
     gap_secs: i64,
 ) -> Result<usize, git_correlation::GitCorrelationError> {
-    let transaction = store.open_write_transaction().await?;
-    let attributed =
-        git_correlation::run_commit_attribution_sweep(&transaction, gap_secs, |target| {
-            git_scan_commits(target, gap_secs)
-        })
-        .await?;
-    git_correlation::GitCorrelationWriteTxn::commit(transaction).await?;
-    Ok(attributed)
+    git_correlation::run_commit_attribution_sweep(store, gap_secs, |target| {
+        git_scan_commits(target, gap_secs)
+    })
+    .await
 }
 
 /// Reads commits on one span target's branch within its (gap-widened) window

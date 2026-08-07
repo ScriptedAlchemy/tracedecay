@@ -710,13 +710,11 @@ impl RegisteredGlobalDb {
             session: session.clone(),
             messages: messages.to_vec(),
         };
-        self.persist_transcript_batch_with_git_evidence_result(
-            &batch,
-            &[],
-            &[],
+        self.upsert_transcript_batches_inner(
+            std::slice::from_ref(&batch),
             parse_offset_path,
-            expected_offset,
             parse_offset,
+            TranscriptWritePolicy::Full { expected_offset },
         )
         .await
     }
@@ -736,28 +734,6 @@ impl RegisteredGlobalDb {
             .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
     }
 
-    /// Atomically persists transcript rows, direct commit evidence, and the
-    /// parse cursor so a failed attribution write is replayed on the next sync.
-    pub async fn persist_transcript_batch_with_git_evidence_result(
-        &self,
-        batch: &TranscriptBatch,
-        commit_records: &[tracedecay_sessions::runtime::git_correlation::CommitSessionRecord],
-        span_observations: &[tracedecay_sessions::runtime::git_correlation::SpanObservation],
-        parse_offset_path: &str,
-        expected_offset: ParseOffset,
-        parse_offset: ParseOffset,
-    ) -> Result<(), TranscriptPersistenceError> {
-        self.upsert_transcript_batches_inner(
-            std::slice::from_ref(batch),
-            commit_records,
-            span_observations,
-            parse_offset_path,
-            parse_offset,
-            TranscriptWritePolicy::Full { expected_offset },
-        )
-        .await
-    }
-
     /// Atomically upserts several transcript sessions (and their messages),
     /// writing only the searchable `session_messages` projection — never
     /// `lcm_raw_messages` — and then advances one shared parse cursor.
@@ -769,8 +745,6 @@ impl RegisteredGlobalDb {
     ) -> Result<(), String> {
         self.upsert_transcript_batches_inner(
             batches,
-            &[],
-            &[],
             parse_offset_path,
             parse_offset,
             TranscriptWritePolicy::ProjectionOnly,
@@ -782,8 +756,6 @@ impl RegisteredGlobalDb {
     async fn upsert_transcript_batches_inner(
         &self,
         batches: &[TranscriptBatch],
-        commit_records: &[tracedecay_sessions::runtime::git_correlation::CommitSessionRecord],
-        span_observations: &[tracedecay_sessions::runtime::git_correlation::SpanObservation],
         parse_offset_path: &str,
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
@@ -807,7 +779,20 @@ impl RegisteredGlobalDb {
         > = async {
             let mut relation_projections = Vec::new();
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
-                require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
+                match require_expected_offset(&transaction, parse_offset_path, expected_offset)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(TranscriptPersistenceError::Conflict { actual, .. })
+                        if actual == parse_offset =>
+                    {
+                        // The SQL batch already committed and a later graph
+                        // publication failed. Re-run deterministic upserts so
+                        // every post-commit projection can be retried without
+                        // rewinding or fabricating the durable parse cursor.
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             for batch in batches {
                 if !Self::upsert_session_in_existing_tx(&transaction, &batch.session).await {
@@ -852,24 +837,6 @@ impl RegisteredGlobalDb {
                         }
                     }
                 }
-            }
-            for record in commit_records {
-                tracedecay_sessions::runtime::git_correlation::upsert_commit_session(&transaction, record)
-                    .await
-                    .map_err(|error| {
-                        TranscriptPersistenceError::storage("upsert commit evidence", error)
-                    })?;
-            }
-            for observation in span_observations {
-                tracedecay_sessions::runtime::git_correlation::record_span_observation_in_transaction(
-                    &transaction,
-                    observation,
-                    tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-                )
-                .await
-                .map_err(|error| {
-                    TranscriptPersistenceError::storage("upsert span evidence", error)
-                })?;
             }
             if matches!(policy, TranscriptWritePolicy::Full { .. }) {
                 set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;

@@ -10,7 +10,7 @@ use tracedecay_store::{
 
 use crate::global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
 use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
-use crate::store::TranscriptIngestStore;
+use crate::store::{GlobalDbGitCorrelationStore, TranscriptIngestStore};
 
 /// Transcript-store adapter over an already-open authoritative
 /// [`RegisteredGlobalDb`].
@@ -133,21 +133,28 @@ where
                 expected_offset,
                 next_offset,
             } => {
-                let batch = crate::global_db::TranscriptBatch {
-                    session: *session,
-                    messages,
-                };
-                self.db()
-                    .persist_transcript_batch_with_git_evidence_result(
-                        &batch,
-                        commit_records,
-                        span_observations,
+                self
+                    .db()
+                    .persist_transcript_batch_result(
+                        &session,
+                        &messages,
                         &cursor_key,
                         expected_offset,
                         next_offset,
                     )
                     .await
-                    .map_err(|error| Self::persistence_error(&cursor_path, error))
+                    .map_err(|error| Self::persistence_error(&cursor_path, error))?;
+
+                GlobalDbGitCorrelationStore::new(self.db())
+                    .publish_transcript_evidence(
+                        "transcript-git-evidence",
+                        commit_records,
+                        span_observations,
+                    )
+                    .map_err(|error| TranscriptStoreError::Storage {
+                        operation: "publish transcript git evidence",
+                        source: Box::new(error),
+                    })
             }
         }
     }

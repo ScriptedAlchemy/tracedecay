@@ -1,12 +1,13 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
+use super::attribution::{publish_graph_evidence, stable_backfill_span};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
     CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GIT_HISTORY_ROWID_FRONTIER_KEY,
-    GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SpanObservation, SpanOverlapKind,
-    SpanScanTarget, SpanSource, TargetScan, normalize_worktree, run_commit_attribution_sweep,
+    GitCorrelationError, GitCorrelationWriteTxn, ScannedCommit, SpanOverlapKind, SpanScanTarget,
+    TargetScan, normalize_worktree, run_commit_attribution_sweep,
 };
 
 mod bounded;
@@ -484,20 +485,18 @@ where
         }
     }
 
-    // Sweep commit attribution over span targets written since the last sweep.
+    // Sweep commit attribution over the currently verified span projection.
     // This is the only attribution path for spans recorded live by the hook
     // route: those sessions have no transcript rows, so the session-driven
     // backfill above never sees them, and without this sweep their commits
     // would stay unattributed until a transcript ingest happens to run. The
-    // sweep keeps its own watermark and is idempotent, so running it on every
-    // pass (including passes with zero new session rows) is safe.
-    let transaction = session_store.open_write_transaction().await?;
+    // Graph publication is content-addressed and idempotent, so running it on
+    // every pass (including passes with zero new session rows) is safe.
     stats.commits_attributed +=
-        run_commit_attribution_sweep(&transaction, opts.merge_gap_secs, |target| {
+        run_commit_attribution_sweep(session_store, opts.merge_gap_secs, |target| {
             scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
         })
         .await?;
-    GitCorrelationWriteTxn::commit(transaction).await?;
     Ok(stats)
 }
 
@@ -659,6 +658,8 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     }
 
     let segments = window_branch_segments(win_start, win_end, &timeline, current_branch.as_deref());
+    let mut published_spans = Vec::new();
+    let mut published_commits = Vec::new();
 
     for segment in &segments {
         // Every segment yields a span: seed it with its own clamped edges so an
@@ -673,34 +674,20 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 .copied()
                 .filter(|&ts| ts >= segment.start && ts <= segment.end),
         );
-        for &ts in &segment_ts {
-            if !opts.dry_run {
-                let transaction = session_store
-                    .open_write_transaction()
-                    .await
-                    .map_err(|_| BackfillSkipReason::GitError)?;
-                super::record_span_observation_in_transaction(
-                    &transaction,
-                    &SpanObservation {
-                        provider: row.provider.clone(),
-                        session_id: row.session_id.clone(),
-                        thread_id: None,
-                        branch: segment.branch.clone(),
-                        worktree: worktree.clone(),
-                        ts,
-                        source: SpanSource::Backfill,
-                    },
-                    opts.merge_gap_secs,
-                )
-                .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
-                GitCorrelationWriteTxn::commit(transaction)
-                    .await
-                    .map_err(|_| BackfillSkipReason::GitError)?;
-                *committed = true;
-            }
+        if opts.dry_run {
+            stats.spans_written += 1;
+        } else {
+            let mut span = stable_backfill_span(
+                &row.provider,
+                &row.session_id,
+                segment.branch.as_deref(),
+                &worktree,
+                segment.start,
+                segment.end,
+            );
+            span.event_count = i64::try_from(segment_ts.len()).unwrap_or(i64::MAX);
+            published_spans.push(span);
         }
-        stats.spans_written += 1;
 
         // Attribute commits on this segment's branch within the segment window.
         let Some(branch) = segment.branch.as_deref() else {
@@ -717,13 +704,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 stats.commits_attributed += 1;
                 continue;
             }
-            let transaction = session_store
-                .open_write_transaction()
-                .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
-            let inserted = super::upsert_commit_session(
-                &transaction,
-                &CommitSessionRecord {
+            published_commits.push(CommitSessionRecord {
                     commit_sha: sha,
                     provider: row.provider.clone(),
                     session_id: row.session_id.clone(),
@@ -736,18 +717,20 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                     evidence: CommitEvidence::ReflogOverlap,
                     confidence: 30,
                     evidence_message_id: None,
-                },
-            )
-            .await
-            .map_err(|_| BackfillSkipReason::GitError)?;
-            GitCorrelationWriteTxn::commit(transaction)
-                .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
-            *committed = true;
-            if inserted {
-                stats.commits_attributed += 1;
-            }
+                });
         }
+    }
+    if !opts.dry_run && (!published_spans.is_empty() || !published_commits.is_empty()) {
+        let (spans_written, commits_attributed) = publish_graph_evidence(
+            session_store,
+            "git-backfill",
+            &published_spans,
+            &published_commits,
+        )
+        .map_err(|_| BackfillSkipReason::GitError)?;
+        stats.spans_written = stats.spans_written.saturating_add(spans_written);
+        stats.commits_attributed = stats.commits_attributed.saturating_add(commits_attributed);
+        *committed = true;
     }
     Ok(())
 }

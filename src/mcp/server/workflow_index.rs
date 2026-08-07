@@ -15,7 +15,7 @@ use tracedecay_sessions::{
 };
 
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::git_correlation::GitScopeFilter;
+use crate::sessions::git_correlation::{GitCorrelationError, GitScopeFilter};
 use crate::sessions::workflow_index::{RegisteredWorkflowIndexSnapshot, WorkflowIndexError};
 use crate::store::GlobalDbWorkflowStore;
 
@@ -87,8 +87,17 @@ impl DaemonWorkflowIndexReadService {
                     worktree: filter.worktree,
                     commit: filter.commit,
                 };
+                let session_ids = match self.database.git_scope_session_ids(&filter) {
+                    Ok(session_ids) => session_ids,
+                    Err(GitCorrelationError::Unavailable(_)) => {
+                        return Ok(WorkflowRunListOutcome::Unavailable(
+                            WorkflowIndexState::AuthorityNotRetained,
+                        ));
+                    }
+                    Err(error) => return Err(WorkflowReadError::new(error.to_string())),
+                };
                 snapshot
-                    .runs_for_git_scope(&filter, limit)
+                    .runs_for_git_scope(session_ids.as_deref(), limit)
                     .await
                     .map_err(workflow_error)?
             }

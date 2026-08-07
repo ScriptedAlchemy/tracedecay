@@ -404,8 +404,10 @@ pub async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
 
 /// Ingest one transcript file: load the prior durable cursor through the store
 /// contract, parse new content, and submit one atomic session/message/cursor
-/// batch. The root adapter extends that write with git evidence in the same
-/// authoritative registered session-database transaction.
+/// batch. The root adapter commits that SQL batch first, then publishes its Git
+/// evidence to the project graph. A graph error remains a typed ingest failure;
+/// it never rewinds the truthful parse cursor or falls back to relational
+/// correlation tables.
 async fn ingest_one<S: TranscriptIngestStore>(
     store: &S,
     source: &dyn TranscriptSource,
@@ -431,9 +433,9 @@ async fn ingest_one<S: TranscriptIngestStore>(
     .await
 }
 
-/// Persist an already parsed transcript through the authoritative batch and
-/// git-evidence transaction. Observation coordinators reuse this after their
-/// one-pass privacy parse and Claude fold.
+/// Persist an already parsed transcript through the ordered transcript commit
+/// and graph-publication boundary. Observation coordinators reuse this after
+/// their one-pass privacy parse and Claude fold.
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,

@@ -24,10 +24,13 @@ mod sql;
 pub mod store;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
+use tracedecay_graph_db::GraphNamespace;
 use tracedecay_runtime_core::db::engine::params;
 
 use self::execution::{
@@ -35,7 +38,11 @@ use self::execution::{
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
-use crate::RegisteredGlobalDb;
+use crate::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use tracedecay_sessions::runtime::git_correlation::{
+    GitCorrelationError, GitEvidenceGraphRuntimePort, GitScopeFilter,
+    git_evidence_projection_identity, recover_git_evidence_projection,
+};
 use tracedecay_sessions::lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
@@ -67,7 +74,62 @@ pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
 pub use store::GlobalDbSessionTemporalStore;
 
+struct RegisteredGitEvidenceGraphRuntime<'a>(&'a dyn ProjectGraphRuntimePortV1);
+
+impl GitEvidenceGraphRuntimePort for RegisteredGitEvidenceGraphRuntime<'_> {
+    fn publish_verified_manifest(
+        &self,
+        manifest: &tracedecay_graph_db::GraphGenerationManifest,
+        idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+        self.0
+            .publish_verified_manifest(manifest, idempotency_key, cancelled)
+    }
+
+    fn verified_snapshot(
+        &self,
+        projection: &tracedecay_graph_db::GraphProjectionIdentity,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
+        self.0.verified_snapshot(projection, cancelled)
+    }
+}
+
 impl RegisteredGlobalDb {
+    /// Resolves a Git filter through the verified Git-evidence graph.
+    ///
+    /// `None` means the request is unscoped. A non-empty filter always returns
+    /// `Some`, including an authoritative empty set when the graph has no
+    /// matching sessions.
+    pub fn git_scope_session_ids(
+        &self,
+        filter: &GitScopeFilter,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        if filter.is_empty() {
+            return Ok(None);
+        }
+        let runtime = self.project_graph_runtime().ok_or_else(|| {
+            GitCorrelationError::Unavailable(
+                "registered project graph runtime is not mounted".to_owned(),
+            )
+        })?;
+        let identity = git_evidence_projection_identity(GraphNamespace::new("project")?)?;
+        let projection = recover_git_evidence_projection(
+            &RegisteredGitEvidenceGraphRuntime(runtime.as_ref()),
+            &identity,
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        let session_ids = projection
+            .session_ids_for_scope(filter)
+            .ok_or_else(|| {
+                GitCorrelationError::Contract(
+                    "Git scope resolution requires a non-empty filter".to_owned(),
+                )
+            })?;
+        Ok(Some(session_ids))
+    }
+
     pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {

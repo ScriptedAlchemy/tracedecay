@@ -30,6 +30,10 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::Serialize;
+use tracedecay_code_index::git_projection::{
+    GitTopologyProjectionError, GitTopologyProjectionV1, GitTopologyRefV1,
+    git_topology_ref_watermark,
+};
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
@@ -43,7 +47,12 @@ use tracedecay_domain::git::{
     HUNK_REF_SCHEMA_VERSION_V1, HunkDirectionV1, HunkRefV1, full_hunk_selection_bitmap,
 };
 use tracedecay_domain::research::time::UtcMicros;
-use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
+use tracedecay_domain::research::{
+    ManifestDigest, RefId, RepositoryId, WorktreeId, canonical_sha256,
+};
+use tracedecay_runtime_core::git_repository::{
+    GitHistoryOptions as RepositoryHistoryOptions, GitReference, GitRepositoryAuthority,
+};
 
 /// Read subcommands the adapter is allowed to run. Anything outside this
 /// list is refused before spawn, which makes index/ref/worktree/config
@@ -165,6 +174,10 @@ pub struct NativeGitIntelligence {
     worktree: WorktreeId,
 }
 
+pub trait GitTopologyReadPort {
+    fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError>;
+}
+
 fn map_repository_error(
     error: tracedecay_runtime_core::git_repository::GitRepositoryError,
 ) -> GitIntelligenceError {
@@ -216,6 +229,69 @@ impl NativeGitIntelligence {
 
     pub fn worktree(&self) -> &WorktreeId {
         &self.worktree
+    }
+
+    pub fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError> {
+        let authority =
+            GitRepositoryAuthority::discover(&self.repo_root).map_err(map_repository_error)?;
+        let (_, _, watermark) = self.topology_ref_snapshot(&authority)?;
+        Ok(watermark)
+    }
+
+    pub fn topology_projection(
+        &self,
+        max_count: u32,
+    ) -> Result<GitTopologyProjectionV1, GitIntelligenceError> {
+        let authority =
+            GitRepositoryAuthority::discover(&self.repo_root).map_err(map_repository_error)?;
+        let (head, refs, ref_watermark) = self.topology_ref_snapshot(&authority)?;
+        let history = authority
+            .history(&RepositoryHistoryOptions {
+                max_count: max_count.clamp(1, GIT_HISTORY_MAX_COUNT_LIMIT),
+                first_parent: false,
+                path: None,
+                follow_renames: false,
+            })
+            .map_err(map_repository_error)?;
+        let (verified_head, verified_refs, verified_watermark) =
+            self.topology_ref_snapshot(&authority)?;
+        if head != verified_head || refs != verified_refs || ref_watermark != verified_watermark {
+            return Err(GitIntelligenceError::MalformedOutput {
+                operation: "topology projection",
+                detail: "repository refs changed during topology capture".to_owned(),
+            });
+        }
+        let projection = GitTopologyProjectionV1 {
+            repository: self.repository.clone(),
+            head,
+            refs,
+            history: GitHistoryV1 {
+                repository: self.repository.clone(),
+                commits: history.commits,
+                truncated: history.truncated,
+                coverage: GitCoverageV1::degraded(history.degradations.into_iter().collect()),
+            },
+            ref_watermark,
+        };
+        projection.validate().map_err(map_topology_error)?;
+        Ok(projection)
+    }
+
+    fn topology_ref_snapshot(
+        &self,
+        authority: &GitRepositoryAuthority,
+    ) -> Result<(GitHeadStateV1, Vec<GitTopologyRefV1>, ManifestDigest), GitIntelligenceError> {
+        let head = authority.head().map_err(map_repository_error)?;
+        let refs = authority
+            .references()
+            .map_err(map_repository_error)?
+            .into_iter()
+            .filter(|reference| reference.name.starts_with("refs/"))
+            .map(topology_ref)
+            .collect::<Result<Vec<_>, _>>()?;
+        let watermark = git_topology_ref_watermark(&self.repository, &head, &refs)
+            .map_err(map_topology_error)?;
+        Ok((head, refs, watermark))
     }
 
     /// Read one exact commit/path blob through the mounted Plan 36 authority.
@@ -1015,6 +1091,12 @@ impl NativeGitIntelligence {
     }
 }
 
+impl GitTopologyReadPort for NativeGitIntelligence {
+    fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError> {
+        NativeGitIntelligence::topology_ref_watermark(self)
+    }
+}
+
 impl GitHistoricalBlobReadPort for NativeGitIntelligence {
     fn historical_blob(
         &self,
@@ -1048,6 +1130,20 @@ impl GitReadPort for NativeGitIntelligence {
         snapshot_digest: &ManifestDigest,
     ) -> Result<Vec<HunkRefV1>, GitIntelligenceError> {
         NativeGitIntelligence::hunk_refs(self, scope, preview_id, snapshot_digest)
+    }
+}
+
+fn topology_ref(reference: GitReference) -> Result<GitTopologyRefV1, GitIntelligenceError> {
+    Ok(GitTopologyRefV1 {
+        reference: RefId::new(reference.name)?,
+        target: reference.target,
+    })
+}
+
+fn map_topology_error(error: GitTopologyProjectionError) -> GitIntelligenceError {
+    GitIntelligenceError::MalformedOutput {
+        operation: "topology projection",
+        detail: error.to_string(),
     }
 }
 

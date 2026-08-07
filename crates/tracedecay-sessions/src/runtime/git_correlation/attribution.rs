@@ -1,41 +1,21 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
-use super::{
-    CommitEvidence, CommitRelation, CommitSessionRecord, GitCorrelationError, SpanOverlapKind,
-    correlation_tables_present, opt_text, upsert_commit_session,
+use sha2::{Digest as _, Sha256};
+use tracedecay_graph_db::{
+    GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision,
 };
 
-const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";
+use super::{
+    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
+    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionV1, SessionGitSpan,
+    SpanOverlapKind, git_evidence_projection_identity, normalize_worktree,
+    publish_git_evidence_projection, recover_git_evidence_projection,
+};
 
-pub async fn read_meta_value(
-    conn: &(impl QueryExecutor + ?Sized),
-    key: &str,
-) -> Result<Option<i64>, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT value FROM git_correlation_meta WHERE key = ?1",
-            params![key],
-        )
-        .await?;
-    match rows.next().await? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
-}
-
-pub async fn write_meta_value(
-    conn: &(impl Executor + ?Sized),
-    key: &str,
-    value: i64,
-) -> Result<(), GitCorrelationError> {
-    conn.execute(
-        "INSERT INTO git_correlation_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()",
-        params![key, value],
-    )
-    .await?;
-    Ok(())
-}
+const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
+const MISSING_VERIFIED_HEAD: &str =
+    "graph projection is not recovered into an installed verified head";
 
 /// A `(branch, worktree)` pair a session was observed on, with the widest span
 /// window recorded for it. Commit scans run once per pair.
@@ -45,11 +25,6 @@ pub struct SpanScanTarget {
     pub worktree: String,
     pub window_start: i64,
     pub window_end: i64,
-    /// Newest span write time (`updated_at`) in this target. The sweep
-    /// watermark advances on this — ingest/write order — not on `window_end`
-    /// (event time), so a session ingested late for old commits is still
-    /// scanned even though its events predate the watermark.
-    pub max_updated_at: i64,
 }
 
 /// One span row a candidate commit may fall inside. Kept minimal so the
@@ -57,7 +32,7 @@ pub struct SpanScanTarget {
 /// without a database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanWindow {
-    pub span_id: i64,
+    pub span_id: String,
     pub provider: String,
     pub session_id: String,
     pub branch: Option<String>,
@@ -114,7 +89,7 @@ pub fn match_commit_to_spans(
             worktree: Some(span.worktree.clone()),
             committed_at,
             span_overlap_kind: kind,
-            span_id: Some(span.span_id),
+            span_id: Some(span.span_id.clone()),
             relation: CommitRelation::Observed,
             evidence: CommitEvidence::TimeOverlap,
             confidence: match kind {
@@ -129,92 +104,44 @@ pub fn match_commit_to_spans(
     records
 }
 
-/// Loads the `(branch, worktree)` scan targets whose spans were *written*
-/// (`updated_at`) at or after `since_ts` (the sweep watermark), each carrying
-/// the widest span window observed for it so the git scan can be time-bounded.
-///
-/// Selecting on `updated_at` (ingest/write time) rather than `last_ts` (event
-/// time) is deliberate: historical sessions ingested after the watermark carry
-/// old event times but a fresh `updated_at`, so they still get attributed.
-async fn scan_targets_since(
-    conn: &(impl QueryExecutor + ?Sized),
-    since_ts: i64,
-) -> Result<Vec<SpanScanTarget>, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT branch, worktree, MIN(first_ts), MAX(last_ts), MAX(updated_at)
-             FROM session_git_spans
-             WHERE updated_at >= ?1
-             GROUP BY branch, worktree",
-            params![since_ts],
-        )
-        .await?;
-    let mut targets = Vec::new();
-    while let Some(row) = rows.next().await? {
-        targets.push(SpanScanTarget {
-            branch: row.get(0)?,
-            worktree: row.get(1)?,
-            window_start: row.get(2)?,
-            window_end: row.get(3)?,
-            max_updated_at: row.get(4)?,
-        });
+fn scan_targets(spans: &[SessionGitSpan]) -> Vec<SpanScanTarget> {
+    let mut targets = std::collections::BTreeMap::new();
+    for span in spans {
+        let key = (span.branch.clone(), span.worktree.clone());
+        targets
+            .entry(key)
+            .and_modify(|target: &mut SpanScanTarget| {
+                target.window_start = target.window_start.min(span.first_ts);
+                target.window_end = target.window_end.max(span.last_ts);
+            })
+            .or_insert_with(|| SpanScanTarget {
+                branch: span.branch.clone(),
+                worktree: span.worktree.clone(),
+                window_start: span.first_ts,
+                window_end: span.last_ts,
+            });
     }
-    Ok(targets)
+    targets.into_values().collect()
 }
 
-/// Loads span windows for one `(branch, worktree)` pair, used to attribute
-/// each scanned commit.
-async fn span_windows_for(
-    conn: &(impl QueryExecutor + ?Sized),
+fn span_windows_for(
+    spans: &[SessionGitSpan],
     branch: Option<&str>,
     worktree: &str,
-) -> Result<Vec<SpanWindow>, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT span_id, provider, session_id, branch, worktree, first_ts, last_ts
-             FROM session_git_spans
-             WHERE branch IS ?1 AND worktree = ?2",
-            params![opt_text(branch), worktree],
-        )
-        .await?;
-    let mut spans = Vec::new();
-    while let Some(row) = rows.next().await? {
-        spans.push(SpanWindow {
-            span_id: row.get(0)?,
-            provider: row.get(1)?,
-            session_id: row.get(2)?,
-            branch: row.get(3)?,
-            worktree: row.get(4)?,
-            first_ts: row.get(5)?,
-            last_ts: row.get(6)?,
-        });
-    }
-    canonicalize_span_providers(&mut spans);
-    Ok(spans)
-}
-
-/// Collapses the multiple provider identities of one session onto its single
-/// real provider. A live session is span-observed by the hook route (which
-/// stores `provider ''`, since it cannot know the provider) and again by
-/// transcript ingest (which stores the real provider). Left split, both
-/// windows attribute the same commit under different `(commit_sha, provider,
-/// session_id)` keys, double-counting the session. Resolving every window to
-/// the session's non-empty provider makes those attributions collapse onto one
-/// `commit_sessions` row via the upsert primary key.
-fn canonicalize_span_providers(spans: &mut [SpanWindow]) {
-    let mut canonical: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for span in spans.iter() {
-        if !span.provider.is_empty() {
-            canonical
-                .entry(span.session_id.clone())
-                .or_insert_with(|| span.provider.clone());
-        }
-    }
-    for span in spans.iter_mut() {
-        if let Some(provider) = canonical.get(&span.session_id) {
-            span.provider = provider.clone();
-        }
-    }
+) -> Vec<SpanWindow> {
+    spans
+        .iter()
+        .filter(|span| span.branch.as_deref() == branch && span.worktree == worktree)
+        .map(|span| SpanWindow {
+            span_id: span.span_id.clone(),
+            provider: span.provider.clone(),
+            session_id: span.session_id.clone(),
+            branch: span.branch.clone(),
+            worktree: span.worktree.clone(),
+            first_ts: span.first_ts,
+            last_ts: span.last_ts,
+        })
+        .collect()
 }
 
 /// One commit observed by the bounded git scan.
@@ -236,71 +163,220 @@ pub enum TargetScan {
     Unavailable,
 }
 
-/// Runs commit attribution for span targets touched since the last sweep.
+pub fn stable_backfill_span(
+    provider: &str,
+    session_id: &str,
+    branch: Option<&str>,
+    worktree: &str,
+    first_ts: i64,
+    last_ts: i64,
+) -> SessionGitSpan {
+    let worktree = normalize_worktree(worktree);
+    let identity = format!(
+        "{provider}\0{session_id}\0{}\0{worktree}\0{first_ts}\0{last_ts}",
+        branch.unwrap_or("\0")
+    );
+    SessionGitSpan {
+        span_id: format!("backfill:{}", hex::encode(Sha256::digest(identity.as_bytes()))),
+        provider: provider.to_owned(),
+        session_id: session_id.to_owned(),
+        thread_id: None,
+        branch: branch.map(str::to_owned),
+        worktree,
+        first_ts,
+        last_ts,
+        event_count: 2,
+        source: super::SpanSource::Backfill,
+    }
+}
+
+pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    publication_prefix: &str,
+    new_spans: &[SessionGitSpan],
+    new_commits: &[CommitSessionRecord],
+) -> Result<(usize, usize), GitCorrelationError> {
+    let runtime = session_store.graph_runtime()?;
+    let identity = git_evidence_projection_identity(GraphNamespace::new(
+        GIT_EVIDENCE_GRAPH_NAMESPACE,
+    )?)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (mut spans, mut commits) = match recover_git_evidence_projection(
+        runtime,
+        &identity,
+        Arc::clone(&cancelled),
+    ) {
+        Ok(store) => (
+            store.projection().spans().to_vec(),
+            store.projection().commit_sessions().to_vec(),
+        ),
+        Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
+            (Vec::new(), Vec::new())
+        }
+        Err(error) => return Err(error),
+    };
+    let mut spans_changed = 0;
+    for incoming in new_spans {
+        if merge_span(&mut spans, incoming) {
+            spans_changed += 1;
+        }
+    }
+    let mut commits_changed = 0;
+    for incoming in new_commits {
+        if merge_commit(&mut commits, incoming) {
+            commits_changed += 1;
+        }
+    }
+    let publication_key =
+        graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
+    let projection = GitEvidenceProjectionV1::new(&publication_key, spans, commits)?;
+    let revision =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned())?;
+    publish_git_evidence_projection(
+        runtime,
+        identity,
+        &projection,
+        &revision,
+        GraphIdempotencyKey::new(publication_key)?,
+        cancelled,
+    )?;
+    Ok((spans_changed, commits_changed))
+}
+
+pub fn graph_evidence_publication_key(
+    prefix: &str,
+    spans: &[SessionGitSpan],
+    commits: &[CommitSessionRecord],
+) -> Result<String, GitCorrelationError> {
+    let bytes = serde_json::to_vec(&(prefix, spans, commits))?;
+    Ok(format!("{prefix}:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> bool {
+    if spans.iter().any(|span| span == incoming) {
+        return false;
+    }
+    if let Some(existing) = spans.iter_mut().find(|span| {
+        span.provider == incoming.provider
+            && span.session_id == incoming.session_id
+            && span.thread_id == incoming.thread_id
+            && span.branch == incoming.branch
+            && span.worktree == incoming.worktree
+            && span.source == incoming.source
+            && incoming.first_ts <= span.last_ts
+            && incoming.last_ts >= span.first_ts
+    }) {
+        let previous = existing.clone();
+        existing.first_ts = existing.first_ts.min(incoming.first_ts);
+        existing.last_ts = existing.last_ts.max(incoming.last_ts);
+        existing.event_count = existing.event_count.max(incoming.event_count);
+        return *existing != previous;
+    } else {
+        spans.push(incoming.clone());
+    }
+    true
+}
+
+fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSessionRecord) -> bool {
+    let Some(existing) = commits.iter_mut().find(|record| {
+        record.commit_sha == incoming.commit_sha && record.session_id == incoming.session_id
+    }) else {
+        commits.push(incoming.clone());
+        return true;
+    };
+    if existing == incoming {
+        return false;
+    }
+    if (incoming.relation == CommitRelation::Produced, incoming.confidence)
+        > (existing.relation == CommitRelation::Produced, existing.confidence)
+    {
+        existing.clone_from(incoming);
+        true
+    } else {
+        false
+    }
+}
+
+/// Runs commit attribution against the currently verified span projection.
 ///
-/// The watermark advances only through the leading run of targets (ordered by
-/// span write time) that actually scanned. A target the scanner could not read
-/// stops the watermark there, so a transient git failure defers attribution to
-/// the next sweep instead of silently dropping those spans forever.
-pub async fn run_commit_attribution_sweep<F>(
-    conn: &(impl Executor + ?Sized),
+/// Every span is rescanned because the immutable graph projection has no SQL
+/// `updated_at` surrogate. Content-addressed graph publication makes replay a
+/// no-op while still admitting late historical spans.
+pub async fn run_commit_attribution_sweep<S, F>(
+    session_store: &S,
     gap_secs: i64,
     mut scan: F,
 ) -> Result<usize, GitCorrelationError>
 where
+    S: GitCorrelationSessionStore,
     F: FnMut(&SpanScanTarget) -> TargetScan,
 {
-    if !correlation_tables_present(conn).await? {
-        return Ok(0);
-    }
-    let watermark = read_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY)
-        .await?
-        .unwrap_or(0);
-    let mut targets = scan_targets_since(conn, watermark).await?;
-    // Oldest write first so the watermark can checkpoint a contiguous prefix.
-    targets.sort_by_key(|target| (target.max_updated_at, target.worktree.clone()));
-    let mut inserted = 0usize;
-    let mut new_watermark = watermark;
-    let mut watermark_blocked = false;
+    let runtime = session_store.graph_runtime()?;
+    let identity = git_evidence_projection_identity(GraphNamespace::new(
+        GIT_EVIDENCE_GRAPH_NAMESPACE,
+    )?)?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let projection = match recover_git_evidence_projection(runtime, &identity, cancelled) {
+        Ok(store) => store.projection().clone(),
+        Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
+            return Ok(0);
+        }
+        Err(error) => return Err(error),
+    };
+    let targets = scan_targets(projection.spans());
+    let mut records = Vec::new();
     for target in &targets {
-        let spans = span_windows_for(conn, target.branch.as_deref(), &target.worktree).await?;
+        let spans = span_windows_for(
+            projection.spans(),
+            target.branch.as_deref(),
+            &target.worktree,
+        );
         if spans.is_empty() {
-            // No windows to attribute against; nothing to retry either.
-            if !watermark_blocked {
-                new_watermark = new_watermark.max(target.max_updated_at);
-            }
             continue;
         }
         let TargetScan::Scanned(commits) = scan(target) else {
-            // Unknown, not empty: hold the watermark here and keep going, so
-            // later targets are still attributed this pass but all of them are
-            // rescanned next pass.
-            watermark_blocked = true;
             continue;
         };
         for commit in commits {
-            let records = match_commit_to_spans(
+            records.extend(match_commit_to_spans(
                 &commit.sha,
                 target.branch.as_deref(),
                 &target.worktree,
                 commit.committed_at,
                 &spans,
                 gap_secs,
-            );
-            for record in &records {
-                if upsert_commit_session(conn, record).await? {
-                    inserted += 1;
-                }
-            }
-        }
-        // Advance on write time, not event time, so the watermark reflects how
-        // far ingestion has progressed rather than how recent the commits are.
-        if !watermark_blocked {
-            new_watermark = new_watermark.max(target.max_updated_at);
+            ));
         }
     }
-    if new_watermark > watermark {
-        write_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY, new_watermark).await?;
+    if records.is_empty() {
+        return Ok(0);
     }
+    let (_, inserted) =
+        publish_graph_evidence(session_store, "git-attribution", &[], &records)?;
     Ok(inserted)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_bounded_span_merge_is_a_noop() {
+        let span = stable_backfill_span("codex", "session-1", Some("main"), "/repo", 10, 20);
+        let mut spans = Vec::new();
+        assert!(merge_span(&mut spans, &span));
+        assert!(!merge_span(&mut spans, &span));
+        assert_eq!(spans, vec![span]);
+    }
+
+    #[test]
+    fn publication_key_covers_the_complete_evidence() {
+        let first = stable_backfill_span("codex", "session-1", Some("main"), "/repo", 10, 20);
+        let second = stable_backfill_span("codex", "session-1", Some("main"), "/repo", 10, 21);
+        assert_ne!(
+            graph_evidence_publication_key("bounded", &[first], &[]).unwrap(),
+            graph_evidence_publication_key("bounded", &[second], &[]).unwrap()
+        );
+    }
 }

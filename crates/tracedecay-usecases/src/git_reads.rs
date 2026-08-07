@@ -7,22 +7,30 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
+use tracedecay_code_index::git_projection::{
+    GitTopologyProjectionStore, git_topology_namespace, git_topology_projection_identity,
+};
 use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
 use tracedecay_domain::{
     GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
     ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 
 use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest};
 // SEAM: the native `git` spawn adapter is still root-owned
 // (`src/git_intelligence.rs`). See `SEAMS.md`.
 use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
-    GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
+    GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,
+    GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
 };
 // The historical outcome projection moved down beside the adapter that
 // produces it; both this owner and the extracted search evaluator mount the
@@ -281,6 +289,7 @@ fn git_unavailable_reason(reason: GitReadUnavailableReasonV1) -> ScopeUnavailabl
 pub struct GitReadAuthorityV1 {
     project_root: PathBuf,
     scope: ResolvedScope,
+    project_sessions: Option<Arc<RegisteredGlobalDb>>,
 }
 
 impl GitReadAuthorityV1 {
@@ -288,6 +297,19 @@ impl GitReadAuthorityV1 {
         Self {
             project_root: project_root.into(),
             scope,
+            project_sessions: None,
+        }
+    }
+
+    pub fn new_with_project_sessions(
+        project_root: impl Into<PathBuf>,
+        scope: ResolvedScope,
+        project_sessions: Arc<RegisteredGlobalDb>,
+    ) -> Self {
+        Self {
+            project_root: project_root.into(),
+            scope,
+            project_sessions: Some(project_sessions),
         }
     }
 
@@ -398,6 +420,55 @@ impl GitReadAuthorityV1 {
         }
     }
 
+    pub fn join_generation(
+        &self,
+        selected_scope: &ResolvedScope,
+        bounds: &GitQueryBounds,
+        query: &GenerationBoundGitQueryV1,
+    ) -> Result<GenerationGitJoinV1, GitQueryError> {
+        if selected_scope != &self.scope {
+            return Err(GitQueryError::TopologyUnavailable(
+                "selected scope does not match the mounted Git topology".to_owned(),
+            ));
+        }
+        bounds.check()?;
+        let database = self.project_sessions.as_ref().ok_or_else(|| {
+            GitQueryError::TopologyUnavailable(
+                "project sessions graph runtime was not mounted".to_owned(),
+            )
+        })?;
+        let runtime = database.project_graph_runtime().ok_or_else(|| {
+            GitQueryError::TopologyUnavailable(
+                "project sessions graph runtime is unavailable".to_owned(),
+            )
+        })?;
+        let identity = git_topology_projection_identity(
+            git_topology_namespace(&self.scope.repository_id)
+                .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?,
+        )
+        .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?;
+        let cancelled = bounds
+            .cancel
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let snapshot = runtime
+            .verified_snapshot(&identity, Arc::clone(&cancelled))
+            .map_err(map_graph_runtime_error)?;
+        let topology = GitTopologyProjectionStore::from_verified_snapshot_verified(
+            snapshot,
+            Arc::new(ReadGraphCancellation {
+                cancelled: Arc::clone(&cancelled),
+            }),
+        )
+        .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?;
+        let adapter = NativeGitIntelligence::new(
+            self.project_root.clone(),
+            self.scope.repository_id.clone(),
+            self.scope.worktree_id.clone(),
+        );
+        GitQueryEngine::with_topology(&adapter, &topology).join_generation(bounds, query)
+    }
+
     /// Mount the historical code-index join on this exact admitted checkout.
     pub fn read_historical(
         &self,
@@ -448,6 +519,24 @@ impl GitReadAuthorityV1 {
                 reason: HistoricalGitReadUnavailableReasonV1::from_query_error(&error),
             },
         }
+    }
+}
+
+struct ReadGraphCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl GraphCancellation for ReadGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+fn map_graph_runtime_error(error: GraphDbError) -> GitQueryError {
+    match error {
+        GraphDbError::Cancelled => GitQueryError::Cancelled,
+        GraphDbError::DeadlineExceeded => GitQueryError::DeadlineExceeded,
+        error => GitQueryError::TopologyUnavailable(error.to_string()),
     }
 }
 

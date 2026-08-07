@@ -249,8 +249,17 @@ impl RegisteredGlobalDb {
     }
 
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
+        let git_scope_session_ids = self
+            .git_scope_session_ids(&request.git_filter)
+            .map_err(|error| LcmError::Db(error.to_string()))?;
         let snapshot = self.read_snapshot().await?;
-        query::grep(&snapshot, request, LcmGrepFilters::default()).await
+        query::grep(
+            &snapshot,
+            request,
+            LcmGrepFilters::default(),
+            git_scope_session_ids.as_deref(),
+        )
+        .await
     }
 
     pub async fn lcm_load_session(

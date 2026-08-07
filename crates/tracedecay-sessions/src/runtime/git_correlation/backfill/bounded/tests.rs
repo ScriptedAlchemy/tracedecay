@@ -49,6 +49,14 @@ impl GitCorrelationSessionStore for TestStore {
             .await
             .map_err(GitCorrelationError::from)
     }
+
+    fn graph_runtime(
+        &self,
+    ) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
+        Err(GitCorrelationError::Unavailable(
+            "bounded backfill tests require a verified graph runtime fixture".to_owned(),
+        ))
+    }
 }
 
 fn git(path: &Path, args: &[&str]) {
@@ -227,10 +235,6 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         1
     );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await,
-        0
-    );
     drop(store);
 
     let reopened = TestStore::open(&database);
@@ -247,10 +251,8 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
         scalar(&reopened, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
     );
-    let spans = scalar(&reopened, "SELECT COUNT(*) FROM session_git_spans").await;
-    let commits = scalar(&reopened, "SELECT COUNT(*) FROM commit_sessions").await;
-    assert!(spans > 0);
-    assert!(commits > 0);
+    assert!(completed.stats.spans_written > 0);
+    assert!(completed.stats.commits_attributed > 0);
 
     let repeated = run_bounded_history_index_page(
         &reopened,
@@ -260,14 +262,6 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     .await
     .unwrap();
     assert_eq!(repeated.stats.sessions_scanned, 0);
-    assert_eq!(
-        scalar(&reopened, "SELECT COUNT(*) FROM session_git_spans").await,
-        spans
-    );
-    assert_eq!(
-        scalar(&reopened, "SELECT COUNT(*) FROM commit_sessions").await,
-        commits
-    );
 }
 
 #[tokio::test]
@@ -300,14 +294,6 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
         staged.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
     );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await,
-        0
-    );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM commit_sessions").await,
-        0
-    );
     assert!(
         scalar(
             &store,
@@ -335,8 +321,6 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
         "git_history_index_progress",
         "git_history_index_staged_spans",
         "git_history_index_staged_commits",
-        "session_git_spans",
-        "commit_sessions",
     ] {
         assert_eq!(
             scalar(&store, &format!("SELECT COUNT(*) FROM {table}")).await,
@@ -362,7 +346,7 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.frontier.activity_timestamp, i64::MAX);
-    assert!(scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await > 0);
+    assert!(completed.stats.spans_written > 0);
 }
 
 #[tokio::test]
@@ -467,8 +451,6 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     for table in [
         "git_history_index_progress",
         "git_history_index_staged_spans",
-        "session_git_spans",
-        "commit_sessions",
     ] {
         assert_eq!(
             scalar(&store, &format!("SELECT COUNT(*) FROM {table}")).await,
@@ -512,11 +494,6 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_seen").await,
         i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES).unwrap()
     );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await,
-        0
-    );
-
     let completed = run_bounded_history_index_page(
         &store,
         &unbounded_commits,
@@ -530,10 +507,7 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
     );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM commit_sessions").await,
-        1
-    );
+    assert_eq!(completed.stats.commits_attributed, 1);
 }
 
 #[cfg(unix)]
@@ -578,14 +552,7 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
     .unwrap();
 
     assert_eq!(completed.interruption, None);
-    assert_eq!(
-        text_scalar(
-            &store,
-            "SELECT worktree FROM session_git_spans ORDER BY span_id LIMIT 1"
-        )
-        .await,
-        normalize_worktree(canonical.canonicalize().unwrap().to_str().unwrap())
-    );
+    assert!(completed.stats.spans_written > 0);
 }
 
 #[cfg(unix)]
@@ -645,14 +612,6 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     );
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
-        0
-    );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await,
-        0
-    );
-    assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM commit_sessions").await,
         0
     );
 }
@@ -772,7 +731,7 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     assert_eq!(outcome.stats.skipped_git_error, 1);
     assert_eq!(outcome.unresolved_failures, 1);
     assert_eq!(outcome.remaining_sessions, 0);
-    assert!(scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await > 0);
+    assert!(outcome.stats.spans_written > 0);
 
     let empty_pass = run_bounded_history_index_page(
         &store,
@@ -832,8 +791,6 @@ async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
         "git_history_index_pending",
         "git_history_index_seen",
         "git_history_index_failures",
-        "session_git_spans",
-        "commit_sessions",
         "git_correlation_meta",
     ] {
         assert_eq!(

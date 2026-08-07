@@ -1,26 +1,26 @@
 //! Workflow-run indexing.
 //!
 //! Indexes Claude Code **workflow runs** (`wf_*` directories) and their
-//! per-phase **agents** in the per-project `sessions.db`, alongside `sessions`,
-//! `session_messages`, and the git-correlation tables from PR #281.
+//! per-phase **agents** in the per-project `sessions.db`.
 //!
 //! Containment mirrors the on-disk layout:
 //! `user thread (session) -> subagents -> workflow runs -> workflow agents`.
 //! A run's transcript files live under
 //! `~/.claude/projects/<slug>/<session_id>/subagents/workflows/<run_id>/`, and
 //! the run's meta+result is the sibling `workflows/<run_id>.json`. A run is
-//! therefore *owned* by the session that spawned it (`parent_session_id`), so
-//! it inherits that session's git spans: "workflows on branch X" resolves to
-//! runs whose parent session has a span on X (see [`runs_for_git_scope`]).
+//! therefore *owned* by the session that spawned it (`parent_session_id`).
+//! Git-scoped callers resolve matching parent sessions through the canonical
+//! graph authority before querying this index (see [`runs_for_git_scope`]).
 //!
 //! This module owns the **storage + query** foundation only. The ingest sweep
 //! that discovers run directories and parses transcripts, and the
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
-pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use crate::runtime::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
+pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
+use crate::runtime::git_correlation::MAX_SESSIONS_FOR_LIMIT;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
@@ -45,6 +45,8 @@ pub enum WorkflowIndexError {
     Db(String),
     /// Caller-supplied argument was invalid (empty run id, …).
     InvalidArgument(String),
+    /// A required higher-level read authority was not supplied.
+    AuthorityUnavailable { authority: &'static str },
 }
 
 impl std::fmt::Display for WorkflowIndexError {
@@ -52,6 +54,9 @@ impl std::fmt::Display for WorkflowIndexError {
         match self {
             Self::Db(message) => write!(f, "workflow index db error: {message}"),
             Self::InvalidArgument(message) => write!(f, "{message}"),
+            Self::AuthorityUnavailable { authority } => {
+                write!(f, "workflow index authority unavailable: {authority}")
+            }
         }
     }
 }
@@ -502,48 +507,49 @@ impl RegisteredWorkflowIndexSnapshot {
 
     pub async fn runs_for_git_scope(
         &self,
-        filter: &GitScopeFilter,
+        session_ids: Option<&[(String, String)]>,
         limit: usize,
     ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
-        if filter.is_empty() {
-            return Err(WorkflowIndexError::InvalidArgument(
-                "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
-            ));
-        }
+        let session_ids = session_ids.ok_or(WorkflowIndexError::AuthorityUnavailable {
+            authority: "Git correlation graph read port",
+        })?;
         if !self
-            .has_tables(&[
-                "workflow_runs",
-                "workflow_agents",
-                "session_git_spans",
-                "commit_sessions",
-            ])
+            .has_tables(&["workflow_runs", "workflow_agents"])
             .await?
         {
             return Ok(Vec::new());
         }
-
-        let clauses = crate::runtime::git_correlation::git_scope_exists_clauses(
-            filter,
-            "r.parent_session_id",
-        );
+        let parent_session_ids = session_ids
+            .iter()
+            .map(|(_, session_id)| session_id)
+            .collect::<BTreeSet<_>>();
+        if parent_session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if parent_session_ids.len() > MAX_WORKFLOW_LIMIT {
+            return Err(WorkflowIndexError::InvalidArgument(format!(
+                "Git scope selected {} parent sessions; maximum is {MAX_WORKFLOW_LIMIT}",
+                parent_session_ids.len()
+            )));
+        }
+        let placeholders = (1..=parent_session_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut sql = format!(
             "SELECT {RUN_COLUMNS}
              FROM workflow_runs AS r
              WHERE r.parent_session_id <> ''
-               AND ("
+               AND r.parent_session_id IN ({placeholders})"
         );
-        let mut params = Vec::new();
-        for (index, (clause, values)) in clauses.into_iter().enumerate() {
-            if index > 0 {
-                sql.push_str(" OR ");
-            }
-            sql.push_str(&clause);
-            params.extend(values);
-        }
+        let mut params = parent_session_ids
+            .into_iter()
+            .map(|session_id| Value::Text(session_id.clone()))
+            .collect::<Vec<_>>();
         params.push(Value::Integer(clamp_limit(limit)));
         let _ = write!(
             sql,
-            ") ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
+            " ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
             params.len()
         );
 
@@ -627,44 +633,46 @@ async fn agents_for_run(
 #[cfg(test)]
 async fn runs_for_git_scope(
     conn: &impl QueryExecutor,
-    filter: &GitScopeFilter,
+    session_ids: Option<&[(String, String)]>,
     limit: usize,
 ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
-    if filter.is_empty() {
-        return Err(WorkflowIndexError::InvalidArgument(
-            "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
-        ));
-    }
+    let session_ids = session_ids.ok_or(WorkflowIndexError::AuthorityUnavailable {
+        authority: "Git correlation graph read port",
+    })?;
     if !tables_present(conn).await? {
         return Ok(Vec::new());
     }
-    if !crate::runtime::git_correlation::tables_present(conn)
-        .await
-        .map_err(WorkflowIndexError::from)?
-    {
+    let parent_session_ids = session_ids
+        .iter()
+        .map(|(_, session_id)| session_id)
+        .collect::<BTreeSet<_>>();
+    if parent_session_ids.is_empty() {
         return Ok(Vec::new());
     }
-
-    let clauses =
-        crate::runtime::git_correlation::git_scope_exists_clauses(filter, "r.parent_session_id");
+    if parent_session_ids.len() > MAX_WORKFLOW_LIMIT {
+        return Err(WorkflowIndexError::InvalidArgument(format!(
+            "Git scope selected {} parent sessions; maximum is {MAX_WORKFLOW_LIMIT}",
+            parent_session_ids.len()
+        )));
+    }
+    let placeholders = (1..=parent_session_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut sql = format!(
         "SELECT {RUN_COLUMNS}
          FROM workflow_runs AS r
          WHERE r.parent_session_id <> ''
-           AND ("
+           AND r.parent_session_id IN ({placeholders})"
     );
-    let mut params: Vec<Value> = Vec::new();
-    for (idx, (clause, mut values)) in clauses.into_iter().enumerate() {
-        if idx > 0 {
-            sql.push_str(" OR ");
-        }
-        sql.push_str(&clause);
-        params.append(&mut values);
-    }
+    let mut params = parent_session_ids
+        .into_iter()
+        .map(|session_id| Value::Text(session_id.clone()))
+        .collect::<Vec<_>>();
     params.push(Value::Integer(clamp_limit(limit)));
     let _ = write!(
         sql,
-        ") ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
+        " ORDER BY COALESCE(r.started_ts, 0) DESC, r.run_id DESC LIMIT ?{}",
         params.len()
     );
 

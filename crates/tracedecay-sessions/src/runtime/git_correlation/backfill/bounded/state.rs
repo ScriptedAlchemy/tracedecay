@@ -528,7 +528,6 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     row: &SessionActivityRow,
     candidate_frontier: GitHistoryIndexFrontier,
     progress: &GitHistoryProgressRow,
-    opts: &BackfillOptions,
     control: &BoundedGitControl,
     stats: &mut BackfillStats,
     committed: &mut bool,
@@ -568,48 +567,76 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     }
 
     let worktree = canonical_worktree_evidence(progress)?;
+    let mut graph_spans = Vec::new();
+    for span_pair in spans.chunks(2) {
+        let first = span_pair
+            .iter()
+            .map(|span| span.timestamp)
+            .min()
+            .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+        let last = span_pair
+            .iter()
+            .map(|span| span.timestamp)
+            .max()
+            .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+        let span = stable_backfill_span(
+            &row.provider,
+            &row.session_id,
+            span_pair[0].branch.as_deref(),
+            &worktree,
+            first,
+            last,
+        );
+        graph_spans.push(span);
+    }
+    let graph_commits = commits
+        .iter()
+        .map(|commit| CommitSessionRecord {
+            commit_sha: commit.oid.clone(),
+            provider: row.provider.clone(),
+            session_id: row.session_id.clone(),
+            branch: commit.branch.clone(),
+            worktree: Some(worktree.clone()),
+            committed_at: commit.committed_at,
+            span_overlap_kind: SpanOverlapKind::WithinSpan,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::ReflogOverlap,
+            confidence: 30,
+            evidence_message_id: None,
+        })
+        .collect::<Vec<_>>();
+    let publication_prefix = format!(
+        "git-bounded:{}:{}",
+        progress.key.source_rowid, progress.generation
+    );
+    control.check()?;
+    let (published_spans, published_commits) = publish_graph_evidence(
+        session_store,
+        &publication_prefix,
+        &graph_spans,
+        &graph_commits,
+    )
+    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    control.check()?;
+
+    // Publication precedes receipt advancement deliberately. If the process
+    // stops here, the staged rows remain and the next pass republishes the
+    // same content-addressed generation before deleting them.
     let transaction = session_store
         .open_write_transaction()
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     control.check()?;
-    let mut published_spans = 0_usize;
     for span in &spans {
-        record_span_in_transaction(
-            &transaction,
-            span.branch.as_deref(),
-            row,
-            &worktree,
-            span.timestamp,
-            opts.merge_gap_secs,
-            control,
-        )
-        .await?;
         if !history_progress::delete_staged_span(&transaction, span)
             .await
             .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         {
             return Err(BoundedBackfillInterruption::SourceUnavailable);
         }
-        if span.boundary == 0 {
-            published_spans = published_spans.saturating_add(1);
-        }
     }
-    let mut published_commits = 0_usize;
     for commit in &commits {
-        if record_commit_in_transaction(
-            &transaction,
-            row,
-            commit.branch.as_deref(),
-            &worktree,
-            &commit.oid,
-            commit.committed_at,
-            control,
-        )
-        .await?
-        {
-            published_commits = published_commits.saturating_add(1);
-        }
         if !history_progress::delete_staged_commit(&transaction, commit)
             .await
             .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
