@@ -105,6 +105,57 @@ fast-forward, ordinary two-parent merge, or exact ordered cherry-pick. The user
 receives status/cancellation behavior and one durable outcome proving
 committed, unchanged, rolled back, or requiring inspection.
 
+### Native-integration authority is unmounted (deferred, 2026-08-07, owner-pending)
+
+All five native-integration operations — `stack_snapshot`,
+`preflight_native_integration`, `apply_native_integration`,
+`native_integration_status`, `cancel_native_integration` — are declared,
+schema-backed, separately authorized, and bound to CLI and MCP, but the daemon
+answers every one of them with the typed
+`NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted` result. Preview is
+unmounted for the same reason apply is; the mounted preview/apply pair that
+does reach a production kernel is the *index-transaction* surface
+(`git_preview`/`git_apply`), which is a different boundary.
+
+The runtime kernel itself is real and is not the gap.
+`NativeIntegrationTransactionCoordinator` implements `NativeIntegrationPort`
+with repository serialization, journaling, one-use approval CAS, cancellation,
+rollback, and restart recovery, and `GixNativeIntegrationAdapter` implements
+`NativeIntegrationMechanics` over the native fast-forward CAS ref update,
+two-parent merge, and ordered cherry-pick chain in
+`tracedecay-runtime-core`. Three composition inputs the coordinator requires
+have no production implementation at all, only test doubles:
+
+- `NativeIntegrationStore` (durable preview/approval/status/receipt CAS,
+  pending-transaction recovery, repository quarantine) — no store-backed
+  implementation exists, so nothing survives a restart and the plan's
+  "one terminal receipt per apply … on restart" acceptance cannot hold.
+- `NativeIntegrationStackResolutionPort` — Plan 16 topology resolution is not
+  bound to the canonical project-graph authority, so no selection can be
+  frozen.
+- `NativeIntegrationAuthorizationPort` — preflight/apply reauthorization is
+  not bound to the daemon's grant/policy state.
+
+**Approval issuance has no surface at all**, and this is the decisive blocker
+rather than a missing adapter. Journey step 6 requires a one-use
+content-bound approval naming the principal, capability, digests, and
+expiry; `apply_native_integration`'s own validator rejects any request whose
+approval does not bind the exact preview. `NativeIntegrationApprovalV1` is
+constructed nowhere in the product, and none of the five declared operations
+mints one. Mounting apply against today's surface set would therefore yield
+an operation that can only ever answer invalid-request — a less truthful
+façade than the typed `AuthorityUnmounted` it replaces.
+
+Consequently `AuthorityUnmounted` is the correct answer today and stays until
+the same slice can land the durable store, the Plan 16 topology binding, the
+authorization binding, an explicit approval-issuance operation, and the
+per-project daemon owner that composes them. Whether approval issuance is a
+sixth native-integration operation or an existing authorization-family
+command is an **owner decision and is not settled here**; this plan still
+declares exactly five operations. The requirement is deferred, not deleted:
+none of the safety constraints above are relaxed, and no transport may fall
+back to local mutation in the meantime.
+
 ## End-to-end production journey
 
 1. **Freeze the selected Git scope.** Plan 16 supplies the exact authorized

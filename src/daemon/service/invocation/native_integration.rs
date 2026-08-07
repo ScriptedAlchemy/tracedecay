@@ -13,6 +13,21 @@
 //! requires exactly this: "An unavailable daemon or capability leaves the
 //! operation explicitly preview-only or unavailable; no transport falls back
 //! to local mutation."
+//!
+//! That absence is an explicit, dated deferral, not an oversight: see
+//! `docs/plans/tracedecay-v2/36-git-aware-change-context-and-index-transactions.md`,
+//! "Native-integration authority is unmounted (deferred, 2026-08-07,
+//! owner-pending)". The runtime kernel exists — the native-integration
+//! transaction coordinator over `GixNativeIntegrationAdapter` — but three
+//! composition inputs (`NativeIntegrationStore`,
+//! `NativeIntegrationStackResolutionPort`,
+//! `NativeIntegrationAuthorizationPort`) have no production implementation,
+//! and the one-use approval that `apply_native_integration` requires has no
+//! issuance operation anywhere in the product. Mounting apply before approval
+//! issuance exists would produce an operation that can only answer
+//! invalid-request, which is less truthful than this result. Delete this note
+//! together with the plan's deferral when the whole journey lands in one
+//! slice.
 
 use super::*;
 

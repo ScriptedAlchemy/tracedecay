@@ -2,17 +2,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkProductEventV1,
-    WorkProductSourceWatermarkV1, WorkProposalV1, WorkTaskEvidenceV1, canonical_sha256,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkProductEventV1,
+    WorkTaskEvidenceV1,
 };
 
 use crate::{OpaqueCursor, RequestAdmission, RequestContext};
 
 use super::{
-    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkGraphReadPortV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
-    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductPortContextV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
+    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductApplicationErrorV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
 pub const MAX_WORK_EVIDENCE_SELECTION_V1: u32 = 1_024;
@@ -340,138 +339,21 @@ where
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GenerateWorkProposalRequestV1 {
-    pub selection: WorkProductSelectionScopeV1,
-    pub task_id: TaskId,
-    pub verified_version: VerifiedWorkGraphVersionV1,
-    pub evidence_limit: u32,
-    pub revisions: WorkProductRevisionPinsV1,
-    pub observed_at: UtcMicros,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratedWorkProposalV1 {
-    pub proposal: WorkProposalV1,
-    pub verified_version: VerifiedWorkGraphVersionV1,
-    pub evidence_digest: ManifestDigest,
-    pub source_watermark: WorkProductSourceWatermarkV1,
-    pub revisions: WorkProductRevisionPinsV1,
-}
-
-pub trait WorkProposalGeneratorPortV1: Send + Sync {
-    fn generate(
-        &self,
-        context: &WorkProductPortContextV1,
-        request: &GenerateWorkProposalRequestV1,
-        evidence: &WorkTaskEvidenceV1,
-    ) -> Result<WorkProposalV1, WorkProductApplicationErrorV1>;
-}
-
-pub struct WorkProposalServiceV1<G, E, A, P> {
-    graph: G,
-    evidence: E,
-    owner_authority: A,
-    planner: P,
-}
-
-impl<G, E, A, P> WorkProposalServiceV1<G, E, A, P>
-where
-    G: WorkGraphReadPortV1,
-    E: WorkEvidenceReadPortV1,
-    A: WorkProductOwnerAuthorizationPortV1,
-    P: WorkProposalGeneratorPortV1,
-{
-    pub const fn new(graph: G, evidence: E, owner_authority: A, planner: P) -> Self {
-        Self {
-            graph,
-            evidence,
-            owner_authority,
-            planner,
-        }
-    }
-
-    pub fn generate(
-        &self,
-        context: &RequestContext,
-        binding: &WorkProductBindingV1,
-        request: GenerateWorkProposalRequestV1,
-    ) -> Result<GeneratedWorkProposalV1, WorkProductApplicationErrorV1> {
-        let port_context = authorize_port_context(
-            context,
-            binding,
-            &self.owner_authority,
-            &request.selection,
-            request.observed_at,
-        )?;
-        if request.evidence_limit == 0 || request.evidence_limit > MAX_WORK_EVIDENCE_SELECTION_V1 {
-            return Err(WorkProductApplicationErrorV1::InvalidRequest);
-        }
-        let graph_request =
-            WorkGraphReadRequestV1::current(request.selection.clone(), request.observed_at);
-        let graph = self.graph.read_graph(&port_context, &graph_request)?;
-        super::read::validate_result(&graph_request, port_context.authorized_scope(), &graph)?;
-        let WorkGraphReadV1::Current { snapshot, .. } = graph else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
-        };
-        if snapshot.verified_version() != &request.verified_version
-            || snapshot.graph().item(&request.task_id).is_none()
-        {
-            return Err(WorkProductApplicationErrorV1::VersionConflict);
-        }
-        let evidence_request = WorkEvidenceSelectRequestV1 {
-            selection: request.selection.clone(),
-            task_id: request.task_id.clone(),
-            verified_version: request.verified_version.clone(),
-            limit: request.evidence_limit,
-            observed_at: request.observed_at,
-        };
-        let selected = self
-            .evidence
-            .select_task_evidence(&port_context, &evidence_request)
-            .map_err(map_evidence_error)?;
-        if selected.verified_version != request.verified_version
-            || selected.evidence.task_id() != &request.task_id
-            || selected.evidence.graph_version() != request.verified_version.graph_version()
-            || !evidence_is_canonical_within_limit(&selected.evidence, request.evidence_limit)
-        {
-            return Err(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable);
-        }
-        let evidence_digest = canonical_sha256(&selected.evidence)
-            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-        let proposal = self
-            .planner
-            .generate(&port_context, &request, &selected.evidence)?;
-        let canonical_proposal = WorkProposalV1::new(
-            proposal.proposal_id().clone(),
-            proposal.task_id().clone(),
-            proposal.based_on_version(),
-            proposal.shape().clone(),
-            proposal.sizing().clone(),
-            proposal.children().to_vec(),
-            proposal.route().clone(),
-            proposal.explanation().to_owned(),
-            proposal.evidence_digest().clone(),
-        )
-        .map_err(|_| WorkProductApplicationErrorV1::ProposalAuthorityUnavailable)?;
-        if proposal.task_id() != &request.task_id
-            || proposal.based_on_version() != request.verified_version.graph_version()
-            || proposal.evidence_digest() != &evidence_digest
-            || proposal != canonical_proposal
-        {
-            return Err(WorkProductApplicationErrorV1::ProposalAuthorityUnavailable);
-        }
-        Ok(GeneratedWorkProposalV1 {
-            proposal,
-            verified_version: request.verified_version,
-            evidence_digest,
-            source_watermark: selected.verified_version.source_watermark().clone(),
-            revisions: request.revisions,
-        })
-    }
-}
+// Work proposal *generation* is mounted once, on the Work family:
+// `WorkOperation::GenerateProposal` -> `WorkService::generate_proposal`
+// (crates/tracedecay-application/src/work.rs) -> `WorkProposalEvaluatorV1`
+// (crates/tracedecay-policy/src/work_loop.rs). A second, unmounted
+// generator port and service used to live here. Plan 06 forbids both halves
+// of that: "No slice lands a standalone schema, trait, registry, fixture
+// framework, or policy phase without its production caller", and "Remove any
+// route, score, fallback, or replan decision duplicated in a surface,
+// provider adapter, dashboard, graph projector, or runtime handler." The
+// shape/sizing/decomposition/route planner Plan 06 mandates is still owed;
+// it lands with its production caller, not as a port ahead of one.
+//
+// This module keeps the read side only: evidence selection/expansion and
+// history. Client-supplied proposals still enter through the mounted
+// mutation path (`DecideWorkProposalRequestV1` in `mutation.rs`).
 
 fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
     context: &RequestContext,
