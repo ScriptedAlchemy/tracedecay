@@ -17,7 +17,7 @@ use super::{
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
-    RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1,
+    RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1, SemanticResourceRequirementV1,
 };
 use crate::configuration::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
@@ -104,7 +104,6 @@ pub trait SemanticEvaluationPublicationSnapshotPortV1: Send + Sync {
 
     fn evaluate_default_candidate<'a>(
         &'a self,
-        repo_root: &'a Path,
         evaluated_profile_id: &'a str,
     ) -> SemanticRuntimeFuture<
         'a,
@@ -137,15 +136,22 @@ pub struct SemanticEvaluationAuthorityPublicationV1 {
     accepted_profiles: Arc<RegisteredSemanticAcceptedProfileAuthorityV1>,
     report: DirectEvaluationReportV1,
     accepted_profile: AcceptedRetrievalProfileV1,
+    runtime: RetrievalRuntimeCompatibilityV1,
 }
 
 impl SemanticEvaluationAuthorityPublicationV1 {
+    pub fn semantic_compatibility(
+        &self,
+    ) -> Option<&crate::config::retrieval::SemanticCompatibilityPinsV1> {
+        self.accepted_profile.compatibility().semantic.as_ref()
+    }
+
     pub async fn commit(
         self,
         expected: &SemanticEvaluationPublicationSnapshotV1,
     ) -> Result<(), SemanticActivationCoordinationErrorV1> {
         self.accepted_profile
-            .executable_under(&expected.runtime)
+            .executable_under(&self.runtime)
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
         let bootstrap_query = self.accepted_profile.is_exact_query_fallback();
         let profile_digest = self.accepted_profile.profile_digest().clone();
@@ -154,7 +160,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
                 &expected.project_root,
                 self.report,
                 self.accepted_profile,
-                expected.runtime.clone(),
+                self.runtime,
                 SemanticEvaluationPublicationIdentityV1 {
                     scope_digest: expected.scope.scope_digest.clone(),
                     code_generation: expected.code_generation.clone(),
@@ -220,12 +226,20 @@ impl ProductionSemanticConfigurationOperationV1 {
         validate_evaluation_snapshot(repo_root, &before, &candidate)?;
 
         let (report, evaluated_material) = snapshot_authority
-            .evaluate_default_candidate(repo_root, &candidate.evaluated_profile_id)
+            .evaluate_default_candidate(&candidate.evaluated_profile_id)
             .await?
             .into_parts();
         if !candidate_matches_evaluated_material(&candidate, &evaluated_material) {
             return Err(SemanticActivationCoordinationErrorV1::Rejected);
         }
+        let mut compatibility = candidate.compatibility;
+        if let Some(semantic) = compatibility.semantic.as_mut() {
+            semantic.resources = semantic_resource_requirement_from_report(
+                &report,
+                &candidate.evaluated_profile_id,
+            )?;
+        }
+        let accepted_runtime = runtime_with_accepted_resources(&before.runtime, &compatibility)?;
         let evaluation =
             PassingRetrievalEvaluationV1::from_report(&report, &candidate.evaluated_profile_id)
                 .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
@@ -263,16 +277,11 @@ impl ProductionSemanticConfigurationOperationV1 {
             max_model_invocations: rerank.max_model_invocations,
             deadline_micros: rerank.deadline_micros,
         });
-        let accepted_profile = AcceptedRetrievalProfileV1::new(
-            profile,
-            diversity,
-            rerank,
-            candidate.compatibility,
-            evaluation,
-        )
-        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+        let accepted_profile =
+            AcceptedRetrievalProfileV1::new(profile, diversity, rerank, compatibility, evaluation)
+                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
         accepted_profile
-            .executable_under(&before.runtime)
+            .executable_under(&accepted_runtime)
             .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
 
         snapshot_authority
@@ -283,6 +292,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                     accepted_profiles: Arc::clone(&self.accepted_profiles),
                     report: report.clone(),
                     accepted_profile: accepted_profile.clone(),
+                    runtime: accepted_runtime,
                 },
             )
             .await?;
@@ -483,6 +493,45 @@ impl ProductionSemanticConfigurationOperationV1 {
             configuration_receipt: preview.receipt,
         })
     }
+}
+
+fn semantic_resource_requirement_from_report(
+    report: &DirectEvaluationReportV1,
+    evaluated_profile_id: &str,
+) -> Result<SemanticResourceRequirementV1, SemanticActivationCoordinationErrorV1> {
+    let measured = report
+        .semantic_activation_resource_pins(evaluated_profile_id)
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
+    Ok(SemanticResourceRequirementV1 {
+        model_bytes: measured.model_bytes,
+        tokenizer_bytes: measured.tokenizer_bytes,
+        resident_bytes: measured.resident_bytes,
+        threads: measured.threads,
+        max_concurrent_sessions: measured.max_concurrent_sessions,
+        batch_size: measured.batch_size,
+        sequence_length: measured.sequence_length,
+        load_deadline_ms: measured.load_deadline_ms,
+    })
+}
+
+fn runtime_with_accepted_resources(
+    observed: &RetrievalRuntimeCompatibilityV1,
+    accepted: &RetrievalCompatibilityPinsV1,
+) -> Result<RetrievalRuntimeCompatibilityV1, SemanticActivationCoordinationErrorV1> {
+    let mut runtime = observed.clone();
+    match (runtime.semantic.as_mut(), accepted.semantic.as_ref()) {
+        (Some(observed), Some(accepted)) => {
+            observed.resources = accepted.resources;
+            if observed != accepted {
+                return Err(SemanticActivationCoordinationErrorV1::Rejected);
+            }
+            runtime.semantic_ceiling = Some(accepted.resources);
+        }
+        (None, None) => runtime.semantic_ceiling = None,
+        _ => return Err(SemanticActivationCoordinationErrorV1::Rejected),
+    }
+    runtime.semantic = accepted.semantic.clone();
+    Ok(runtime)
 }
 
 fn candidate_matches_evaluated_material(

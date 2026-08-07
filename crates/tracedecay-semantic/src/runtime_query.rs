@@ -12,7 +12,8 @@ use tracedecay_query::retrieval::semantic::{
 };
 
 use super::fastembed_adapter::{
-    BoundedSanitizedTextBatchV1, CancellationSignal, EmbedError, EmbeddingRuntime, EmbeddingSession,
+    BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
+    SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
 };
 use super::runtime_service::{SemanticGenerationPointerV1, SemanticRuntimeService};
 use super::session_pool::SessionAcquireError;
@@ -47,7 +48,7 @@ where
 
     pub fn create<'a>(
         self: &Arc<Self>,
-        cancellation: Arc<dyn CancellationSignal + 'a>,
+        cancellation: Arc<dyn SemanticExecutionAuthority + 'a>,
     ) -> PooledSemanticQueryEmbedder<'a, R> {
         PooledSemanticQueryEmbedder {
             factory: Arc::clone(self),
@@ -129,7 +130,7 @@ where
 /// exactly one ephemeral query vector.
 pub struct PooledSemanticQueryEmbedder<'a, R: EmbeddingRuntime> {
     factory: Arc<PooledSemanticQueryEmbedderFactory<R>>,
-    cancellation: Arc<dyn CancellationSignal + 'a>,
+    cancellation: Arc<dyn SemanticExecutionAuthority + 'a>,
 }
 
 impl<R> SemanticQueryEmbeddingPort for PooledSemanticQueryEmbedder<'_, R>
@@ -149,8 +150,14 @@ where
         {
             return Err(RetrievalPortError::IncompatibleProjection);
         }
-        if self.cancellation.cancelled() {
-            return Err(RetrievalPortError::Cancelled);
+        match self.cancellation.interruption() {
+            Some(SemanticExecutionInterruptionV1::Cancelled) => {
+                return Err(RetrievalPortError::Cancelled);
+            }
+            Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+                return Err(RetrievalPortError::BudgetExceeded);
+            }
+            None => {}
         }
 
         let max_query_bytes = authority.max_batch_bytes() as usize;
@@ -195,6 +202,7 @@ fn map_acquire_error(error: SessionAcquireError) -> RetrievalPortError {
         SessionAcquireError::Exhausted { .. }
         | SessionAcquireError::QueueFull { .. }
         | SessionAcquireError::MemoryCeilingExceeded { .. }
+        | SessionAcquireError::LoadDeadlineExceeded { .. }
         | SessionAcquireError::Closed => {
             RetrievalPortError::AuthorityUnavailable("semantic runtime unavailable".to_owned())
         }
@@ -204,6 +212,7 @@ fn map_acquire_error(error: SessionAcquireError) -> RetrievalPortError {
 fn map_embed_error(error: EmbedError) -> RetrievalPortError {
     match error {
         EmbedError::Cancelled => RetrievalPortError::Cancelled,
+        EmbedError::DeadlineExceeded => RetrievalPortError::BudgetExceeded,
         EmbedError::DimensionMismatch { .. } | EmbedError::NonFiniteVectorValue => {
             RetrievalPortError::IncompatibleProjection
         }

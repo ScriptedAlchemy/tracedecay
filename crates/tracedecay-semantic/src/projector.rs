@@ -22,8 +22,6 @@ use tracedecay_code_index::projection::{
     expected_request_digest, verify_batch_receipt,
 };
 
-const VECTOR_OUTPUT_DIGEST_DOMAIN: &str = "tracedecay.semantic-vector-output.v1";
-
 /// Chunks packed into one encoder invocation.
 ///
 /// This is the tensor shape the model sees, so it is *semantics*, not sizing:
@@ -640,18 +638,6 @@ pub fn vector_output_digest(
     chunk_digest: &ContentDigest,
     values: &[f32],
 ) -> Result<ContentDigest, SemanticProjectionErrorV1> {
-    let bits = values
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
-    let digest = canonical_sha256(&(
-        VECTOR_OUTPUT_DIGEST_DOMAIN,
-        projection_key,
-        chunk_id,
-        chunk_digest,
-        bits,
-    ))
-    .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
-    ContentDigest::new(digest.as_str().to_string())
+    tracedecay_domain::semantic_vector_output_digest(projection_key, chunk_id, chunk_digest, values)
         .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))
 }

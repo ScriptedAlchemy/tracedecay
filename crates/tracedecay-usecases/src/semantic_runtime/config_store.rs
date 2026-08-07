@@ -45,6 +45,14 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         })
     }
 
+    pub(super) fn database(&self) -> &Arc<RegisteredGlobalDb> {
+        &self.database
+    }
+
+    pub(super) fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
     pub async fn install_initial_state(
         &self,
         configuration: &SemanticConfigurationPinV1,
@@ -57,13 +65,16 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         {
             return Err(SemanticConfigurationBackendErrorV1::Rejected);
         }
+        let scope_json = encode_scope(&self.scope)?;
+        let (active_vector_generation, rollback_vector_generation) =
+            normalized_semantic_vector_roots(state);
         let state_json = encode_state(state)?;
         let transaction = self
             .database
             .begin_write_transaction()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        let existing = load_latest(&transaction, &self.scope.scope_digest).await?;
+        let existing = load_latest(&transaction, &self.scope).await?;
         if let Some(existing) = existing {
             return if existing.state == state.clone() && existing.receipt.is_none() {
                 Ok(())
@@ -74,12 +85,17 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         transaction
             .execute(
                 "INSERT INTO configuration_semantic_retrieval_state_v1 (
-                    scope_digest, epoch, configuration_revision, transition_digest,
-                    activation_receipt_digest, state_json, activation_receipt_json
-                 ) VALUES (?1, 0, ?2, NULL, NULL, ?3, NULL)",
+                    project_id, scope_digest, scope_json, epoch, configuration_revision, transition_digest,
+                    activation_receipt_digest, active_vector_generation,
+                    rollback_vector_generation, state_json, activation_receipt_json
+                 ) VALUES (?1, ?2, ?3, 0, ?4, NULL, NULL, ?5, ?6, ?7, NULL)",
                 params![
+                    self.scope.project_id.as_str(),
                     self.scope.scope_digest.as_str(),
+                    scope_json,
                     configuration.revision_id.as_str(),
+                    active_vector_generation,
+                    rollback_vector_generation,
                     state_json
                 ],
             )
@@ -99,7 +115,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .read_snapshot()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        let Some(stored) = load_latest(&snapshot, &self.scope.scope_digest).await? else {
+        let Some(stored) = load_latest(&snapshot, &self.scope).await? else {
             return Ok(None);
         };
         if stored.transition_digest.is_none() {
@@ -115,7 +131,11 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             return Err(SemanticConfigurationBackendErrorV1::Rejected);
         }
         Ok(Some(CommittedRetrievalProfileStateV1 {
-            scope: self.scope.clone(),
+            epoch: stored.epoch,
+            transition_digest: stored
+                .transition_digest
+                .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?,
+            scope: stored.scope,
             state: stored.state,
             current_activation,
         }))
@@ -129,7 +149,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .read_snapshot()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        Ok(load_latest(&snapshot, &self.scope.scope_digest)
+        Ok(load_latest(&snapshot, &self.scope)
             .await?
             .map(|stored| stored.state))
     }
@@ -310,7 +330,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .read_snapshot()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        load_latest(&snapshot, &self.scope.scope_digest)
+        load_latest(&snapshot, &self.scope)
             .await?
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)
     }
@@ -326,13 +346,14 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
         let transition_json = serde_json::to_string(transition)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+        let scope_json = encode_scope(&self.scope)?;
         let resulting_state_json = encode_state(resulting)?;
         let transaction = self
             .database
             .begin_write_transaction()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        let current = load_latest(&transaction, &self.scope.scope_digest)
+        let current = load_latest(&transaction, &self.scope)
             .await?
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
         if current.epoch != base_epoch
@@ -343,12 +364,14 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         transaction
             .execute(
                 "INSERT INTO configuration_semantic_retrieval_pending_v1 (
-                    scope_digest, transition_digest, base_epoch, base_configuration_revision,
-                    transition_json, resulting_state_json, staged_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(scope_digest, transition_digest) DO NOTHING",
+                    project_id, scope_digest, scope_json, transition_digest, base_epoch,
+                    base_configuration_revision, transition_json, resulting_state_json, staged_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(project_id, scope_digest, transition_digest) DO NOTHING",
                 params![
+                    self.scope.project_id.as_str(),
                     self.scope.scope_digest.as_str(),
+                    scope_json,
                     transition.transition_digest.as_str(),
                     base_epoch,
                     transition.base_configuration.revision_id.as_str(),
@@ -402,6 +425,10 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         let current_activation =
             current_activation_from_stored(&stored, &configuration.revision_id)?;
         Ok(CommittedRetrievalProfileStateV1 {
+            epoch: stored.epoch,
+            transition_digest: stored
+                .transition_digest
+                .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?,
             scope: self.scope.clone(),
             state: stored.state,
             current_activation,
@@ -467,15 +494,11 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
                 .begin_write_transaction()
                 .await
                 .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-            let current = load_latest(&transaction, &self.scope.scope_digest)
+            let current = load_latest(&transaction, &self.scope)
                 .await?
                 .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
-            let pending = load_pending(
-                &transaction,
-                &self.scope.scope_digest,
-                &transition.transition_digest,
-            )
-            .await?;
+            let pending =
+                load_pending(&transaction, &self.scope, &transition.transition_digest).await?;
             if current.epoch != pending.base_epoch
                 || current.state.configuration_revision()
                     != &transition.base_configuration.revision_id
@@ -514,8 +537,15 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
                 .last()
                 .cloned()
                 .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?;
-            let linked = SemanticLinkedTransitionV1::new(transition, receipt, audit)
+            let result_epoch = current
+                .epoch
+                .checked_add(1)
+                .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?;
+            let linked = SemanticLinkedTransitionV1::new(result_epoch, transition, receipt, audit)
                 .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+            let scope_json = encode_scope(&self.scope)?;
+            let (active_vector_generation, rollback_vector_generation) =
+                normalized_semantic_vector_roots(&pending.resulting_state);
             let state_json = encode_state(&pending.resulting_state)?;
             let receipt_json = receipt
                 .map(serde_json::to_string)
@@ -525,15 +555,21 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
             transaction
                 .execute(
                     "INSERT INTO configuration_semantic_retrieval_state_v1 (
-                        scope_digest, epoch, configuration_revision, transition_digest,
-                        activation_receipt_digest, state_json, activation_receipt_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        project_id, scope_digest, scope_json, epoch, configuration_revision,
+                        transition_digest, activation_receipt_digest,
+                        active_vector_generation, rollback_vector_generation,
+                        state_json, activation_receipt_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
+                        self.scope.project_id.as_str(),
                         self.scope.scope_digest.as_str(),
-                        current.epoch + 1,
+                        scope_json,
+                        result_epoch,
                         transition.result_configuration.revision_id.as_str(),
                         transition.transition_digest.as_str(),
                         receipt_digest,
+                        active_vector_generation,
+                        rollback_vector_generation,
                         state_json,
                         receipt_json,
                     ],
@@ -569,7 +605,11 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
             let current_activation =
                 current_activation_from_stored(&stored, stored.state.configuration_revision())?;
             let committed = CommittedRetrievalProfileStateV1 {
-                scope: self.scope.clone(),
+                epoch: stored.epoch,
+                transition_digest: stored
+                    .transition_digest
+                    .ok_or(SemanticConfigurationBackendErrorV1::Rejected)?,
+                scope: stored.scope,
                 state: stored.state,
                 current_activation,
             };
@@ -648,13 +688,16 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
         let mut rows = snapshot
             .query(
-                "SELECT scope_digest, transition_digest, base_epoch,
+                "SELECT scope_digest, scope_json, transition_digest, base_epoch,
                         transition_json, resulting_state_json
                  FROM configuration_semantic_retrieval_pending_v1
-                 WHERE scope_digest = ?1
+                 WHERE project_id = ?1 AND scope_digest = ?2
                  ORDER BY staged_at DESC, rowid DESC
                  LIMIT 1",
-                params![self.scope.scope_digest.as_str()],
+                params![
+                    self.scope.project_id.as_str(),
+                    self.scope.scope_digest.as_str()
+                ],
             )
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
@@ -663,12 +706,13 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
-        decode_pending_row(&row, &self.scope.scope_digest)
+        decode_pending_row(&row, &self.scope)
     }
 }
 
 #[derive(Clone, Debug)]
 struct StoredState {
+    scope: ResolvedScope,
     epoch: i64,
     state: RetrievalProfileStateV1,
     receipt: Option<SemanticActivationReceiptV1>,
@@ -712,20 +756,25 @@ struct PendingTransition {
 
 async fn load_latest<E>(
     executor: &E,
-    scope_digest: &ManifestDigest,
+    expected_scope: &ResolvedScope,
 ) -> Result<Option<StoredState>, SemanticConfigurationBackendErrorV1>
 where
     E: QueryExecutor + Sync,
 {
     let mut rows = executor
         .query(
-            "SELECT scope_digest, epoch, state_json, activation_receipt_json,
-                    transition_digest, activation_receipt_digest
+            "SELECT scope_digest, scope_json, epoch, configuration_revision,
+                    state_json, activation_receipt_json, transition_digest,
+                    activation_receipt_digest,
+                    active_vector_generation, rollback_vector_generation
              FROM configuration_semantic_retrieval_state_v1
-             WHERE scope_digest = ?1
+             WHERE project_id = ?1 AND scope_digest = ?2
              ORDER BY epoch DESC
              LIMIT 1",
-            params![scope_digest.as_str()],
+            params![
+                expected_scope.project_id.as_str(),
+                expected_scope.scope_digest.as_str()
+            ],
         )
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
@@ -741,27 +790,51 @@ where
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
-    if &stored_scope != scope_digest {
+    if stored_scope != expected_scope.scope_digest {
+        return Err(SemanticConfigurationBackendErrorV1::Rejected);
+    }
+    let scope = decode_scope(
+        &row.get::<String>(1)
+            .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
+    )?;
+    if &scope != expected_scope {
         return Err(SemanticConfigurationBackendErrorV1::Rejected);
     }
     let epoch = row
-        .get::<i64>(1)
+        .get::<i64>(2)
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    let configuration_revision = row
+        .get::<String>(3)
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
     let state_json = row
-        .get::<String>(2)
+        .get::<String>(4)
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
     let receipt_json = row
-        .get::<Option<String>>(3)
+        .get::<Option<String>>(5)
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
     let transition_digest = decode_optional_digest(
-        row.get::<Option<String>>(4)
+        row.get::<Option<String>>(6)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )?;
     let activation_receipt_digest = decode_optional_digest(
-        row.get::<Option<String>>(5)
+        row.get::<Option<String>>(7)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )?;
     let state = decode_state(&state_json)?;
+    if state.configuration_revision().as_str() != configuration_revision {
+        return Err(SemanticConfigurationBackendErrorV1::Rejected);
+    }
+    let normalized_active = row
+        .get::<Option<String>>(8)
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    let normalized_rollback = row
+        .get::<Option<String>>(9)
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    validate_normalized_semantic_vector_roots(
+        &state,
+        normalized_active.as_deref(),
+        normalized_rollback.as_deref(),
+    )?;
     let receipt = receipt_json
         .map(|json| {
             let receipt: SemanticActivationReceiptV1 = serde_json::from_str(&json)
@@ -777,6 +850,7 @@ where
         return Err(SemanticConfigurationBackendErrorV1::Rejected);
     }
     Ok(Some(StoredState {
+        scope,
         epoch,
         state,
         receipt,
@@ -787,7 +861,7 @@ where
 
 async fn load_pending<E>(
     executor: &E,
-    scope_digest: &ManifestDigest,
+    scope: &ResolvedScope,
     digest: &ManifestDigest,
 ) -> Result<PendingTransition, SemanticConfigurationBackendErrorV1>
 where
@@ -795,11 +869,15 @@ where
 {
     let mut rows = executor
         .query(
-            "SELECT scope_digest, transition_digest, base_epoch,
+            "SELECT scope_digest, scope_json, transition_digest, base_epoch,
                     transition_json, resulting_state_json
              FROM configuration_semantic_retrieval_pending_v1
-             WHERE scope_digest = ?1 AND transition_digest = ?2",
-            params![scope_digest.as_str(), digest.as_str()],
+             WHERE project_id = ?1 AND scope_digest = ?2 AND transition_digest = ?3",
+            params![
+                scope.project_id.as_str(),
+                scope.scope_digest.as_str(),
+                digest.as_str()
+            ],
         )
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
@@ -808,31 +886,38 @@ where
         .await
         .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?
         .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
-    decode_pending_row(&row, scope_digest)
+    decode_pending_row(&row, scope)
 }
 
 fn decode_pending_row(
     row: &tracedecay_runtime_core::db::engine::Row,
-    expected_scope: &ManifestDigest,
+    expected_scope: &ResolvedScope,
 ) -> Result<PendingTransition, SemanticConfigurationBackendErrorV1> {
     let stored_scope = ManifestDigest::new(
         row.get::<String>(0)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    if stored_scope != expected_scope.scope_digest {
+        return Err(SemanticConfigurationBackendErrorV1::Rejected);
+    }
+    let stored_scope = decode_scope(
+        &row.get::<String>(1)
+            .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
+    )?;
     if &stored_scope != expected_scope {
         return Err(SemanticConfigurationBackendErrorV1::Rejected);
     }
     let stored_digest = ManifestDigest::new(
-        row.get::<String>(1)
+        row.get::<String>(2)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
     let base_epoch = row
-        .get::<i64>(2)
+        .get::<i64>(3)
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
     let transition: SemanticConfigurationTransitionV1 = serde_json::from_str(
-        &row.get::<String>(3)
+        &row.get::<String>(4)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
@@ -840,7 +925,7 @@ fn decode_pending_row(
         return Err(SemanticConfigurationBackendErrorV1::Rejected);
     }
     let resulting_state = decode_state(
-        &row.get::<String>(4)
+        &row.get::<String>(5)
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?,
     )?;
     Ok(PendingTransition {
@@ -848,6 +933,64 @@ fn decode_pending_row(
         transition,
         resulting_state,
     })
+}
+
+fn encode_scope(scope: &ResolvedScope) -> Result<String, SemanticConfigurationBackendErrorV1> {
+    scope
+        .validate()
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    serde_json::to_string(scope).map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
+}
+
+pub(super) fn decode_scope(
+    json: &str,
+) -> Result<ResolvedScope, SemanticConfigurationBackendErrorV1> {
+    let scope: ResolvedScope =
+        serde_json::from_str(json).map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    scope
+        .validate()
+        .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+    Ok(scope)
+}
+
+fn normalized_semantic_vector_roots(
+    state: &RetrievalProfileStateV1,
+) -> (Option<String>, Option<String>) {
+    let active = state
+        .active()
+        .compatibility()
+        .semantic
+        .as_ref()
+        .map(|semantic| {
+            semantic
+                .vector_generation_id
+                .as_digest()
+                .as_str()
+                .to_owned()
+        });
+    let rollback = state
+        .rollback_profile()
+        .and_then(|profile| profile.compatibility().semantic.as_ref())
+        .map(|semantic| {
+            semantic
+                .vector_generation_id
+                .as_digest()
+                .as_str()
+                .to_owned()
+        });
+    (active, rollback)
+}
+
+pub(super) fn validate_normalized_semantic_vector_roots(
+    state: &RetrievalProfileStateV1,
+    active: Option<&str>,
+    rollback: Option<&str>,
+) -> Result<(), SemanticConfigurationBackendErrorV1> {
+    let (expected_active, expected_rollback) = normalized_semantic_vector_roots(state);
+    if expected_active.as_deref() != active || expected_rollback.as_deref() != rollback {
+        return Err(SemanticConfigurationBackendErrorV1::Rejected);
+    }
+    Ok(())
 }
 
 fn encode_state(
@@ -861,7 +1004,7 @@ fn encode_state(
     .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
 }
 
-fn decode_state(
+pub(super) fn decode_state(
     json: &str,
 ) -> Result<RetrievalProfileStateV1, SemanticConfigurationBackendErrorV1> {
     serde_json::from_str::<RetrievalProfileStateSnapshotV1>(json)
@@ -870,7 +1013,7 @@ fn decode_state(
         .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)
 }
 
-fn decode_optional_digest(
+pub(super) fn decode_optional_digest(
     value: Option<String>,
 ) -> Result<Option<ManifestDigest>, SemanticConfigurationBackendErrorV1> {
     value

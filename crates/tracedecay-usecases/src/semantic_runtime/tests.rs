@@ -8,8 +8,8 @@ use super::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticActivationRequestV1,
     SemanticConfigurationPinV1, SemanticConfigurationSnapshotSourceV1, SemanticFallbackReasonV1,
     SemanticRollbackCommandV1, SemanticRollbackReceiptV1, SemanticRollbackRequestV1,
-    SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeControlErrorV1,
-    SemanticRuntimeFuture, SemanticRuntimeOwnerV1, SemanticRuntimeRouteV1, SemanticRuntimeStateV1,
+    SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1, SemanticRuntimeFuture,
+    SemanticRuntimeOwnerV1, SemanticRuntimeRouteV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
 };
 use crate::configuration::{
@@ -107,7 +107,6 @@ fn only_a_current_receipt_routes_to_semantic_search() {
             reason: SemanticFallbackReasonV1::RuntimeUnavailable,
         },
         SemanticRuntimeStateV1::Indexing {
-            target_generation: generation('b'),
             completed_units: 3,
             total_units: 10,
         },
@@ -231,11 +230,10 @@ fn semantic_off_rollback_has_no_fabricated_activation_receipt() {
 }
 
 #[tokio::test]
-async fn activation_receipt_cannot_silently_promote_an_indexing_runtime() {
+async fn validated_activation_receipt_is_not_reclassified_by_a_later_indexing_status() {
     let configuration = configuration();
     let runtime = ReceiptWithoutPromotionRuntime {
         state: Mutex::new(SemanticRuntimeStateV1::Indexing {
-            target_generation: generation('a'),
             completed_units: 4,
             total_units: 10,
         }),
@@ -247,12 +245,12 @@ async fn activation_receipt_cannot_silently_promote_an_indexing_runtime() {
         runtime,
     );
 
-    let error = owner
+    let receipt = owner
         .activate(SemanticActivationRequestV1::new(generation('a'), None, None).unwrap())
         .await
-        .unwrap_err();
+        .expect("durably committed activation receipt");
 
-    assert_eq!(error, SemanticRuntimeControlErrorV1::PromotionNotObserved);
+    assert_eq!(receipt.activated_generation, generation('a'));
     assert!(matches!(
         owner.status().await.route(),
         SemanticRuntimeRouteV1::LexicalFallback { .. }
@@ -260,10 +258,40 @@ async fn activation_receipt_cannot_silently_promote_an_indexing_runtime() {
 }
 
 #[tokio::test]
+async fn exact_committed_activation_receipt_survives_observed_cache_failure() {
+    let target = generation('a');
+    let runtime = ReceiptWithoutPromotionRuntime {
+        state: Mutex::new(SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(target.clone()),
+            reason: SemanticFallbackReasonV1::RuntimeFailure,
+        }),
+    };
+    let owner = SemanticRuntimeOwnerV1::new(
+        StaticConfiguration {
+            current: Ok(configuration()),
+        },
+        runtime,
+    );
+
+    let receipt = owner
+        .activate(SemanticActivationRequestV1::new(target.clone(), None, None).unwrap())
+        .await
+        .expect("durably committed receipt is not reported as a failed mutation");
+
+    assert_eq!(receipt.activated_generation, target);
+    assert!(matches!(
+        owner.status().await.state,
+        SemanticRuntimeStateV1::Degraded {
+            active_generation: Some(_),
+            reason: SemanticFallbackReasonV1::RuntimeFailure,
+        }
+    ));
+}
+
+#[tokio::test]
 async fn startup_observes_indexing_without_waiting_for_semantic_activation() {
     let runtime = ReceiptWithoutPromotionRuntime {
         state: Mutex::new(SemanticRuntimeStateV1::Indexing {
-            target_generation: generation('b'),
             completed_units: 2,
             total_units: 8,
         }),
@@ -320,6 +348,7 @@ mod config_backend_tests {
             tokenizer_bytes: 5,
             resident_bytes: 20,
             threads: 2,
+            max_concurrent_sessions: 1,
             batch_size: 4,
             sequence_length: 128,
             load_deadline_ms: 1_000,
@@ -405,6 +434,21 @@ mod config_backend_tests {
         let mut evidence =
             SemanticExecutableGenerationV1::new(target.clone(), resources(), true, true).unwrap();
         evidence.rollback_executable = false;
+
+        assert_eq!(
+            evidence.validate_for(&target, false),
+            Err(super::super::SemanticRuntimeContractErrorV1::InvalidCompatibility)
+        );
+    }
+
+    #[test]
+    fn executable_generation_rejects_a_widened_configured_ceiling_as_observation() {
+        let target = pins('a');
+        let mut configured_maxima = resources();
+        configured_maxima.resident_bytes += 1;
+        let evidence =
+            SemanticExecutableGenerationV1::new(target.clone(), configured_maxima, true, true)
+                .unwrap();
 
         assert_eq!(
             evidence.validate_for(&target, false),

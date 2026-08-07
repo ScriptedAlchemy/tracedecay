@@ -2,16 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_domain::{ContentDigest, ManifestDigest, VectorGenerationIdV1, canonical_sha256};
+use tracedecay_domain::{ContentDigest, ManifestDigest, VectorGenerationIdV1};
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphLabel, GraphProperty, GraphPropertyName, GraphRelation,
-    GraphRelationId, GraphRelationKind,
+    GraphRelationId, GraphRelationKind, semantic_vector_native,
 };
 
 use super::super::super::{VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1};
 use super::super::persistence::{map_graph_error, storage_error};
-
-const ID_DOMAIN: &str = "tracedecay.semantic-vector.record-id.v1";
 
 pub(super) fn entity<const N: usize, const P: usize>(
     identity: &str,
@@ -35,17 +33,9 @@ pub(super) fn relation(
     kind: &str,
     discriminator: &str,
 ) -> Result<GraphRelation, VectorGenerationStoreErrorV1> {
-    let digest = canonical_sha256(&(
-        ID_DOMAIN,
-        "relation",
-        from.as_str(),
-        to.as_str(),
-        kind,
-        discriminator,
-    ))
-    .map_err(storage_error)?;
     GraphRelation::new(
-        relation_id(&format!("semantic-vector:relation:{}", digest.as_str()))?,
+        semantic_vector_native::relation_id(from, to, kind, discriminator)
+            .map_err(map_graph_error)?,
         from.clone(),
         to.clone(),
         relation_kind(kind)?,
@@ -91,16 +81,13 @@ pub(super) fn insert_relation(
 pub(super) fn build_entity_id(
     id: &VectorGenerationBuildIdV1,
 ) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
-    entity_id(&format!("semantic-vector:build:{}", id.0.as_str()))
+    semantic_vector_native::build_entity_id(id.0.as_str()).map_err(map_graph_error)
 }
 
 pub(super) fn generation_entity_id(
     id: &VectorGenerationIdV1,
 ) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
-    entity_id(&format!(
-        "semantic-vector:generation:{}",
-        id.as_digest().as_str()
-    ))
+    semantic_vector_native::generation_entity_id(id.as_digest().as_str()).map_err(map_graph_error)
 }
 
 pub(super) fn scoped_entity_id(
@@ -108,16 +95,11 @@ pub(super) fn scoped_entity_id(
     owner: &str,
     member: &str,
 ) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
-    let digest = canonical_sha256(&(ID_DOMAIN, kind, owner, member)).map_err(storage_error)?;
-    entity_id(&format!("semantic-vector:{kind}:{}", digest.as_str()))
+    semantic_vector_native::scoped_entity_id(kind, owner, member).map_err(map_graph_error)
 }
 
 pub(super) fn entity_id(value: &str) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
     GraphEntityId::new(value).map_err(map_graph_error)
-}
-
-pub(super) fn relation_id(value: &str) -> Result<GraphRelationId, VectorGenerationStoreErrorV1> {
-    GraphRelationId::new(value).map_err(map_graph_error)
 }
 
 pub(super) fn relation_kind(

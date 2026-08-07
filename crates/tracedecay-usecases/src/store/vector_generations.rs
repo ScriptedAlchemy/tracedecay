@@ -2,9 +2,9 @@
 //!
 //! The deterministic state machine is the single in-memory authority over
 //! generation lifecycle. All persistence lives in the embedded graph database
-//! through [`graph_adapter`], whose watermark compare-and-swap makes
-//! generation publication and the active pointer visible together; the native
-//! semantic evaluator drives the same adapter over a private in-memory graph.
+//! through [`graph_adapter`], whose verified publication makes each immutable
+//! generation recoverable by exact identity. Retrieval activation remains the
+//! committed configuration authority.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -28,10 +28,11 @@ use tracedecay_semantic::projector::{
 };
 
 mod graph_adapter;
+mod identity;
 pub use graph_adapter::*;
+pub(crate) use identity::generation_identity_digest;
 
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
-const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
 const VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN: &str = "tracedecay.vector-committed-batch.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
 #[cfg(test)]
@@ -914,17 +915,13 @@ impl PublishedVectorGenerationV1 {
 
     fn validate_persisted(&self) -> Result<(), VectorGenerationStoreErrorV1> {
         if self.generation_id.as_digest() != &self.manifest_digest
-            || generation_identity_digest(
-                &VectorGenerationPlanV1 {
-                    target_projection_key: self.projection_key.clone(),
-                    source_generation: self.source_generation.clone(),
-                    source_manifest_digest: self.source_manifest_digest.clone(),
-                    expected_chunk_ids: self.vectors.keys().cloned().collect(),
-                    base_generation: self.base_generation.clone(),
-                },
-                &self.vectors,
-                &self.tombstone_digests,
-            )
+            || generation_identity_digest(&VectorGenerationPlanV1 {
+                target_projection_key: self.projection_key.clone(),
+                source_generation: self.source_generation.clone(),
+                source_manifest_digest: self.source_manifest_digest.clone(),
+                expected_chunk_ids: self.vectors.keys().cloned().collect::<Vec<_>>().into(),
+                base_generation: self.base_generation.clone(),
+            })
             .map_err(|error| VectorGenerationStoreErrorV1::Storage(error.to_string()))?
                 != self.manifest_digest
         {
@@ -1000,14 +997,10 @@ pub enum VectorGenerationStoreErrorV1 {
     MissingAppliedVector(CodeSearchChunkId),
     #[error("vector generation membership is incomplete")]
     IncompleteGeneration,
-    #[error("active vector generation changed before publication")]
-    StaleActiveGeneration,
     #[error("immutable vector generation identity already has different content")]
     ImmutableGenerationConflict,
     #[error("physical vector reuse identity already has different bytes")]
     PhysicalVectorConflict,
-    #[error("injected failure before atomic publication swap")]
-    InjectedPublicationFailure,
     #[error("project vector generation storage failed: {0}")]
     Storage(String),
     #[error("project vector generation state changed repeatedly during compare-and-swap")]
@@ -1037,12 +1030,23 @@ struct StagedVectorGenerationV1 {
 #[serde(deny_unknown_fields)]
 struct PublishedStateV1 {
     generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
-    active_generation: Option<VectorGenerationIdV1>,
     #[serde(skip, default)]
     physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
     #[serde(default, with = "external_state::address_map")]
     physical_vector_bindings:
         BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
+}
+
+impl PublishedStateV1 {
+    fn immutable_graph_generation(
+        generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
+    ) -> Self {
+        Self {
+            generations,
+            physical_vectors: BTreeMap::new(),
+            physical_vector_bindings: BTreeMap::new(),
+        }
+    }
 }
 
 /// Deterministic transition authority shared by the SQL store and native graph
@@ -1054,8 +1058,6 @@ pub struct VectorGenerationStateMachineV1 {
     published: PublishedStateV1,
     #[serde(skip, default)]
     physical_vector_pool: PhysicalVectorBytePoolV1,
-    #[serde(default, skip)]
-    fail_before_publication_swap: bool,
 }
 
 impl VectorGenerationStateMachineV1 {
@@ -1110,7 +1112,7 @@ impl VectorGenerationStateMachineV1 {
 
     /// Discard any checkpointed execution for the same deterministic build
     /// identity and restart projection from its authoritative query inputs.
-    /// Already-published generations and the active pointer are untouched.
+    /// Already-published generations are untouched.
     pub fn rebuild_generation(
         &mut self,
         plan: VectorGenerationPlanV1,
@@ -1140,7 +1142,7 @@ impl VectorGenerationStateMachineV1 {
     }
 
     /// Discard one unpublished build without changing any immutable
-    /// generation or the active pointer. This is the cancellation boundary
+    /// generation. This is the cancellation boundary
     /// for asynchronous projection work.
     pub fn cancel_generation(&mut self, build_id: &VectorGenerationBuildIdV1) -> bool {
         self.staged.remove(build_id).is_some()
@@ -1313,17 +1315,12 @@ impl VectorGenerationStateMachineV1 {
         Ok(checkpoint)
     }
 
-    /// Validate a fully staged immutable generation and atomically publish
-    /// both its record and active pointer. Partial generations remain in
-    /// `staged` and are never returned by active-generation reads.
+    /// Validate and atomically publish a fully staged immutable generation.
+    /// Partial generations remain in `staged` and are never readable.
     pub fn publish_generation(
         &mut self,
         build_id: &VectorGenerationBuildIdV1,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
     ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        if self.published.active_generation.as_ref() != expected_active_generation {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
         let staged = self
             .staged
             .get(build_id)
@@ -1347,8 +1344,7 @@ impl VectorGenerationStateMachineV1 {
             validate_vector_row(&staged.plan, &embedding_key, vector)?;
         }
 
-        let manifest_digest =
-            generation_identity_digest(&staged.plan, &staged.vectors, &staged.tombstones)?;
+        let manifest_digest = generation_identity_digest(&staged.plan)?;
         let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
         let tombstone_digests = staged.tombstones;
         let mut generation = PublishedVectorGenerationV1 {
@@ -1385,10 +1381,6 @@ impl VectorGenerationStateMachineV1 {
             }
             None => false,
         };
-        if self.fail_before_publication_swap {
-            self.fail_before_publication_swap = false;
-            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
-        }
         intern_generation_vectors(&self.physical_vector_pool, &mut self.published, &generation)?;
         let checkpoint = if replays_existing {
             self.published
@@ -1404,67 +1396,12 @@ impl VectorGenerationStateMachineV1 {
                 .insert(generation_id.clone(), generation);
             checkpoint
         };
-        self.published.active_generation = Some(generation_id.clone());
         self.staged.remove(build_id);
         Ok(VectorGenerationPublicationV1 {
             generation_id,
             manifest_digest,
             checkpoint,
         })
-    }
-
-    pub fn active_generation_id(&self) -> Option<&VectorGenerationIdV1> {
-        self.published.active_generation.as_ref()
-    }
-
-    /// Atomically repoint reads to an already-published immutable generation.
-    pub fn activate_generation(
-        &mut self,
-        generation_id: &VectorGenerationIdV1,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
-    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        if self.published.active_generation.as_ref() != expected_active_generation {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
-        let generation = self
-            .published
-            .generations
-            .get(generation_id)
-            .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
-        generation.validate_persisted()?;
-        let publication = VectorGenerationPublicationV1 {
-            generation_id: generation.generation_id().clone(),
-            manifest_digest: generation.manifest_digest().clone(),
-            checkpoint: generation.checkpoint().clone(),
-        };
-        if self.fail_before_publication_swap {
-            self.fail_before_publication_swap = false;
-            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
-        }
-        self.published.active_generation = Some(generation_id.clone());
-        Ok(publication)
-    }
-
-    /// Atomically disable semantic reads while retaining immutable generations
-    /// for an exact offline rollback.
-    pub fn deactivate_generation(
-        &mut self,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
-    ) -> Result<(), VectorGenerationStoreErrorV1> {
-        if self.published.active_generation.as_ref() != expected_active_generation {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
-        if self.fail_before_publication_swap {
-            self.fail_before_publication_swap = false;
-            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
-        }
-        self.published.active_generation = None;
-        Ok(())
-    }
-
-    pub fn active_checkpoint(&self) -> Option<&VectorProjectionCheckpointV1> {
-        self.active_generation()
-            .map(PublishedVectorGenerationV1::checkpoint)
     }
 
     /// The checkpoint of one staged build, which is how a resumed run learns
@@ -1474,28 +1411,6 @@ impl VectorGenerationStateMachineV1 {
         build_id: &VectorGenerationBuildIdV1,
     ) -> Option<&VectorProjectionCheckpointV1> {
         self.staged.get(build_id).map(|staged| &staged.checkpoint)
-    }
-
-    pub fn active_generation(&self) -> Option<&PublishedVectorGenerationV1> {
-        self.active_generation_id()
-            .and_then(|id| self.published.generations.get(id))
-    }
-
-    /// Return the active immutable generation only when every query-facing
-    /// projection and source identity matches exactly. A staged replacement
-    /// is never considered, so incompatible searches omit semantics rather
-    /// than reading stale or partial rows.
-    pub fn active_generation_for(
-        &self,
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
-    ) -> Option<&PublishedVectorGenerationV1> {
-        self.active_generation().filter(|generation| {
-            generation.embedding_key() == embedding_key
-                && generation.source_generation() == source_generation
-                && generation.source_manifest_digest() == source_manifest_digest
-        })
     }
 
     pub fn generation(
@@ -1522,10 +1437,6 @@ impl VectorGenerationStateMachineV1 {
             .physical_vectors
             .get(physical_id)
             .map(|payload| Arc::clone(&payload.values.0))
-    }
-
-    pub fn fail_before_publication_swap_once(&mut self) {
-        self.fail_before_publication_swap = true;
     }
 }
 
@@ -1640,13 +1551,6 @@ fn intern_generation_vectors(
 fn validate_loaded_state(
     state: &VectorGenerationStateMachineV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
-    if let Some(active) = &state.published.active_generation
-        && !state.published.generations.contains_key(active)
-    {
-        return Err(VectorGenerationStoreErrorV1::Storage(
-            "active vector generation pointer is dangling".to_string(),
-        ));
-    }
     for (generation_id, generation) in &state.published.generations {
         if generation.generation_id() != generation_id {
             return Err(VectorGenerationStoreErrorV1::Storage(
@@ -1985,31 +1889,6 @@ fn storage_error(error: impl std::fmt::Display) -> VectorGenerationStoreErrorV1 
     VectorGenerationStoreErrorV1::Storage(error.to_string())
 }
 
-/// Derive the immutable vector-generation identity from projected content,
-/// not from resumable execution evidence. Receipt batches and checkpoints
-/// remain available for audit but must not change the generation they produced.
-fn generation_identity_digest(
-    plan: &VectorGenerationPlanV1,
-    vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
-    tombstones: &BTreeMap<CodeSearchChunkId, ContentDigest>,
-) -> Result<ManifestDigest, VectorGenerationStoreErrorV1> {
-    let vector_digests = vectors
-        .iter()
-        .map(|(chunk_id, vector)| (chunk_id, &vector.output_digest))
-        .collect::<Vec<_>>();
-    let tombstone_digests = tombstones.iter().collect::<Vec<_>>();
-    canonical_sha256(&(
-        VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN,
-        &plan.target_projection_key,
-        &plan.source_generation,
-        &plan.source_manifest_digest,
-        &plan.expected_chunk_ids,
-        vector_digests,
-        tombstone_digests,
-    ))
-    .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))
-}
-
 fn validate_plan(plan: &VectorGenerationPlanV1) -> Result<(), VectorGenerationStoreErrorV1> {
     if plan.target_projection_key.kind != ProjectionKindV1::Embedding {
         return Err(VectorGenerationStoreErrorV1::InvalidPlan(
@@ -2154,9 +2033,6 @@ fn validate_base_digest(
 pub type FakeVectorGenerationStoreV1 = VectorGenerationStateMachineV1;
 
 #[cfg(test)]
-mod graph_adapter_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_domain::{
@@ -2259,8 +2135,7 @@ mod tests {
             expected_chunk_ids: vec![chunk_id.clone()].into(),
             base_generation: None,
         };
-        let manifest_digest =
-            generation_identity_digest(&plan, &vectors, &BTreeMap::new()).expect("manifest digest");
+        let manifest_digest = generation_identity_digest(&plan).expect("manifest digest");
         let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
         let request_digest = manifest_digest_for_test_request(generation_digest);
         let mut batch = ProjectionBatchReceiptV1 {
@@ -2409,6 +2284,12 @@ mod tests {
             .expect("base vector")
             .chunk_digest
             .clone();
+        let base_output_digest = base
+            .vectors
+            .get(&chunk_id)
+            .expect("base vector")
+            .output_digest
+            .clone();
         let base_id = base.generation_id().clone();
         let mut store = FakeVectorGenerationStoreV1::new();
         insert_generation(&mut store, base);
@@ -2458,8 +2339,22 @@ mod tests {
             })
             .expect("split-batch build");
         store
-            .commit_batch(&split_build, None, compatible)
+            .commit_batch(&split_build, None, compatible.clone())
             .expect("a per-batch changed-set digest commits against the plan");
+        let durable_chunks = graph_adapter::transitions::semantic_stage_chunk_receipts(
+            &store,
+            &split_build,
+            &compatible,
+        )
+        .expect("reused batch binds its carried native vector");
+        assert_eq!(durable_chunks.len(), 1);
+        assert_eq!(
+            durable_chunks[0]
+                .output_digest
+                .as_ref()
+                .map(|digest| digest.as_str()),
+            Some(base_output_digest.as_str())
+        );
         let staged = store.staged.get(&split_build).expect("staged build");
         assert_eq!(
             staged
@@ -2503,7 +2398,6 @@ mod tests {
         );
         let mut store = FakeVectorGenerationStoreV1::new();
         insert_generation(&mut store, base);
-        store.published.active_generation = Some(base_id.clone());
         let build = store
             .begin_generation(VectorGenerationPlanV1 {
                 target_projection_key: embedding.projection_key().clone(),
@@ -2517,97 +2411,15 @@ mod tests {
             .commit_batch(&build, None, prepared)
             .expect("complete reused batch");
         let publication = store
-            .publish_generation(&build, Some(&base_id))
-            .expect("atomic publication");
+            .publish_generation(&build)
+            .expect("immutable publication");
 
         assert!(!store.staged.contains_key(&build));
-        assert_eq!(
-            store.active_generation_id(),
-            Some(&publication.generation_id)
-        );
         store
-            .active_generation()
-            .expect("current generation")
+            .generation(&publication.generation_id)
+            .expect("published generation")
             .validate_persisted()
-            .expect("current generation is complete");
-    }
-
-    #[test]
-    fn active_pointer_cas_fault_restart_and_semantic_off_are_atomic() {
-        let embedding = admitted_embedding();
-        let first = logical_generation(
-            'a',
-            embedding.clone(),
-            "code-generation.atomic-a",
-            '1',
-            "chunk.v1.atomic-a",
-            'a',
-            vec![0.25],
-        );
-        let second = logical_generation(
-            'b',
-            embedding,
-            "code-generation.atomic-b",
-            '2',
-            "chunk.v1.atomic-b",
-            'b',
-            vec![0.75],
-        );
-        let mut store = FakeVectorGenerationStoreV1::new();
-        let first_id = insert_generation(&mut store, first);
-        let second_id = insert_generation(&mut store, second);
-        store.published.active_generation = Some(first_id.clone());
-
-        assert_eq!(
-            store.activate_generation(&second_id, None),
-            Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
-        );
-        assert_eq!(store.active_generation_id(), Some(&first_id));
-
-        store.fail_before_publication_swap_once();
-        assert_eq!(
-            store.activate_generation(&second_id, Some(&first_id)),
-            Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
-        );
-        assert_eq!(store.active_generation_id(), Some(&first_id));
-
-        store
-            .activate_generation(&second_id, Some(&first_id))
-            .expect("activate replacement generation");
-        assert_eq!(
-            store.deactivate_generation(Some(&first_id)),
-            Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
-        );
-        assert_eq!(store.active_generation_id(), Some(&second_id));
-        // The state document carries neither float payloads nor corpus-sized
-        // collections; a restart resolves both from their own tables, which
-        // this round trip stands in for.
-        let mut restarted = restart_round_trip(&mut store);
-        restarted
-            .ensure_physical_reuse_index()
-            .expect("rebuild physical reuse index");
-        validate_loaded_state(&restarted).expect("validate restarted vector state");
-        assert_eq!(restarted.active_generation_id(), Some(&second_id));
-
-        restarted.fail_before_publication_swap_once();
-        assert_eq!(
-            restarted.deactivate_generation(Some(&second_id)),
-            Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
-        );
-        assert_eq!(restarted.active_generation_id(), Some(&second_id));
-
-        restarted
-            .deactivate_generation(Some(&second_id))
-            .expect("disable semantic generation");
-        assert_eq!(restarted.active_generation_id(), None);
-        assert!(
-            restarted.generation(&second_id).is_some(),
-            "semantic-off retains the immutable generation for rollback"
-        );
-        restarted
-            .activate_generation(&second_id, None)
-            .expect("restore exact retained generation");
-        assert_eq!(restarted.active_generation_id(), Some(&second_id));
+            .expect("published generation is complete");
     }
 
     #[test]
@@ -2648,7 +2460,6 @@ mod tests {
             .published
             .generations
             .insert(first_generation.clone(), first.clone());
-        first_store.published.active_generation = Some(first_generation.clone());
         intern_generation_vectors(
             &second_store.physical_vector_pool,
             &mut second_store.published,
@@ -2659,7 +2470,6 @@ mod tests {
             .published
             .generations
             .insert(second_generation.clone(), second.clone());
-        second_store.published.active_generation = Some(second_generation.clone());
 
         let first_values = first_store
             .physical_vector_values(&first_generation, &first_chunk)
@@ -2674,12 +2484,6 @@ mod tests {
         assert_ne!(first.source_generation(), second.source_generation());
         assert_ne!(first_chunk, second_chunk);
         assert_ne!(first.receipts(), second.receipts());
-        assert_eq!(first_store.active_generation_id(), Some(&first_generation));
-        assert_eq!(
-            second_store.active_generation_id(),
-            Some(&second_generation),
-            "each worktree retains its own active pointer"
-        );
 
         for (generation_digest, embedding_key) in [
             (
@@ -2761,11 +2565,6 @@ mod tests {
                 .physical_vector_values(&first_generation, &first_chunk)
                 .unwrap()
         ));
-        assert_eq!(first_store.active_generation_id(), Some(&first_generation));
-        assert_eq!(
-            second_store.active_generation_id(),
-            Some(&second_generation)
-        );
 
         let conflicting = logical_generation(
             '8',
@@ -2813,12 +2612,9 @@ mod tests {
                 output_digest: content_digest('d'),
             },
         )]);
-        let tombstones = BTreeMap::new();
-
-        let first = generation_identity_digest(&plan, &vectors, &tombstones)
-            .expect("identity from vector content");
-        let second = generation_identity_digest(&plan, &vectors, &tombstones)
-            .expect("identity remains independent from receipt/checkpoint batching");
+        let first = generation_identity_digest(&plan).expect("identity from admitted plan");
+        let second = generation_identity_digest(&plan)
+            .expect("identity remains independent from vector execution output");
 
         assert_eq!(first, second);
 
@@ -2827,7 +2623,7 @@ mod tests {
             source_generation: plan.source_generation.clone(),
             source_manifest_digest: plan.source_manifest_digest.clone(),
             completed_batches: 1,
-            last_request_digest: Some(manifest_digest('e')),
+            last_request_digest: Some(manifest_digest('a')),
             last_publication_digest: Some(manifest_digest('f')),
         };
         let published = PublishedVectorGenerationV1 {
@@ -2911,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_state_rejects_tombstone_vector_overlap_and_dangling_active() {
+    fn persisted_state_rejects_tombstone_vector_overlap() {
         let embedding_key = admitted_embedding();
         let projection_key = embedding_key.projection_key().clone();
         let chunk_id = id::<CodeSearchChunkId>("chunk.v1.alpha");
@@ -2984,24 +2780,118 @@ mod tests {
         generation.checkpoint.last_publication_digest =
             Some(deletion_batch.publication_digest.clone());
         *generation.receipts = vec![deletion_batch];
-        generation.manifest_digest = generation_identity_digest(
-            &VectorGenerationPlanV1 {
-                target_projection_key: generation.projection_key.clone(),
-                source_generation: generation.source_generation.clone(),
-                source_manifest_digest: generation.source_manifest_digest.clone(),
-                expected_chunk_ids: vec![].into(),
-                base_generation: None,
-            },
-            &generation.vectors,
-            &generation.tombstone_digests,
-        )
+        generation.manifest_digest = generation_identity_digest(&VectorGenerationPlanV1 {
+            target_projection_key: generation.projection_key.clone(),
+            source_generation: generation.source_generation.clone(),
+            source_manifest_digest: generation.source_manifest_digest.clone(),
+            expected_chunk_ids: vec![].into(),
+            base_generation: None,
+        })
         .expect("tombstone generation manifest");
         generation.generation_id = VectorGenerationIdV1::new(generation.manifest_digest.clone());
         assert!(generation.validate_persisted().is_ok());
+        let mut sealed_state = FakeVectorGenerationStoreV1::new();
+        sealed_state
+            .published
+            .generations
+            .insert(generation.generation_id().clone(), generation);
+        let sealed = seal_test_state(&mut sealed_state);
+        let persisted = sealed_state
+            .published
+            .generations
+            .values()
+            .next()
+            .expect("sealed deletion-to-empty generation");
+        let encoded = serde_json::to_string(persisted).expect("serialize deletion generation");
+        let mut reloaded: PublishedVectorGenerationV1 =
+            serde_json::from_str(&encoded).expect("deserialize deletion generation");
+        reloaded
+            .visit_external_slots(&mut |slot| {
+                let Some(address) = slot.address().cloned() else {
+                    return Ok(());
+                };
+                slot.fill(sealed.get(&address).expect("sealed deletion collection"))
+            })
+            .expect("hydrate deletion generation");
+        reloaded
+            .validate_persisted()
+            .expect("deletion evidence does not enter eligible membership identity");
+    }
 
-        let mut state = FakeVectorGenerationStoreV1::default();
-        state.published.active_generation = Some(VectorGenerationIdV1::new(manifest_digest('9')));
-        assert!(validate_loaded_state(&state).is_err());
+    #[test]
+    fn initially_empty_generation_publishes_and_reloads_without_inference() {
+        let embedding_key = admitted_embedding();
+        let source_generation = id::<CodeGenerationId>("code-generation.empty");
+        let mut changes = ChangedCodeChunkSetV1 {
+            from_generation: None,
+            to_generation: source_generation.clone(),
+            manifest_digest: manifest_digest('0'),
+            added_or_changed: Vec::new(),
+            deleted: Vec::new(),
+            reused: Vec::new(),
+        };
+        changes.manifest_digest = changes.compute_digest().expect("empty source digest");
+        let mut request = ProjectionBatchRequestV1 {
+            request_digest: manifest_digest('0'),
+            changes,
+            previous_projection_key: None,
+            target_projection_key: embedding_key.projection_key().clone(),
+            replay_reason: ProjectionReplayReasonV1::FullRebuildIncompatible,
+        };
+        request.request_digest =
+            tracedecay_code_index::projection::expected_request_digest(&request)
+                .expect("empty request digest");
+        let receipt = tracedecay_code_index::projection::build_batch_receipt(&request, &[])
+            .expect("empty batch receipt");
+        let plan = VectorGenerationPlanV1 {
+            target_projection_key: request.target_projection_key.clone(),
+            source_generation,
+            source_manifest_digest: request.changes.manifest_digest.clone(),
+            expected_chunk_ids: Vec::new().into(),
+            base_generation: None,
+        };
+        let mut store = FakeVectorGenerationStoreV1::new();
+        let build = store
+            .begin_generation(plan)
+            .expect("begin empty generation");
+        store
+            .commit_batch(
+                &build,
+                None,
+                PreparedVectorGenerationV1 {
+                    embedding_key,
+                    request,
+                    receipt,
+                    vectors: Vec::new(),
+                    tombstones: Vec::new(),
+                },
+            )
+            .expect("commit canonical empty control batch");
+        let publication = store
+            .publish_generation(&build)
+            .expect("publish empty generation");
+        let sealed = seal_test_state(&mut store);
+        let persisted = store
+            .published
+            .generations
+            .get(&publication.generation_id)
+            .expect("persisted empty generation");
+        let encoded = serde_json::to_string(persisted).expect("serialize empty generation");
+        let mut reloaded: PublishedVectorGenerationV1 =
+            serde_json::from_str(&encoded).expect("deserialize empty generation");
+        reloaded
+            .visit_external_slots(&mut |slot| {
+                let Some(address) = slot.address().cloned() else {
+                    return Ok(());
+                };
+                slot.fill(sealed.get(&address).expect("sealed empty collection"))
+            })
+            .expect("hydrate empty generation");
+        reloaded
+            .validate_persisted()
+            .expect("empty immutable generation remains valid after restart");
+        assert!(reloaded.vectors().is_empty());
+        assert!(reloaded.tombstones().is_empty());
     }
 
     #[test]
@@ -3086,5 +2976,4 @@ mod tests {
             "retiring the generations releases every key they interned"
         );
     }
-
 }

@@ -7,7 +7,7 @@ use tracedecay_graph_db::{
 };
 
 use super::super::super::{VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1};
-use super::super::persistence::{graph_namespace, map_graph_error};
+use super::super::persistence::map_graph_error;
 use super::{
     BASE_GENERATION, BUILD_CATALOG_KIND, BUILD_ID, CONTROL_ID, GENERATION_CATALOG_KIND,
     GENERATION_ID, ROW_COUNT, VECTOR_BYTES, build_id, entity_id, generation_entity_id,
@@ -31,7 +31,7 @@ pub(crate) struct NativeBuildCatalogEntryV1 {
 }
 
 pub(crate) fn read_generation_catalog(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Vec<NativeGenerationCatalogEntryV1>, VectorGenerationStoreErrorV1> {
     let visits = catalog_visits(snapshot, GENERATION_CATALOG_KIND, Arc::clone(&cancellation))?;
@@ -39,7 +39,11 @@ pub(crate) fn read_generation_catalog(
         .into_iter()
         .map(|identity| {
             let row = snapshot
-                .entity(&graph_namespace()?, &identity, Arc::clone(&cancellation))
+                .entity(
+                    &snapshot.projection().namespace,
+                    &identity,
+                    Arc::clone(&cancellation),
+                )
                 .map_err(map_graph_error)?
                 .ok_or_else(|| corrupt("semantic vector generation catalog target is missing"))?;
             decode_generation_catalog_entry(&row)
@@ -48,11 +52,11 @@ pub(crate) fn read_generation_catalog(
 }
 
 pub(crate) fn read_generation_catalog_entry(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     generation: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<NativeGenerationCatalogEntryV1>, VectorGenerationStoreErrorV1> {
-    let namespace = graph_namespace()?;
+    let namespace = snapshot.projection().namespace.clone();
     let relation_id = generation_catalog_relation_id(generation)?;
     let Some(catalog_relation) = snapshot
         .relation(&namespace, &relation_id, Arc::clone(&cancellation))
@@ -82,7 +86,7 @@ pub(crate) fn read_generation_catalog_entry(
 }
 
 pub(crate) fn read_build_catalog(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Vec<NativeBuildCatalogEntryV1>, VectorGenerationStoreErrorV1> {
     let visits = catalog_visits(snapshot, BUILD_CATALOG_KIND, Arc::clone(&cancellation))?;
@@ -90,7 +94,11 @@ pub(crate) fn read_build_catalog(
         .into_iter()
         .map(|identity| {
             let row = snapshot
-                .entity(&graph_namespace()?, &identity, Arc::clone(&cancellation))
+                .entity(
+                    &snapshot.projection().namespace,
+                    &identity,
+                    Arc::clone(&cancellation),
+                )
                 .map_err(map_graph_error)?
                 .ok_or_else(|| corrupt("semantic vector build catalog target is missing"))?;
             Ok(NativeBuildCatalogEntryV1 {
@@ -114,13 +122,13 @@ pub(crate) fn generation_catalog_relation_id(
 }
 
 fn catalog_visits(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     kind: &str,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Vec<GraphEntityId>, VectorGenerationStoreErrorV1> {
     let result = snapshot
         .traverse(TraversalRequest {
-            namespace: graph_namespace()?,
+            namespace: snapshot.projection().namespace.clone(),
             start: entity_id(CONTROL_ID)?,
             relation_kinds: BTreeSet::from([relation_kind(kind)?]),
             direction: GraphTraversalDirection::Outgoing,

@@ -64,6 +64,56 @@ impl ProductionSemanticActivationCoordinatorV1 {
         }
     }
 
+    pub(crate) fn configuration_inventory_authority(
+        &self,
+    ) -> ProductionSemanticRetrievalConfigurationStoreV1 {
+        self.configuration.clone()
+    }
+
+    /// Re-observe the exact latest durable transition after a verified model
+    /// lifecycle recovery. The registrar remains the sole live-route publisher;
+    /// this method neither changes configuration nor publishes graph state.
+    pub async fn reobserve_current_activation(
+        &self,
+    ) -> Result<
+        Option<(
+            i64,
+            tracedecay_domain::ConfigurationRevisionId,
+            ManifestDigest,
+        )>,
+        SemanticActivationCoordinationErrorV1,
+    > {
+        let Some(committed) = self
+            .configuration
+            .current_committed_state()
+            .await
+            .map_err(map_configuration_error)?
+        else {
+            return Ok(None);
+        };
+        let identity = (
+            committed.epoch,
+            committed.state.configuration_revision().clone(),
+            committed.transition_digest.clone(),
+        );
+        self.owner
+            .runtime()
+            .reconcile_committed_activation(committed)
+            .await
+            .map_err(|error| match error {
+                super::RetrievalProfileActivationObserverErrorV1::Unavailable => {
+                    SemanticActivationCoordinationErrorV1::Unavailable
+                }
+                super::RetrievalProfileActivationObserverErrorV1::Rejected => {
+                    SemanticActivationCoordinationErrorV1::Rejected
+                }
+                super::RetrievalProfileActivationObserverErrorV1::Conflict => {
+                    SemanticActivationCoordinationErrorV1::Conflict
+                }
+            })?;
+        Ok(Some(identity))
+    }
+
     pub async fn bootstrap_query_profile(
         &self,
         configuration: ConfigurationCurrentStateV1,

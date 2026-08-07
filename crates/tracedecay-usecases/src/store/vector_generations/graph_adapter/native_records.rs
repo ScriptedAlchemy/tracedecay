@@ -3,21 +3,31 @@ use std::sync::Arc;
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, ManifestDigest,
-    ProjectionKeyV1, VectorGenerationIdV1,
+    ProjectionKeyV1, ProjectionOperationV1, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphLabel, GraphProjectionTelemetryRequest,
-    GraphProperty, GraphRelation, GraphSnapshot, GraphVector, GraphWatermark,
+    GraphProperty, GraphRelation, GraphVector, GraphWatermark,
+    semantic_vector_native::{
+        BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_CATALOG_KIND, BUILD_ID,
+        BUILD_LABEL, BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_DIGEST, CHUNK_ID, CONTAINS_KIND,
+        CONTROL_ID, CONTROL_LABEL, EMBEDDING_KEY, EXPECTED_COUNT, GENERATION_CATALOG_KIND,
+        GENERATION_ID, GENERATION_LABEL, GENERATION_RECEIPT_LABEL, GENERATION_TOMBSTONE_LABEL,
+        GENERATION_VECTOR_LABEL, MANIFEST_DIGEST, ORDINAL, OUTPUT_DIGEST, PREPARED_DIGEST,
+        PRIOR_DIGEST, RECEIPT, RECEIPT_COUNT, REQUEST_DIGEST, REVISION, ROW_COUNT,
+        SOURCE_GENERATION, SOURCE_MANIFEST, STAGED_TOMBSTONE_LABEL, STAGED_VECTOR_LABEL,
+        TARGET_PROJECTION, TOMBSTONE_COUNT, VECTOR, VECTOR_BYTES, VECTOR_COUNT,
+    },
 };
 
+use super::super::identity::generation_identity_digest;
 use super::super::{
-    ProjectedChunkVectorV1, PublishedVectorGenerationV1, VectorGenerationStateMachineV1,
-    VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
+    PreparedVectorGenerationV1, ProjectedChunkVectorV1, PublishedVectorGenerationV1,
+    VectorGenerationBuildIdV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
+    VectorProjectionCheckpointV1,
 };
-use super::persistence::{
-    generation_label, graph_namespace, graph_projection, map_graph_error, storage_error,
-    vector_metric,
-};
+use super::persistence::{generation_label, map_graph_error, storage_error, vector_metric};
+use super::snapshot::SemanticVectorVerifiedRead;
 
 mod catalog;
 mod scoped;
@@ -31,61 +41,27 @@ pub(super) use scoped::{
     ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records, read_generation_records,
 };
 
+pub(super) fn generation_vector_entity_id(
+    generation: &VectorGenerationIdV1,
+    chunk: &CodeSearchChunkId,
+) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
+    scoped_entity_id(
+        "generation-vector",
+        generation.as_digest().as_str(),
+        &chunk.to_string(),
+    )
+}
+
 use support::{
     build_entity_id, build_id, bytes_property, content_digest, corrupt, digest, entity, entity_id,
     generation_entity_id, generation_id, graph_label, i64_property, insert_entity, insert_relation,
     optional_bytes, optional_bytes_property, optional_digest_property, optional_generation,
-    parse_id, properties,
-    property_name, relation, relation_id, relation_kind, require_labels, required_bytes,
+    parse_id, properties, property_name, relation, relation_kind, require_labels, required_bytes,
     required_property, required_string, required_u64, scoped_entity_id, string_property,
 };
 
-const CONTROL_ID: &str = "semantic-vector:control";
-const ACTIVE_RELATION_ID: &str = "semantic-vector:active";
-const CONTROL_LABEL: &str = "semantic-vector-control-v1";
-const BUILD_LABEL: &str = "semantic-vector-build-v1";
-const BUILD_MEMBER_LABEL: &str = "semantic-vector-build-member-v1";
-const STAGED_VECTOR_LABEL: &str = "semantic-vector-staged-vector-v1";
-const STAGED_TOMBSTONE_LABEL: &str = "semantic-vector-staged-tombstone-v1";
-const BUILD_BATCH_LABEL: &str = "semantic-vector-build-batch-v1";
-const GENERATION_LABEL: &str = "semantic-vector-generation-v1";
-const GENERATION_VECTOR_LABEL: &str = "semantic-vector-generation-vector-v1";
-const GENERATION_TOMBSTONE_LABEL: &str = "semantic-vector-generation-tombstone-v1";
-const GENERATION_RECEIPT_LABEL: &str = "semantic-vector-generation-receipt-v1";
-const CONTAINS_KIND: &str = "semantic_vector_contains";
-const BASE_KIND: &str = "semantic_vector_base";
-const ACTIVE_KIND: &str = "semantic_vector_active";
-const BUILD_CATALOG_KIND: &str = "semantic_vector_build_catalog";
-const GENERATION_CATALOG_KIND: &str = "semantic_vector_generation_catalog";
-const REVISION: &str = "revision";
-const BUILD_ID: &str = "build_id";
-const GENERATION_ID: &str = "generation_id";
-const CHUNK_ID: &str = "chunk_id";
-const CHUNK_DIGEST: &str = "chunk_digest";
-const OUTPUT_DIGEST: &str = "output_digest";
-const TARGET_PROJECTION: &str = "target_projection";
-const SOURCE_GENERATION: &str = "source_generation";
-const SOURCE_MANIFEST: &str = "source_manifest";
-const BASE_GENERATION: &str = "base_generation";
-const EMBEDDING_KEY: &str = "embedding_key";
-const CHECKPOINT: &str = "checkpoint";
-const MANIFEST_DIGEST: &str = "manifest_digest";
-const REQUEST_DIGEST: &str = "request_digest";
-const PREPARED_DIGEST: &str = "prepared_digest";
-const RECEIPT: &str = "receipt";
-const PRIOR_DIGEST: &str = "prior_digest";
-const ORDINAL: &str = "ordinal";
-const ROW_COUNT: &str = "row_count";
-const VECTOR_BYTES: &str = "vector_bytes";
-const EXPECTED_COUNT: &str = "expected_count";
-const VECTOR_COUNT: &str = "vector_count";
-const TOMBSTONE_COUNT: &str = "tombstone_count";
-const BATCH_COUNT: &str = "batch_count";
-const RECEIPT_COUNT: &str = "receipt_count";
-const VECTOR: &str = "vector";
-
 pub(super) fn read_cataloged_generation_records(
-    snapshot: &GraphSnapshot,
+    snapshot: &SemanticVectorVerifiedRead,
     generation_id: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
@@ -128,8 +104,6 @@ pub(super) struct NativeGraphStateV1 {
 pub(super) struct NativeStateMetadataV1 {
     pub watermark: GraphWatermark,
     pub revision: u64,
-    pub active_generation: Option<VectorGenerationIdV1>,
-    pub active_row_count: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -140,7 +114,8 @@ pub(super) struct NativeGenerationMetadataV1 {
     pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
 }
 
-pub(super) fn encode_state(
+#[cfg(test)]
+fn encode_legacy_state_for_test(
     state: &VectorGenerationStateMachineV1,
     revision: u64,
 ) -> Result<NativeGraphStateV1, VectorGenerationStoreErrorV1> {
@@ -254,6 +229,7 @@ pub(super) fn encode_state(
                         .embedding_key
                         .as_ref()
                         .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?,
+                    None,
                     None,
                 )?,
             )?;
@@ -401,6 +377,7 @@ pub(super) fn encode_state(
                     vector,
                     &generation.embedding_key,
                     Some(generation_label(generation_id)?),
+                    Some(generation_id),
                 )?,
             )?;
             insert_relation(
@@ -461,19 +438,203 @@ pub(super) fn encode_state(
             )?;
         }
     }
-    if let Some(active) = &state.published.active_generation {
-        insert_relation(
-            &mut relations,
-            GraphRelation::new(
-                relation_id(ACTIVE_RELATION_ID)?,
-                entity_id(CONTROL_ID)?,
-                generation_entity_id(active)?,
-                relation_kind(ACTIVE_KIND)?,
-                BTreeMap::new(),
+    Ok(NativeGraphStateV1 {
+        revision,
+        entities: entities.into_values().collect(),
+        relations: relations.into_values().collect(),
+    })
+}
+
+/// Encode one bounded projector batch directly into its immutable semantic
+/// generation identity. The semantic identity is known from the admitted plan
+/// before batch zero; no staged row namespace or terminal corpus rename exists.
+pub(super) fn encode_generation_batch_delta(
+    state: &VectorGenerationStateMachineV1,
+    build_id: &VectorGenerationBuildIdV1,
+    prepared: &PreparedVectorGenerationV1,
+    revision: u64,
+) -> Result<NativeGraphStateV1, VectorGenerationStoreErrorV1> {
+    let build = state
+        .staged
+        .get(build_id)
+        .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+    let mut entities = BTreeMap::new();
+    let mut relations = BTreeMap::new();
+    let manifest_digest = generation_identity_digest(&build.plan)?;
+    let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
+    insert_entity(
+        &mut entities,
+        entity(
+            CONTROL_ID,
+            [CONTROL_LABEL],
+            [(REVISION, i64_property(revision)?)],
+        )?,
+    )?;
+
+    let owner = generation_entity_id(&generation_id)?;
+    let vector_bytes = build.vectors.values().try_fold(0_u64, |total, vector| {
+        total
+            .checked_add(
+                u64::try_from(vector.values.len())
+                    .map_err(storage_error)?
+                    .checked_mul(4)
+                    .ok_or_else(|| corrupt("semantic vector byte count overflowed"))?,
             )
-            .map_err(map_graph_error)?,
-        )?;
+            .ok_or_else(|| corrupt("semantic vector byte count overflowed"))
+    })?;
+    let embedding = build
+        .embedding_key
+        .as_ref()
+        .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
+    insert_entity(
+        &mut entities,
+        entity(
+            owner.as_str(),
+            [GENERATION_LABEL],
+            [
+                (
+                    GENERATION_ID,
+                    string_property(generation_id.as_digest().as_str()),
+                ),
+                (
+                    TARGET_PROJECTION,
+                    bytes_property(&build.plan.target_projection_key)?,
+                ),
+                (
+                    SOURCE_GENERATION,
+                    string_property(&build.plan.source_generation.to_string()),
+                ),
+                (
+                    SOURCE_MANIFEST,
+                    string_property(build.plan.source_manifest_digest.as_str()),
+                ),
+                (
+                    BASE_GENERATION,
+                    optional_digest_property(
+                        build.plan.base_generation.as_ref().map(|id| id.as_digest()),
+                    ),
+                ),
+                (EMBEDDING_KEY, bytes_property(embedding)?),
+                (CHECKPOINT, bytes_property(&build.checkpoint)?),
+                (MANIFEST_DIGEST, string_property(manifest_digest.as_str())),
+                (ROW_COUNT, i64_property(build.vectors.len())?),
+                (VECTOR_BYTES, i64_property(vector_bytes)?),
+                (TOMBSTONE_COUNT, i64_property(build.tombstones.len())?),
+                (RECEIPT_COUNT, i64_property(build.batches.len())?),
+            ],
+        )?,
+    )?;
+    insert_relation(
+        &mut relations,
+        relation(
+            &entity_id(CONTROL_ID)?,
+            &owner,
+            GENERATION_CATALOG_KIND,
+            "generation-catalog",
+        )?,
+    )?;
+    for receipt in &prepared.receipt.receipts {
+        match receipt.operation {
+            ProjectionOperationV1::Added
+            | ProjectionOperationV1::Updated
+            | ProjectionOperationV1::Reused => {
+                let vector = build.vectors.get(&receipt.chunk_id).ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::Corrupt(
+                        "committed semantic vector receipt has no staged vector".to_owned(),
+                    )
+                })?;
+                let child = scoped_entity_id(
+                    "generation-vector",
+                    generation_id.as_digest().as_str(),
+                    &receipt.chunk_id.to_string(),
+                )?;
+                insert_entity(
+                    &mut entities,
+                    vector_entity(
+                        child.as_str(),
+                        GENERATION_VECTOR_LABEL,
+                        GENERATION_ID,
+                        generation_id.as_digest().as_str(),
+                        vector,
+                        embedding,
+                        Some(generation_label(&generation_id)?),
+                        Some(&generation_id),
+                    )?,
+                )?;
+                insert_relation(
+                    &mut relations,
+                    relation(&owner, &child, CONTAINS_KIND, "vector")?,
+                )?;
+            }
+            ProjectionOperationV1::Deleted => {
+                let prior_digest = build.tombstones.get(&receipt.chunk_id).ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::Corrupt(
+                        "committed semantic tombstone receipt has no staged tombstone".to_owned(),
+                    )
+                })?;
+                let child = scoped_entity_id(
+                    "generation-tombstone",
+                    generation_id.as_digest().as_str(),
+                    &receipt.chunk_id.to_string(),
+                )?;
+                insert_entity(
+                    &mut entities,
+                    entity(
+                        child.as_str(),
+                        [GENERATION_TOMBSTONE_LABEL],
+                        [
+                            (
+                                GENERATION_ID,
+                                string_property(generation_id.as_digest().as_str()),
+                            ),
+                            (CHUNK_ID, string_property(&receipt.chunk_id.to_string())),
+                            (PRIOR_DIGEST, string_property(prior_digest.as_str())),
+                        ],
+                    )?,
+                )?;
+                insert_relation(
+                    &mut relations,
+                    relation(&owner, &child, CONTAINS_KIND, "tombstone")?,
+                )?;
+            }
+        }
     }
+
+    let (ordinal, committed) = build
+        .batches
+        .iter()
+        .enumerate()
+        .find(|(_, batch)| batch.request_digest == prepared.request.request_digest)
+        .ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Corrupt(
+                "committed semantic vector batch has no native receipt row".to_owned(),
+            )
+        })?;
+    let batch_row = scoped_entity_id(
+        "generation-receipt",
+        generation_id.as_digest().as_str(),
+        &ordinal.to_string(),
+    )?;
+    insert_entity(
+        &mut entities,
+        entity(
+            batch_row.as_str(),
+            [GENERATION_RECEIPT_LABEL],
+            [
+                (
+                    GENERATION_ID,
+                    string_property(generation_id.as_digest().as_str()),
+                ),
+                (RECEIPT, bytes_property(&committed.receipt)?),
+                (ORDINAL, i64_property(ordinal)?),
+            ],
+        )?,
+    )?;
+    insert_relation(
+        &mut relations,
+        relation(&owner, &batch_row, CONTAINS_KIND, "batch")?,
+    )?;
+
     Ok(NativeGraphStateV1 {
         revision,
         entities: entities.into_values().collect(),
@@ -482,7 +643,7 @@ pub(super) fn encode_state(
 }
 
 pub(super) fn read_state_metadata(
-    snapshot: &GraphSnapshot,
+    snapshot: &SemanticVectorVerifiedRead,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<NativeStateMetadataV1, VectorGenerationStoreErrorV1> {
     read_optional_state_metadata(snapshot, cancellation)?.ok_or_else(|| {
@@ -497,14 +658,14 @@ pub(super) fn read_state_metadata(
 /// an unavailability error. Read paths that admit an empty store use this;
 /// mutation paths keep requiring the installed projection.
 pub(super) fn read_optional_state_metadata(
-    snapshot: &GraphSnapshot,
+    snapshot: &SemanticVectorVerifiedRead,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<NativeStateMetadataV1>, VectorGenerationStoreErrorV1> {
-    let namespace = graph_namespace()?;
+    let namespace = snapshot.projection().namespace.clone();
     let Some(telemetry) = snapshot
         .projection_telemetry(GraphProjectionTelemetryRequest {
             namespace: namespace.clone(),
-            projection: graph_projection()?,
+            projection: snapshot.projection().projection.clone(),
             cancellation: Arc::clone(&cancellation),
         })
         .map_err(map_graph_error)?
@@ -520,38 +681,20 @@ pub(super) fn read_optional_state_metadata(
         .map_err(map_graph_error)?
         .ok_or_else(|| corrupt("semantic vector control entity is missing"))?;
     require_labels(&control, [CONTROL_LABEL])?;
-    let active = snapshot
-        .relation(
-            &namespace,
-            &relation_id(ACTIVE_RELATION_ID)?,
-            Arc::clone(&cancellation),
-        )
-        .map_err(map_graph_error)?;
-    let active_generation = active.as_ref().map(decode_active_relation).transpose()?;
-    let active_row_count = match &active_generation {
-        Some(id) => snapshot
-            .entity(&namespace, &generation_entity_id(id)?, cancellation)
-            .map_err(map_graph_error)?
-            .ok_or_else(|| corrupt("active semantic vector generation is missing"))
-            .and_then(|row| required_u64(&row, ROW_COUNT))?,
-        None => 0,
-    };
     Ok(Some(NativeStateMetadataV1 {
         watermark: telemetry.watermark,
         revision: required_u64(&control, REVISION)?,
-        active_generation,
-        active_row_count,
     }))
 }
 
 pub(super) fn read_generation_metadata(
-    snapshot: &GraphSnapshot,
+    snapshot: &SemanticVectorVerifiedRead,
     generation_id: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<NativeGenerationMetadataV1>, VectorGenerationStoreErrorV1> {
     snapshot
         .entity(
-            &graph_namespace()?,
+            &snapshot.projection().namespace,
             &generation_entity_id(generation_id)?,
             cancellation,
         )
@@ -574,11 +717,15 @@ pub(super) fn read_generation_metadata(
 }
 
 pub(super) fn read_control_entity(
-    snapshot: &GraphSnapshot,
+    snapshot: &SemanticVectorVerifiedRead,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<GraphEntity, VectorGenerationStoreErrorV1> {
     snapshot
-        .entity(&graph_namespace()?, &entity_id(CONTROL_ID)?, cancellation)
+        .entity(
+            &snapshot.projection().namespace,
+            &entity_id(CONTROL_ID)?,
+            cancellation,
+        )
         .map_err(map_graph_error)?
         .ok_or_else(|| corrupt("semantic vector control entity is missing"))
 }
@@ -602,6 +749,7 @@ fn vector_entity(
     vector: &ProjectedChunkVectorV1,
     embedding: &AdmittedEmbeddingProjectionKeyV1,
     generation_row_label: Option<GraphLabel>,
+    generation_id: Option<&VectorGenerationIdV1>,
 ) -> Result<GraphEntity, VectorGenerationStoreErrorV1> {
     let mut labels = BTreeSet::from([graph_label(label)?]);
     if let Some(label) = generation_row_label {
@@ -619,7 +767,11 @@ fn vector_entity(
                 string_property(vector.output_digest.as_str()),
             ),
             (
-                VECTOR,
+                generation_id
+                    .map(super::persistence::search_vector_property)
+                    .transpose()?
+                    .as_ref()
+                    .map_or(VECTOR, tracedecay_graph_db::GraphPropertyName::as_str),
                 GraphProperty::Vector(
                     GraphVector::new(
                         vector.values.clone(),
@@ -641,7 +793,18 @@ fn decode_vector(
     source_manifest_digest: &ManifestDigest,
 ) -> Result<(CodeSearchChunkId, ProjectedChunkVectorV1), VectorGenerationStoreErrorV1> {
     let chunk_id: CodeSearchChunkId = parse_id(required_string(row, CHUNK_ID)?)?;
-    let vector = match required_property(row, VECTOR)? {
+    let vector_property = optional_generation(row, GENERATION_ID)?
+        .as_ref()
+        .map(super::persistence::search_vector_property)
+        .transpose()?;
+    let vector = match vector_property.as_ref().map_or_else(
+        || required_property(row, VECTOR),
+        |property| {
+            row.properties
+                .get(property)
+                .ok_or_else(|| corrupt("semantic vector row is missing its indexed vector"))
+        },
+    )? {
         GraphProperty::Vector(vector) => vector.values.clone(),
         _ => return Err(corrupt("semantic vector row has a non-vector value")),
     };
@@ -657,23 +820,6 @@ fn decode_vector(
             output_digest: content_digest(required_string(row, OUTPUT_DIGEST)?)?,
         },
     ))
-}
-
-fn decode_active_relation(
-    relation: &GraphRelation,
-) -> Result<VectorGenerationIdV1, VectorGenerationStoreErrorV1> {
-    if relation.identity.as_str() != ACTIVE_RELATION_ID
-        || relation.from.as_str() != CONTROL_ID
-        || relation.kind.as_str() != ACTIVE_KIND
-    {
-        return Err(corrupt("semantic vector active relation is invalid"));
-    }
-    relation
-        .to
-        .as_str()
-        .strip_prefix("semantic-vector:generation:")
-        .ok_or_else(|| corrupt("semantic vector active target is invalid"))
-        .and_then(generation_id)
 }
 
 fn generation_measure(

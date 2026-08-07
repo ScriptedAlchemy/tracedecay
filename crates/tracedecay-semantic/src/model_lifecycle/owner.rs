@@ -7,9 +7,42 @@ pub struct SemanticModelLifecycleOwnerV1 {
     inner: Arc<Mutex<LifecycleInner>>,
     worker: Mutex<AcquisitionWorkerStateV1>,
     acquisition: Arc<AcquisitionControlV1>,
+    verified_ready: watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
 }
 struct LifecycleInner {
     durable: DurableLifecycleV1,
+}
+
+fn verified_ready_artifact_digest(state: &SemanticModelLifecycleStateV1) -> Option<String> {
+    match state {
+        SemanticModelLifecycleStateV1::Installed {
+            artifact_digest, ..
+        }
+        | SemanticModelLifecycleStateV1::Ready {
+            artifact_digest, ..
+        } => Some(artifact_digest.clone()),
+        _ => None,
+    }
+}
+
+fn publish_verified_ready_event(
+    events: &watch::Sender<SemanticLifecycleVerifiedReadyEventV1>,
+    inner: &Mutex<LifecycleInner>,
+) {
+    let artifact_digest = inner
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .durable
+        .state
+        .as_ref()
+        .and_then(verified_ready_artifact_digest);
+    let Some(artifact_digest) = artifact_digest else {
+        return;
+    };
+    events.send_modify(|current| {
+        current.epoch = current.epoch.saturating_add(1);
+        current.artifact_digest = Some(artifact_digest);
+    });
 }
 
 #[derive(Default)]
@@ -61,6 +94,14 @@ impl SemanticModelLifecycleOwnerV1 {
             },
         )?;
         let durable = load_or_default_durable(&root, &catalog)?;
+        let initial_ready = SemanticLifecycleVerifiedReadyEventV1 {
+            epoch: 0,
+            artifact_digest: durable
+                .state
+                .as_ref()
+                .and_then(verified_ready_artifact_digest),
+        };
+        let (verified_ready, _) = watch::channel(initial_ready);
         let owner = Self {
             root,
             catalog,
@@ -69,6 +110,7 @@ impl SemanticModelLifecycleOwnerV1 {
             inner: Arc::new(Mutex::new(LifecycleInner { durable })),
             worker: Mutex::new(AcquisitionWorkerStateV1::default()),
             acquisition: Arc::new(AcquisitionControlV1::default()),
+            verified_ready,
         };
         let durable = owner
             .inner
@@ -90,6 +132,10 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn catalog(&self) -> &FastEmbedModelCatalogV1 {
         &self.catalog
+    }
+
+    pub fn verified_ready_events(&self) -> watch::Receiver<SemanticLifecycleVerifiedReadyEventV1> {
+        self.verified_ready.subscribe()
     }
 
     /// Re-admit the independently evaluated reranker selected by exact
@@ -520,8 +566,17 @@ impl SemanticModelLifecycleOwnerV1 {
             .selected_model
             .clone()
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
-        self.select_model(Some(&model_id), status.auto_download)?;
-        let _ = self.spawn_acquire(false, Some(&model_id));
+        let selected = self.select_model(Some(&model_id), status.auto_download)?;
+        if selected
+            .state
+            .as_ref()
+            .and_then(verified_ready_artifact_digest)
+            .is_some()
+        {
+            publish_verified_ready_event(&self.verified_ready, &self.inner);
+        } else {
+            let _ = self.spawn_acquire(false, Some(&model_id));
+        }
         Ok(self.status())
     }
 
@@ -891,17 +946,22 @@ impl SemanticModelLifecycleOwnerV1 {
         let worker_catalog = catalog.clone();
         let worker_model_id = model_id.clone();
         let worker_inner = Arc::clone(&inner);
+        let verified_ready = self.verified_ready.clone();
         let handle = thread::Builder::new()
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
-                run_acquisition(
+                let result = run_acquisition(
                     &worker_root,
                     &worker_catalog,
                     source.as_ref(),
                     &worker_model_id,
                     &epoch,
                     &worker_inner,
-                )
+                );
+                if result.is_ok() {
+                    publish_verified_ready_event(&verified_ready, &worker_inner);
+                }
+                result
             });
         match handle {
             Ok(join) => {

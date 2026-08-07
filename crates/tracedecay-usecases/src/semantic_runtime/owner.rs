@@ -9,10 +9,9 @@ use super::ports::{
 
 /// Application owner for semantic activation, status, and rollback.
 ///
-/// Configuration remains authoritative through its existing snapshot port,
-/// while the backend remains authoritative for artifact checks, indexing, and
-/// active/rollback pointer CAS. This owner only publishes semantic routing
-/// after it observes the exact activation receipt as current.
+/// The configuration store owns the sole linked active/rollback CAS. The
+/// runtime verifies immutable generations and reports whether the exact
+/// configuration-selected generation is observed in its process cache.
 pub struct SemanticRuntimeOwnerV1<C, R> {
     configuration: C,
     runtime: R,
@@ -83,22 +82,6 @@ where
         receipt
             .validate_for(&command)
             .map_err(|_| SemanticRuntimeControlErrorV1::InvalidReceipt)?;
-        let observed = self
-            .runtime
-            .status(&receipt.configuration)
-            .await
-            .map_err(map_backend_error)?;
-        let current_configuration = self.configuration_pin().await?;
-        if current_configuration != receipt.configuration
-            || !matches!(
-                observed,
-                SemanticRuntimeStateV1::Current {
-                    receipt: ref current
-                } if current == &receipt
-            )
-        {
-            return Err(SemanticRuntimeControlErrorV1::PromotionNotObserved);
-        }
         Ok(receipt)
     }
 
@@ -120,27 +103,6 @@ where
         receipt
             .validate_for(&command)
             .map_err(|_| SemanticRuntimeControlErrorV1::InvalidReceipt)?;
-        let observed = self
-            .runtime
-            .status(&receipt.configuration)
-            .await
-            .map_err(map_backend_error)?;
-        let current_configuration = self.configuration_pin().await?;
-        let promotion_observed = match (&receipt.restored_activation, &observed) {
-            (Some(restored), SemanticRuntimeStateV1::Current { receipt: current }) => {
-                current == restored
-            }
-            (
-                None,
-                SemanticRuntimeStateV1::Unavailable {
-                    reason: SemanticFallbackReasonV1::ArtifactUnavailable,
-                },
-            ) => true,
-            _ => false,
-        };
-        if current_configuration != receipt.configuration || !promotion_observed {
-            return Err(SemanticRuntimeControlErrorV1::PromotionNotObserved);
-        }
         Ok(receipt)
     }
 

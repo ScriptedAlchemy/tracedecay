@@ -1,13 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, ManifestDigest,
-    ProjectionKeyV1, VectorGenerationIdV1,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
+    ManifestDigest, ProjectionKeyV1, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphProjectionTelemetryRequest, GraphProperty, GraphSnapshot,
-    GraphWatermark, VectorMetric,
+    GraphCancellation, GraphProjectionTelemetryRequest, GraphProperty, GraphWatermark,
+};
+use tracedecay_store::{
+    GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
+    SemanticVectorChunkId, SemanticVectorChunkManifestMember, SemanticVectorPublishedGenerationKey,
+    SemanticVectorPublishedGenerationLookup, SemanticVectorStageChunkOperation,
+    SemanticVectorStageRecord,
+};
+
+use crate::semantic_runtime::{
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1,
+    VerifiedSemanticVectorGraphRuntimeV1,
 };
 
 use super::{
@@ -16,31 +27,123 @@ use super::{
     VectorProjectionCheckpointV1,
 };
 
+mod evaluation_runtime;
 mod native_records;
 mod persistence;
-mod reclaim;
-mod transitions;
-
-pub use reclaim::VectorGenerationReclaimReceiptV1;
+mod retention;
+mod search;
+mod snapshot;
+mod stage_identity;
+pub(super) mod transitions;
 
 use native_records::{
     read_build_records, read_cataloged_generation_records, read_generation_catalog,
-    read_generation_metadata, read_optional_state_metadata, read_state_metadata,
+    read_generation_metadata, read_state_metadata,
 };
 use persistence::{
-    check_cancelled, generation_label, graph_namespace, graph_projection, map_graph_error,
-    measured_resident_bytes, normalized_vector_score, required_string, resident_size_overflow,
-    search_vector_property, storage_error, vector_metric,
+    check_cancelled, generation_label, map_graph_error, measured_resident_bytes, required_string,
+    resident_size_overflow, search_vector_property, storage_error, vector_metric,
+};
+use snapshot::SemanticVectorVerifiedReadV1;
+
+pub use evaluation_runtime::{
+    IsolatedSemanticEvaluationGraphV1, isolated_semantic_evaluation_graph,
 };
 
 pub const SEMANTIC_VECTOR_GRAPH_PROJECTION: &str = "tracedecay.semantic-vector.graph";
-const VECTOR_PROPERTY: &str = "vector";
+pub const MAX_SEMANTIC_VECTOR_SEARCH_RESULTS: usize = 1_024;
+pub const MAX_SEMANTIC_HYBRID_LEXICAL_CANDIDATES: usize = 4_096;
 const CHUNK_ID_PROPERTY: &str = "chunk_id";
 const GENERATION_ID_PROPERTY: &str = "generation_id";
-const MAX_RESIDENT_VECTOR_ROWS: usize = 100_000;
+const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
+pub(super) const MAX_RESIDENT_VECTOR_ROWS: usize = 100_000;
 
 pub struct GraphVectorGenerationStoreV1 {
-    graph: Arc<GraphDb>,
+    runtime: Arc<dyn VerifiedSemanticVectorGraphRuntimeV1>,
+    snapshot: Mutex<Option<SemanticVectorVerifiedReadV1>>,
+    descriptor: Mutex<Option<SemanticVectorStageDescriptorV1>>,
+    pending: Mutex<BTreeMap<VectorGenerationBuildIdV1, PendingSemanticVectorBuildV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VectorGenerationBeginOutcomeV1 {
+    ReplayFromStart {
+        build_id: VectorGenerationBuildIdV1,
+    },
+    AlreadyPublished {
+        build_id: VectorGenerationBuildIdV1,
+        publication: VectorGenerationPublicationV1,
+    },
+}
+
+impl VectorGenerationBeginOutcomeV1 {
+    pub fn build_id(&self) -> &VectorGenerationBuildIdV1 {
+        match self {
+            Self::ReplayFromStart { build_id } | Self::AlreadyPublished { build_id, .. } => {
+                build_id
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SemanticVectorStageDescriptorV1 {
+    projection: AdmittedEmbeddingProjectionKeyV1,
+    members: Vec<SemanticVectorChunkManifestMember>,
+}
+
+struct PendingSemanticVectorBuildV1 {
+    state: VectorGenerationStateMachineV1,
+    stage: SemanticVectorStageRecord,
+    revision: u64,
+    publication: Option<VectorGenerationPublicationV1>,
+}
+
+impl SemanticVectorStageDescriptorV1 {
+    pub fn from_changes(
+        projection: AdmittedEmbeddingProjectionKeyV1,
+        changes: &ChangedCodeChunkSetV1,
+    ) -> Result<Self, VectorGenerationStoreErrorV1> {
+        let mut members = changes
+            .added_or_changed
+            .iter()
+            .chain(&changes.reused)
+            .map(|change| {
+                let digest = change.current_digest.as_ref().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector live member has no current digest".to_owned(),
+                    )
+                })?;
+                Ok(SemanticVectorChunkManifestMember {
+                    chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
+                        .map_err(storage_error)?,
+                    chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
+                        .map_err(storage_error)?,
+                    operation: SemanticVectorStageChunkOperation::Embed,
+                })
+            })
+            .chain(changes.deleted.iter().map(|change| {
+                let digest = change.prior_digest.as_ref().ok_or_else(|| {
+                    VectorGenerationStoreErrorV1::InvalidPlan(
+                        "semantic vector tombstone has no prior digest".to_owned(),
+                    )
+                })?;
+                Ok(SemanticVectorChunkManifestMember {
+                    chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
+                        .map_err(storage_error)?,
+                    chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
+                        .map_err(storage_error)?,
+                    operation: SemanticVectorStageChunkOperation::Tombstone,
+                })
+            }))
+            .collect::<Result<Vec<_>, VectorGenerationStoreErrorV1>>()?;
+        members.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+        tracedecay_store::semantic_vector_chunk_manifest_digest(&members).map_err(storage_error)?;
+        Ok(Self {
+            projection,
+            members,
+        })
+    }
 }
 
 pub struct SemanticVectorGraphSearchRequestV1 {
@@ -51,6 +154,18 @@ pub struct SemanticVectorGraphSearchRequestV1 {
     pub query: Vec<f32>,
     pub limit: usize,
     pub cancellation: Arc<dyn GraphCancellation>,
+    pub deadline: Instant,
+}
+
+struct DeadlineGraphCancellationV1 {
+    request: Arc<dyn GraphCancellation>,
+    deadline: Instant,
+}
+
+impl GraphCancellation for DeadlineGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.request.is_cancelled() || Instant::now() >= self.deadline
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,74 +208,13 @@ pub struct SemanticHybridGraphSearchResultV1 {
     pub matches: Vec<SemanticHybridGraphMatchV1>,
 }
 
-pub struct ActiveVectorGenerationPublicationGuardV1 {
-    _snapshot: GraphSnapshot,
-    watermark: GraphWatermark,
-    generation_id: VectorGenerationIdV1,
-    projection_key: ProjectionKeyV1,
-    source_generation: CodeGenerationId,
-    source_manifest_digest: ManifestDigest,
-    embedding_key: AdmittedEmbeddingProjectionKeyV1,
-}
-
-impl ActiveVectorGenerationPublicationGuardV1 {
-    pub fn watermark(&self) -> &GraphWatermark {
-        &self.watermark
-    }
-
-    pub fn generation_id(&self) -> &VectorGenerationIdV1 {
-        &self.generation_id
-    }
-
-    pub fn projection_key(&self) -> &ProjectionKeyV1 {
-        &self.projection_key
-    }
-
-    pub fn source_generation(&self) -> &CodeGenerationId {
-        &self.source_generation
-    }
-
-    pub fn source_manifest_digest(&self) -> &ManifestDigest {
-        &self.source_manifest_digest
-    }
-
-    pub fn embedding_key(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
-        &self.embedding_key
-    }
-}
-
-/// Identity-only snapshot of every cataloged vector generation plus the
-/// record revision that produced it.
-///
-/// This is the graph-side liveness authority for code-generation retention
-/// and Doctor's collectable-byte census (Plan 31 semantics: a sweep must
-/// never delete code generations vectors still read from). Retention pins the
-/// inventory by comparing two reads for equality — any vector mutation in
-/// between moves the revision and refuses the sweep.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GraphVectorRetentionInventoryV1 {
-    /// `None` when the semantic-vector projection was never installed: no
-    /// vectors exist, so nothing pins a source generation.
-    revision: Option<u64>,
-    active_generation: Option<VectorGenerationIdV1>,
-    readable_sources: BTreeSet<CodeGenerationId>,
-}
-
-impl GraphVectorRetentionInventoryV1 {
-    /// Code generations still named by cataloged vector generations.
-    pub fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
-        self.readable_sources.clone()
-    }
-}
-
-/// Active generation plus the monotonic record revision that made it current.
 #[derive(Clone, Debug)]
-pub struct ActiveGraphVectorGenerationSnapshotV1 {
+pub struct VerifiedGraphVectorGenerationSnapshotV1 {
     revision: u64,
     generation: super::PublishedVectorGenerationV1,
 }
 
-impl ActiveGraphVectorGenerationSnapshotV1 {
+impl VerifiedGraphVectorGenerationSnapshotV1 {
     pub const fn revision(&self) -> u64 {
         self.revision
     }
@@ -168,14 +222,10 @@ impl ActiveGraphVectorGenerationSnapshotV1 {
     pub fn generation(&self) -> &super::PublishedVectorGenerationV1 {
         &self.generation
     }
-
-    pub fn into_generation(self) -> super::PublishedVectorGenerationV1 {
-        self.generation
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActiveVectorResidentPlanV1 {
+pub struct VerifiedVectorResidentPlanV1 {
     pub watermark: GraphWatermark,
     pub generation_id: VectorGenerationIdV1,
     pub retained_bytes: u64,
@@ -198,29 +248,14 @@ pub struct ResidentVectorRowV1 {
 
 impl GraphVectorGenerationStoreV1 {
     pub fn open(
-        graph: Arc<GraphDb>,
-        cancellation: Arc<dyn GraphCancellation>,
+        retained: &RetainedSemanticVectorGraphV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
-        let store = Self { graph };
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = Self::read_only(retained)?;
         check_cancelled(cancellation.as_ref())?;
-        let snapshot = store.graph.snapshot().map_err(map_graph_error)?;
-        let exists = snapshot
-            .projection_telemetry(GraphProjectionTelemetryRequest {
-                namespace: graph_namespace()?,
-                projection: graph_projection()?,
-                cancellation: Arc::clone(&cancellation),
-            })
-            .map_err(map_graph_error)?
-            .is_some();
-        drop(snapshot);
-        if !exists {
-            let mut initial = VectorGenerationStateMachineV1::new();
-            match store.initialize_state(&mut initial, Arc::clone(&cancellation)) {
-                Ok(_) | Err(VectorGenerationStoreErrorV1::ConcurrentMutation) => {}
-                Err(error) => return Err(error),
-            }
+        if store.optional_snapshot()?.is_some() {
+            store.verify_existing_state(cancellation)?;
         }
-        store.verify_existing_state(cancellation)?;
         Ok(store)
     }
 
@@ -228,8 +263,155 @@ impl GraphVectorGenerationStoreV1 {
     /// [`Self::open`] this never installs or verifies the projection: a graph
     /// that has never published a semantic-vector generation reads as "no
     /// vectors" on the identity-filtered read surface.
-    pub fn read_only(graph: Arc<GraphDb>) -> Self {
-        Self { graph }
+    pub fn read_only(
+        retained: &RetainedSemanticVectorGraphV1,
+    ) -> Result<Self, VectorGenerationStoreErrorV1> {
+        let runtime = Arc::clone(retained.runtime());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(retained.cancellation()),
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
+        let snapshot = runtime
+            .recover_verified_snapshot(&authority)
+            .map_err(map_graph_error)?
+            .map(SemanticVectorVerifiedReadV1::new);
+        Ok(Self {
+            runtime,
+            snapshot: Mutex::new(snapshot),
+            descriptor: Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Recover the one verified physical graph generation bound to a stable
+    /// semantic generation identity. Serving callers use the configured
+    /// semantic pin here; graph head order is never an activation authority.
+    pub fn read_only_generation(
+        retained: &RetainedSemanticVectorGraphV1,
+        generation_id: &VectorGenerationIdV1,
+    ) -> Result<Option<Self>, VectorGenerationStoreErrorV1> {
+        let runtime = Arc::clone(retained.runtime());
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(retained.cancellation()),
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
+        let (_, binding) = runtime.staging_binding();
+        let scope = runtime.scope();
+        let key = SemanticVectorPublishedGenerationKey {
+            projection: GraphProjectionIdentityV1 {
+                shard_id: binding.shard_id.clone(),
+                namespace: GraphNamespaceV1::new(scope.projection().namespace.as_str())
+                    .map_err(storage_error)?,
+                projection: GraphProjectionIdV1::new(scope.projection().projection.as_str())
+                    .map_err(storage_error)?,
+            },
+            semantic_generation_id: generation_id.clone(),
+        };
+        let (record, verified_head) = match runtime
+            .published_semantic_generation(&key, &authority)
+            .map_err(map_graph_error)?
+        {
+            SemanticVectorPublishedGenerationLookup::Missing => return Ok(None),
+            SemanticVectorPublishedGenerationLookup::Published {
+                record,
+                verified_head,
+            } => (record, verified_head),
+        };
+        if record.plan.semantic_generation_id != *generation_id
+            || record.plan.publication_key != verified_head.key
+        {
+            return Err(VectorGenerationStoreErrorV1::Corrupt(
+                "published semantic mapping returned foreign generation evidence".to_owned(),
+            ));
+        }
+        let snapshot = runtime
+            .recover_verified_generation(&verified_head.key, &authority)
+            .map_err(map_graph_error)?;
+        if snapshot.verified_head() != &verified_head {
+            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
+        }
+        Ok(Some(Self {
+            runtime,
+            snapshot: Mutex::new(Some(SemanticVectorVerifiedReadV1::new(snapshot))),
+            descriptor: Mutex::new(None),
+            pending: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    pub fn configure_stage(
+        &self,
+        descriptor: SemanticVectorStageDescriptorV1,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        let mut current = self.descriptor.lock().map_err(|_| {
+            VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector stage descriptor lock is poisoned".to_owned(),
+            )
+        })?;
+        match current.as_ref() {
+            Some(existing)
+                if existing.projection != descriptor.projection
+                    || existing.members != descriptor.members =>
+            {
+                Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+            }
+            Some(_) => Ok(()),
+            None => {
+                *current = Some(descriptor);
+                Ok(())
+            }
+        }
+    }
+
+    fn optional_snapshot(
+        &self,
+    ) -> Result<Option<SemanticVectorVerifiedReadV1>, VectorGenerationStoreErrorV1> {
+        self.snapshot
+            .lock()
+            .map_err(|_| {
+                VectorGenerationStoreErrorV1::Unavailable(
+                    "semantic vector verified snapshot lock is poisoned".to_owned(),
+                )
+            })
+            .map(|snapshot| snapshot.clone())
+    }
+
+    fn snapshot(&self) -> Result<SemanticVectorVerifiedReadV1, VectorGenerationStoreErrorV1> {
+        self.optional_snapshot()?.ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector projection has no verified generation".to_owned(),
+            )
+        })
+    }
+
+    fn install_snapshot(
+        &self,
+        snapshot: tracedecay_graph_db::VerifiedGraphSnapshot,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        let mut current = self.snapshot.lock().map_err(|_| {
+            VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector verified snapshot lock is poisoned".to_owned(),
+            )
+        })?;
+        *current = Some(SemanticVectorVerifiedReadV1::new(snapshot));
+        Ok(())
+    }
+
+    fn refresh_snapshot(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<Option<SemanticVectorVerifiedReadV1>, VectorGenerationStoreErrorV1> {
+        let recovered = self
+            .runtime
+            .recover_verified_snapshot(authority)
+            .map_err(map_graph_error)?
+            .map(SemanticVectorVerifiedReadV1::new);
+        let mut current = self.snapshot.lock().map_err(|_| {
+            VectorGenerationStoreErrorV1::Unavailable(
+                "semantic vector verified snapshot lock is poisoned".to_owned(),
+            )
+        })?;
+        *current = recovered.clone();
+        Ok(recovered)
     }
 
     fn verify_existing_state(
@@ -237,29 +419,23 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), VectorGenerationStoreErrorV1> {
         check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        let active = metadata.active_generation;
-        let records = active
-            .as_ref()
-            .map(|generation| {
-                read_cataloged_generation_records(&snapshot, generation, Arc::clone(&cancellation))
-            })
-            .transpose()?
-            .flatten();
-        if active.is_some() && records.is_none() {
+        let snapshot = self.snapshot()?;
+        let catalog = read_generation_catalog(&snapshot, Arc::clone(&cancellation))?;
+        if catalog.len() != 1 {
             return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector generation records are missing".to_owned(),
+                "verified semantic vector graph must contain exactly one generation".to_owned(),
             ));
         }
-        if let Some(records) = records {
-            let rows = u64::try_from(records.generation.vectors().len()).map_err(storage_error)?;
-            if rows != metadata.active_row_count {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "active semantic vector generation measures are inconsistent".to_owned(),
-                ));
-            }
-        }
+        read_cataloged_generation_records(
+            &snapshot,
+            &catalog[0].generation_id,
+            Arc::clone(&cancellation),
+        )?
+        .ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Corrupt(
+                "verified semantic vector generation records are missing".to_owned(),
+            )
+        })?;
         drop(snapshot);
         check_cancelled(cancellation.as_ref())?;
         Ok(())
@@ -269,7 +445,7 @@ impl GraphVectorGenerationStoreV1 {
         &self,
         plan: VectorGenerationPlanV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
         self.begin_generation_records(plan, false, cancellation)
     }
 
@@ -277,7 +453,7 @@ impl GraphVectorGenerationStoreV1 {
         &self,
         plan: VectorGenerationPlanV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+    ) -> Result<VectorGenerationBeginOutcomeV1, VectorGenerationStoreErrorV1> {
         self.begin_generation_records(plan, true, cancellation)
     }
 
@@ -302,62 +478,28 @@ impl GraphVectorGenerationStoreV1 {
     pub async fn publish_generation(
         &self,
         build_id: &VectorGenerationBuildIdV1,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        self.publish_generation_records(build_id, expected_active_generation, cancellation)
+        self.publish_generation_records(build_id, cancellation)
     }
 
-    pub async fn activate_generation(
+    /// Read one exact semantic generation from an already identity-selected
+    /// verified physical snapshot.
+    pub async fn generation_snapshot_for(
         &self,
         generation_id: &VectorGenerationIdV1,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        self.activate_generation_records(generation_id, expected_active_generation, cancellation)
-    }
-
-    pub async fn deactivate_generation(
-        &self,
-        expected_active_generation: Option<&VectorGenerationIdV1>,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<(), VectorGenerationStoreErrorV1> {
-        self.deactivate_generation_records(expected_active_generation, cancellation)
-    }
-
-    pub async fn active_generation_id(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        read_optional_state_metadata(&snapshot, cancellation)
-            .map(|metadata| metadata.and_then(|metadata| metadata.active_generation))
-    }
-
-    /// Read the active immutable generation together with the monotonic
-    /// record revision that made it current. Callers holding the revision can
-    /// later verify currency without re-reading vector payloads.
-    pub async fn active_generation_snapshot_for(
-        &self,
         embedding_key: &AdmittedEmbeddingProjectionKeyV1,
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<ActiveGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+    ) -> Result<Option<VerifiedGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        let snapshot = self.snapshot()?;
+        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+        let Some(records) =
+            read_cataloged_generation_records(&snapshot, generation_id, cancellation)?
         else {
             return Ok(None);
         };
-        let Some(active) = metadata.active_generation.as_ref() else {
-            return Ok(None);
-        };
-        let records = read_cataloged_generation_records(&snapshot, active, cancellation)?
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Corrupt(
-                    "active semantic vector generation records are missing".to_owned(),
-                )
-            })?;
         let generation = records.generation;
         if generation.embedding_key() != embedding_key
             || generation.source_generation() != source_generation
@@ -365,84 +507,10 @@ impl GraphVectorGenerationStoreV1 {
         {
             return Ok(None);
         }
-        Ok(Some(ActiveGraphVectorGenerationSnapshotV1 {
+        Ok(Some(VerifiedGraphVectorGenerationSnapshotV1 {
             revision: metadata.revision,
             generation,
         }))
-    }
-
-    /// Return the active immutable generation only when every query-facing
-    /// projection and source identity matches exactly.
-    pub async fn active_generation_for(
-        &self,
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        Ok(self
-            .active_generation_snapshot_for(
-                embedding_key,
-                source_generation,
-                source_manifest_digest,
-                cancellation,
-            )
-            .await?
-            .map(ActiveGraphVectorGenerationSnapshotV1::into_generation))
-    }
-
-    /// True while `revision` still names the record state that activated
-    /// `generation_id`. Any later vector mutation retires the revision.
-    pub async fn active_snapshot_is_current(
-        &self,
-        revision: u64,
-        generation_id: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<bool, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        Ok(
-            read_optional_state_metadata(&snapshot, cancellation)?.is_some_and(|metadata| {
-                metadata.revision == revision
-                    && metadata.active_generation.as_ref() == Some(generation_id)
-            }),
-        )
-    }
-
-    /// Snapshot cataloged generation identities without reading any vector
-    /// payload. See [`GraphVectorRetentionInventoryV1`].
-    pub async fn retention_inventory(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphVectorRetentionInventoryV1, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
-        else {
-            return Ok(GraphVectorRetentionInventoryV1 {
-                revision: None,
-                active_generation: None,
-                readable_sources: BTreeSet::new(),
-            });
-        };
-        let catalog = read_generation_catalog(&snapshot, Arc::clone(&cancellation))?;
-        let mut readable_sources = BTreeSet::new();
-        for entry in catalog {
-            let generation = read_generation_metadata(
-                &snapshot,
-                &entry.generation_id,
-                Arc::clone(&cancellation),
-            )?
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Corrupt(
-                    "cataloged semantic vector generation metadata is missing".to_owned(),
-                )
-            })?;
-            readable_sources.insert(generation.source_generation);
-        }
-        Ok(GraphVectorRetentionInventoryV1 {
-            revision: Some(metadata.revision),
-            active_generation: metadata.active_generation,
-            readable_sources,
-        })
     }
 
     pub async fn staged_checkpoint(
@@ -450,28 +518,11 @@ impl GraphVectorGenerationStoreV1 {
         build_id: &VectorGenerationBuildIdV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<VectorProjectionCheckpointV1>, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        read_build_records(&snapshot, build_id, cancellation)
-            .map(|records| records.map(|records| records.staged.checkpoint))
-    }
-
-    pub async fn active_generation(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
-        else {
+        let Some(snapshot) = self.optional_snapshot()? else {
             return Ok(None);
         };
-        metadata
-            .active_generation
-            .as_ref()
-            .map(|generation| {
-                read_cataloged_generation_records(&snapshot, generation, cancellation)
-            })
-            .transpose()
-            .map(|records| records.flatten().map(|records| records.generation))
+        read_build_records(&snapshot, build_id, cancellation)
+            .map(|records| records.map(|records| records.staged.checkpoint))
     }
 
     pub async fn generation(
@@ -479,257 +530,29 @@ impl GraphVectorGenerationStoreV1 {
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let Some(snapshot) = self.optional_snapshot()? else {
+            return Ok(None);
+        };
         read_cataloged_generation_records(&snapshot, generation_id, cancellation)
             .map(|records| records.map(|records| records.generation))
     }
 
-    pub async fn search_active_vectors(
+    pub fn verified_revision(
         &self,
-        request: SemanticVectorGraphSearchRequestV1,
-    ) -> Result<SemanticVectorGraphSearchResultV1, VectorGenerationStoreErrorV1> {
-        check_cancelled(request.cancellation.as_ref())?;
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        self.search_active_vectors_in_snapshot(&snapshot, request)
-    }
-
-    fn search_active_vectors_in_snapshot(
-        &self,
-        snapshot: &GraphSnapshot,
-        request: SemanticVectorGraphSearchRequestV1,
-    ) -> Result<SemanticVectorGraphSearchResultV1, VectorGenerationStoreErrorV1> {
-        let metadata = read_state_metadata(snapshot, Arc::clone(&request.cancellation))?;
-        if metadata.active_generation.as_ref() != Some(&request.generation_id) {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
-        let generation = read_generation_metadata(
-            snapshot,
-            &request.generation_id,
-            Arc::clone(&request.cancellation),
-        )?
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
-        if generation.embedding_key != request.embedding_key
-            || generation.source_generation != request.source_generation
-            || generation.source_manifest_digest != request.source_manifest_digest
-        {
-            return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
-        }
-        let entities = self.generation_entities(
-            snapshot,
-            &request.generation_id,
-            Arc::clone(&request.cancellation),
-        )?;
-        if u64::try_from(entities.len()).map_err(storage_error)? != metadata.active_row_count {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector row count does not match its committed state".to_owned(),
-            ));
-        }
-        let embedding = request.embedding_key.embedding_key();
-        let expected_dimension = usize::try_from(embedding.dimensions).map_err(storage_error)?;
-        if request.query.len() != expected_dimension
-            || request.query.iter().any(|value| !value.is_finite())
-        {
-            return Err(VectorGenerationStoreErrorV1::InvalidPlan(
-                "semantic vector query shape does not match its projection".to_owned(),
-            ));
-        }
-        let mut matches = Vec::with_capacity(entities.len());
-        for entity in entities {
-            check_cancelled(request.cancellation.as_ref())?;
-            if required_string(&entity, GENERATION_ID_PROPERTY)?
-                != request.generation_id.as_digest().as_str()
-            {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "semantic vector search returned a foreign generation row".to_owned(),
-                ));
-            }
-            let chunk_id = CodeSearchChunkId::try_from(
-                required_string(&entity, CHUNK_ID_PROPERTY)?.to_owned(),
-            )
-            .map_err(storage_error)?;
-            let vector = match entity
-                .properties
-                .get(&search_vector_property(&request.generation_id)?)
-            {
-                Some(GraphProperty::Vector(vector)) => vector,
-                Some(_) => {
-                    return Err(VectorGenerationStoreErrorV1::Corrupt(
-                        "semantic vector property has the wrong type".to_owned(),
-                    ));
-                }
-                None => {
-                    return Err(VectorGenerationStoreErrorV1::Corrupt(
-                        "semantic vector property is missing".to_owned(),
-                    ));
-                }
-            };
-            if vector.dimension != expected_dimension
-                || vector.metric != vector_metric(embedding.metric)
-            {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "semantic vector shape does not match its projection".to_owned(),
-                ));
-            }
-            matches.push(SemanticVectorGraphMatchV1 {
-                chunk_id,
-                distance: exact_vector_distance(
-                    vector_metric(embedding.metric),
-                    &request.query,
-                    &vector.values,
-                )?,
-            });
-        }
-        matches.sort_by(|left, right| {
-            left.distance
-                .total_cmp(&right.distance)
-                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-        });
-        matches.truncate(request.limit);
-        Ok(SemanticVectorGraphSearchResultV1 {
-            generation_id: request.generation_id,
-            matches,
-        })
-    }
-
-    pub async fn search_active_hybrid(
-        &self,
-        request: SemanticHybridGraphSearchRequestV1,
-    ) -> Result<SemanticHybridGraphSearchResultV1, VectorGenerationStoreErrorV1> {
-        if request.limit == 0
-            || !request.vector_weight.is_finite()
-            || !request.lexical_weight.is_finite()
-            || request.vector_weight < 0.0
-            || request.lexical_weight < 0.0
-            || request.vector_weight + request.lexical_weight <= 0.0
-            || request
-                .lexical
-                .iter()
-                .any(|candidate| !candidate.score.is_finite() || candidate.score < 0.0)
-        {
-            return Err(VectorGenerationStoreErrorV1::InvalidPlan(
-                "semantic hybrid search weights, scores, and limit must be finite and positive"
-                    .to_owned(),
-            ));
-        }
-        let cancellation = Arc::clone(&request.vector.cancellation);
-        let generation_id = request.vector.generation_id.clone();
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let vector = self.search_active_vectors_in_snapshot(&snapshot, request.vector)?;
-        let eligible =
-            self.generation_chunk_ids(&snapshot, &generation_id, Arc::clone(&cancellation))?;
-        let lexical_max = request
-            .lexical
-            .iter()
-            .filter(|candidate| eligible.contains(&candidate.chunk_id))
-            .map(|candidate| candidate.score)
-            .max_by(f64::total_cmp)
-            .unwrap_or(0.0);
-        let mut fused = BTreeMap::<CodeSearchChunkId, SemanticHybridGraphMatchV1>::new();
-        for candidate in vector.matches {
-            let score = normalized_vector_score(candidate.distance);
-            fused.insert(
-                candidate.chunk_id.clone(),
-                SemanticHybridGraphMatchV1 {
-                    chunk_id: candidate.chunk_id,
-                    vector_distance: Some(candidate.distance),
-                    lexical_score: None,
-                    combined_score: request.vector_weight * score,
-                },
-            );
-        }
-        for candidate in request.lexical {
-            if !eligible.contains(&candidate.chunk_id) {
-                continue;
-            }
-            let normalized = if lexical_max == 0.0 {
-                0.0
-            } else {
-                candidate.score / lexical_max
-            };
-            let entry = fused.entry(candidate.chunk_id.clone()).or_insert_with(|| {
-                SemanticHybridGraphMatchV1 {
-                    chunk_id: candidate.chunk_id.clone(),
-                    vector_distance: None,
-                    lexical_score: None,
-                    combined_score: 0.0,
-                }
-            });
-            if entry
-                .lexical_score
-                .is_none_or(|prior| candidate.score > prior)
-            {
-                if let Some(prior) = entry.lexical_score {
-                    entry.combined_score -= request.lexical_weight
-                        * if lexical_max == 0.0 {
-                            0.0
-                        } else {
-                            prior / lexical_max
-                        };
-                }
-                entry.lexical_score = Some(candidate.score);
-                entry.combined_score += request.lexical_weight * normalized;
-            }
-        }
-        check_cancelled(cancellation.as_ref())?;
-        let mut matches = fused.into_values().collect::<Vec<_>>();
-        matches.sort_by(|left, right| {
-            right
-                .combined_score
-                .total_cmp(&left.combined_score)
-                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
-        });
-        matches.truncate(request.limit);
-        Ok(SemanticHybridGraphSearchResultV1 {
-            generation_id,
-            matches,
-        })
-    }
-
-    fn generation_chunk_ids(
-        &self,
-        snapshot: &GraphSnapshot,
-        generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<BTreeSet<CodeSearchChunkId>, VectorGenerationStoreErrorV1> {
-        let entities =
-            self.generation_entities(snapshot, generation_id, Arc::clone(&cancellation))?;
-        let mut chunks = BTreeSet::new();
-        for entity in entities {
-            check_cancelled(cancellation.as_ref())?;
-            if required_string(&entity, GENERATION_ID_PROPERTY)?
-                != generation_id.as_digest().as_str()
-            {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "semantic vector search row names a foreign generation".to_owned(),
-                ));
-            }
-            let chunk_id = CodeSearchChunkId::try_from(
-                required_string(&entity, CHUNK_ID_PROPERTY)?.to_owned(),
-            )
-            .map_err(storage_error)?;
-            if !chunks.insert(chunk_id) {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "semantic vector generation contains duplicate search chunks".to_owned(),
-                ));
-            }
-        }
-        Ok(chunks)
+    ) -> Result<u64, VectorGenerationStoreErrorV1> {
+        read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
     }
 
     fn generation_entities(
         &self,
-        snapshot: &GraphSnapshot,
+        snapshot: &SemanticVectorVerifiedReadV1,
         generation_id: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<tracedecay_graph_db::GraphEntity>, VectorGenerationStoreErrorV1> {
         let label = generation_label(generation_id)?;
         let records = read_cataloged_generation_records(snapshot, generation_id, cancellation)?
             .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
-        if records.generation.vectors().len() > MAX_RESIDENT_VECTOR_ROWS {
-            return Err(VectorGenerationStoreErrorV1::Unavailable(format!(
-                "semantic vector generation exceeds the resident row ceiling of {MAX_RESIDENT_VECTOR_ROWS}"
-            )));
-        }
         Ok(records
             .entities
             .into_values()
@@ -737,60 +560,14 @@ impl GraphVectorGenerationStoreV1 {
             .collect())
     }
 
-    pub fn acquire_active_generation_publication_guard(
-        &self,
-        expected_watermark: &GraphWatermark,
-        expected_generation: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<ActiveVectorGenerationPublicationGuardV1, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        if &metadata.watermark != expected_watermark
-            || metadata.active_generation.as_ref() != Some(expected_generation)
-        {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
-        let records = read_cataloged_generation_records(
-            &snapshot,
-            expected_generation,
-            Arc::clone(&cancellation),
-        )?
-        .ok_or_else(|| {
-            VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector generation records are missing".to_owned(),
-            )
-        })?;
-        if u64::try_from(records.generation.vectors().len()).map_err(storage_error)?
-            != metadata.active_row_count
-        {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector row count does not match its committed state".to_owned(),
-            ));
-        }
-        check_cancelled(cancellation.as_ref())?;
-        Ok(ActiveVectorGenerationPublicationGuardV1 {
-            _snapshot: snapshot,
-            watermark: metadata.watermark,
-            generation_id: expected_generation.clone(),
-            projection_key: records.generation.projection_key().clone(),
-            source_generation: records.generation.source_generation().clone(),
-            source_manifest_digest: records.generation.source_manifest_digest().clone(),
-            embedding_key: records.generation.embedding_key().clone(),
-        })
-    }
-
-    pub async fn active_resident_plan(
+    pub async fn verified_resident_plan(
         &self,
         expected_generation: &VectorGenerationIdV1,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<ActiveVectorResidentPlanV1>, VectorGenerationStoreErrorV1> {
+    ) -> Result<Option<VerifiedVectorResidentPlanV1>, VectorGenerationStoreErrorV1> {
         check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let snapshot = self.snapshot()?;
         let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        if metadata.active_generation.as_ref() != Some(expected_generation) {
-            return Ok(None);
-        }
         let generation =
             read_generation_metadata(&snapshot, expected_generation, Arc::clone(&cancellation))?
                 .ok_or_else(|| {
@@ -801,11 +578,6 @@ impl GraphVectorGenerationStoreV1 {
         let rows =
             self.generation_entities(&snapshot, expected_generation, Arc::clone(&cancellation))?;
         let row_count = u64::try_from(rows.len()).map_err(storage_error)?;
-        if row_count != metadata.active_row_count {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector row count does not match its committed state".to_owned(),
-            ));
-        }
         let dimensions = u64::from(generation.embedding_key.embedding_key().dimensions);
         let vector_bytes = dimensions
             .checked_mul(u64::try_from(size_of::<f32>()).map_err(storage_error)?)
@@ -828,7 +600,7 @@ impl GraphVectorGenerationStoreV1 {
             .ok_or_else(resident_size_overflow)?;
         drop(snapshot);
         check_cancelled(cancellation.as_ref())?;
-        Ok(Some(ActiveVectorResidentPlanV1 {
+        Ok(Some(VerifiedVectorResidentPlanV1 {
             watermark: metadata.watermark,
             generation_id: expected_generation.clone(),
             retained_bytes,
@@ -838,14 +610,14 @@ impl GraphVectorGenerationStoreV1 {
 
     pub async fn read_resident_generation_for(
         &self,
-        plan: &ActiveVectorResidentPlanV1,
+        plan: &VerifiedVectorResidentPlanV1,
         embedding_key: &AdmittedEmbeddingProjectionKeyV1,
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<ResidentVectorGenerationV1>, VectorGenerationStoreErrorV1> {
         check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let snapshot = self.snapshot()?;
         let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
         if metadata.watermark != plan.watermark {
             return Ok(None);
@@ -856,8 +628,7 @@ impl GraphVectorGenerationStoreV1 {
         else {
             return Ok(None);
         };
-        if metadata.active_generation.as_ref() != Some(generation_id)
-            || &generation.embedding_key != embedding_key
+        if &generation.embedding_key != embedding_key
             || &generation.source_generation != source_generation
             || &generation.source_manifest_digest != source_manifest_digest
         {
@@ -865,11 +636,6 @@ impl GraphVectorGenerationStoreV1 {
         }
         let entities =
             self.generation_entities(&snapshot, generation_id, Arc::clone(&cancellation))?;
-        if u64::try_from(entities.len()).map_err(storage_error)? != metadata.active_row_count {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "active semantic vector row count does not match its committed state".to_owned(),
-            ));
-        }
         let expected_dimension =
             usize::try_from(embedding_key.embedding_key().dimensions).map_err(storage_error)?;
         let expected_metric = vector_metric(embedding_key.embedding_key().metric);
@@ -930,59 +696,5 @@ impl GraphVectorGenerationStoreV1 {
             rows,
             retained_bytes,
         }))
-    }
-}
-
-fn exact_vector_distance(
-    metric: VectorMetric,
-    query: &[f32],
-    document: &[f32],
-) -> Result<f64, VectorGenerationStoreErrorV1> {
-    if query.is_empty()
-        || query.len() != document.len()
-        || query.iter().chain(document).any(|value| !value.is_finite())
-    {
-        return Err(VectorGenerationStoreErrorV1::Corrupt(
-            "semantic vector exact-flat inputs are invalid".to_owned(),
-        ));
-    }
-    let distance = match metric {
-        VectorMetric::Cosine => {
-            let (mut dot, mut query_norm, mut document_norm) = (0.0_f64, 0.0_f64, 0.0_f64);
-            for (&query_value, &document_value) in query.iter().zip(document) {
-                let query_value = f64::from(query_value);
-                let document_value = f64::from(document_value);
-                dot += query_value * document_value;
-                query_norm += query_value * query_value;
-                document_norm += document_value * document_value;
-            }
-            if query_norm == 0.0 || document_norm == 0.0 {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "cosine distance is undefined for a zero-norm vector".to_owned(),
-                ));
-            }
-            1.0 - (dot / (query_norm.sqrt() * document_norm.sqrt())).clamp(-1.0, 1.0)
-        }
-        VectorMetric::DotProduct => -query
-            .iter()
-            .zip(document)
-            .map(|(&left, &right)| f64::from(left) * f64::from(right))
-            .sum::<f64>(),
-        VectorMetric::Euclidean => query
-            .iter()
-            .zip(document)
-            .map(|(&left, &right)| {
-                let delta = f64::from(left) - f64::from(right);
-                delta * delta
-            })
-            .sum::<f64>()
-            .sqrt(),
-    };
-    if distance.is_finite() {
-        Ok(distance)
-    } else {
-        Err(VectorGenerationStoreErrorV1::Corrupt(
-            "semantic vector exact-flat distance is not finite".to_owned(),
-        ))
     }
 }

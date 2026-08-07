@@ -38,6 +38,11 @@ use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicCloc
 mod artifact_store;
 pub mod embedding_parallelism;
 mod fastembed_adapter;
+pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
+mod generation_resume;
+pub use generation_resume::SemanticProjectionResumeOutcomeV1;
+use generation_resume::SemanticProjectionResumeV1;
+use generation_resume::{completed_batch_offset, install_candidate_on_success};
 mod manifest;
 mod model_catalog;
 mod model_lifecycle;
@@ -56,8 +61,8 @@ pub use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
-    ModelLifecycleErrorV1, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
-    SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
+    ModelLifecycleErrorV1, SemanticLifecycleVerifiedReadyEventV1, SemanticModelLifecycleOwnerV1,
+    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
     open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
 };
 
@@ -68,9 +73,10 @@ pub use runtime_service::{
     SemanticRuntimeShutdownReceiptV1, SemanticRuntimeWorkV1,
 };
 pub use semantic_evaluation::{
-    PreparedSemanticEvaluationProjectionV1, SemanticEvaluationProjectionCancellationV1,
-    SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
-    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
+    PreparedSemanticEvaluationProjectionV1, SemanticEvaluationCancellationV1,
+    SemanticEvaluationProjectionCancellationV1, SemanticEvaluationQueryEmbedderV1,
+    SemanticEvaluationQueryFactoryV1, measure_semantic_evaluation_projection_cancellation,
+    prepare_semantic_evaluation_projection,
 };
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
@@ -178,13 +184,6 @@ type SemanticProjectionCommitFutureV1 =
 /// the batch's vectors are dropped as soon as it returns.
 type SemanticProjectionCommitV1 =
     Box<dyn FnMut(PreparedVectorGenerationV1) -> SemanticProjectionCommitFutureV1 + Send + 'static>;
-type SemanticProjectionResumeFutureV1 =
-    Pin<Box<dyn Future<Output = Result<u64, SemanticRuntimeScheduleFailureV1>> + Send + 'static>>;
-/// Opens the staged build and reports how many leading batches are already
-/// durable. Called once, before any encoder work, so a resumed run skips what
-/// it already committed instead of re-embedding it.
-type SemanticProjectionResumeV1 =
-    Box<dyn FnOnce() -> SemanticProjectionResumeFutureV1 + Send + 'static>;
 /// Seals the staged build once every batch has committed.
 type SemanticProjectionStageV1 =
     Box<dyn FnOnce() -> SemanticProjectionStageFutureV1 + Send + 'static>;
@@ -363,8 +362,13 @@ impl FastEmbedSemanticGenerationRequestV1 {
             + Send
             + 'static,
         ResumeProjection: FnOnce() -> ResumeFuture + Send + 'static,
-        ResumeFuture:
-            Future<Output = Result<u64, SemanticRuntimeScheduleFailureV1>> + Send + 'static,
+        ResumeFuture: Future<
+                Output = Result<
+                    SemanticProjectionResumeOutcomeV1,
+                    SemanticRuntimeScheduleFailureV1,
+                >,
+            > + Send
+            + 'static,
         CommitBatch: FnMut(PreparedVectorGenerationV1) -> CommitFuture + Send + 'static,
         CommitFuture:
             Future<Output = Result<(), SemanticRuntimeScheduleFailureV1>> + Send + 'static,
@@ -419,6 +423,12 @@ pub struct DaemonSemanticRuntimeHandleV1 {
 pub struct PreparedSemanticRuntimeRestoreV1 {
     pointer: SemanticGenerationPointerV1,
     runtime: CurrentSemanticQueryRuntimeV1<FastEmbedEmbeddingRuntime>,
+    expected_current: Option<SemanticGenerationPointerV1>,
+    expected_status: SemanticRuntimeScheduleStatusV1,
+}
+
+pub struct PreparedSemanticRuntimeObservationV1 {
+    pointer: SemanticGenerationPointerV1,
     expected_current: Option<SemanticGenerationPointerV1>,
     expected_status: SemanticRuntimeScheduleStatusV1,
 }
@@ -513,12 +523,13 @@ impl DaemonSemanticRuntimeHandleV1 {
             projection_key.clone(),
             total_units,
             move |progress| async move {
+                let resume = (request.resume_projection)().await?;
                 let authority = tokio::task::spawn_blocking(request.load_artifact)
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??
                     .0;
-                if progress.cancelled() {
-                    return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                if let Some(failure) = progress.failure() {
+                    return Err(failure);
                 }
 
                 let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
@@ -526,6 +537,18 @@ impl DaemonSemanticRuntimeHandleV1 {
                 let candidate =
                     SemanticRuntimeService::new_owned(Arc::clone(&authority), factory, pool_config)
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
+                if resume == SemanticProjectionResumeOutcomeV1::AlreadyPublished {
+                    progress.set_completed_units(total_units);
+                    let commit = (request.stage_projection)().await?;
+                    return Ok(install_candidate_on_success(
+                        commit,
+                        target_generation,
+                        projection_key,
+                        runtime,
+                        candidate,
+                        query_in_flight,
+                    ));
+                }
                 // Embed and commit batch by batch. A batch's vectors are
                 // durable and released before the next batch is embedded, so
                 // the live float set is bounded by one batch rather than by
@@ -538,10 +561,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                 )
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
                 drop(request.canonical_chunks);
-                // Batches are deterministic and committed in order, so the
-                // durable batch count is exactly how far a prior run got.
-                let committed_batches =
-                    usize::try_from((request.resume_projection)().await?).unwrap_or(usize::MAX);
+                let committed_batches = completed_batch_offset(resume, batches.len())?
+                    .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
                 let mut commit_batch = request.commit_batch;
                 let mut embedded_units = batches
                     .iter()
@@ -563,35 +584,27 @@ impl DaemonSemanticRuntimeHandleV1 {
                     )
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-                    if progress.cancelled() {
-                        return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                    if let Some(failure) = progress.failure() {
+                        return Err(failure);
                     }
                     commit_batch(prepared).await?;
                     embedded_units = embedded_units.saturating_add(batch_units);
                     progress.set_completed_units(embedded_units.min(total_units));
                 }
-                if progress.cancelled() {
-                    return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                if let Some(failure) = progress.failure() {
+                    return Err(failure);
                 }
                 progress.set_completed_units(total_units);
 
                 let commit = (request.stage_projection)().await?;
-                Ok(commit.on_success(move |pointer| {
-                    if pointer.source_generation != target_generation
-                        || pointer.projection_key != projection_key
-                    {
-                        return Err(SemanticRuntimeScheduleFailureV1::Publication);
-                    }
-                    *runtime
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(CurrentSemanticQueryRuntimeV1::new_with_admission(
-                            pointer.clone(),
-                            candidate,
-                            Arc::clone(&query_in_flight),
-                        ));
-                    Ok(())
-                }))
+                Ok(install_candidate_on_success(
+                    commit,
+                    target_generation,
+                    projection_key,
+                    runtime,
+                    candidate,
+                    query_in_flight,
+                ))
             },
         );
         let _transition = self
@@ -615,6 +628,31 @@ impl DaemonSemanticRuntimeHandleV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.scheduling.cancel()
+    }
+
+    /// Drop one exact process-local semantic cache without deleting its
+    /// immutable graph generation. A concurrent newer pointer is preserved.
+    pub fn unbind_query_runtime_if_current(
+        &self,
+        expected_generation: &VectorGenerationIdV1,
+    ) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(expected) = self.current() else {
+            return false;
+        };
+        if &expected.generation != expected_generation
+            || !self.scheduling.clear_current_if(&expected)
+        {
+            return false;
+        }
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        true
     }
 
     pub fn begin_shutdown(&self) -> bool {
@@ -752,6 +790,51 @@ impl DaemonSemanticRuntimeHandleV1 {
         self.commit_restore_if_current(prepared)
     }
 
+    pub fn prepare_current_observation(
+        &self,
+        pointer: &SemanticGenerationPointerV1,
+    ) -> Option<PreparedSemanticRuntimeObservationV1> {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (expected_current, expected_status) = self.restore_snapshot();
+        if expected_current.as_ref() != Some(pointer)
+            || self
+                .query_factory(
+                    &pointer.source_generation,
+                    &pointer.generation,
+                    &pointer.projection_key,
+                )
+                .is_none()
+        {
+            return None;
+        }
+        Some(PreparedSemanticRuntimeObservationV1 {
+            pointer: pointer.clone(),
+            expected_current,
+            expected_status,
+        })
+    }
+
+    pub fn commit_current_observation(
+        &self,
+        prepared: PreparedSemanticRuntimeObservationV1,
+    ) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.restore_snapshot_is_current(&prepared.expected_current, &prepared.expected_status)
+            && self
+                .query_factory(
+                    &prepared.pointer.source_generation,
+                    &prepared.pointer.generation,
+                    &prepared.pointer.projection_key,
+                )
+                .is_some()
+    }
+
     fn commit_restore_if_current(&self, prepared: PreparedSemanticRuntimeRestoreV1) -> bool {
         let _transition = self
             .transitions
@@ -788,7 +871,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                     | SemanticRuntimeScheduleFailureV1::Publication => {
                         SemanticFallbackReasonV1::RuntimeFailure
                     }
-                    SemanticRuntimeScheduleFailureV1::Cancelled => {
+                    SemanticRuntimeScheduleFailureV1::Cancelled
+                    | SemanticRuntimeScheduleFailureV1::DeadlineExceeded => {
                         SemanticFallbackReasonV1::RuntimeUnavailable
                     }
                 }),
@@ -1075,8 +1159,9 @@ mod scheduling_tests {
     };
 
     use super::{
-        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
-        SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticProjectionResumeOutcomeV1,
+        SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
     };
 
     fn source_generation(value: char) -> CodeGenerationId {
@@ -1189,7 +1274,7 @@ mod scheduling_tests {
                 let _ = release_rx.recv();
                 Err(SemanticRuntimeScheduleFailureV1::Projection)
             },
-            || async { Ok(0) },
+            || async { Ok(SemanticProjectionResumeOutcomeV1::ReplayFromStart) },
             |_prepared| async { Ok(()) },
             move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
         )
@@ -1402,6 +1487,52 @@ mod scheduling_tests {
             SemanticRuntimeScheduleStatusV1::Current {
                 generation: restored.generation,
             }
+        );
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn exact_unbind_clears_pointer_and_factory_but_preserves_newer_generation() {
+        let handle =
+            super::DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("semantic handle");
+        let prior = pointer('a', 'a');
+        handle.scheduling.restore_current(prior.clone());
+        handle
+            .bind_query_runtime_for_current(super::session_pool::test_support::authority())
+            .expect("bind prior query runtime");
+        assert!(
+            handle
+                .query_factory(
+                    &prior.source_generation,
+                    &prior.generation,
+                    &prior.projection_key,
+                )
+                .is_some()
+        );
+
+        assert!(!handle.unbind_query_runtime_if_current(&vector_generation('b')));
+        assert_eq!(handle.current(), Some(prior.clone()));
+        assert!(
+            handle
+                .query_factory(
+                    &prior.source_generation,
+                    &prior.generation,
+                    &prior.projection_key,
+                )
+                .is_some(),
+            "a delayed older disable cannot evict a different generation"
+        );
+
+        assert!(handle.unbind_query_runtime_if_current(&prior.generation));
+        assert!(handle.current().is_none());
+        assert!(
+            handle
+                .query_factory(
+                    &prior.source_generation,
+                    &prior.generation,
+                    &prior.projection_key,
+                )
+                .is_none()
         );
     }
 

@@ -9,25 +9,45 @@
 //! unresolved dispatch cannot become semantic fact.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
+use tracedecay_application::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
-    RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
-    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId,
+    RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrieverBatch, RetrieverContinuation,
+    RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, LaneBoundEvidence,
-    LaneEvidenceRejections, RetrievalPortError, checkpoint_digest, contract_error,
-    lane_bound_evidence, lane_candidate_cap,
+    CodeCandidateBindingV1, GraphEvidenceReadPort, LaneBoundEvidence, LaneEvidenceRejections,
+    RetrievalPortError, checkpoint_digest, contract_error, lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
 
 pub use self::projection::production_code_index_freshness;
+
+/// Live request authority consulted throughout one graph traversal.
+pub trait GraphExecutionControl: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+    /// Monotonic elapsed time in the request-relative domain used by
+    /// [`RetrievalBudget::deadline_micros`].
+    fn elapsed_micros(&self) -> u64;
+}
+
+impl<T> GraphExecutionControl for T
+where
+    T: super::semantic::SemanticExecutionControl + Send + Sync + ?Sized,
+{
+    fn is_cancelled(&self) -> bool {
+        super::semantic::SemanticExecutionControl::is_cancelled(self)
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        super::semantic::SemanticExecutionControl::elapsed_micros(self)
+    }
+}
 
 /// Wording the graph lane uses when a port-emitted batch fails the shared
 /// candidate/evidence binding checks.
@@ -70,9 +90,21 @@ impl GraphLaneRequest {
                 "graph traversal depth exceeds the callable code bound".to_owned(),
             ));
         }
+        if self.budget.max_candidates_per_lane > MAX_APPLICATION_PAGE_SIZE
+            || self.base.budget.max_candidates_per_lane > MAX_APPLICATION_PAGE_SIZE
+        {
+            return Err(RetrievalPortError::Contract(
+                "graph candidate budget exceeds the application page bound".to_owned(),
+            ));
+        }
         if self.seed_anchors.is_empty() {
             return Err(RetrievalPortError::Contract(
                 "graph retrieval requires at least one seed anchor".to_owned(),
+            ));
+        }
+        if self.seed_anchors.len() > MAX_APPLICATION_PAGE_SIZE as usize {
+            return Err(RetrievalPortError::Contract(
+                "graph seed count exceeds the application page bound".to_owned(),
             ));
         }
         let mut seed_occurrences = BTreeSet::new();
@@ -227,6 +259,7 @@ pub trait GraphLaneRetriever {
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
+        control: Arc<dyn GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
 }
 
@@ -252,8 +285,8 @@ where
         &self,
         request: &GraphLaneRequest,
         batch: &RetrieverBatch<GraphLaneEvidence>,
+        control: &dyn GraphExecutionControl,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
-        batch.validate().map_err(contract_error)?;
         if batch.coverage.eligible < batch.candidates.len() as u64 {
             return Err(RetrievalPortError::Contract(
                 "graph coverage cannot report fewer eligible candidates than it emitted".to_owned(),
@@ -263,42 +296,42 @@ where
             .continuation
             .as_ref()
             .is_none_or(|continuation| continuation.exhausted);
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let mut admitted: Vec<(CompactCandidate, GraphLaneEvidence)> =
-            Vec::with_capacity(batch.candidates.len());
+            Vec::with_capacity(batch.candidates.len().min(cap));
         for candidate in &batch.candidates {
+            check_graph_control(request, control)?;
             let evidence =
                 lane_bound_evidence(batch, candidate, RetrieverKind::Graph, &GRAPH_REJECTIONS)?;
             evidence.validate_against_validated_request(request)?;
-            admitted.push((candidate.clone(), evidence.clone()));
+            let next = (candidate.clone(), evidence.clone());
+            if admitted.len() < cap {
+                admitted.push(next);
+            } else if let Some(worst) = admitted
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| compare_graph_candidates(left, right))
+                .map(|(index, _)| index)
+                && compare_graph_candidates(&next, &admitted[worst]).is_lt()
+            {
+                admitted[worst] = next;
+            }
         }
-        admitted.sort_by(|left, right| {
-            right
-                .0
-                .raw_score
-                .cmp(&left.0.raw_score)
-                .then_with(|| {
-                    left.0
-                        .source_occurrence_id
-                        .cmp(&right.0.source_occurrence_id)
-                })
-                .then_with(|| {
-                    left.0
-                        .retriever_evidence_anchor
-                        .cmp(&right.0.retriever_evidence_anchor)
-                })
-        });
-        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
+        check_graph_control(request, control)?;
+        admitted.sort_by(compare_graph_candidates);
+        check_graph_control(request, control)?;
         let truncated = admitted.len().saturating_sub(cap);
-        admitted.truncate(cap);
+        let truncated = batch.candidates.len().saturating_sub(admitted.len()) + truncated;
         let mut candidates = Vec::with_capacity(admitted.len());
         let mut evidence_by_occurrence = BTreeMap::new();
         for (ordinal, (mut candidate, evidence)) in admitted.into_iter().enumerate() {
+            check_graph_control(request, control)?;
             candidate.ordinal_rank = ordinal as u32;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
         let checkpoint_digest =
-            graph_checkpoint_digest(&request.generation, &candidates, &evidence_by_occurrence)?;
+            graph_checkpoint_digest(request, &candidates, &evidence_by_occurrence, control)?;
         let mut coverage = batch.coverage;
         coverage.capped = coverage
             .capped
@@ -317,6 +350,7 @@ where
             }),
         };
         rebuilt.validate().map_err(contract_error)?;
+        check_graph_control(request, control)?;
         Ok(rebuilt)
     }
 }
@@ -328,9 +362,13 @@ where
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
+        control: Arc<dyn GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
-        let outcome = match self.evidence.read_graph_evidence(request) {
+        let outcome = match self
+            .evidence
+            .read_graph_evidence(request, Arc::clone(&control))
+        {
             Ok(outcome) => outcome,
             Err(RetrievalPortError::AuthorityUnavailable(detail)) => {
                 return Ok(RetrieverOutcome::Unavailable(
@@ -342,10 +380,10 @@ where
         };
         match outcome {
             RetrieverOutcome::Complete(batch) => Ok(RetrieverOutcome::Complete(
-                self.enforce_batch(request, &batch)?,
+                self.enforce_batch(request, &batch, control.as_ref())?,
             )),
             RetrieverOutcome::Partial { value, reason } => Ok(RetrieverOutcome::Partial {
-                value: self.enforce_batch(request, &value)?,
+                value: self.enforce_batch(request, &value, control.as_ref())?,
                 reason,
             }),
             outcome => Ok(outcome),
@@ -353,38 +391,52 @@ where
     }
 }
 
-impl<P> Retriever<GraphLaneRequest, GraphLaneEvidence> for GraphLane<P>
-where
-    P: GraphEvidenceReadPort,
-{
-    fn retrieve(
-        &self,
-        request: &GraphLaneRequest,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalError> {
-        self.retrieve_graph(request)
-            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
-    }
+fn compare_graph_candidates(
+    left: &(CompactCandidate, GraphLaneEvidence),
+    right: &(CompactCandidate, GraphLaneEvidence),
+) -> std::cmp::Ordering {
+    right
+        .0
+        .raw_score
+        .cmp(&left.0.raw_score)
+        .then_with(|| {
+            left.0
+                .source_occurrence_id
+                .cmp(&right.0.source_occurrence_id)
+        })
+        .then_with(|| {
+            left.0
+                .retriever_evidence_anchor
+                .cmp(&right.0.retriever_evidence_anchor)
+        })
 }
 
-impl<P> CompactCandidateLane<GraphLaneRequest, GraphLaneEvidence> for GraphLane<P>
-where
-    P: GraphEvidenceReadPort,
-{
-    fn candidates(
-        &self,
-        request: &GraphLaneRequest,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
-        self.retrieve_graph(request)
+fn check_graph_control(
+    request: &GraphLaneRequest,
+    control: &dyn GraphExecutionControl,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        return Err(RetrievalPortError::Cancelled);
     }
+    if request
+        .budget
+        .deadline_micros
+        .is_some_and(|deadline| control.elapsed_micros() >= deadline)
+    {
+        return Err(RetrievalPortError::BudgetExceeded);
+    }
+    Ok(())
 }
 
 fn graph_checkpoint_digest(
-    generation: &CodeGenerationId,
+    request: &GraphLaneRequest,
     candidates: &[CompactCandidate],
     evidence_by_occurrence: &BTreeMap<SourceOccurrenceId, GraphLaneEvidence>,
+    control: &dyn GraphExecutionControl,
 ) -> Result<CursorPayloadDigest, RetrievalPortError> {
     let mut prefix = Vec::with_capacity(candidates.len());
     for candidate in candidates {
+        check_graph_control(request, control)?;
         let evidence = evidence_by_occurrence
             .get(&candidate.source_occurrence_id)
             .ok_or_else(|| {
@@ -420,7 +472,7 @@ fn graph_checkpoint_digest(
     checkpoint_digest(&(
         "tracedecay.retrieval-lane-checkpoint.v1",
         RetrieverKind::Graph.as_str(),
-        generation.as_str(),
+        request.generation.as_str(),
         prefix,
     ))
 }

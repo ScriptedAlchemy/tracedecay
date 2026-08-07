@@ -470,8 +470,9 @@ pub enum SemanticRuntimeStateV1 {
         model_id: String,
         artifact_digest: String,
     },
+    /// Semantic planning or projection is in progress. No vector-generation
+    /// identity exists until the admitted plan has been built.
     Indexing {
-        target_generation: VectorGenerationIdV1,
         completed_units: u64,
         total_units: u64,
     },
@@ -539,11 +540,9 @@ impl SemanticRuntimeStateV1 {
                 Ok(())
             }
             Self::Indexing {
-                target_generation,
                 completed_units,
                 total_units,
             } => {
-                validate_generation(target_generation)?;
                 if *total_units == 0 || completed_units > total_units {
                     return Err(SemanticRuntimeContractErrorV1::InvalidProgress);
                 }
@@ -1009,6 +1008,8 @@ impl SemanticConfigurationTransitionV1 {
 }
 
 /// Verified local evidence for one complete immutable semantic generation.
+/// `observed_ceiling` is the exact accepted evaluator-derived resource pin set,
+/// never a projection of configured maxima.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticExecutableGenerationV1 {
     pub compatibility: SemanticCompatibilityPinsV1,
@@ -1050,7 +1051,7 @@ impl SemanticExecutableGenerationV1 {
         self.validate_fields()?;
         if self.compute_digest()? != self.evidence_digest
             || &self.compatibility != required
-            || !resources_covered(required.resources, self.observed_ceiling)
+            || self.observed_ceiling != required.resources
         {
             return Err(SemanticRuntimeContractErrorV1::InvalidCompatibility);
         }
@@ -1080,10 +1081,11 @@ impl SemanticExecutableGenerationV1 {
 }
 
 /// Durable linkage returned only after the configuration profile CAS, semantic
-/// generation pointer, activation receipt, and retrieval audit event commit in
-/// one atomic owner transaction.
+/// compatibility selection, activation receipt, and retrieval audit event
+/// commit in one atomic owner transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticLinkedTransitionV1 {
+    pub epoch: i64,
     pub transition_digest: ManifestDigest,
     pub activation_receipt_digest: Option<ManifestDigest>,
     pub audit: RetrievalProfileAuditEventV1,
@@ -1091,10 +1093,14 @@ pub struct SemanticLinkedTransitionV1 {
 
 impl SemanticLinkedTransitionV1 {
     pub fn new(
+        epoch: i64,
         transition: &SemanticConfigurationTransitionV1,
         receipt: Option<&SemanticActivationReceiptV1>,
         audit: RetrievalProfileAuditEventV1,
     ) -> Result<Self, SemanticRuntimeContractErrorV1> {
+        if epoch <= 0 {
+            return Err(SemanticRuntimeContractErrorV1::InvalidTransition);
+        }
         transition.validate()?;
         if let Some(receipt) = receipt {
             receipt.validate()?;
@@ -1109,6 +1115,7 @@ impl SemanticLinkedTransitionV1 {
             _ => return Err(SemanticRuntimeContractErrorV1::InvalidTransition),
         }
         Ok(Self {
+            epoch,
             transition_digest: transition.transition_digest.clone(),
             activation_receipt_digest: receipt.map(|receipt| receipt.receipt_digest.clone()),
             audit,
@@ -1120,7 +1127,7 @@ impl SemanticLinkedTransitionV1 {
         transition: &SemanticConfigurationTransitionV1,
         receipt: Option<&SemanticActivationReceiptV1>,
     ) -> Result<(), SemanticRuntimeContractErrorV1> {
-        let expected = Self::new(transition, receipt, self.audit.clone())?;
+        let expected = Self::new(self.epoch, transition, receipt, self.audit.clone())?;
         if &expected != self {
             return Err(SemanticRuntimeContractErrorV1::InvalidTransition);
         }
@@ -1168,6 +1175,8 @@ pub enum SemanticConfigurationBackendErrorV1 {
 /// mutable labels are never authority.
 #[derive(Clone, Debug)]
 pub struct CommittedRetrievalProfileStateV1 {
+    pub epoch: i64,
+    pub transition_digest: ManifestDigest,
     pub scope: ResolvedScope,
     pub state: RetrievalProfileStateV1,
     pub current_activation: Option<SemanticCurrentLinkedActivationV1>,
@@ -1178,6 +1187,12 @@ impl CommittedRetrievalProfileStateV1 {
         &self,
         linked: &SemanticLinkedTransitionV1,
     ) -> Result<(), SemanticRuntimeContractErrorV1> {
+        if self.epoch <= 0
+            || self.epoch != linked.epoch
+            || self.transition_digest != linked.transition_digest
+        {
+            return Err(SemanticRuntimeContractErrorV1::InvalidTransition);
+        }
         self.scope
             .validate()
             .map_err(|_| SemanticRuntimeContractErrorV1::InvalidTransition)?;
@@ -1284,8 +1299,26 @@ pub trait SemanticRuntimeGenerationInspectorV1: Sync {
         required: &'a SemanticCompatibilityPinsV1,
     ) -> SemanticRuntimeFuture<
         'a,
-        Result<SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1>,
+        Result<SemanticExecutableGenerationLeaseV1, SemanticRuntimeBackendErrorV1>,
     >;
+}
+
+pub struct SemanticExecutableGenerationLeaseV1 {
+    evidence: SemanticExecutableGenerationV1,
+    _lease: Box<dyn Send>,
+}
+
+impl SemanticExecutableGenerationLeaseV1 {
+    pub fn new(evidence: SemanticExecutableGenerationV1, lease: impl Send + 'static) -> Self {
+        Self {
+            evidence,
+            _lease: Box::new(lease),
+        }
+    }
+
+    pub fn evidence(&self) -> &SemanticExecutableGenerationV1 {
+        &self.evidence
+    }
 }
 
 pub trait SemanticRuntimeBackendV1: Sync {
@@ -1307,7 +1340,9 @@ pub trait SemanticRuntimeBackendV1: Sync {
 
 /// Mount point for central configuration and Doctor integration. Implementors
 /// expose only application semantics; persistence, artifact verification, and
-/// pointer CAS remain owned by the semantic runtime backend.
+/// active/rollback CAS belongs solely to the linked configuration authority;
+/// the semantic runtime backend verifies immutable generations and reports
+/// exact process-cache observation.
 pub trait SemanticRuntimeIntegrationPortV1: Sync {
     fn status(&self) -> SemanticRuntimeFuture<'_, SemanticRuntimeStatusV1>;
 
@@ -1408,6 +1443,7 @@ fn resources_valid(resources: SemanticResourceRequirementV1) -> bool {
         && resources.resident_bytes >= resources.model_bytes
         && resources.resident_bytes >= resources.tokenizer_bytes
         && resources.threads > 0
+        && resources.max_concurrent_sessions > 0
         && resources.batch_size > 0
         && resources.sequence_length > 0
         && resources.load_deadline_ms > 0
@@ -1423,6 +1459,7 @@ fn resources_covered(
         && ceiling.tokenizer_bytes >= required.tokenizer_bytes
         && ceiling.resident_bytes >= required.resident_bytes
         && ceiling.threads >= required.threads
+        && ceiling.max_concurrent_sessions >= required.max_concurrent_sessions
         && ceiling.batch_size >= required.batch_size
         && ceiling.sequence_length >= required.sequence_length
         && ceiling.load_deadline_ms >= required.load_deadline_ms
@@ -1619,7 +1656,6 @@ mod validate_contract_tests {
     fn indexing_degraded_and_rollback_require_configuration_pin() {
         for state in [
             SemanticRuntimeStateV1::Indexing {
-                target_generation: generation('a'),
                 completed_units: 1,
                 total_units: 2,
             },
@@ -1658,7 +1694,6 @@ mod validate_contract_tests {
         let status = SemanticRuntimeStatusV1::new(
             Some(pin()),
             SemanticRuntimeStateV1::Indexing {
-                target_generation: generation('a'),
                 completed_units: 3,
                 total_units: 2,
             },

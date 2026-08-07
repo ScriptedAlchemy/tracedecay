@@ -49,7 +49,7 @@ fn graph_projection_bounds_convergent_fanout_by_nodes_and_edges() {
     .expect("projection is valid");
     let batch = complete_batch(
         adapter
-            .read_graph_evidence(&request)
+            .read_graph_evidence(&request, super::graph_control())
             .expect("bounded traversal succeeds"),
     );
 

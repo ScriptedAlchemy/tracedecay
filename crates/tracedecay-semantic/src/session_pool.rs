@@ -22,69 +22,23 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracedecay_domain::{AdmittedEmbeddingProjectionKeyV1, PrivacyDomainId, ProjectionKeyV1};
 
 use super::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, CancellationSignal, EmbedError, EmbeddingRuntime,
-    EmbeddingSession,
+    AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, EmbeddingSession,
+    SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
 };
+
+mod clock;
+pub use clock::{ManualClock, MonotonicClock, SystemMonotonicClock};
 
 const WAITER_WAKEUP_INTERVAL: Duration = Duration::from_millis(5);
 
-/// Monotonic time source. Reaping and blocking-acquire deadlines are driven
-/// entirely by this clock, so tests inject [`ManualClock`] and never depend
-/// on wall time.
-pub trait MonotonicClock: Send + Sync {
-    /// Time since an arbitrary, fixed epoch. Must be monotonically
-    /// non-decreasing per clock instance.
-    fn now(&self) -> Duration;
-}
-
-/// Wall-clock driver for production wiring.
-#[derive(Debug)]
-pub struct SystemMonotonicClock {
-    start: Instant,
-}
-
-impl Default for SystemMonotonicClock {
-    fn default() -> Self {
-        Self {
-            start: Instant::now(),
-        }
-    }
-}
-
-impl MonotonicClock for SystemMonotonicClock {
-    fn now(&self) -> Duration {
-        self.start.elapsed()
-    }
-}
-
-/// Deterministic test clock; advances only when told to.
-#[derive(Debug, Default)]
-pub struct ManualClock {
-    micros: AtomicU64,
-}
-
-impl ManualClock {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn advance(&self, delta: Duration) {
-        self.micros
-            .fetch_add(delta.as_micros() as u64, Ordering::SeqCst);
-    }
-}
-
-impl MonotonicClock for ManualClock {
-    fn now(&self) -> Duration {
-        Duration::from_micros(self.micros.load(Ordering::SeqCst))
-    }
+fn duration_micros(duration: Duration) -> Option<u64> {
+    u64::try_from(duration.as_micros()).ok()
 }
 
 /// The complete projection/privacy identity of a warmed session. It can only
@@ -184,6 +138,12 @@ pub enum SessionAcquireError {
     Cancelled,
     /// The caller's wait budget elapsed while waiting.
     DeadlineExceeded { waited: Duration, budget: Duration },
+    /// A cold model session exceeded the artifact's admitted load deadline and
+    /// was discarded before it could enter the reusable pool.
+    LoadDeadlineExceeded {
+        elapsed: Duration,
+        deadline: Duration,
+    },
     /// The runtime failed to open a new session.
     Open(EmbedError),
     /// The pool has been closed.
@@ -212,6 +172,10 @@ impl fmt::Display for SessionAcquireError {
                 f,
                 "session acquisition deadline exceeded: waited {waited:?} of {budget:?} budget"
             ),
+            Self::LoadDeadlineExceeded { elapsed, deadline } => write!(
+                f,
+                "cold session load deadline exceeded: elapsed {elapsed:?} exceeds {deadline:?}"
+            ),
             Self::Open(err) => write!(f, "failed to open session: {err}"),
             Self::Closed => write!(f, "session pool is closed"),
         }
@@ -231,6 +195,7 @@ pub struct SessionPoolStats {
     pub sessions_opened: usize,
     pub sessions_closed: usize,
     pub sessions_reaped: usize,
+    pub last_cold_load_micros: Option<u64>,
     pub closed: bool,
 }
 
@@ -250,6 +215,7 @@ struct PoolState<S> {
     sessions_opened: usize,
     sessions_closed: usize,
     sessions_reaped: usize,
+    last_cold_load_micros: Option<u64>,
     closed: bool,
 }
 
@@ -265,6 +231,7 @@ impl<S> Default for PoolState<S> {
             sessions_opened: 0,
             sessions_closed: 0,
             sessions_reaped: 0,
+            last_cold_load_micros: None,
             closed: false,
         }
     }
@@ -449,6 +416,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             projected_resident.unwrap_or_else(|| panic!("resident reservation checked above"));
         drop(state);
 
+        let load_started = self.inner.clock.now();
         let session = match self.inner.runtime.open_session(authority) {
             Ok(session) => session,
             Err(err) => {
@@ -461,6 +429,24 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 return Err(SessionAcquireError::Open(err));
             }
         };
+        let load_elapsed = self.inner.clock.now().saturating_sub(load_started);
+        let load_deadline = Duration::from_millis(authority.load_deadline_ms());
+        if load_elapsed > load_deadline {
+            let mut state = self.inner.lock_state();
+            state.active -= 1;
+            state.resident_bytes = state.resident_bytes.saturating_sub(reserved_bytes);
+            state.sessions_opened += 1;
+            state.sessions_closed += 1;
+            state.last_cold_load_micros = duration_micros(load_elapsed);
+            state.mark_availability_changed();
+            drop(state);
+            self.inner.wakeups.notify_all();
+            drop(session);
+            return Err(SessionAcquireError::LoadDeadlineExceeded {
+                elapsed: load_elapsed,
+                deadline: load_deadline,
+            });
+        }
         let resident_bytes = session.resident_bytes_estimate();
         let mut state = self.inner.lock_state();
         if state.closed {
@@ -502,6 +488,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         state.resident_bytes =
             projected_resident.unwrap_or_else(|| panic!("resident total checked above"));
         state.sessions_opened += 1;
+        state.last_cold_load_micros = duration_micros(load_elapsed);
         Ok(self.make_guard(identity, session, resident_bytes))
     }
 
@@ -512,10 +499,19 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         &self,
         authority: &AdmittedProjectionArtifactV1,
         budget: Duration,
-        cancel: &dyn CancellationSignal,
+        cancel: &dyn SemanticExecutionAuthority,
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
-        if cancel.cancelled() {
-            return Err(SessionAcquireError::Cancelled);
+        match cancel.interruption() {
+            Some(SemanticExecutionInterruptionV1::Cancelled) => {
+                return Err(SessionAcquireError::Cancelled);
+            }
+            Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+                return Err(SessionAcquireError::DeadlineExceeded {
+                    waited: Duration::ZERO,
+                    budget,
+                });
+            }
+            None => {}
         }
         let start = self.inner.clock.now();
         let (waiter_id, mut observed_epoch) = {
@@ -539,10 +535,16 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
         };
         self.verify_artifact(authority)?;
         loop {
-            if cancel.cancelled() {
-                return Err(SessionAcquireError::Cancelled);
-            }
             let waited = self.inner.clock.now().saturating_sub(start);
+            match cancel.interruption() {
+                Some(SemanticExecutionInterruptionV1::Cancelled) => {
+                    return Err(SessionAcquireError::Cancelled);
+                }
+                Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+                    return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
+                }
+                None => {}
+            }
             if waited >= budget {
                 return Err(SessionAcquireError::DeadlineExceeded { waited, budget });
             }
@@ -552,7 +554,19 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                 if state.closed {
                     return Err(SessionAcquireError::Closed);
                 }
-                state.allows_acquire(Some(waiter_id)) && state.availability_epoch != observed_epoch
+                let attempt = state.allows_acquire(Some(waiter_id))
+                    && state.availability_epoch != observed_epoch;
+                if attempt {
+                    // Capture the epoch BEFORE the attempt, under the same lock
+                    // that admitted it. A release that lands while the attempt
+                    // is in flight bumps the epoch past this value, so a
+                    // retryable failure re-attempts immediately instead of
+                    // waiting on an epoch whose availability signal it already
+                    // consumed (that lost wakeup deadlocked waiters whose
+                    // deadline clock never advances).
+                    observed_epoch = state.availability_epoch;
+                }
+                attempt
             };
             if should_attempt {
                 match self.acquire_verified(authority, Some(waiter_id)) {
@@ -569,7 +583,6 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
                         | SessionAcquireError::MemoryCeilingExceeded { .. }),
                     ) => {
                         drop(retryable);
-                        observed_epoch = self.inner.lock_state().availability_epoch;
                         continue;
                     }
                     Err(err) => return Err(err),
@@ -617,6 +630,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
             sessions_opened: state.sessions_opened,
             sessions_closed: state.sessions_closed,
             sessions_reaped: state.sessions_reaped,
+            last_cold_load_micros: state.last_cold_load_micros,
             closed: state.closed,
         }
     }
@@ -994,8 +1008,8 @@ mod tests {
 
     use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::{
-        BoundedSanitizedTextBatchV1, FakeEmbeddingRuntime, ManualCancellation,
-        ProjectionArtifactPinV1, RuntimeFailureKindV1,
+        BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
+        FakeEmbeddingSession, ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
     };
     use super::super::manifest::{ArtifactProfileKindV1, Sha256DigestHex};
     use super::test_support::*;
@@ -1016,6 +1030,60 @@ mod tests {
             config(max_sessions, idle_timeout, ceiling),
         )
         .expect("valid config")
+    }
+
+    struct TimedOpenRuntime {
+        inner: FakeEmbeddingRuntime,
+        clock: Arc<ManualClock>,
+        load_time: Duration,
+    }
+
+    impl EmbeddingRuntime for TimedOpenRuntime {
+        type Session = FakeEmbeddingSession;
+
+        fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
+            self.inner.resident_bytes_reservation(authority)
+        }
+
+        fn verify_artifact_compatibility(
+            &self,
+            authority: &AdmittedProjectionArtifactV1,
+        ) -> Result<(), EmbedError> {
+            self.inner.verify_artifact_compatibility(authority)
+        }
+
+        fn open_session(
+            &self,
+            authority: &AdmittedProjectionArtifactV1,
+        ) -> Result<Self::Session, EmbedError> {
+            self.clock.advance(self.load_time);
+            self.inner.open_session(authority)
+        }
+    }
+
+    #[test]
+    fn cold_open_beyond_the_artifact_deadline_is_discarded() {
+        let clock = Arc::new(ManualClock::new());
+        let pool = SessionPool::new(
+            TimedOpenRuntime {
+                inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
+                clock: Arc::clone(&clock),
+                load_time: Duration::from_millis(30_001),
+            },
+            Arc::clone(&clock),
+            config(1, Duration::from_mins(1), 1 << 20),
+        )
+        .expect("valid config");
+
+        assert_eq!(
+            pool.acquire(&authority()).err(),
+            Some(SessionAcquireError::LoadDeadlineExceeded {
+                elapsed: Duration::from_millis(30_001),
+                deadline: Duration::from_millis(30_000),
+            })
+        );
+        assert_eq!(pool.stats().last_cold_load_micros, Some(30_001_000));
+        assert_eq!(pool.stats().live_sessions, 0);
     }
 
     #[test]

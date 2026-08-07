@@ -333,6 +333,11 @@ fn validate_retained_authority(
     if &evaluation != accepted_profile.evaluation() {
         return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
     }
+    validate_runtime_evidence(
+        report,
+        accepted_profile,
+        accepted_profile.evaluation().evaluated_profile_id(),
+    )?;
     accepted_profile
         .executable_under(runtime)
         .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
@@ -598,6 +603,20 @@ fn validate_runtime_evidence(
         return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
     }
     if let Some(semantic) = accepted_profile.compatibility().semantic.as_ref() {
+        let measured = report
+            .semantic_activation_resource_pins(evaluated_profile_id)
+            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
+        if semantic.resources.model_bytes != measured.model_bytes
+            || semantic.resources.tokenizer_bytes != measured.tokenizer_bytes
+            || semantic.resources.resident_bytes != measured.resident_bytes
+            || semantic.resources.threads != measured.threads
+            || semantic.resources.max_concurrent_sessions != measured.max_concurrent_sessions
+            || semantic.resources.batch_size != measured.batch_size
+            || semantic.resources.sequence_length != measured.sequence_length
+            || semantic.resources.load_deadline_ms != measured.load_deadline_ms
+        {
+            return Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected);
+        }
         for output in &outputs {
             let resources = output
                 .native_resources

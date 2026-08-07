@@ -10,7 +10,7 @@ use crate::config::retrieval::RetrievalProfileStateV1;
 /// The active and rollback profiles are the only persisted vector consumers:
 /// model lifecycle pins artifacts, while direct-evaluator vectors are
 /// process-local. A store reclaim operation must additionally retain its
-/// active pointer and every staged build/base generation internally. Missing
+/// verified generations and every staged build/base generation internally. Missing
 /// generations named here are corruption/reset-required states, not an empty
 /// retention result.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

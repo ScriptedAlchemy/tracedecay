@@ -71,7 +71,7 @@ fn manual_measure_code_graph_projection_and_traversal() {
     let started = Instant::now();
     let batch = complete_batch(
         adapter
-            .read_graph_evidence(&request)
+            .read_graph_evidence(&request, super::graph_control())
             .expect("representative traversal succeeds"),
     );
     let traversal_elapsed = started.elapsed();

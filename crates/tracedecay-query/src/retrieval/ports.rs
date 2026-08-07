@@ -189,6 +189,7 @@ pub trait GraphEvidenceReadPort {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
+        control: std::sync::Arc<dyn super::graph::GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
 }
 

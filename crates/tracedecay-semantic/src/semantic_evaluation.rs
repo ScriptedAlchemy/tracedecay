@@ -7,7 +7,9 @@ use tracedecay_query::retrieval::semantic::{
     SemanticQueryEmbeddingRequestV1,
 };
 
-use super::fastembed_adapter::{CancellationSignal, FastEmbedEmbeddingRuntime};
+use super::fastembed_adapter::{
+    FastEmbedEmbeddingRuntime, SemanticExecutionAuthority, SemanticExecutionInterruptionV1,
+};
 use super::projector::{PreparedVectorGenerationV1, prepare_vector_generation};
 use super::runtime_query::{PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory};
 use super::runtime_service::{
@@ -16,6 +18,10 @@ use super::runtime_service::{
 };
 use super::session_pool::SessionPoolConfigV1;
 use super::{LoadedSemanticArtifactV1, RuntimeChunkVectorEncoderV1};
+
+/// One caller-owned cancellation/deadline authority shared by every stage of
+/// a semantic evaluation. Evaluator code never manufactures a replacement.
+pub trait SemanticEvaluationCancellationV1: SemanticExecutionAuthority {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticEvaluationProjectionCancellationV1 {
@@ -42,7 +48,11 @@ pub fn prepare_semantic_evaluation_projection(
     canonical_chunks: &[CodeSearchChunkV1],
     max_sessions: usize,
     memory_ceiling_bytes: u64,
+    cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 ) -> Result<PreparedSemanticEvaluationProjectionV1, SemanticRuntimeScheduleFailureV1> {
+    if let Some(interruption) = cancellation.interruption() {
+        return Err(schedule_interruption(interruption));
+    }
     let authority = artifact.into_authority();
     let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
         fastembed_runtime_factory();
@@ -57,8 +67,9 @@ pub fn prepare_semantic_evaluation_projection(
         },
     )
     .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new(
+    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new_linked(
         request.changes.added_or_changed.len().max(1) as u64,
+        cancellation,
     ));
     let mut encoder = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), progress);
     let prepared = prepare_vector_generation(
@@ -84,9 +95,13 @@ pub fn measure_semantic_evaluation_projection_cancellation(
     canonical_chunks: &[CodeSearchChunkV1],
     max_sessions: usize,
     memory_ceiling_bytes: u64,
+    cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 ) -> Result<SemanticEvaluationProjectionCancellationV1, SemanticRuntimeScheduleFailureV1> {
     if request.changes.added_or_changed.is_empty() {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
+    }
+    if let Some(interruption) = cancellation.interruption() {
+        return Err(schedule_interruption(interruption));
     }
     let chunks_added_or_changed = request.changes.added_or_changed.len() as u64;
     let authority = artifact.into_authority();
@@ -103,8 +118,9 @@ pub fn measure_semantic_evaluation_projection_cancellation(
         },
     )
     .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new(
+    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new_linked(
         request.changes.added_or_changed.len() as u64,
+        cancellation,
     ));
     let inner = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), Arc::clone(&progress));
     let mut encoder = CancelAfterFirstModelBatchV1 {
@@ -130,6 +146,17 @@ pub fn measure_semantic_evaluation_projection_cancellation(
         projection_calls,
         chunks_added_or_changed,
     })
+}
+
+fn schedule_interruption(
+    interruption: SemanticExecutionInterruptionV1,
+) -> SemanticRuntimeScheduleFailureV1 {
+    match interruption {
+        SemanticExecutionInterruptionV1::Cancelled => SemanticRuntimeScheduleFailureV1::Cancelled,
+        SemanticExecutionInterruptionV1::DeadlineExceeded => {
+            SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+        }
+    }
 }
 
 struct CancelAfterFirstModelBatchV1 {
@@ -191,11 +218,18 @@ impl SemanticEvaluationQueryFactoryV1 {
         Self { inner }
     }
 
-    pub fn create<'a, C>(&self, control: &'a C) -> SemanticEvaluationQueryEmbedderV1<'a>
+    pub fn create<'a, C>(
+        &self,
+        control: &'a C,
+        deadline_micros: Option<u64>,
+    ) -> SemanticEvaluationQueryEmbedderV1<'a>
     where
         C: SemanticExecutionControl + Sync,
     {
-        let cancellation = Arc::new(QueryCancellationV1(control));
+        let cancellation = Arc::new(QueryExecutionAuthorityV1 {
+            control,
+            deadline_micros,
+        });
         SemanticEvaluationQueryEmbedderV1 {
             inner: self.inner.create(cancellation),
         }
@@ -204,16 +238,32 @@ impl SemanticEvaluationQueryFactoryV1 {
     pub fn resident_cache_bytes(&self) -> u64 {
         self.inner.runtime().stats().resident_bytes
     }
+
+    pub fn cold_load_micros(&self) -> Option<u64> {
+        self.inner.runtime().stats().last_cold_load_micros
+    }
 }
 
-struct QueryCancellationV1<'a, C>(&'a C);
+struct QueryExecutionAuthorityV1<'a, C> {
+    control: &'a C,
+    deadline_micros: Option<u64>,
+}
 
-impl<C> CancellationSignal for QueryCancellationV1<'_, C>
+impl<C> SemanticExecutionAuthority for QueryExecutionAuthorityV1<'_, C>
 where
     C: SemanticExecutionControl + Sync,
 {
-    fn cancelled(&self) -> bool {
-        self.0.is_cancelled()
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+        if self.control.is_cancelled() {
+            Some(SemanticExecutionInterruptionV1::Cancelled)
+        } else if self
+            .deadline_micros
+            .is_some_and(|deadline| self.control.elapsed_micros() >= deadline)
+        {
+            Some(SemanticExecutionInterruptionV1::DeadlineExceeded)
+        } else {
+            None
+        }
     }
 }
 

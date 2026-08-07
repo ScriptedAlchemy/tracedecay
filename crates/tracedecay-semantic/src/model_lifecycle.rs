@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::watch;
 
 #[cfg(feature = "semantic-fastembed")]
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
@@ -96,6 +97,15 @@ pub enum SemanticModelLifecycleStateV1 {
         detail: String,
         retryable: bool,
     },
+}
+
+/// Monotone daemon wake emitted only after verified local model bytes become
+/// installed or ready again. The artifact identity lets consumers coalesce
+/// duplicate wakes without inferring readiness from a mutable path.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SemanticLifecycleVerifiedReadyEventV1 {
+    pub epoch: u64,
+    pub artifact_digest: Option<String>,
 }
 
 impl SemanticModelLifecycleStateV1 {

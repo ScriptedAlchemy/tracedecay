@@ -1,15 +1,16 @@
 //! Focused graph-lane adapter tests. The read port is an in-memory fake over
-//! frozen Plan 25 generation evidence; no graph rows are copied into a search
+//! frozen code-generation evidence; no graph rows are copied into a search
 //! corpus and no graph storage behavior is exercised here.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use tracedecay_application::CancellationSignal;
 use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionPublisher,
-    CodeGraphProjectionStore,
+    CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+    HermeticCodeGraphProjectionStore,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
@@ -23,16 +24,41 @@ use tracedecay_domain::{
 };
 
 use super::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
+    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
+    GraphPathSegmentV1,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
 
+mod control;
 mod measurement;
 mod projection;
 mod scale;
 mod storage;
+
+#[derive(Debug)]
+struct TestGraphExecutionControl {
+    cancelled: bool,
+    elapsed_micros: u64,
+}
+
+impl GraphExecutionControl for TestGraphExecutionControl {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        self.elapsed_micros
+    }
+}
+
+fn graph_control() -> Arc<dyn GraphExecutionControl> {
+    Arc::new(TestGraphExecutionControl {
+        cancelled: false,
+        elapsed_micros: 0,
+    })
+}
 
 fn id<T>(value: &str) -> T
 where
@@ -220,8 +246,12 @@ fn projection_batch(
 ) -> RetrieverBatch<GraphLaneEvidence> {
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.fixture").expect("valid token");
-    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
-    publish_projection(&store, request, edges, symbols);
+    let publisher =
+        HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+    publish_projection(&publisher, request, edges, symbols);
+    let store = publisher
+        .verified_store(&request.generation)
+        .expect("open verified generation");
     read_projection(&store, request, &cancellation)
 }
 
@@ -240,7 +270,7 @@ fn read_projection(
         .expect("published generation is readable");
     complete_batch(
         adapter
-            .read_graph_evidence(request)
+            .read_graph_evidence(request, graph_control())
             .expect("graph read succeeds"),
     )
 }
@@ -254,7 +284,7 @@ fn projection_chunks(request: &GraphLaneRequest, symbols: &[&str]) -> Vec<CodeSe
 }
 
 fn publish_projection(
-    store: &CodeGraphProjectionStore,
+    store: &HermeticCodeGraphProjectionStore,
     request: &GraphLaneRequest,
     edges: &[CanonicalRelationEdgeV1],
     symbols: &[&str],
@@ -325,6 +355,7 @@ impl GraphEvidenceReadPort for FakeGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
+        _control: Arc<dyn super::GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             PortReply::Outcome(outcome) => Ok(outcome.clone()),
@@ -464,7 +495,7 @@ fn graph_projection_rejects_foreign_generation_chunks() {
     foreign.anchor.generation_id = id("generation.foreign");
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.foreign").expect("valid token");
-    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+    let store = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
 
     let result = store.publish_code_graph(&request.generation, &[], &[foreign], &cancellation);
 
@@ -482,7 +513,7 @@ fn graph_projection_rejects_conflicting_symbol_bindings() {
     conflicting.anchor.file_occurrence_id = id("file.symbol.other");
     let cancellation =
         CancellationSignal::active("cancellation.code-graph.conflict").expect("valid token");
-    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+    let store = HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
 
     let result = store.publish_code_graph(
         &request.generation,
@@ -528,7 +559,7 @@ fn graph_lane_emits_generic_candidates_with_ordered_path_ids_and_weakest_authori
     ))));
 
     let result = complete_batch(
-        lane.retrieve_graph(&request)
+        lane.retrieve_graph(&request, graph_control())
             .expect("graph retrieval succeeds"),
     );
 
@@ -683,8 +714,9 @@ fn graph_projection_selects_symbol_chunk_binding_canonically() {
     let read = |chunks: &[CodeSearchChunkV1]| {
         let cancellation =
             CancellationSignal::active("cancellation.code-graph.binding").expect("valid token");
-        let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
-        store
+        let publisher =
+            HermeticCodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+        publisher
             .publish_code_graph(
                 &request.generation,
                 std::slice::from_ref(&edge),
@@ -692,6 +724,9 @@ fn graph_projection_selects_symbol_chunk_binding_canonically() {
                 &cancellation,
             )
             .expect("projection is valid");
+        let store = publisher
+            .verified_store(&request.generation)
+            .expect("open verified generation");
         read_projection(&store, &request, &cancellation)
     };
 
@@ -728,7 +763,7 @@ fn graph_lane_rejects_non_contiguous_ordered_path_ids() {
         candidate_coverage(1),
     ))));
 
-    let result = lane.retrieve_graph(&request);
+    let result = lane.retrieve_graph(&request, graph_control());
 
     assert!(matches!(result, Err(RetrievalPortError::Contract(_))));
 }
@@ -748,7 +783,7 @@ fn graph_lane_rejects_paths_beyond_the_profile_depth_bound() {
         candidate_coverage(1),
     ))));
 
-    let result = lane.retrieve_graph(&request);
+    let result = lane.retrieve_graph(&request, graph_control());
 
     assert!(matches!(result, Err(RetrievalPortError::Contract(_))));
 }
@@ -772,7 +807,7 @@ fn graph_lane_recomputes_and_rejects_a_forged_weakest_authority() {
         candidate_coverage(1),
     ))));
 
-    let result = lane.retrieve_graph(&request);
+    let result = lane.retrieve_graph(&request, graph_control());
 
     assert!(matches!(result, Err(RetrievalPortError::Contract(_))));
 }
@@ -793,7 +828,7 @@ fn graph_lane_rejects_cross_generation_evidence() {
         candidate_coverage(1),
     ))));
 
-    let result = lane.retrieve_graph(&request);
+    let result = lane.retrieve_graph(&request, graph_control());
 
     assert_eq!(result, Err(RetrievalPortError::GenerationMismatch));
 }
@@ -836,7 +871,7 @@ fn graph_lane_canonicalizes_and_caps_the_prefix_without_losing_coverage() {
             pairs.clone(),
             source_coverage,
         ))))
-        .retrieve_graph(&request)
+        .retrieve_graph(&request, graph_control())
         .expect("first run"),
     );
     let mut reversed = pairs;
@@ -846,7 +881,7 @@ fn graph_lane_canonicalizes_and_caps_the_prefix_without_losing_coverage() {
             reversed,
             source_coverage,
         ))))
-        .retrieve_graph(&request)
+        .retrieve_graph(&request, graph_control())
         .expect("restarted run"),
     );
 
@@ -874,7 +909,7 @@ fn graph_lane_preserves_partial_stale_and_cancelled_outcomes() {
         value: batch(vec![pair], candidate_coverage(1)),
         reason: RetrievalFailure::StaleSource,
     }))
-    .retrieve_graph(&request)
+    .retrieve_graph(&request, graph_control())
     .expect("partial outcome");
     assert!(matches!(
         partial,
@@ -888,12 +923,12 @@ fn graph_lane_preserves_partial_stale_and_cancelled_outcomes() {
     let stale = GraphLane::new(FakeGraphPort::outcome(RetrieverOutcome::Stale(
         stale_freshness.clone(),
     )))
-    .retrieve_graph(&request)
+    .retrieve_graph(&request, graph_control())
     .expect("stale outcome");
     assert_eq!(stale, RetrieverOutcome::Stale(stale_freshness));
 
     let cancelled = GraphLane::new(FakeGraphPort::error(RetrievalPortError::Cancelled))
-        .retrieve_graph(&request)
+        .retrieve_graph(&request, graph_control())
         .expect("cancelled outcome");
     assert_eq!(cancelled, RetrieverOutcome::Cancelled);
 }
@@ -905,7 +940,9 @@ fn graph_lane_reports_missing_authority_without_substitution() {
         RetrievalPortError::AuthorityUnavailable("graph generation is not published".to_owned()),
     ));
 
-    let outcome = lane.retrieve_graph(&request).expect("typed outcome");
+    let outcome = lane
+        .retrieve_graph(&request, graph_control())
+        .expect("typed outcome");
 
     assert!(matches!(
         outcome,

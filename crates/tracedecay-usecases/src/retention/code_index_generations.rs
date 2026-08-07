@@ -8,12 +8,11 @@
 //! and a small newest-superseded rollback floor.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -23,11 +22,22 @@ use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 // demanded 1: every real sealed file was refused as "incompatible" and the store
 // became uncollectable.
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
-use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
 
 mod generation_scan;
+mod graph_replay_release;
+mod locking;
+pub use graph_replay_release::{
+    CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
+    code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
+};
+pub use locking::{
+    CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
+    try_acquire_code_generation_store_lock,
+};
 
 use generation_scan::read_generation_metadata;
+use locking::acquire_scope_retention_lock;
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
 
@@ -45,6 +55,8 @@ const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
 const RECEIPT_SCHEMA: &str = "tracedecay.code-generation-retention-receipt.v1";
 const TRANSACTION_FILE: &str = ".code-generation-retention-transaction-v1.json";
 const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transaction.v1";
+const GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY: &str = "graph-replay-release-queue";
+const GRAPH_REPLAY_RELEASE_SCHEMA: &str = "tracedecay.graph-replay-release.v1";
 
 /// Scope-root reconciliation artifacts. They deliberately live in the *parent*
 /// `code-index-v1/` directory rather than inside a scope: the scope directory is
@@ -57,10 +69,17 @@ const SCOPE_RETENTION_RECEIPTS_DIRECTORY: &str = "code-index-scope-retention-rec
 const SCOPE_RETENTION_RECEIPT_SCHEMA: &str = "tracedecay.code-index-scope-retention-receipt.v1";
 const SCOPE_RETENTION_TRANSACTION_SCHEMA: &str =
     "tracedecay.code-index-scope-retention-transaction.v1";
+const SCOPE_BINDING_CLEANUP_INTENT_FILE: &str = ".code-index-scope-binding-cleanup-intent-v1.json";
+const SCOPE_BINDING_CLEANUP_INTENT_SCHEMA: &str =
+    "tracedecay.code-index-scope-binding-cleanup-intent.v1";
+const SCOPE_ROOT_LIVENESS_PROOF_SCHEMA: &str = "tracedecay.code-index-scope-liveness-proof.v1";
 const MAX_SCOPE_TRANSACTION_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SCOPE_ROOTS_PER_INVENTORY: usize = 4_096;
 
 const MAX_GENERATION_METADATA_PREFIX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSACTION_BYTES: u64 = 1024 * 1024;
+pub const MAX_CODE_GENERATION_RETENTION_BATCH_V1: usize = 32;
 
 #[derive(Deserialize)]
 struct SealedGenerationManifestMetadataV1 {
@@ -172,6 +191,17 @@ pub struct CodeGenerationRetentionReceiptV1 {
     pub completed_at_micros: i64,
 }
 
+#[derive(Serialize)]
+struct CodeGenerationRetentionReceiptMaterialV1<'a> {
+    schema: &'static str,
+    active_generation_id: &'a CodeGenerationId,
+    vector_readable_sources: &'a BTreeSet<CodeGenerationId>,
+    rollback_floor: usize,
+    deleted_generations: &'a [CodeGenerationRetentionGenerationV1],
+    reclaimed_bytes: u64,
+    completed_at_micros: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct CodeGenerationRetentionTransactionV1 {
@@ -209,29 +239,6 @@ pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
     hex::encode(Sha256::digest(
         canonical_project_root.to_string_lossy().as_bytes(),
     ))
-}
-
-pub struct CodeGenerationStoreLockV1(File);
-
-impl Drop for CodeGenerationStoreLockV1 {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-pub fn acquire_code_generation_store_lock(
-    store_root: &Path,
-) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    let lock_path = store_root.join(STORE_LOCK_FILE);
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(storage)?;
-    lock.lock_exclusive().map_err(storage)?;
-    Ok(CodeGenerationStoreLockV1(lock))
 }
 
 /// Plan retention with full digest verification. This is the only planner a
@@ -434,6 +441,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
     let collectable_generations = superseded_generations
         .iter()
         .filter(|generation| !marked.contains(&generation.generation_id))
+        .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()
         .collect();
 
@@ -596,7 +604,12 @@ pub fn observe_code_generation_retention(
     };
     let mut active_present = false;
     let mut observation = CodeGenerationRetentionObservationV1::default();
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_SCOPE_ROOTS_PER_INVENTORY {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "code-index scope inventory exceeds its bounded authority".to_owned(),
+            ));
+        }
         let entry = entry.map_err(storage)?;
         let path = entry.path();
         let Some(file_name) = generation_file_name(&path) else {
@@ -867,6 +880,7 @@ fn rollback_staged_transaction(
             }
         }
     }
+    graph_replay_release::remove_events(store_root, &transaction.receipt)?;
     remove_empty_stage_root(&stage_root)
 }
 
@@ -1016,19 +1030,8 @@ fn build_receipt(
     deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
-    #[derive(Serialize)]
-    struct ReceiptMaterial<'a> {
-        schema: &'static str,
-        active_generation_id: &'a CodeGenerationId,
-        vector_readable_sources: &'a BTreeSet<CodeGenerationId>,
-        rollback_floor: usize,
-        deleted_generations: &'a [CodeGenerationRetentionGenerationV1],
-        reclaimed_bytes: u64,
-        completed_at_micros: i64,
-    }
-
     let reclaimed_bytes = total_bytes(&deleted_generations);
-    let material = ReceiptMaterial {
+    let material = CodeGenerationRetentionReceiptMaterialV1 {
         schema: RECEIPT_SCHEMA,
         active_generation_id: &plan.active_generation_id,
         vector_readable_sources: &plan.vector_readable_sources,
@@ -1060,6 +1063,7 @@ fn write_receipt(
     store_root: &Path,
     receipt: &CodeGenerationRetentionReceiptV1,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
+    graph_replay_release::write_events(store_root, receipt)?;
     let receipts_root = store_root.join(RECEIPTS_DIRECTORY);
     std::fs::create_dir_all(&receipts_root).map_err(storage)?;
     let final_path = receipts_root.join(format!("receipt-{}.json", receipt.receipt_digest));
@@ -1173,9 +1177,17 @@ pub struct ScopeRootRetentionPlanV1 {
     pub retained_immature_scopes: Vec<StrandedCodeIndexScopeV1>,
     /// Stranded but structurally refused.
     pub refused_scopes: Vec<RefusedCodeIndexScopeV1>,
+    /// Present only when the canonical production authorities sealed this plan
+    /// for Apply. Raw-root observation plans deliberately leave it absent.
+    liveness_proof: Option<ScopeRootLivenessProofV1>,
 }
 
 impl ScopeRootRetentionPlanV1 {
+    #[must_use]
+    pub fn liveness_proof(&self) -> Option<&ScopeRootLivenessProofV1> {
+        self.liveness_proof.as_ref()
+    }
+
     /// Every scope no live root names, whatever this pass decided to do about
     /// it. This is the number a storage report or Doctor finding must publish:
     /// the gap is "unreachable bytes", not "bytes we happened to collect".
@@ -1201,6 +1213,101 @@ impl ScopeRootRetentionPlanV1 {
     }
 }
 
+/// Terminal receipt for one bounded liveness authority. `revision` identifies
+/// the exact snapshot while `digest` covers every row in that snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRootAuthorityReceiptV1 {
+    pub revision: String,
+    pub terminal_count: u64,
+    pub digest: String,
+}
+
+/// Exact relational source bound to one physical code-index scope at the
+/// vector census revision recorded by the proof.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRootCandidateBindingV1 {
+    pub scope_hash: String,
+    pub source_scope: tracedecay_store::StoreShardIdV1,
+    pub vector_census_revision: String,
+    pub live: bool,
+}
+
+/// Complete, revision-bound proof used by scope collection. Every authority is
+/// explicit so adding a new liveness source cannot silently omit it from the
+/// digest or from crash replay.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRootLivenessProofV1 {
+    pub schema: String,
+    pub proof_digest: String,
+    pub live_scope_hashes: BTreeSet<String>,
+    pub registered_roots: ScopeRootAuthorityReceiptV1,
+    pub git_worktrees: ScopeRootAuthorityReceiptV1,
+    pub mounted_leases: ScopeRootAuthorityReceiptV1,
+    pub configuration_roots: ScopeRootAuthorityReceiptV1,
+    pub vector_census: ScopeRootAuthorityReceiptV1,
+    pub vector_dependencies: ScopeRootAuthorityReceiptV1,
+    pub candidate_binding: ScopeRootCandidateBindingV1,
+}
+
+#[derive(Serialize)]
+struct ScopeRootLivenessProofMaterialV1<'a> {
+    schema: &'static str,
+    live_scope_hashes: &'a BTreeSet<String>,
+    registered_roots: &'a ScopeRootAuthorityReceiptV1,
+    git_worktrees: &'a ScopeRootAuthorityReceiptV1,
+    mounted_leases: &'a ScopeRootAuthorityReceiptV1,
+    configuration_roots: &'a ScopeRootAuthorityReceiptV1,
+    vector_census: &'a ScopeRootAuthorityReceiptV1,
+    vector_dependencies: &'a ScopeRootAuthorityReceiptV1,
+    candidate_binding: &'a ScopeRootCandidateBindingV1,
+}
+
+impl ScopeRootLivenessProofV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        live_scope_hashes: BTreeSet<String>,
+        registered_roots: ScopeRootAuthorityReceiptV1,
+        git_worktrees: ScopeRootAuthorityReceiptV1,
+        mounted_leases: ScopeRootAuthorityReceiptV1,
+        configuration_roots: ScopeRootAuthorityReceiptV1,
+        vector_census: ScopeRootAuthorityReceiptV1,
+        vector_dependencies: ScopeRootAuthorityReceiptV1,
+        candidate_binding: ScopeRootCandidateBindingV1,
+    ) -> Result<Self, CodeGenerationRetentionErrorV1> {
+        let mut proof = Self {
+            schema: SCOPE_ROOT_LIVENESS_PROOF_SCHEMA.to_owned(),
+            proof_digest: String::new(),
+            live_scope_hashes,
+            registered_roots,
+            git_worktrees,
+            mounted_leases,
+            configuration_roots,
+            vector_census,
+            vector_dependencies,
+            candidate_binding,
+        };
+        proof.refresh_digest()?;
+        validate_scope_root_liveness_proof(&proof)?;
+        Ok(proof)
+    }
+
+    fn refresh_digest(&mut self) -> Result<(), CodeGenerationRetentionErrorV1> {
+        self.proof_digest = scope_root_liveness_proof_digest(self)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRootBindingCleanupReplayV1 {
+    pub scope_hash: String,
+    pub source_scope: tracedecay_store::StoreShardIdV1,
+    pub liveness_proof: ScopeRootLivenessProofV1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeRootRetentionReceiptV1 {
@@ -1209,16 +1316,42 @@ pub struct ScopeRootRetentionReceiptV1 {
     /// The exact live set the decision was made against, so a receipt can be
     /// audited without re-deriving it.
     pub live_scope_hashes: BTreeSet<String>,
+    pub liveness_proof: ScopeRootLivenessProofV1,
     pub minimum_stranding_age_secs: i64,
     pub collected_scopes: Vec<StrandedCodeIndexScopeV1>,
     pub reclaimed_bytes: u64,
     pub completed_at_micros: i64,
 }
 
+#[derive(Serialize)]
+struct ScopeReceiptMaterial<'a> {
+    schema: &'static str,
+    live_scope_hashes: &'a BTreeSet<String>,
+    liveness_proof: &'a ScopeRootLivenessProofV1,
+    minimum_stranding_age_secs: i64,
+    collected_scopes: &'a [StrandedCodeIndexScopeV1],
+    reclaimed_bytes: u64,
+    completed_at_micros: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ScopeRootRetentionTransactionV1 {
     schema: String,
+    receipt: ScopeRootRetentionReceiptV1,
+}
+
+/// A durable promise to remove one semantic source-scope binding only after
+/// the corresponding scope-root receipt has committed. This lives beside the
+/// filesystem transaction because deleting the source scope would otherwise
+/// erase the only place an interrupted relational cleanup could be recovered.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ScopeRootBindingCleanupIntentV1 {
+    schema: String,
+    scope_hash: String,
+    source_scope: tracedecay_store::StoreShardIdV1,
+    liveness_proof: ScopeRootLivenessProofV1,
     receipt: ScopeRootRetentionReceiptV1,
 }
 
@@ -1229,13 +1362,12 @@ pub struct ScopeRootRetentionReportV1 {
     pub receipt: Option<ScopeRootRetentionReceiptV1>,
 }
 
-/// Classify every scope directory under one `code-index-v1/` store root against
-/// the caller's proven-live canonical project roots.
+/// Read-only classification of every scope directory under one
+/// `code-index-v1/` store root against caller-supplied roots.
 ///
-/// `live_canonical_roots` must be the *complete* live set. An empty set is
-/// rejected rather than interpreted, because "I could not read the registry" and
-/// "this profile has no live roots" are indistinguishable at this layer and one
-/// of those readings would delete the entire store.
+/// This API never seals an Apply-capable plan. Production collection uses
+/// [`plan_scope_root_retention_with_liveness_proof`] after the canonical
+/// authorities have produced a complete revision-bound receipt.
 pub fn plan_scope_root_retention(
     store_root: &Path,
     live_canonical_roots: &BTreeSet<PathBuf>,
@@ -1257,6 +1389,41 @@ pub fn plan_scope_root_retention(
         minimum_stranding_age_secs,
         now_secs,
     )
+}
+
+/// Plan an Apply-capable scope pass from the complete canonical liveness proof.
+/// The physical executor will require the exact proof again immediately before
+/// quarantine, which turns every authority revision into a compare-and-swap.
+pub fn plan_scope_root_retention_with_liveness_proof(
+    store_root: &Path,
+    liveness_proof: ScopeRootLivenessProofV1,
+    minimum_stranding_age_secs: i64,
+    now_secs: i64,
+) -> Result<ScopeRootRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    validate_scope_root_liveness_proof(&liveness_proof)?;
+    let mut plan = plan_scope_root_retention_from_hashes(
+        store_root,
+        &liveness_proof.live_scope_hashes,
+        minimum_stranding_age_secs,
+        now_secs,
+    )?;
+    if liveness_proof.candidate_binding.live
+        || liveness_proof
+            .live_scope_hashes
+            .contains(&liveness_proof.candidate_binding.scope_hash)
+        || !plan
+            .collectable_scopes
+            .iter()
+            .any(|scope| scope.scope_hash == liveness_proof.candidate_binding.scope_hash)
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope liveness proof does not authorize its exact collection candidate".to_owned(),
+        ));
+    }
+    plan.collectable_scopes
+        .retain(|scope| scope.scope_hash == liveness_proof.candidate_binding.scope_hash);
+    plan.liveness_proof = Some(liveness_proof);
+    Ok(plan)
 }
 
 fn plan_scope_root_retention_from_hashes(
@@ -1285,6 +1452,7 @@ fn plan_scope_root_retention_from_hashes(
         collectable_scopes: Vec::new(),
         retained_immature_scopes: Vec::new(),
         refused_scopes: Vec::new(),
+        liveness_proof: None,
     };
 
     for entry in entries {
@@ -1339,12 +1507,13 @@ fn plan_scope_root_retention_from_hashes(
     Ok(plan)
 }
 
-/// Collect the stranded scopes a plan named, under the same
-/// journal → quarantine → durable receipt → unlink ordering generation
-/// retention uses.
+/// Collect the one stranded scope whose exact semantic binding-cleanup intent
+/// was durably recorded, under the journal → quarantine → durable receipt →
+/// unlink ordering generation retention uses.
 pub fn execute_scope_root_retention(
     store_root: &Path,
     plan: ScopeRootRetentionPlanV1,
+    revalidated_liveness_proof: &ScopeRootLivenessProofV1,
     mode: CodeGenerationRetentionModeV1,
     now_secs: i64,
     completed_at: UtcMicros,
@@ -1357,8 +1526,54 @@ pub fn execute_scope_root_retention(
         });
     }
 
+    validate_scope_root_liveness_proof(revalidated_liveness_proof)?;
+    let planned_liveness_proof = plan.liveness_proof.as_ref().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope Apply requires a canonical proof-bound plan".to_owned(),
+        )
+    })?;
+    if planned_liveness_proof != revalidated_liveness_proof {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope liveness authority changed before quarantine".to_owned(),
+        ));
+    }
+    let candidate = plan.collectable_scopes.first().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup requires a singleton collection plan".to_owned(),
+        )
+    })?;
+    let expected_binding_cleanup_intent = ScopeRootBindingCleanupIntentV1 {
+        schema: SCOPE_BINDING_CLEANUP_INTENT_SCHEMA.to_owned(),
+        scope_hash: candidate.scope_hash.clone(),
+        source_scope: revalidated_liveness_proof
+            .candidate_binding
+            .source_scope
+            .clone(),
+        liveness_proof: revalidated_liveness_proof.clone(),
+        receipt: binding_cleanup_receipt(&plan, &candidate.scope_hash, completed_at)?,
+    };
+    validate_scope_binding_cleanup_intent(&expected_binding_cleanup_intent)?;
+
     let _pass_lock = acquire_scope_retention_lock(store_root)?;
     recover_pending_scope_transaction_unlocked(store_root)?;
+    if plan.liveness_proof.as_ref() != Some(revalidated_liveness_proof) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope liveness authority changed at the quarantine boundary".to_owned(),
+        ));
+    }
+    match load_scope_binding_cleanup_intent(store_root)? {
+        Some(intent) if intent == expected_binding_cleanup_intent => {}
+        Some(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "scope binding cleanup intent does not match the collection plan".to_owned(),
+            ));
+        }
+        None => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "scope collection requires a durable binding cleanup intent".to_owned(),
+            ));
+        }
+    }
 
     // Re-verify every candidate under the pass lock, and hold each scope's own
     // generation-retention lock while doing so, so a concurrent generation pass
@@ -1401,7 +1616,7 @@ pub fn execute_scope_root_retention(
         collected.push(scope.clone());
     }
 
-    let receipt = build_scope_receipt(&plan, collected.clone(), completed_at)?;
+    let receipt = expected_binding_cleanup_intent.receipt;
     let transaction = ScopeRootRetentionTransactionV1 {
         schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
         receipt: receipt.clone(),
@@ -1441,25 +1656,131 @@ pub fn recover_scope_root_retention(
     recover_pending_scope_transaction_unlocked(store_root)
 }
 
-/// Recover, plan, and execute one scope-root reconciliation pass.
-pub fn run_scope_root_retention(
+/// Persist the relational cleanup that must follow one exact scope-root
+/// collection before the scope can be physically quarantined.
+///
+/// The receipt is derived from the same singleton plan and timestamp that
+/// `execute_scope_root_retention` will use. That makes a later replay depend
+/// on the durable filesystem decision, rather than on a newly derived plan.
+pub fn prepare_scope_root_binding_cleanup(
     store_root: &Path,
-    live_canonical_roots: &BTreeSet<PathBuf>,
-    minimum_stranding_age_secs: i64,
-    mode: CodeGenerationRetentionModeV1,
-    now_secs: i64,
+    plan: &ScopeRootRetentionPlanV1,
+    scope_hash: &str,
+    source_scope: &tracedecay_store::StoreShardIdV1,
+    revalidated_liveness_proof: &ScopeRootLivenessProofV1,
     completed_at: UtcMicros,
-) -> Result<ScopeRootRetentionReportV1, CodeGenerationRetentionErrorV1> {
-    if mode == CodeGenerationRetentionModeV1::Apply {
-        recover_scope_root_retention(store_root)?;
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    validate_scope_root_liveness_proof(revalidated_liveness_proof)?;
+    if plan.liveness_proof.as_ref() != Some(revalidated_liveness_proof)
+        || revalidated_liveness_proof.candidate_binding.scope_hash != scope_hash
+        || revalidated_liveness_proof.candidate_binding.source_scope != *source_scope
+        || revalidated_liveness_proof.candidate_binding.live
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope cleanup intent does not match its revalidated liveness proof".to_owned(),
+        ));
     }
-    let plan = plan_scope_root_retention(
-        store_root,
-        live_canonical_roots,
-        minimum_stranding_age_secs,
-        now_secs,
-    )?;
-    execute_scope_root_retention(store_root, plan, mode, now_secs, completed_at)
+    let receipt = binding_cleanup_receipt(plan, scope_hash, completed_at)?;
+    let intent = ScopeRootBindingCleanupIntentV1 {
+        schema: SCOPE_BINDING_CLEANUP_INTENT_SCHEMA.to_owned(),
+        scope_hash: scope_hash.to_owned(),
+        source_scope: source_scope.clone(),
+        liveness_proof: revalidated_liveness_proof.clone(),
+        receipt,
+    };
+    validate_scope_binding_cleanup_intent(&intent)?;
+
+    let _pass_lock = acquire_scope_retention_lock(store_root)?;
+    if scope_transaction_path(store_root).exists() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup cannot begin while filesystem recovery is pending".to_owned(),
+        ));
+    }
+    match load_scope_binding_cleanup_intent(store_root)? {
+        None => persist_scope_binding_cleanup_intent(store_root, &intent),
+        Some(existing) if existing == intent => Ok(()),
+        Some(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "a different scope binding cleanup intent is already pending".to_owned(),
+        )),
+    }
+}
+
+/// Return the exact binding whose cleanup must be replayed after filesystem
+/// transaction recovery. A rolled-back filesystem transaction clears its
+/// intent; every other state that cannot prove either outcome is unsafe.
+pub fn recover_scope_root_binding_cleanup(
+    store_root: &Path,
+) -> Result<Option<ScopeRootBindingCleanupReplayV1>, CodeGenerationRetentionErrorV1> {
+    if !store_root.is_dir() {
+        return Ok(None);
+    }
+    let _pass_lock = acquire_scope_retention_lock(store_root)?;
+    if scope_transaction_path(store_root).exists() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup requires filesystem transaction recovery first".to_owned(),
+        ));
+    }
+    let Some(intent) = load_scope_binding_cleanup_intent(store_root)? else {
+        return Ok(None);
+    };
+    let source_exists = scope_directory_exists(&scope_root_path(store_root, &intent.scope_hash)?)?;
+    if scope_receipt_is_durable(store_root, &intent.receipt)? {
+        if source_exists {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "scope binding cleanup receipt is durable but its source scope remains".to_owned(),
+            ));
+        }
+        return Ok(Some(ScopeRootBindingCleanupReplayV1 {
+            scope_hash: intent.scope_hash,
+            source_scope: intent.source_scope,
+            liveness_proof: intent.liveness_proof,
+        }));
+    }
+    if source_exists {
+        clear_scope_binding_cleanup_intent(store_root)?;
+        return Ok(None);
+    }
+    Err(CodeGenerationRetentionErrorV1::UnsafeState(
+        "scope binding cleanup cannot prove whether its source scope was collected".to_owned(),
+    ))
+}
+
+/// Clear a replayed binding-cleanup intent only after the exact receipt is
+/// durable and its exact source scope is absent.
+pub fn complete_scope_root_binding_cleanup(
+    store_root: &Path,
+    replay: &ScopeRootBindingCleanupReplayV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    let _pass_lock = acquire_scope_retention_lock(store_root)?;
+    if scope_transaction_path(store_root).exists() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup cannot complete while filesystem recovery is pending".to_owned(),
+        ));
+    }
+    let intent = load_scope_binding_cleanup_intent(store_root)?.ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup completion has no pending intent".to_owned(),
+        )
+    })?;
+    if intent.scope_hash != replay.scope_hash
+        || intent.source_scope != replay.source_scope
+        || intent.liveness_proof != replay.liveness_proof
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup completion does not match its pending intent".to_owned(),
+        ));
+    }
+    if !scope_receipt_is_durable(store_root, &intent.receipt)? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup completion has no durable filesystem receipt".to_owned(),
+        ));
+    }
+    if scope_directory_exists(&scope_root_path(store_root, &replay.scope_hash)?)? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup completion found its source scope present".to_owned(),
+        ));
+    }
+    clear_scope_binding_cleanup_intent(store_root)
 }
 
 fn recover_pending_scope_transaction_unlocked(
@@ -1476,23 +1797,12 @@ fn recover_pending_scope_transaction_unlocked(
     clear_scope_transaction(store_root)
 }
 
-fn acquire_scope_retention_lock(
-    store_root: &Path,
-) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    let lock_path = store_root.join(SCOPE_RETENTION_LOCK_FILE);
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(storage)?;
-    lock.lock_exclusive().map_err(storage)?;
-    Ok(CodeGenerationStoreLockV1(lock))
-}
-
 fn scope_transaction_path(store_root: &Path) -> PathBuf {
     store_root.join(SCOPE_RETENTION_TRANSACTION_FILE)
+}
+
+fn scope_binding_cleanup_intent_path(store_root: &Path) -> PathBuf {
+    store_root.join(SCOPE_BINDING_CLEANUP_INTENT_FILE)
 }
 
 fn scope_stage_root(store_root: &Path, receipt: &ScopeRootRetentionReceiptV1) -> PathBuf {
@@ -1606,52 +1916,78 @@ fn build_scope_receipt(
     collected_scopes: Vec<StrandedCodeIndexScopeV1>,
     completed_at: UtcMicros,
 ) -> Result<ScopeRootRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
-    #[derive(Serialize)]
-    struct ScopeReceiptMaterial<'a> {
-        schema: &'static str,
-        live_scope_hashes: &'a BTreeSet<String>,
-        minimum_stranding_age_secs: i64,
-        collected_scopes: &'a [StrandedCodeIndexScopeV1],
-        reclaimed_bytes: u64,
-        completed_at_micros: i64,
-    }
-
+    let liveness_proof = plan.liveness_proof.clone().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope receipt requires a canonical liveness proof".to_owned(),
+        )
+    })?;
+    validate_scope_root_liveness_proof(&liveness_proof)?;
     let reclaimed_bytes = total_scope_bytes(&collected_scopes);
-    let material = ScopeReceiptMaterial {
-        schema: SCOPE_RETENTION_RECEIPT_SCHEMA,
-        live_scope_hashes: &plan.live_scope_hashes,
-        minimum_stranding_age_secs: plan.minimum_stranding_age_secs,
-        collected_scopes: &collected_scopes,
-        reclaimed_bytes,
-        completed_at_micros: completed_at.0,
-    };
-    let digest = canonical_sha256(&material)
-        .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    let receipt_digest = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_owned();
-    Ok(ScopeRootRetentionReceiptV1 {
+    let mut receipt = ScopeRootRetentionReceiptV1 {
         schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
-        receipt_digest,
+        receipt_digest: String::new(),
         live_scope_hashes: plan.live_scope_hashes.clone(),
+        liveness_proof,
         minimum_stranding_age_secs: plan.minimum_stranding_age_secs,
         collected_scopes,
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
-    })
+    };
+    receipt.receipt_digest = scope_receipt_digest(&receipt)?;
+    Ok(receipt)
 }
 
-fn validate_scope_transaction(
-    transaction: &ScopeRootRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let receipt = &transaction.receipt;
-    if transaction.schema != SCOPE_RETENTION_TRANSACTION_SCHEMA
-        || receipt.schema != SCOPE_RETENTION_RECEIPT_SCHEMA
-    {
+fn scope_receipt_digest(
+    receipt: &ScopeRootRetentionReceiptV1,
+) -> Result<String, CodeGenerationRetentionErrorV1> {
+    let material = ScopeReceiptMaterial {
+        schema: SCOPE_RETENTION_RECEIPT_SCHEMA,
+        live_scope_hashes: &receipt.live_scope_hashes,
+        liveness_proof: &receipt.liveness_proof,
+        minimum_stranding_age_secs: receipt.minimum_stranding_age_secs,
+        collected_scopes: &receipt.collected_scopes,
+        reclaimed_bytes: receipt.reclaimed_bytes,
+        completed_at_micros: receipt.completed_at_micros,
+    };
+    let digest = canonical_sha256(&material)
+        .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
+    let Some(receipt_digest) = digest.as_str().strip_prefix("sha256:") else {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation transaction has an incompatible schema".to_owned(),
+            "scope reconciliation receipt digest lacks its SHA-256 prefix".to_owned(),
+        ));
+    };
+    Ok(receipt_digest.to_owned())
+}
+
+fn binding_cleanup_receipt(
+    plan: &ScopeRootRetentionPlanV1,
+    scope_hash: &str,
+    completed_at: UtcMicros,
+) -> Result<ScopeRootRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
+    if plan.collectable_scopes.len() != 1 {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup requires a singleton collection plan".to_owned(),
+        ));
+    }
+    let candidate = plan.collectable_scopes.first().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup singleton plan has no candidate".to_owned(),
+        )
+    })?;
+    if candidate.scope_hash != scope_hash {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup candidate does not match its collection plan".to_owned(),
+        ));
+    }
+    build_scope_receipt(plan, vec![candidate.clone()], completed_at)
+}
+
+fn validate_scope_receipt(
+    receipt: &ScopeRootRetentionReceiptV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if receipt.schema != SCOPE_RETENTION_RECEIPT_SCHEMA {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope reconciliation receipt has an incompatible schema".to_owned(),
         ));
     }
     if receipt.receipt_digest.len() != 64
@@ -1664,9 +2000,20 @@ fn validate_scope_transaction(
             "scope reconciliation receipt digest is not a SHA-256 file component".to_owned(),
         ));
     }
+    if receipt.receipt_digest != scope_receipt_digest(receipt)? {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope reconciliation receipt digest does not match its contents".to_owned(),
+        ));
+    }
     if receipt.live_scope_hashes.is_empty() {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "scope reconciliation transaction records an empty live-root set".to_owned(),
+        ));
+    }
+    validate_scope_root_liveness_proof(&receipt.liveness_proof)?;
+    if receipt.live_scope_hashes != receipt.liveness_proof.live_scope_hashes {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope reconciliation receipt liveness set does not match its proof".to_owned(),
         ));
     }
     let mut seen = BTreeSet::new();
@@ -1688,6 +2035,118 @@ fn validate_scope_transaction(
     {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "scope reconciliation transaction violates liveness or byte invariants".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scope_transaction(
+    transaction: &ScopeRootRetentionTransactionV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if transaction.schema != SCOPE_RETENTION_TRANSACTION_SCHEMA {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope reconciliation transaction has an incompatible schema".to_owned(),
+        ));
+    }
+    validate_scope_receipt(&transaction.receipt)
+}
+
+fn scope_root_liveness_proof_digest(
+    proof: &ScopeRootLivenessProofV1,
+) -> Result<String, CodeGenerationRetentionErrorV1> {
+    canonical_sha256(&ScopeRootLivenessProofMaterialV1 {
+        schema: SCOPE_ROOT_LIVENESS_PROOF_SCHEMA,
+        live_scope_hashes: &proof.live_scope_hashes,
+        registered_roots: &proof.registered_roots,
+        git_worktrees: &proof.git_worktrees,
+        mounted_leases: &proof.mounted_leases,
+        configuration_roots: &proof.configuration_roots,
+        vector_census: &proof.vector_census,
+        vector_dependencies: &proof.vector_dependencies,
+        candidate_binding: &proof.candidate_binding,
+    })
+    .map(|digest| digest.as_str().to_owned())
+    .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
+}
+
+fn validate_scope_root_authority_receipt(
+    name: &str,
+    receipt: &ScopeRootAuthorityReceiptV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if receipt.revision.is_empty() || ManifestDigest::new(receipt.digest.clone()).is_err() {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "{name} liveness authority receipt has an invalid revision or digest"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_scope_root_liveness_proof(
+    proof: &ScopeRootLivenessProofV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if proof.schema != SCOPE_ROOT_LIVENESS_PROOF_SCHEMA
+        || proof.live_scope_hashes.is_empty()
+        || proof
+            .live_scope_hashes
+            .iter()
+            .any(|scope_hash| !is_code_index_scope_hash(scope_hash))
+        || !is_code_index_scope_hash(&proof.candidate_binding.scope_hash)
+        || proof.candidate_binding.vector_census_revision != proof.vector_census.revision
+        || (!proof.candidate_binding.live
+            && proof
+                .live_scope_hashes
+                .contains(&proof.candidate_binding.scope_hash))
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope liveness proof violates its structural authority contract".to_owned(),
+        ));
+    }
+    for (name, receipt) in [
+        ("registered-root", &proof.registered_roots),
+        ("git-worktree", &proof.git_worktrees),
+        ("mounted-lease", &proof.mounted_leases),
+        ("configuration-root", &proof.configuration_roots),
+        ("vector-census", &proof.vector_census),
+        ("vector-dependency", &proof.vector_dependencies),
+    ] {
+        validate_scope_root_authority_receipt(name, receipt)?;
+    }
+    if proof.registered_roots.terminal_count == 0
+        || proof.git_worktrees.terminal_count == 0
+        || ManifestDigest::new(proof.proof_digest.clone()).is_err()
+        || proof.proof_digest != scope_root_liveness_proof_digest(proof)?
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope liveness proof is incomplete or its digest does not match".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scope_binding_cleanup_intent(
+    intent: &ScopeRootBindingCleanupIntentV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if intent.schema != SCOPE_BINDING_CLEANUP_INTENT_SCHEMA {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup intent has an incompatible schema".to_owned(),
+        ));
+    }
+    if !is_code_index_scope_hash(&intent.scope_hash) {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup intent names a non-scope directory".to_owned(),
+        ));
+    }
+    validate_scope_root_liveness_proof(&intent.liveness_proof)?;
+    validate_scope_receipt(&intent.receipt)?;
+    if intent.receipt.collected_scopes.len() != 1
+        || intent.receipt.collected_scopes[0].scope_hash != intent.scope_hash
+        || intent.liveness_proof.candidate_binding.scope_hash != intent.scope_hash
+        || intent.liveness_proof.candidate_binding.source_scope != intent.source_scope
+        || intent.liveness_proof.candidate_binding.live
+        || intent.receipt.liveness_proof != intent.liveness_proof
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope binding cleanup intent does not bind exactly one matching scope".to_owned(),
         ));
     }
     Ok(())
@@ -1739,6 +2198,60 @@ fn load_scope_transaction(
 
 fn clear_scope_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
     match std::fs::remove_file(scope_transaction_path(store_root)) {
+        Ok(()) => sync_directory(store_root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+fn persist_scope_binding_cleanup_intent(
+    store_root: &Path,
+    intent: &ScopeRootBindingCleanupIntentV1,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    validate_scope_binding_cleanup_intent(intent)?;
+    let bytes = serde_json::to_vec(intent).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "scope binding cleanup intent serialization failed: {error}"
+        ))
+    })?;
+    atomic_write(
+        &scope_binding_cleanup_intent_path(store_root),
+        "code-index-scope-binding-cleanup-intent",
+        &bytes,
+        DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(storage)
+}
+
+fn load_scope_binding_cleanup_intent(
+    store_root: &Path,
+) -> Result<Option<ScopeRootBindingCleanupIntentV1>, CodeGenerationRetentionErrorV1> {
+    let path = scope_binding_cleanup_intent_path(store_root);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
+    if bytes.len() as u64 > MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "scope binding cleanup intent '{}' exceeds the bounded journal size",
+            path.display()
+        )));
+    }
+    let intent = serde_json::from_slice(&bytes).map_err(|error| {
+        CodeGenerationRetentionErrorV1::UnsafeState(format!(
+            "scope binding cleanup intent '{}' is unreadable: {error}",
+            path.display()
+        ))
+    })?;
+    validate_scope_binding_cleanup_intent(&intent)?;
+    Ok(Some(intent))
+}
+
+fn clear_scope_binding_cleanup_intent(
+    store_root: &Path,
+) -> Result<(), CodeGenerationRetentionErrorV1> {
+    match std::fs::remove_file(scope_binding_cleanup_intent_path(store_root)) {
         Ok(()) => sync_directory(store_root),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(storage(error)),
@@ -1958,6 +2471,8 @@ fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionEr
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    mod graph_replay_release_tests;
 
     #[derive(Clone)]
     struct FixtureGeneration {
@@ -2265,6 +2780,130 @@ mod tests {
         [PathBuf::from(LIVE_ROOT)].into_iter().collect()
     }
 
+    fn authority_receipt(
+        revision: &str,
+        terminal_count: u64,
+        digest_byte: char,
+    ) -> ScopeRootAuthorityReceiptV1 {
+        ScopeRootAuthorityReceiptV1 {
+            revision: revision.to_owned(),
+            terminal_count,
+            digest: format!("sha256:{}", digest_byte.to_string().repeat(64)),
+        }
+    }
+
+    fn fixture_scope_liveness_proof(
+        live_scope_hash: String,
+        candidate_scope_hash: String,
+    ) -> ScopeRootLivenessProofV1 {
+        let source_scope = tracedecay_store::StoreShardIdV1::project(
+            tracedecay_domain::BrainId::new("brain.scope-retention").expect("fixture brain"),
+            tracedecay_domain::UserProfileId::new("profile.scope-retention")
+                .expect("fixture profile"),
+            tracedecay_domain::ProjectId::new("project.scope-retention").expect("fixture project"),
+        );
+        ScopeRootLivenessProofV1::new(
+            [live_scope_hash].into_iter().collect(),
+            authority_receipt("registry-r1", 1, '1'),
+            authority_receipt("git-r1", 1, '2'),
+            authority_receipt("mount-r1", 1, '3'),
+            authority_receipt("config-r1", 1, '4'),
+            authority_receipt("vector-r1", 2, '5'),
+            authority_receipt("dependency-r1", 1, '6'),
+            ScopeRootCandidateBindingV1 {
+                scope_hash: candidate_scope_hash,
+                source_scope,
+                vector_census_revision: "vector-r1".to_owned(),
+                live: false,
+            },
+        )
+        .expect("valid fixture liveness proof")
+    }
+
+    #[test]
+    fn scope_apply_refuses_a_changed_terminal_authority_receipt() {
+        let (store, live, stranded) = fixture_scope_store();
+        let proof = fixture_scope_liveness_proof(live, stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
+            store.path(),
+            proof.clone(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan proof-bound scope reconciliation");
+        let completed_at = UtcMicros(10);
+        prepare_scope_root_binding_cleanup(
+            store.path(),
+            &plan,
+            &stranded,
+            &proof.candidate_binding.source_scope,
+            &proof,
+            completed_at,
+        )
+        .expect("persist exact proof-bound cleanup intent");
+        let mut changed = proof;
+        changed.mounted_leases.revision = "mount-r2".to_owned();
+        changed
+            .refresh_digest()
+            .expect("refresh changed proof digest");
+
+        let error = execute_scope_root_retention(
+            store.path(),
+            plan,
+            &changed,
+            CodeGenerationRetentionModeV1::Apply,
+            AGED_NOW_SECS,
+            completed_at,
+        )
+        .expect_err("pre-quarantine CAS must reject a changed root authority");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(store.path().join(stranded).is_dir());
+        assert!(!scope_transaction_path(store.path()).exists());
+    }
+
+    #[test]
+    fn cleanup_replay_preserves_exact_source_shard_and_liveness_proof() {
+        let (store, live, stranded) = fixture_scope_store();
+        let proof = fixture_scope_liveness_proof(live, stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
+            store.path(),
+            proof.clone(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan proof-bound scope reconciliation");
+        let completed_at = UtcMicros(11);
+        prepare_scope_root_binding_cleanup(
+            store.path(),
+            &plan,
+            &stranded,
+            &proof.candidate_binding.source_scope,
+            &proof,
+            completed_at,
+        )
+        .expect("persist proof-bound cleanup intent");
+        execute_scope_root_retention(
+            store.path(),
+            plan,
+            &proof,
+            CodeGenerationRetentionModeV1::Apply,
+            AGED_NOW_SECS,
+            completed_at,
+        )
+        .expect("collect proof-bound stranded scope");
+
+        let replay = recover_scope_root_binding_cleanup(store.path())
+            .expect("read cleanup replay")
+            .expect("pending cleanup replay");
+        assert_eq!(replay.scope_hash, stranded);
+        assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
+        assert_eq!(replay.liveness_proof, proof);
+    }
+
     #[test]
     fn scope_plan_refuses_an_unproven_live_root_set() {
         let (store, _live, stranded) = fixture_scope_store();
@@ -2287,9 +2926,10 @@ mod tests {
     #[test]
     fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
         let (store, live, stranded) = fixture_scope_store();
-        let plan = plan_scope_root_retention(
+        let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
             store.path(),
-            &live_root_set(),
+            proof,
             DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
             AGED_NOW_SECS,
         )
@@ -2325,9 +2965,10 @@ mod tests {
     #[test]
     fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
         let (store, live, stranded) = fixture_scope_store();
-        let plan = plan_scope_root_retention(
+        let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
             store.path(),
-            &live_root_set(),
+            proof,
             DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
             AGED_NOW_SECS,
         )
@@ -2356,12 +2997,97 @@ mod tests {
     }
 
     #[test]
+    fn scope_apply_refuses_collection_without_exact_binding_cleanup_intent() {
+        let (store, live, stranded) = fixture_scope_store();
+        let proof = fixture_scope_liveness_proof(live, stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
+            store.path(),
+            proof.clone(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan scope reconciliation");
+
+        let error = execute_scope_root_retention(
+            store.path(),
+            plan,
+            &proof,
+            CodeGenerationRetentionModeV1::Apply,
+            AGED_NOW_SECS,
+            UtcMicros(13),
+        )
+        .expect_err("physical collection must require a durable relational cleanup intent");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(store.path().join(stranded).is_dir());
+        assert!(!scope_transaction_path(store.path()).exists());
+    }
+
+    #[test]
+    fn scope_binding_cleanup_intent_replays_after_filesystem_collection_restart() {
+        let (store, live, stranded) = fixture_scope_store();
+        let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+        let plan = plan_scope_root_retention_with_liveness_proof(
+            store.path(),
+            proof.clone(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan scope reconciliation");
+        let completed_at = UtcMicros(14);
+
+        prepare_scope_root_binding_cleanup(
+            store.path(),
+            &plan,
+            &stranded,
+            &proof.candidate_binding.source_scope,
+            &proof,
+            completed_at,
+        )
+        .expect("journal relational cleanup before filesystem collection");
+        let report = execute_scope_root_retention(
+            store.path(),
+            plan,
+            &proof,
+            CodeGenerationRetentionModeV1::Apply,
+            AGED_NOW_SECS,
+            completed_at,
+        )
+        .expect("complete filesystem collection");
+        assert_eq!(report.collected_scopes[0].scope_hash, stranded);
+        assert!(!store.path().join(&stranded).exists());
+        assert!(store.path().join(&live).is_dir());
+
+        // Simulate restart exactly after durable filesystem completion and
+        // before the caller removes the semantic source-scope binding.
+        recover_scope_root_retention(store.path()).expect("recover filesystem transaction");
+        let replay = recover_scope_root_binding_cleanup(store.path())
+            .expect("replay binding cleanup intent")
+            .expect("pending replay");
+        assert_eq!(replay.scope_hash, stranded);
+        assert_eq!(replay.source_scope, proof.candidate_binding.source_scope);
+        assert_eq!(replay.liveness_proof, proof);
+        complete_scope_root_binding_cleanup(store.path(), &replay)
+            .expect("complete exact binding cleanup intent");
+        assert_eq!(
+            recover_scope_root_binding_cleanup(store.path())
+                .expect("completed cleanup stays complete"),
+            None
+        );
+    }
+
+    #[test]
     fn scope_transaction_never_journals_a_live_scope() {
         let (_store, live, stranded) = fixture_scope_store();
-        let receipt = ScopeRootRetentionReceiptV1 {
+        let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+        let mut receipt = ScopeRootRetentionReceiptV1 {
             schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
-            receipt_digest: "a".repeat(64),
+            receipt_digest: String::new(),
             live_scope_hashes: [live.clone()].into_iter().collect(),
+            liveness_proof: proof,
             minimum_stranding_age_secs: DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
             collected_scopes: vec![
                 StrandedCodeIndexScopeV1 {
@@ -2378,6 +3104,8 @@ mod tests {
             reclaimed_bytes: 12,
             completed_at_micros: 13,
         };
+        receipt.receipt_digest =
+            scope_receipt_digest(&receipt).expect("calculate malformed receipt digest");
 
         let error = validate_scope_transaction(&ScopeRootRetentionTransactionV1 {
             schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),

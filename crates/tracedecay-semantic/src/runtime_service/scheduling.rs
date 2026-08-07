@@ -38,6 +38,7 @@ pub enum SemanticRuntimeScheduleFailureV1 {
     Projection,
     Publication,
     Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -60,11 +61,26 @@ pub enum SemanticRuntimeScheduleStatusV1 {
     },
 }
 
-#[derive(Debug)]
 pub struct SemanticRuntimeScheduleCancellationV1 {
     cancelled: AtomicBool,
     completed_units: AtomicU64,
     total_units: u64,
+    linked: Option<Arc<dyn crate::semantic_evaluation::SemanticEvaluationCancellationV1>>,
+}
+
+impl std::fmt::Debug for SemanticRuntimeScheduleCancellationV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemanticRuntimeScheduleCancellationV1")
+            .field("cancelled", &self.cancelled.load(Ordering::Acquire))
+            .field(
+                "completed_units",
+                &self.completed_units.load(Ordering::Acquire),
+            )
+            .field("total_units", &self.total_units)
+            .field("linked", &self.linked.is_some())
+            .finish()
+    }
 }
 
 impl SemanticRuntimeScheduleCancellationV1 {
@@ -73,11 +89,44 @@ impl SemanticRuntimeScheduleCancellationV1 {
             cancelled: AtomicBool::new(false),
             completed_units: AtomicU64::new(0),
             total_units,
+            linked: None,
+        }
+    }
+
+    pub fn new_linked(
+        total_units: u64,
+        linked: Arc<dyn crate::semantic_evaluation::SemanticEvaluationCancellationV1>,
+    ) -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            completed_units: AtomicU64::new(0),
+            total_units,
+            linked: Some(linked),
         }
     }
 
     pub fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.interruption().is_some()
+    }
+
+    pub fn failure(&self) -> Option<SemanticRuntimeScheduleFailureV1> {
+        self.interruption().map(|interruption| match interruption {
+            SemanticExecutionInterruptionV1::Cancelled => {
+                SemanticRuntimeScheduleFailureV1::Cancelled
+            }
+            SemanticExecutionInterruptionV1::DeadlineExceeded => {
+                SemanticRuntimeScheduleFailureV1::DeadlineExceeded
+            }
+        })
+    }
+
+    pub fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Some(SemanticExecutionInterruptionV1::Cancelled);
+        }
+        self.linked
+            .as_ref()
+            .and_then(|linked| linked.interruption())
     }
 
     pub fn set_completed_units(&self, completed_units: u64) {
@@ -94,9 +143,9 @@ impl SemanticRuntimeScheduleCancellationV1 {
     }
 }
 
-impl CancellationSignal for SemanticRuntimeScheduleCancellationV1 {
-    fn cancelled(&self) -> bool {
-        Self::cancelled(self)
+impl SemanticExecutionAuthority for SemanticRuntimeScheduleCancellationV1 {
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+        Self::interruption(self)
     }
 }
 
@@ -498,6 +547,20 @@ impl SemanticRuntimeSchedulingHandleV1 {
         state.status = SemanticRuntimeScheduleStatusV1::Current {
             generation: pointer.generation,
         };
+    }
+
+    pub fn clear_current_if(&self, expected: &SemanticGenerationPointerV1) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.committing || state.current.as_ref() != Some(expected) {
+            return false;
+        }
+        if let Some(cancellation) = state.cancellation.take() {
+            cancellation.cancel();
+        }
+        state.sequence = state.sequence.wrapping_add(1);
+        state.current = None;
+        state.status = SemanticRuntimeScheduleStatusV1::Unavailable;
+        true
     }
 
     pub fn cancel(&self) -> bool {

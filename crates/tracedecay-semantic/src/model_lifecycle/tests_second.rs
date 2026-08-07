@@ -827,8 +827,14 @@
                 persist_durable(&owner.root, &guard.durable).unwrap();
             }
         }
+        let mut recovery = owner.verified_ready_events();
+        let prior_recovery_epoch = recovery.borrow().epoch;
         let retried = owner.retry().unwrap();
         assert!(retried.remediation.retry || retried.state.is_some());
+        assert!(recovery.has_changed().unwrap());
+        let recovered = recovery.borrow_and_update().clone();
+        assert!(recovered.epoch > prior_recovery_epoch);
+        assert!(recovered.artifact_digest.is_some());
     }
 
     #[test]

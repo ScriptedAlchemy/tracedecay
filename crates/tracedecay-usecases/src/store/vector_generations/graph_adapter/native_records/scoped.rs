@@ -13,7 +13,8 @@ use super::super::super::{
     VectorGenerationPlanV1, VectorGenerationStoreErrorV1, VectorRowMapV1, validate_plan,
     validate_vector_row,
 };
-use super::super::persistence::{graph_namespace, map_graph_error};
+use super::super::persistence::map_graph_error;
+use super::VectorProjectionCheckpointV1;
 use super::{
     BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
     BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_ID, CONTAINS_KIND, EMBEDDING_KEY, EXPECTED_COUNT,
@@ -25,7 +26,6 @@ use super::{
     generation_entity_id, generation_id, optional_bytes, optional_generation, parse_id,
     relation_kind, require_labels, required_bytes, required_string, required_u64, rows_with_owner,
 };
-use super::VectorProjectionCheckpointV1;
 
 // Each logical row can contribute one entity and one relation; builds also
 // retain one expected-member record and, in the worst case, one batch record.
@@ -44,7 +44,7 @@ pub(crate) struct ScopedGenerationRecordsV1 {
 }
 
 pub(crate) fn read_build_records(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     build: &VectorGenerationBuildIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<ScopedBuildRecordsV1>, VectorGenerationStoreErrorV1> {
@@ -73,15 +73,11 @@ pub(crate) fn read_build_records(
             // Member rows are set-semantic and surface in graph-entity order;
             // the canonical plan form is strictly ascending, so reconstruction
             // restores that order. Duplicates still fail canonical validation.
-            let mut chunk_ids = rows_with_owner(
-                &entities,
-                BUILD_MEMBER_LABEL,
-                BUILD_ID,
-                build.0.as_str(),
-            )?
-            .into_iter()
-            .map(|member| parse_id(required_string(member, CHUNK_ID)?))
-            .collect::<Result<Vec<_>, _>>()?;
+            let mut chunk_ids =
+                rows_with_owner(&entities, BUILD_MEMBER_LABEL, BUILD_ID, build.0.as_str())?
+                    .into_iter()
+                    .map(|member| parse_id(required_string(member, CHUNK_ID)?))
+                    .collect::<Result<Vec<_>, _>>()?;
             chunk_ids.sort();
             chunk_ids.into()
         },
@@ -270,7 +266,7 @@ pub(crate) fn read_build_records(
 }
 
 pub(crate) fn read_generation_records(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     generation: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
@@ -372,21 +368,13 @@ pub(crate) fn read_generation_records(
     require_count(owner, TOMBSTONE_COUNT, tombstone_digests.len())?;
     require_count(owner, RECEIPT_COUNT, receipts.len())?;
     let base_generation = optional_generation(owner, BASE_GENERATION)?;
-    let expected_base_entity = base_generation
-        .as_ref()
-        .map(generation_entity_id)
-        .transpose()?;
     let base_relations = relations
         .values()
         .filter(|relation| relation.kind.as_str() == BASE_KIND)
         .collect::<Vec<_>>();
-    if base_relations.len() != usize::from(expected_base_entity.is_some())
-        || base_relations
-            .iter()
-            .any(|relation| expected_base_entity.as_ref() != Some(&relation.to))
-    {
+    if !base_relations.is_empty() {
         return Err(corrupt(
-            "semantic vector generation base relation is inconsistent",
+            "immutable semantic vector generation links to a foreign physical generation",
         ));
     }
     let contained_records = vectors
@@ -394,13 +382,7 @@ pub(crate) fn read_generation_records(
         .checked_add(tombstone_digests.len())
         .and_then(|count| count.checked_add(receipts.len()))
         .ok_or_else(|| corrupt("semantic vector generation relation count overflowed"))?;
-    let expected_relations = contained_records
-        .checked_add(base_relations.len())
-        .ok_or_else(|| corrupt("semantic vector generation relation count overflowed"))?;
-    // The base relation points into the prior generation's scope; its target
-    // entity is intentionally not hydrated here, so only contained children
-    // plus the owner are expected in the entity set.
-    if relations.len() != expected_relations
+    if relations.len() != contained_records
         || entities.len()
             != contained_records
                 .checked_add(1)
@@ -438,7 +420,7 @@ pub(crate) fn read_generation_records(
 }
 
 fn read_scope(
-    snapshot: &tracedecay_graph_db::GraphSnapshot,
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     owner: GraphEntityId,
     max_records: usize,
     cancellation: Arc<dyn GraphCancellation>,
@@ -449,7 +431,7 @@ fn read_scope(
     )>,
     VectorGenerationStoreErrorV1,
 > {
-    let namespace = graph_namespace()?;
+    let namespace = snapshot.projection().namespace.clone();
     let Some(owner_row) = snapshot
         .entity(&namespace, &owner, Arc::clone(&cancellation))
         .map_err(map_graph_error)?

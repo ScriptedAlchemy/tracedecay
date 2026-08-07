@@ -21,7 +21,8 @@ use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1}
 
 use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
 use super::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, CancellationSignal, EmbedError, EmbeddingRuntime,
+    AdmittedProjectionArtifactV1, EmbedError, EmbeddingRuntime, SemanticExecutionAuthority,
+    SemanticExecutionInterruptionV1,
 };
 use super::session_pool::{
     PooledSession, SessionAcquireError, SessionPool, SessionPoolConfigError, SessionPoolConfigV1,

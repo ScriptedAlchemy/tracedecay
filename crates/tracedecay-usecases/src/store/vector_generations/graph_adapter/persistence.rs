@@ -1,142 +1,13 @@
 use std::mem::size_of;
-use std::sync::Arc;
 
-use tracedecay_domain::{EmbeddingMetricV1, VectorGenerationIdV1, canonical_sha256};
+use tracedecay_domain::{EmbeddingMetricV1, VectorGenerationIdV1};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphEntity, GraphIdempotencyKey, GraphLabel, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
-    GraphPublicationInputDigest, GraphWatermark, GraphWriteBatch, SourceGeneration, VectorMetric,
+    GraphCancellation, GraphDbError, GraphEntity, GraphLabel, GraphNamespace, GraphProjectionId,
+    GraphProperty, GraphPropertyName, VectorMetric,
 };
 
-use super::super::{VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1};
-use super::native_records::{NativeGraphStateV1, encode_state};
-use super::{
-    GraphVectorGenerationStoreV1, ResidentVectorRowV1, SEMANTIC_VECTOR_GRAPH_PROJECTION,
-    VECTOR_PROPERTY,
-};
-
-const SEMANTIC_VECTOR_GRAPH_STATE_DIGEST_DOMAIN: &str =
-    "tracedecay.semantic-vector.graph-native-state.v1";
-
-impl GraphVectorGenerationStoreV1 {
-    pub(super) fn initialize_state(
-        &self,
-        state: &mut VectorGenerationStateMachineV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphWatermark, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let encoded = encode_state(state, 0)?;
-        let (next_watermark, state_digest) = native_state_watermark_from_encoded(&encoded)?;
-        let mut mutations = encoded
-            .entities
-            .into_iter()
-            .map(GraphMutation::UpsertEntity)
-            .collect::<Vec<_>>();
-        mutations.extend(
-            encoded
-                .relations
-                .into_iter()
-                .map(GraphMutation::UpsertRelation),
-        );
-        let batch = GraphWriteBatch::new(
-            graph_namespace()?,
-            graph_projection()?,
-            SourceGeneration::new("semantic-vector-unpublished").map_err(map_graph_error)?,
-            next_watermark.clone(),
-            mutations,
-            Arc::clone(&cancellation),
-        )
-        .map_err(map_graph_error)?;
-        let publication = GraphPublication {
-            namespace: graph_namespace()?,
-            idempotency_key: GraphIdempotencyKey::new(format!(
-                "semantic-vector:{}",
-                state_digest.as_str()
-            ))
-            .map_err(map_graph_error)?,
-            input_digest: GraphPublicationInputDigest::new(state_digest.as_str())
-                .map_err(map_graph_error)?,
-            source_generation: batch.source_generation.clone(),
-            expected_watermark: None,
-            next_watermark,
-            batch,
-            cancellation,
-        };
-        self.graph
-            .publish_unverified(publication)
-            .map(|commit| commit.watermark)
-            .map_err(|error| match error {
-                GraphDbError::Conflict => VectorGenerationStoreErrorV1::ConcurrentMutation,
-                other => map_graph_error(other),
-            })
-    }
-
-    pub(super) fn publish_record_mutations(
-        &self,
-        revision: u64,
-        expected_watermark: GraphWatermark,
-        source_generation: String,
-        input_digest: tracedecay_domain::ManifestDigest,
-        mutations: Vec<GraphMutation>,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<GraphWatermark, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let next_watermark = GraphWatermark::new(format!(
-            "semantic-vector:{revision}:{}",
-            input_digest.as_str()
-        ))
-        .map_err(map_graph_error)?;
-        let batch = GraphWriteBatch::new(
-            graph_namespace()?,
-            graph_projection()?,
-            SourceGeneration::new(source_generation).map_err(map_graph_error)?,
-            next_watermark.clone(),
-            mutations,
-            Arc::clone(&cancellation),
-        )
-        .map_err(map_graph_error)?;
-        self.graph
-            .publish_unverified(GraphPublication {
-                namespace: graph_namespace()?,
-                idempotency_key: GraphIdempotencyKey::new(format!(
-                    "semantic-vector:{}",
-                    input_digest.as_str()
-                ))
-                .map_err(map_graph_error)?,
-                input_digest: GraphPublicationInputDigest::new(input_digest.as_str())
-                    .map_err(map_graph_error)?,
-                source_generation: batch.source_generation.clone(),
-                expected_watermark: Some(expected_watermark),
-                next_watermark,
-                batch,
-                cancellation,
-            })
-            .map(|commit| commit.watermark)
-            .map_err(|error| match error {
-                GraphDbError::Conflict => VectorGenerationStoreErrorV1::ConcurrentMutation,
-                other => map_graph_error(other),
-            })
-    }
-}
-
-fn native_state_watermark_from_encoded(
-    encoded: &NativeGraphStateV1,
-) -> Result<(GraphWatermark, tracedecay_domain::ManifestDigest), VectorGenerationStoreErrorV1> {
-    let state_digest = canonical_sha256(&(
-        SEMANTIC_VECTOR_GRAPH_STATE_DIGEST_DOMAIN,
-        encoded.revision,
-        &encoded.entities,
-        &encoded.relations,
-    ))
-    .map_err(storage_error)?;
-    let watermark = GraphWatermark::new(format!(
-        "semantic-vector:{}:{}",
-        encoded.revision,
-        state_digest.as_str()
-    ))
-    .map_err(map_graph_error)?;
-    Ok((watermark, state_digest))
-}
+use super::super::VectorGenerationStoreErrorV1;
+use super::{ResidentVectorRowV1, SEMANTIC_VECTOR_GRAPH_PROJECTION};
 
 pub(super) fn measured_resident_bytes(
     rows: &[ResidentVectorRowV1],
@@ -161,31 +32,18 @@ pub(super) fn resident_size_overflow() -> VectorGenerationStoreErrorV1 {
     VectorGenerationStoreErrorV1::Corrupt("semantic resident vector size exceeds u64".to_owned())
 }
 
-pub(super) fn graph_namespace() -> Result<GraphNamespace, VectorGenerationStoreErrorV1> {
-    GraphNamespace::new(SEMANTIC_VECTOR_GRAPH_PROJECTION).map_err(map_graph_error)
-}
-
-pub(super) fn graph_projection() -> Result<GraphProjectionId, VectorGenerationStoreErrorV1> {
-    GraphProjectionId::new(SEMANTIC_VECTOR_GRAPH_PROJECTION).map_err(map_graph_error)
-}
-
-fn graph_label(value: &str) -> Result<GraphLabel, VectorGenerationStoreErrorV1> {
-    GraphLabel::new(value).map_err(map_graph_error)
-}
-
 pub(super) fn generation_label(
     generation: &VectorGenerationIdV1,
 ) -> Result<GraphLabel, VectorGenerationStoreErrorV1> {
-    graph_label(&format!(
-        "semantic-vector-generation:{}",
-        generation.as_digest().as_str()
-    ))
+    tracedecay_graph_db::semantic_vector_native::generation_label(generation.as_digest().as_str())
+        .map_err(map_graph_error)
 }
 
 pub(super) fn search_vector_property(
-    _generation: &VectorGenerationIdV1,
+    generation: &VectorGenerationIdV1,
 ) -> Result<GraphPropertyName, VectorGenerationStoreErrorV1> {
-    property_name(VECTOR_PROPERTY)
+    tracedecay_graph_db::semantic_vector_native::vector_property(generation.as_digest().as_str())
+        .map_err(map_graph_error)
 }
 
 fn property_name(value: &str) -> Result<GraphPropertyName, VectorGenerationStoreErrorV1> {
@@ -247,6 +105,10 @@ pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreError
     match error {
         GraphDbError::Cancelled => VectorGenerationStoreErrorV1::Cancelled,
         GraphDbError::Conflict => VectorGenerationStoreErrorV1::ConcurrentMutation,
+        GraphDbError::ProjectionMismatch { message, .. }
+        | GraphDbError::GenerationMismatch { message, .. } => {
+            VectorGenerationStoreErrorV1::ResetRequired(message)
+        }
         GraphDbError::ResetRequired { message } => {
             VectorGenerationStoreErrorV1::ResetRequired(message)
         }

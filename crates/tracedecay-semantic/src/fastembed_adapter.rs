@@ -30,8 +30,8 @@
 //!   shared query `RetrievalBudget` and semantic introduces no semantic-only budget
 //!   type. That domain type is outside this root-private module, so deadlines
 //!   are modelled here as a `Duration` against the injected pool clock and
-//!   cancellation as the [`CancellationSignal`] trait; the integrator adapts
-//!   `RetrievalBudget` onto both.
+//!   interruption as the [`SemanticExecutionAuthority`] trait; the integrator
+//!   adapts `RetrievalBudget` onto it.
 #[cfg(feature = "semantic-fastembed")]
 use fastembed::{
     InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
@@ -66,6 +66,8 @@ use crate::SemanticResourceCeilings;
 pub enum EmbedError {
     /// The caller's cancellation signal fired before or during the batch.
     Cancelled,
+    /// The caller's authoritative deadline expired before or during the batch.
+    DeadlineExceeded,
     /// A batch with zero texts invokes no inference.
     EmptyBatch,
     /// The batch exceeded the manifest's bounded text count.
@@ -85,6 +87,7 @@ impl fmt::Display for EmbedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => write!(f, "the embedding operation was cancelled"),
+            Self::DeadlineExceeded => write!(f, "the embedding operation deadline expired"),
             Self::EmptyBatch => write!(f, "an empty batch invokes no inference"),
             Self::TooManyTexts { presented, max } => write!(
                 f,
@@ -186,6 +189,7 @@ struct VerifiedEmbeddingArtifactV1 {
     max_batch_bytes: u32,
     max_threads: u32,
     resident_byte_ceiling: u64,
+    load_deadline_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,6 +260,10 @@ impl VerifiedEmbeddingArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.resident_byte_ceiling
+    }
+
+    pub fn load_deadline_ms(&self) -> u64 {
+        self.load_deadline_ms
     }
 
     // Feature-independent implementation, but only the compiled FastEmbed
@@ -412,6 +420,7 @@ impl AdmittedProjectionArtifactV1 {
                     .saturating_mul(4),
                 max_threads: payload.resource_ceiling.max_threads,
                 resident_byte_ceiling: payload.resource_ceiling.max_resident_bytes,
+                load_deadline_ms: payload.resource_ceiling.load_deadline_ms,
             },
         })
     }
@@ -474,6 +483,7 @@ impl AdmittedProjectionArtifactV1 {
                     .saturating_mul(4),
                 max_threads: resources.max_threads,
                 resident_byte_ceiling: resources.max_resident_bytes,
+                load_deadline_ms: resources.load_deadline_ms,
             },
         })
     }
@@ -555,6 +565,10 @@ impl AdmittedProjectionArtifactV1 {
 
     pub fn resident_byte_ceiling(&self) -> u64 {
         self.runtime_artifact.resident_byte_ceiling()
+    }
+
+    pub fn load_deadline_ms(&self) -> u64 {
+        self.runtime_artifact.load_deadline_ms()
     }
 
     pub fn max_batch_bytes(&self) -> u32 {
@@ -762,11 +776,26 @@ impl BoundedSanitizedTextBatchV1 {
     }
 }
 
-/// Cancellation surface shared by the runtime and the session pool (Plan 31:
-/// sessions are pooled under a bounded cancellation policy; cancellation can
-/// never broaden scope or leave a partial batch visible).
-pub trait CancellationSignal: Send + Sync {
-    fn cancelled(&self) -> bool;
+/// One request-owned interruption authority shared by every semantic stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticExecutionInterruptionV1 {
+    Cancelled,
+    DeadlineExceeded,
+}
+
+pub trait SemanticExecutionAuthority: Send + Sync {
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1>;
+}
+
+#[cfg(any(test, feature = "semantic-fastembed"))]
+fn check_execution_authority(authority: &dyn SemanticExecutionAuthority) -> Result<(), EmbedError> {
+    match authority.interruption() {
+        None => Ok(()),
+        Some(SemanticExecutionInterruptionV1::Cancelled) => Err(EmbedError::Cancelled),
+        Some(SemanticExecutionInterruptionV1::DeadlineExceeded) => {
+            Err(EmbedError::DeadlineExceeded)
+        }
+    }
 }
 
 /// A manually flipped cancellation flag.
@@ -788,9 +817,11 @@ impl ManualCancellation {
 }
 
 #[cfg(test)]
-impl CancellationSignal for ManualCancellation {
-    fn cancelled(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+impl SemanticExecutionAuthority for ManualCancellation {
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+        self.flag
+            .load(Ordering::SeqCst)
+            .then_some(SemanticExecutionInterruptionV1::Cancelled)
     }
 }
 
@@ -815,10 +846,10 @@ impl ScriptedCancellation {
 }
 
 #[cfg(test)]
-impl CancellationSignal for ScriptedCancellation {
-    fn cancelled(&self) -> bool {
+impl SemanticExecutionAuthority for ScriptedCancellation {
+    fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
         let poll = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
-        poll > self.cancel_after
+        (poll > self.cancel_after).then_some(SemanticExecutionInterruptionV1::Cancelled)
     }
 }
 
@@ -838,7 +869,7 @@ pub trait EmbeddingSession: Send {
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,
-        cancel: &dyn CancellationSignal,
+        authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError>;
 }
 
@@ -927,7 +958,7 @@ impl EmbeddingSession for UnavailableEmbeddingSession {
     fn embed_batch(
         &mut self,
         _batch: &BoundedSanitizedTextBatchV1,
-        _cancel: &dyn CancellationSignal,
+        _authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         match *self {}
     }
@@ -1055,14 +1086,12 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,
-        cancel: &dyn CancellationSignal,
+        authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
 
-        if cancel.cancelled() {
-            return Err(EmbedError::Cancelled);
-        }
+        check_execution_authority(authority)?;
         // FastEmbed/ORT inference is synchronous. Keep batches small at the
         // projector boundary, then perform one tensor invocation per admitted
         // batch instead of one invocation per text.
@@ -1076,9 +1105,7 @@ impl EmbeddingSession for FastEmbedEmbeddingSession {
                     &error,
                 )
             })?;
-        if cancel.cancelled() {
-            return Err(EmbedError::Cancelled);
-        }
+        check_execution_authority(authority)?;
         if embedded.len() != batch.len() {
             return Err(fastembed_failure(
                 RuntimeFailureKindV1::EmbedFailed,
@@ -1312,7 +1339,7 @@ impl EmbeddingSession for FakeEmbeddingSession {
     fn embed_batch(
         &mut self,
         batch: &BoundedSanitizedTextBatchV1,
-        cancel: &dyn CancellationSignal,
+        authority: &dyn SemanticExecutionAuthority,
     ) -> Result<Vec<EmbeddingVectorV1>, EmbedError> {
         let artifact = self.authority.runtime_artifact();
         validate_batch_limits(batch, artifact)?;
@@ -1320,9 +1347,7 @@ impl EmbeddingSession for FakeEmbeddingSession {
         for text in batch.texts() {
             // Honor cancellation between texts; a cancelled batch returns no
             // partial results.
-            if cancel.cancelled() {
-                return Err(EmbedError::Cancelled);
-            }
+            check_execution_authority(authority)?;
             let vector = EmbeddingVectorV1 {
                 values: pseudo_embedding(
                     self.vector_seed,
@@ -1478,6 +1503,7 @@ mod tests {
                 max_batch_bytes: 16 * 1024,
                 max_threads: 4,
                 resident_byte_ceiling: 64 * 1024 * 1024,
+                load_deadline_ms: 30_000,
             },
         }
     }
@@ -1737,6 +1763,28 @@ mod tests {
             runtime.counters().texts_embedded.load(Ordering::SeqCst),
             0,
             "no text embedded after pre-cancel"
+        );
+    }
+
+    #[test]
+    fn deadline_before_embed_surfaces_typed_expiry_without_inference() {
+        struct ExpiredAuthority;
+
+        impl SemanticExecutionAuthority for ExpiredAuthority {
+            fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
+                Some(SemanticExecutionInterruptionV1::DeadlineExceeded)
+            }
+        }
+
+        let runtime = FakeEmbeddingRuntime::new();
+        let mut session = runtime.open_session(&authority(8)).expect("session");
+        let result = session.embed_batch(&batch(&["a", "b"]), &ExpiredAuthority);
+
+        assert_eq!(result, Err(EmbedError::DeadlineExceeded));
+        assert_eq!(
+            runtime.counters().texts_embedded.load(Ordering::SeqCst),
+            0,
+            "expired work must not enter inference"
         );
     }
 

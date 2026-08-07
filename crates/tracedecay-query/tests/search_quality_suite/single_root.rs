@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSearchChunkGrainV1, CompactCandidate,
@@ -18,7 +19,8 @@ use tracedecay_query::retrieval::fusion::{
     RetrievalCursorKeyringV1,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
+    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
+    GraphPathSegmentV1,
 };
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
@@ -44,6 +46,18 @@ enum GraphDisposition {
 
 const CURSOR_NOW: UtcMicros = UtcMicros(10);
 
+struct FixtureGraphExecutionControl;
+
+impl GraphExecutionControl for FixtureGraphExecutionControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
 #[derive(Clone)]
 enum GraphPortReply {
     Outcome(RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>),
@@ -59,6 +73,7 @@ impl GraphEvidenceReadPort for FixtureGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
+        _control: std::sync::Arc<dyn tracedecay_query::retrieval::graph::GraphExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             GraphPortReply::Outcome(outcome) => Ok(outcome.clone()),
@@ -347,7 +362,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         }
     };
     let graph_outcome = GraphLane::new(FixtureGraphPort { reply })
-        .retrieve_graph(&graph_request)
+        .retrieve_graph(&graph_request, Arc::new(FixtureGraphExecutionControl))
         .expect("graph lane reports a typed outcome");
 
     SingleRootFixture {

@@ -2,8 +2,8 @@
 //!
 //! Saved code generations call [`schedule_saved_code_generation`] without waiting
 //! for `FastEmbed` download/indexing. Application search admits a semantic lane
-//! only through [`query_factory`] once a complete compatible generation is
-//! atomically current. Status projection carries indexing progress, degraded
+//! only through [`query_factory`] once the committed configuration's complete
+//! generation is present in the exact warmed cache. Status projection carries indexing progress, degraded
 //! reason, and prior generation for Doctor/`tracedecay_runtime`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +11,6 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tracedecay_application::now_micros;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkV1,
     CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
@@ -27,12 +26,15 @@ use tracedecay_policy::retrieval_selection::{
 
 use crate::config::SemanticResourceCeilings;
 use crate::store::vector_generations::{
-    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
-    VectorGenerationPlanV1, VectorProjectionCheckpointV1,
+    GraphVectorGenerationStoreV1, IsolatedSemanticEvaluationGraphV1, PublishedVectorGenerationV1,
+    SemanticVectorStageDescriptorV1, VectorGenerationBeginOutcomeV1, VectorGenerationPlanV1,
+    generation_identity_digest, isolated_semantic_evaluation_graph,
 };
+
+mod vector_projection_support;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
-use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::production_code_index_freshness;
@@ -65,25 +67,43 @@ use tracedecay_semantic::rerank_adapter::{
 use tracedecay_semantic::{
     DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
     PreparedSemanticEvaluationProjectionV1, PreparedSemanticRuntimeCommitV1,
-    SemanticEvaluationQueryFactoryV1, SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1,
-    SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
-    SemanticRuntimeStatusProjectionV1, prepare_semantic_evaluation_projection,
+    PreparedSemanticRuntimeObservationV1, PreparedSemanticRuntimeRestoreV1,
+    SemanticEvaluationCancellationV1, SemanticEvaluationQueryFactoryV1,
+    SemanticExecutionInterruptionV1, SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1,
+    SemanticProjectionResumeOutcomeV1, SemanticRuntimeScheduleFailureV1,
+    SemanticRuntimeScheduleStatusV1, SemanticRuntimeStatusProjectionV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
+use vector_projection_support::{BatchCommitStateV1, graph_vector_store, projection_input_bytes};
 
-use super::graph_provider::{RetainedSemanticVectorGraphV1, SemanticVectorGraphProviderV1};
+use super::graph_provider::{
+    RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
+};
 #[cfg(test)]
 use super::ports::SemanticActivationRequestV1;
 use super::ports::{
     SemanticActivationCommandV1, SemanticActivationReceiptV1, SemanticConfigurationPinV1,
-    SemanticExecutableGenerationV1, SemanticFallbackReasonV1, SemanticRollbackCommandV1,
-    SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeBackendV1,
-    SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeStateV1,
-    SemanticRuntimeStatusV1,
+    SemanticExecutableGenerationLeaseV1, SemanticExecutableGenerationV1, SemanticFallbackReasonV1,
+    SemanticRollbackCommandV1, SemanticRollbackReceiptV1, SemanticRuntimeBackendErrorV1,
+    SemanticRuntimeBackendV1, SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1,
+    SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
 use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
 };
+
+const EVALUATION_MAX_CONCURRENT_SESSIONS: u32 = 1;
+
+struct SemanticEvaluationGraphCancellationV1 {
+    evaluation: Arc<dyn SemanticEvaluationCancellationV1>,
+}
+
+impl GraphCancellation for SemanticEvaluationGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.evaluation.interruption().is_some()
+    }
+}
 
 /// Chunks embedded before the run commits and releases them.
 ///
@@ -92,20 +112,11 @@ use super::{
 /// changes a tensor shape and therefore never changes a vector. It is sizing,
 /// not semantics: the generation a run publishes is identical at any value.
 ///
-/// Smaller values bound memory harder but make each commit re-encode a growing
-/// staged build more often; 4,096 keeps a 150K-chunk corpus at a few dozen
-/// commits while holding roughly 12MB of floats in flight at 768 dimensions.
-const SEMANTIC_EMBEDS_PER_COMMIT: usize = 4_096;
-
-/// Staged-build identity shared by the resume, commit, and publish boundaries
-/// of one incremental run.
-#[derive(Default)]
-struct BatchCommitStateV1 {
-    build: Option<VectorGenerationBuildIdV1>,
-    /// The last committed checkpoint, which the next commit presents as its
-    /// expected watermark. `None` until the first batch commits.
-    checkpoint: Option<VectorProjectionCheckpointV1>,
-}
+/// The durable stage receipt contract owns the batch ceiling. Keeping the
+/// projector at that same limit prevents a prepared batch from requiring a
+/// second, adapter-local receipt partition and preserves exact restart replay.
+const SEMANTIC_EMBEDS_PER_COMMIT: usize =
+    tracedecay_store::MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH;
 
 /// Map daemon schedule projection into the application/Doctor status shape.
 ///
@@ -122,12 +133,10 @@ pub fn application_status_from_projection(
                 .unwrap_or(SemanticFallbackReasonV1::RuntimeUnavailable),
         },
         SemanticRuntimeScheduleStatusV1::Indexing {
-            target_generation,
             completed_units,
             total_units,
             ..
         } => SemanticRuntimeStateV1::Indexing {
-            target_generation: provisional_vector_generation(target_generation),
             completed_units: *completed_units,
             total_units: *total_units,
         },
@@ -142,7 +151,8 @@ pub fn application_status_from_projection(
                 SemanticRuntimeScheduleFailureV1::Artifact => {
                     SemanticFallbackReasonV1::ArtifactUnavailable
                 }
-                SemanticRuntimeScheduleFailureV1::Cancelled => {
+                SemanticRuntimeScheduleFailureV1::Cancelled
+                | SemanticRuntimeScheduleFailureV1::DeadlineExceeded => {
                     SemanticFallbackReasonV1::RuntimeUnavailable
                 }
                 SemanticRuntimeScheduleFailureV1::Runtime
@@ -190,7 +200,7 @@ where
         // This helper owns no staged build, so it never resumes and its
         // batches commit nowhere; callers that need durability go through
         // `ProductionSemanticRuntimeV1`.
-        || async { Ok(0) },
+        || async { Ok(SemanticProjectionResumeOutcomeV1::ReplayFromStart) },
         |_prepared| async { Ok(()) },
         stage_projection,
     ) else {
@@ -201,15 +211,12 @@ where
 }
 
 /// Daemon-owned production bridge from lifecycle-ready model bytes to the
-/// persistent vector store and atomically current query runtime.
+/// persistent vector store and exact process-local query cache.
 #[derive(Clone)]
 pub struct ProductionSemanticRuntimeV1 {
     handle: DaemonSemanticRuntimeHandleV1,
     graph: Arc<dyn SemanticVectorGraphProviderV1>,
-    /// Runtime-owned writer lane shared across clones. Every vector-mutation
-    /// path acquires it, so a publication lease freezes pointer movement; the
-    /// graph adapter's watermark CAS independently fails concurrent mutations
-    /// closed.
+    /// Runtime-owned writer lane shared across clones.
     vector_writer: Arc<tokio::sync::Mutex<()>>,
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
@@ -223,18 +230,37 @@ pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
     pub vector_generation_id: VectorGenerationIdV1,
 }
 
+#[derive(Clone, Debug)]
+pub struct SemanticEvaluationCurrentGenerationSnapshotV1 {
+    pub vector_state_revision: i64,
+    pub vector_generation_id: VectorGenerationIdV1,
+}
+
 pub struct SemanticVectorPublicationLeaseV1 {
     _writer: tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// Read/write handles over one retained graph runtime.
-fn graph_vector_store(
-    retained: &RetainedSemanticVectorGraphV1,
-) -> (GraphVectorGenerationStoreV1, Arc<dyn GraphCancellation>) {
-    (
-        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph())),
-        Arc::clone(retained.cancellation()),
-    )
+pub struct PreparedProductionSemanticCacheCommitV1 {
+    handle: DaemonSemanticRuntimeHandleV1,
+    prepared: PreparedProductionSemanticCacheActionV1,
+}
+
+enum PreparedProductionSemanticCacheActionV1 {
+    Observation(PreparedSemanticRuntimeObservationV1),
+    Restore(PreparedSemanticRuntimeRestoreV1),
+}
+
+impl PreparedProductionSemanticCacheCommitV1 {
+    pub fn commit(self) -> bool {
+        match self.prepared {
+            PreparedProductionSemanticCacheActionV1::Observation(prepared) => {
+                self.handle.commit_current_observation(prepared)
+            }
+            PreparedProductionSemanticCacheActionV1::Restore(prepared) => {
+                self.handle.commit_restore(prepared)
+            }
+        }
+    }
 }
 
 impl ProductionSemanticRuntimeV1 {
@@ -276,17 +302,49 @@ impl ProductionSemanticRuntimeV1 {
         }
     }
 
+    pub fn verified_ready_events(
+        &self,
+    ) -> tokio::sync::watch::Receiver<tracedecay_semantic::SemanticLifecycleVerifiedReadyEventV1>
+    {
+        self.lifecycle.verified_ready_events()
+    }
+
     /// Restore a compatible immutable generation after daemon restart.
     pub async fn restore_current(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
+        required_generation: &VectorGenerationIdV1,
     ) -> Result<bool, SemanticRuntimeScheduleFailureV1> {
+        let Some(prepared) = self
+            .prepare_restore_current(generation, required_generation)
+            .await?
+        else {
+            return Ok(false);
+        };
+        Ok(prepared.commit())
+    }
+
+    pub async fn prepare_restore_current(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+        required_generation: &VectorGenerationIdV1,
+    ) -> Result<Option<PreparedProductionSemanticCacheCommitV1>, SemanticRuntimeScheduleFailureV1>
+    {
         let retained = self
             .graph
             .graph_for_generation(generation)
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let (store, cancellation) = graph_vector_store(&retained);
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = match GraphVectorGenerationStoreV1::read_only_generation(
+            &retained,
+            required_generation,
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
+        {
+            Some(store) => store,
+            None => return Ok(None),
+        };
         let projection = LoadedSemanticArtifactV1::lifecycle_projection(
             &self.lifecycle,
             generation.manifest(),
@@ -294,34 +352,24 @@ impl ProductionSemanticRuntimeV1 {
         )?;
         let source_manifest_digest =
             semantic_source_manifest_digest(generation.projection().request());
-        let mut active = store
-            .active_generation_for(
-                &projection,
-                &generation.manifest().generation_id,
-                source_manifest_digest,
-                Arc::clone(&cancellation),
-            )
+        let active = store
+            .generation(required_generation, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        if active.is_none() {
-            let replay_digest = semantic_projection_request(generation, &projection, None)?
-                .changes
-                .manifest_digest;
-            if &replay_digest != source_manifest_digest {
-                active = store
-                    .active_generation_for(
-                        &projection,
-                        &generation.manifest().generation_id,
-                        &replay_digest,
-                        Arc::clone(&cancellation),
-                    )
-                    .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-            }
-        }
         let Some(active) = active else {
-            return Ok(false);
+            return Ok(None);
         };
+        let replay_digest = semantic_projection_request(generation, &projection, None)?
+            .changes
+            .manifest_digest;
+        if active.generation_id() != required_generation
+            || active.embedding_key() != &projection
+            || active.source_generation() != &generation.manifest().generation_id
+            || (active.source_manifest_digest() != source_manifest_digest
+                && active.source_manifest_digest() != &replay_digest)
+        {
+            return Ok(None);
+        }
         let lifecycle = Arc::clone(&self.lifecycle);
         let manifest = generation.manifest().clone();
         let resources = self.resources;
@@ -331,7 +379,7 @@ impl ProductionSemanticRuntimeV1 {
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
         if artifact.projection() != &projection {
-            return Ok(false);
+            return Ok(None);
         }
         let pointer = SemanticGenerationPointerV1 {
             generation: active.generation_id().clone(),
@@ -339,15 +387,39 @@ impl ProductionSemanticRuntimeV1 {
             projection_key: active.projection_key().clone(),
         };
         let handle = self.handle.clone();
+        let prepared_handle = handle.clone();
         let prepared =
-            tokio::task::spawn_blocking(move || handle.prepare_restore(pointer, artifact))
+            tokio::task::spawn_blocking(move || prepared_handle.prepare_restore(pointer, artifact))
                 .await
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
-        if !self.handle.commit_restore(prepared) {
-            return Err(SemanticRuntimeScheduleFailureV1::Publication);
-        }
         let _ = self.lifecycle.mark_ready();
-        Ok(true)
+        Ok(Some(PreparedProductionSemanticCacheCommitV1 {
+            handle,
+            prepared: PreparedProductionSemanticCacheActionV1::Restore(prepared),
+        }))
+    }
+
+    pub fn prepare_current_cache_observation(
+        &self,
+        pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+        source_generation: &CodeGenerationId,
+    ) -> Option<PreparedProductionSemanticCacheCommitV1> {
+        let pointer = SemanticGenerationPointerV1 {
+            generation: pins.vector_generation_id.clone(),
+            source_generation: source_generation.clone(),
+            projection_key: pins.projection.projection_key().clone(),
+        };
+        let prepared = self.handle.prepare_current_observation(&pointer)?;
+        Some(PreparedProductionSemanticCacheCommitV1 {
+            handle: self.handle.clone(),
+            prepared: PreparedProductionSemanticCacheActionV1::Observation(prepared),
+        })
+    }
+
+    /// Evict one exact process-local generation while retaining every durable
+    /// graph snapshot and staging record.
+    pub fn unbind_cache_if_current(&self, generation: &VectorGenerationIdV1) -> bool {
+        self.handle.unbind_query_runtime_if_current(generation)
     }
 
     /// Enqueue one saved code generation. Model verification, ORT startup,
@@ -358,13 +430,18 @@ impl ProductionSemanticRuntimeV1 {
 
     /// Build an evaluator-only exact-flat lane from the checked-in sanitized
     /// corpus. The verified production artifact/runtime are reused, while the
-    /// resulting vectors remain process-local and cannot replace the project's
-    /// active vector generation.
+    /// resulting vectors remain process-local and cannot alter the project's
+    /// committed semantic activation.
     pub fn prepare_evaluation_generation(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
-        let model_bytes = installed_artifact_member_bytes(&self.lifecycle)?;
+        let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)?;
+        let execution = SemanticResourceCeilings {
+            max_concurrent_sessions: EVALUATION_MAX_CONCURRENT_SESSIONS,
+            ..self.resources
+        };
         let artifact = LoadedSemanticArtifactV1::from_lifecycle(
             &self.lifecycle,
             generation.manifest(),
@@ -383,16 +460,19 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             generation.chunks().chunks(),
-            self.resources.max_concurrent_sessions as usize,
+            execution.max_concurrent_sessions as usize,
             self.resources.max_resident_bytes,
+            Arc::clone(&cancellation),
         )?;
         PreparedSemanticEvaluationGenerationV1::new(
             generation.clone(),
             prepared,
             artifact_digest,
-            model_bytes,
+            artifact_bytes,
+            execution,
             elapsed_micros(started),
             projection_input_bytes,
+            cancellation,
         )
     }
 
@@ -443,8 +523,9 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            self.resources.max_concurrent_sessions as usize,
+            EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
             self.resources.max_resident_bytes,
+            Arc::clone(&current.cancellation),
         )?;
         if prepared.prepared.request.changes.from_generation.as_ref()
             != Some(&current.source_generation)
@@ -482,23 +563,27 @@ impl ProductionSemanticRuntimeV1 {
         BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
-        // The measured lane runs the production publication protocol against a
-        // private in-memory graph owned by this run. It can never alias the
-        // durable project graph, and every record vanishes with the owner —
-        // the bounded foreground measurement is not cancellable.
-        let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
-        let owner = GraphDbOwner::memory(Arc::clone(&cancellation))
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let store = GraphVectorGenerationStoreV1::open(owner.handle(), Arc::clone(&cancellation))
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        self.measure_evaluation_projection_cases_in_store(&store, &cancellation, clean, sources)
+        let graph_cancellation: Arc<dyn GraphCancellation> =
+            Arc::new(SemanticEvaluationGraphCancellationV1 {
+                evaluation: Arc::clone(&clean.cancellation),
+            });
+        let graph = isolated_semantic_evaluation_graph(
+            &[
+                &clean.code,
+                sources.one_symbol,
+                sources.no_op,
+                sources.deletion,
+            ],
+            graph_cancellation,
+        )
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        self.measure_evaluation_projection_cases_in_store(&graph, clean, sources)
             .await
     }
 
     async fn measure_evaluation_projection_cases_in_store(
         &self,
-        store: &GraphVectorGenerationStoreV1,
-        cancellation: &Arc<dyn GraphCancellation>,
+        graph: &Arc<IsolatedSemanticEvaluationGraphV1>,
         clean: &PreparedSemanticEvaluationGenerationV1,
         sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
     ) -> Result<
@@ -522,29 +607,78 @@ impl ProductionSemanticRuntimeV1 {
                 .collect(),
             base_generation: None,
         };
+        let clean_retained = graph
+            .retained(&clean.source_generation)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let cancellation = Arc::clone(clean_retained.cancellation());
+        let store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
         let clean_build = store
-            .rebuild_generation(clean_plan, Arc::clone(cancellation))
+            .rebuild_generation(clean_plan.clone(), Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        let clean_checkpoint = store
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .build_id()
+            .clone();
+
+        // Replay workload (Plan 31): the first writer begins the durable
+        // stage and dies before committing; a fresh store partition recovers
+        // that stage and drives the identical prepared batch through commit
+        // and publication. This measures the real replay path — durable
+        // stage recovery, byte-exact batch convergence, prepare, publish,
+        // settle — with zero model calls, instead of a zero-work
+        // already-published lookup.
+        let replay_started = std::time::Instant::now();
+        let replay_store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
+        let replay_build = match replay_store
+            .begin_generation(clean_plan.clone(), Arc::clone(&cancellation))
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        {
+            VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id }
+                if build_id == clean_build =>
+            {
+                build_id
+            }
+            VectorGenerationBeginOutcomeV1::ReplayFromStart { .. }
+            | VectorGenerationBeginOutcomeV1::AlreadyPublished { .. } => {
+                return Err(SemanticRuntimeScheduleFailureV1::Projection);
+            }
+        };
+        replay_store
             .commit_batch(
-                &clean_build,
+                &replay_build,
                 None,
                 clean_prepared.clone(),
-                Arc::clone(cancellation),
+                Arc::clone(&cancellation),
             )
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        let clean_publication = store
-            .publish_generation(&clean_build, None, Arc::clone(cancellation))
+        let clean_publication = replay_store
+            .publish_generation(&replay_build, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if store
-            .active_generation_id(Arc::clone(cancellation))
+        let replay_elapsed = elapsed_micros(replay_started);
+        if replay_store
+            .generation(&clean_publication.generation_id, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-            != Some(clean_publication.generation_id.clone())
+            .is_none()
         {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        // Durable idempotency: a third partition observes the published
+        // generation without re-doing any work.
+        let idempotent_store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
+        let idempotent = idempotent_store
+            .begin_generation(clean_plan, Arc::clone(&cancellation))
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        if !matches!(
+            idempotent,
+            VectorGenerationBeginOutcomeV1::AlreadyPublished {
+                publication,
+                ..
+            } if publication == clean_publication
+        ) {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
 
@@ -558,53 +692,36 @@ impl ProductionSemanticRuntimeV1 {
                 SemanticProjectionCaseOutcomeV1::Complete,
             ),
         );
-
-        let replay_started = std::time::Instant::now();
-        let replay_checkpoint = store
-            .commit_batch(
-                &clean_build,
-                Some(&clean_checkpoint),
-                clean_prepared.clone(),
-                Arc::clone(cancellation),
-            )
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if replay_checkpoint != clean_checkpoint
-            || store
-                .active_generation_id(Arc::clone(cancellation))
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-                != Some(clean_publication.generation_id.clone())
-        {
-            return Err(SemanticRuntimeScheduleFailureV1::Projection);
-        }
-        samples.insert(
-            SemanticProjectionCaseV1::IdempotencyReplay,
-            SemanticProjectionCaseSampleV1 {
-                outcome: SemanticProjectionCaseOutcomeV1::Complete,
-                elapsed_micros: elapsed_micros(replay_started),
-                input_bytes: 0,
-                chunks_added_or_changed: 0,
-                chunks_deleted: 0,
-                chunks_reused: 0,
-                projection_calls: 0,
-            },
+        let mut replay_sample = projection_case_sample_from_prepared(
+            clean_prepared,
+            replay_elapsed,
+            clean.projection_input_bytes,
+            SemanticProjectionCaseOutcomeV1::Complete,
         );
+        // The replay re-commits retained vectors; it never invokes the model.
+        replay_sample.projection_calls = 0;
+        samples.insert(SemanticProjectionCaseV1::IdempotencyReplay, replay_sample);
 
         let clean_pointer = SemanticGenerationPointerV1 {
             generation: clean_publication.generation_id.clone(),
             source_generation: clean_prepared.request.changes.to_generation.clone(),
             projection_key: clean_prepared.request.target_projection_key.clone(),
         };
-        let (one_symbol, one_symbol_elapsed, one_symbol_input) =
-            self.prepare_projection_case(sources.one_symbol, Some(&clean_pointer))?;
+        let (one_symbol, one_symbol_elapsed, one_symbol_input) = self.prepare_projection_case(
+            sources.one_symbol,
+            Some(&clean_pointer),
+            &clean.cancellation,
+        )?;
+        let one_symbol_retained = graph
+            .retained(&one_symbol.request.changes.to_generation)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let one_symbol_store = evaluation_projection_case_store(&one_symbol_retained, &one_symbol)?;
         let one_symbol_publication = publish_evaluation_projection_case_isolated(
-            store,
-            cancellation,
+            &one_symbol_store,
+            &cancellation,
             sources.one_symbol,
             one_symbol.clone(),
             Some(clean_publication.generation_id.clone()),
-            Some(&clean_publication.generation_id),
         )
         .await?;
         samples.insert(
@@ -622,15 +739,21 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: one_symbol.request.changes.to_generation.clone(),
             projection_key: one_symbol.request.target_projection_key.clone(),
         };
-        let (no_op, no_op_elapsed, no_op_input) =
-            self.prepare_projection_case(sources.no_op, Some(&one_symbol_pointer))?;
+        let (no_op, no_op_elapsed, no_op_input) = self.prepare_projection_case(
+            sources.no_op,
+            Some(&one_symbol_pointer),
+            &clean.cancellation,
+        )?;
+        let no_op_retained = graph
+            .retained(&no_op.request.changes.to_generation)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let no_op_store = evaluation_projection_case_store(&no_op_retained, &no_op)?;
         let no_op_publication = publish_evaluation_projection_case_isolated(
-            store,
-            cancellation,
+            &no_op_store,
+            &cancellation,
             sources.no_op,
             no_op.clone(),
             Some(one_symbol_publication.generation_id.clone()),
-            Some(&one_symbol_publication.generation_id),
         )
         .await?;
         samples.insert(
@@ -648,15 +771,21 @@ impl ProductionSemanticRuntimeV1 {
             source_generation: no_op.request.changes.to_generation.clone(),
             projection_key: no_op.request.target_projection_key.clone(),
         };
-        let (deletion, deletion_elapsed, deletion_input) =
-            self.prepare_projection_case(sources.deletion, Some(&no_op_pointer))?;
+        let (deletion, deletion_elapsed, deletion_input) = self.prepare_projection_case(
+            sources.deletion,
+            Some(&no_op_pointer),
+            &clean.cancellation,
+        )?;
+        let deletion_retained = graph
+            .retained(&deletion.request.changes.to_generation)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let deletion_store = evaluation_projection_case_store(&deletion_retained, &deletion)?;
         let deletion_publication = publish_evaluation_projection_case_isolated(
-            store,
-            cancellation,
+            &deletion_store,
+            &cancellation,
             sources.deletion,
             deletion.clone(),
             Some(no_op_publication.generation_id.clone()),
-            Some(&no_op_publication.generation_id),
         )
         .await?;
         samples.insert(
@@ -669,26 +798,116 @@ impl ProductionSemanticRuntimeV1 {
             ),
         );
 
-        let active_before_cancellation = deletion_publication.generation_id.clone();
-        let cancellation_started = std::time::Instant::now();
-        let cancellation_plan = evaluation_projection_plan(
-            sources.deletion,
-            &deletion,
-            Some(no_op_publication.generation_id.clone()),
+        let cancellation_artifact = LoadedSemanticArtifactV1::from_lifecycle(
+            &self.lifecycle,
+            sources.deletion.manifest(),
+            self.resources,
         )?;
-        let cancellation_build = store
-            .rebuild_generation(cancellation_plan, Arc::clone(cancellation))
+        let cancellation_projection = cancellation_artifact.projection().clone();
+        let cancellation_request =
+            semantic_projection_request(sources.deletion, &cancellation_projection, None)?;
+        let cancellation_changed = cancellation_request
+            .changes
+            .added_or_changed
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+        let cancellation_chunks = sources
+            .deletion
+            .chunks()
+            .chunks()
+            .iter()
+            .filter(|chunk| cancellation_changed.contains(&chunk.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if cancellation_chunks.len() != cancellation_request.changes.added_or_changed.len() {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        let cancellation_input = projection_input_bytes(&cancellation_chunks)?;
+        let cancellation_store = evaluation_projection_case_store_for_changes(
+            &deletion_retained,
+            cancellation_projection,
+            &cancellation_request.changes,
+        )?;
+        let cancellation_started = std::time::Instant::now();
+        let graph_authority = SemanticGraphExecutionAuthorityV1::new(
+            Arc::clone(&cancellation),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        let cancellation_revision_before = cancellation_store
+            .verified_revision(Arc::clone(&cancellation))
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        let cancellation_head_before = deletion_retained
+            .runtime()
+            .verified_head(&graph_authority)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        let cancellation_plan =
+            evaluation_projection_plan_from_request(sources.deletion, &cancellation_request, None)?;
+        let cancellation_generation = VectorGenerationIdV1::new(
+            generation_identity_digest(&cancellation_plan)
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?,
+        );
+        let cancellation_build = cancellation_store
+            .begin_generation(cancellation_plan, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if !store
-            .cancel_generation(&cancellation_build, Arc::clone(cancellation))
+        let VectorGenerationBeginOutcomeV1::ReplayFromStart {
+            build_id: cancellation_build,
+        } = cancellation_build
+        else {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        };
+        if cancellation_store
+            .generation(&cancellation_generation, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-            || store
-                .active_generation_id(Arc::clone(cancellation))
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-                != Some(active_before_cancellation.clone())
+            .is_some()
+        {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        let cancellation_measurement = measure_semantic_evaluation_projection_cancellation(
+            cancellation_artifact,
+            cancellation_request.clone(),
+            &cancellation_chunks,
+            EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
+            self.resources.max_resident_bytes,
+            Arc::clone(&clean.cancellation),
+        );
+        if !cancellation_store
+            .cancel_generation(&cancellation_build, Arc::clone(&cancellation))
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        let cancellation_after_store = GraphVectorGenerationStoreV1::open(&deletion_retained)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        if cancellation_after_store
+            .generation(&cancellation_generation, Arc::clone(&cancellation))
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .is_some()
+        {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        let cancellation_revision_after = cancellation_after_store
+            .verified_revision(Arc::clone(&cancellation))
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        let cancellation_head_after = deletion_retained
+            .runtime()
+            .verified_head(&graph_authority)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        if cancellation_revision_after != cancellation_revision_before
+            || cancellation_head_after != cancellation_head_before
+        {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
+        let cancellation_measurement = cancellation_measurement?;
+        if cancellation_measurement.projection_calls == 0
+            || cancellation_measurement.projection_calls
+                >= cancellation_measurement.chunks_added_or_changed
+            || cancellation_measurement.chunks_added_or_changed
+                != cancellation_request.changes.added_or_changed.len() as u64
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -697,16 +916,16 @@ impl ProductionSemanticRuntimeV1 {
             SemanticProjectionCaseSampleV1 {
                 outcome: SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication,
                 elapsed_micros: elapsed_micros(cancellation_started),
-                input_bytes: 0,
-                chunks_added_or_changed: 0,
-                chunks_deleted: 0,
-                chunks_reused: 0,
-                projection_calls: 0,
+                input_bytes: cancellation_input,
+                chunks_added_or_changed: cancellation_measurement.chunks_added_or_changed,
+                chunks_deleted: cancellation_request.changes.deleted.len() as u64,
+                chunks_reused: cancellation_request.changes.reused.len() as u64,
+                projection_calls: cancellation_measurement.projection_calls,
             },
         );
 
         let (incompatible, incompatible_elapsed, incompatible_input) =
-            self.prepare_projection_case(sources.one_symbol, None)?;
+            self.prepare_projection_case(sources.one_symbol, None, &clean.cancellation)?;
         if incompatible.request.changes.from_generation.is_some()
             || incompatible.request.previous_projection_key.is_some()
             || incompatible.request.replay_reason
@@ -716,38 +935,27 @@ impl ProductionSemanticRuntimeV1 {
         }
         let incompatible_plan =
             evaluation_projection_plan(sources.one_symbol, &incompatible, None)?;
-        let incompatible_build = store
-            .rebuild_generation(incompatible_plan, Arc::clone(cancellation))
+        let incompatible_store =
+            evaluation_projection_case_store(&one_symbol_retained, &incompatible)?;
+        let incompatible_build = incompatible_store
+            .rebuild_generation(incompatible_plan, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        store
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .build_id()
+            .clone();
+        incompatible_store
             .commit_batch(
                 &incompatible_build,
                 None,
                 incompatible.clone(),
-                Arc::clone(cancellation),
+                Arc::clone(&cancellation),
             )
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if store
-            .active_generation_for(
-                &incompatible.embedding_key,
-                &incompatible.request.changes.to_generation,
-                &incompatible.request.changes.manifest_digest,
-                Arc::clone(cancellation),
-            )
+        if !incompatible_store
+            .cancel_generation(&incompatible_build, Arc::clone(&cancellation))
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-            .is_some()
-            || !store
-                .cancel_generation(&incompatible_build, Arc::clone(cancellation))
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-            || store
-                .active_generation_id(Arc::clone(cancellation))
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-                != Some(active_before_cancellation)
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -760,6 +968,18 @@ impl ProductionSemanticRuntimeV1 {
                 SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible,
             ),
         );
+        let required = BTreeSet::from([
+            SemanticProjectionCaseV1::Clean,
+            SemanticProjectionCaseV1::OneSymbol,
+            SemanticProjectionCaseV1::Deletion,
+            SemanticProjectionCaseV1::NoOp,
+            SemanticProjectionCaseV1::IdempotencyReplay,
+            SemanticProjectionCaseV1::Cancellation,
+            SemanticProjectionCaseV1::IncompatibleState,
+        ]);
+        if samples.keys().copied().collect::<BTreeSet<_>>() != required {
+            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+        }
         Ok(samples)
     }
 
@@ -767,6 +987,7 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
         current: Option<&SemanticGenerationPointerV1>,
+        cancellation: &Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<(PreparedVectorGenerationV1, u64, u64), SemanticRuntimeScheduleFailureV1> {
         let artifact = LoadedSemanticArtifactV1::from_lifecycle(
             &self.lifecycle,
@@ -797,8 +1018,9 @@ impl ProductionSemanticRuntimeV1 {
             artifact,
             request,
             &chunks,
-            self.resources.max_concurrent_sessions as usize,
+            EVALUATION_MAX_CONCURRENT_SESSIONS as usize,
             self.resources.max_resident_bytes,
+            Arc::clone(cancellation),
         )?;
         Ok((prepared.prepared, elapsed_micros(started), input_bytes))
     }
@@ -814,9 +1036,16 @@ impl ProductionSemanticRuntimeV1 {
             .graph_for_current()
             .await
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        let (store, cancellation) = graph_vector_store(&retained);
-        let active = store
-            .active_generation_snapshot_for(
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = GraphVectorGenerationStoreV1::read_only_generation(
+            &retained,
+            &required.vector_generation_id,
+        )
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+        .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+        let verified = store
+            .generation_snapshot_for(
+                &required.vector_generation_id,
                 &required.projection,
                 source_generation,
                 source_manifest_digest,
@@ -824,41 +1053,56 @@ impl ProductionSemanticRuntimeV1 {
             )
             .await
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        let active = active.ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
-        if active.generation().generation_id() != &required.vector_generation_id {
-            return Err(SemanticRuntimeBackendErrorV1::Rejected);
-        }
-        let pointer = self
-            .handle
-            .current()
-            .ok_or(SemanticRuntimeBackendErrorV1::Unavailable)?;
-        if pointer.generation != required.vector_generation_id
-            || pointer.source_generation != *source_generation
-            || pointer.projection_key != *required.projection.projection_key()
-        {
-            return Err(SemanticRuntimeBackendErrorV1::Rejected);
-        }
-        let executable = self.inspect_generation(required).await?;
-        if !store
-            .active_snapshot_is_current(
-                active.revision(),
-                active.generation().generation_id(),
+        let verified = verified.ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+        let executable_lease = self.inspect_generation(required).await?;
+        // Publication identity stays i64 on the wire; the graph adapter's
+        // monotonic u64 revision maps 1:1 into it and can only overflow after
+        // ~9.2e18 mutations, which we treat as a rejected protocol state.
+        let vector_state_revision = i64::try_from(verified.revision())
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+        Ok(SemanticCompatibleCurrentGenerationSnapshotV1 {
+            executable: executable_lease.evidence().clone(),
+            vector_state_revision,
+            vector_generation_id: verified.generation().generation_id().clone(),
+        })
+    }
+
+    /// Inspect only immutable vector/source identity before native evaluation.
+    /// Resource evidence does not exist yet and is therefore not fabricated
+    /// from the evaluator's configured ceilings.
+    pub async fn inspect_evaluation_current_generation_snapshot(
+        &self,
+        required: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+    ) -> Result<SemanticEvaluationCurrentGenerationSnapshotV1, SemanticRuntimeBackendErrorV1> {
+        let retained = self
+            .graph
+            .graph_for_current()
+            .await
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = GraphVectorGenerationStoreV1::read_only_generation(
+            &retained,
+            &required.vector_generation_id,
+        )
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+        .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+        let verified = store
+            .generation_snapshot_for(
+                &required.vector_generation_id,
+                &required.projection,
+                source_generation,
+                source_manifest_digest,
                 cancellation,
             )
             .await
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
-        {
-            return Err(SemanticRuntimeBackendErrorV1::Rejected);
-        }
-        // Publication identity stays i64 on the wire; the graph adapter's
-        // monotonic u64 revision maps 1:1 into it and can only overflow after
-        // ~9.2e18 mutations, which we treat as a rejected protocol state.
-        let vector_state_revision = i64::try_from(active.revision())
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
-        Ok(SemanticCompatibleCurrentGenerationSnapshotV1 {
-            executable,
-            vector_state_revision,
-            vector_generation_id: active.generation().generation_id().clone(),
+            .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+        Ok(SemanticEvaluationCurrentGenerationSnapshotV1 {
+            vector_state_revision: i64::try_from(verified.revision())
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?,
+            vector_generation_id: verified.generation().generation_id().clone(),
         })
     }
 
@@ -878,11 +1122,14 @@ impl ProductionSemanticRuntimeV1 {
             .graph_for_current()
             .await
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        let (store, cancellation) = graph_vector_store(&retained);
-        if !store
-            .active_snapshot_is_current(expected_revision, expected_generation, cancellation)
-            .await
+        let store =
+            GraphVectorGenerationStoreV1::read_only_generation(&retained, expected_generation)
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+                .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+        if store
+            .verified_revision(Arc::clone(retained.cancellation()))
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+            != expected_revision
         {
             return Err(SemanticRuntimeBackendErrorV1::Rejected);
         }
@@ -900,12 +1147,37 @@ impl ProductionSemanticRuntimeV1 {
         }
     }
 
-    /// Read the durably active vector generation from the current graph,
-    /// or `None` when the graph is unavailable or nothing is active.
-    pub async fn active_vector_generation(&self) -> Option<PublishedVectorGenerationV1> {
+    /// Read the immutable generation selected by committed compatibility pins.
+    ///
+    /// The installed runtime pointer is a cache observation only and cannot
+    /// substitute another graph generation.
+    pub async fn active_vector_generation(
+        &self,
+        pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+    ) -> Option<PublishedVectorGenerationV1> {
+        let generation_id = &pins.vector_generation_id;
         let retained = self.graph.graph_for_current().await.ok()?;
-        let (store, cancellation) = graph_vector_store(&retained);
-        store.active_generation(cancellation).await.ok().flatten()
+        let store =
+            GraphVectorGenerationStoreV1::read_only_generation(&retained, generation_id).ok()??;
+        store
+            .generation(generation_id, Arc::clone(retained.cancellation()))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub fn cache_ready_for(
+        &self,
+        pins: &crate::config::retrieval::SemanticCompatibilityPinsV1,
+        source_generation: &CodeGenerationId,
+    ) -> bool {
+        self.handle
+            .query_factory(
+                source_generation,
+                &pins.vector_generation_id,
+                pins.projection.projection_key(),
+            )
+            .is_some()
     }
 
     fn schedule_saved_generation_fair(
@@ -969,8 +1241,10 @@ impl ProductionSemanticRuntimeV1 {
             drop(fair_lease);
             return false;
         }
-        let current = self.handle.current();
-        let request = match semantic_projection_request(generation, &projection, current.as_ref()) {
+        // Projection publication is independent of the process cache. Without
+        // an immutable prior-generation catalog input this is truthfully a
+        // full rebuild; `handle.current()` is never a delta/base authority.
+        let request = match semantic_projection_request(generation, &projection, None) {
             Ok(request) => request,
             Err(_) => return false,
         };
@@ -994,12 +1268,7 @@ impl ProductionSemanticRuntimeV1 {
             .iter()
             .map(|chunk| chunk.id.clone())
             .collect::<Vec<_>>();
-        let base_generation = current.as_ref().and_then(|pointer| {
-            (request.changes.from_generation.as_ref() == Some(&pointer.source_generation)
-                && request.previous_projection_key.as_ref() == Some(&pointer.projection_key))
-            .then(|| pointer.generation.clone())
-        });
-        let expected_active = base_generation.clone();
+        let base_generation = None;
         let graph = Arc::clone(&self.graph);
         let writer = Arc::clone(&self.vector_writer);
         let scheduled_generation = Arc::new(generation.clone());
@@ -1015,6 +1284,13 @@ impl ProductionSemanticRuntimeV1 {
         // one batch's.
         let published_source_generation = request.changes.to_generation.clone();
         let published_projection_key = request.target_projection_key.clone();
+        let stage_descriptor = match SemanticVectorStageDescriptorV1::from_changes(
+            projection.clone(),
+            &request.changes,
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(_) => return false,
+        };
         let plan = VectorGenerationPlanV1 {
             target_projection_key: published_projection_key.clone(),
             source_generation: published_source_generation.clone(),
@@ -1050,28 +1326,39 @@ impl ProductionSemanticRuntimeV1 {
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 let cancellation = Arc::clone(retained.cancellation());
-                let store = GraphVectorGenerationStoreV1::open(
-                    Arc::clone(retained.graph()),
-                    Arc::clone(&cancellation),
-                )
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                let store = Arc::new(
+                    GraphVectorGenerationStoreV1::open(&retained)
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?,
+                );
+                store
+                    .configure_stage(stage_descriptor)
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 // The build identity is a digest of the plan, so reopening the
                 // same plan re-adopts the same staged build rather than
                 // starting a second one.
-                let build = store
+                let resume = store
                     .begin_generation(plan, Arc::clone(&cancellation))
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-                let checkpoint = store
-                    .staged_checkpoint(&build, cancellation)
-                    .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-                    .filter(|checkpoint| checkpoint.completed_batches > 0);
-                let committed_batches = checkpoint.as_ref().map_or(0, |it| it.completed_batches);
                 let mut state = resume_state.lock().await;
-                state.build = Some(build);
-                state.checkpoint = checkpoint;
-                Ok(committed_batches)
+                state.build = Some(resume.build_id().clone());
+                state.store = Some(store);
+                state.checkpoint = None;
+                state.published = match resume {
+                    VectorGenerationBeginOutcomeV1::ReplayFromStart { .. } => None,
+                    VectorGenerationBeginOutcomeV1::AlreadyPublished { publication, .. } => {
+                        Some(publication)
+                    }
+                };
+                // Pending native rows are deliberately unreadable through the
+                // verified snapshot. Replay bounded source batches from zero;
+                // durable stage receipts and keyed native applies make each
+                // replay exact after restart.
+                Ok(if state.published.is_some() {
+                    SemanticProjectionResumeOutcomeV1::AlreadyPublished
+                } else {
+                    SemanticProjectionResumeOutcomeV1::ReplayFromStart
+                })
             },
             move |prepared| {
                 let state = Arc::clone(&commit_state);
@@ -1091,14 +1378,17 @@ impl ProductionSemanticRuntimeV1 {
                         .build
                         .clone()
                         .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let store = state
+                        .store
+                        .as_ref()
+                        .cloned()
+                        .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
                     let _writer = writer.lock().await;
                     let retained = graph
                         .graph_for_generation(generation.as_ref())
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let cancellation = Arc::clone(retained.cancellation());
-                    let store =
-                        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
                     let next = store
                         .commit_batch(&build, state.checkpoint.as_ref(), prepared, cancellation)
                         .await
@@ -1108,12 +1398,21 @@ impl ProductionSemanticRuntimeV1 {
                 }
             },
             move || async move {
-                let build = stage_state
-                    .lock()
-                    .await
-                    .build
-                    .clone()
-                    .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                let (build, store, published) = {
+                    let state = stage_state.lock().await;
+                    (
+                        state
+                            .build
+                            .clone()
+                            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?,
+                        state
+                            .store
+                            .as_ref()
+                            .cloned()
+                            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?,
+                        state.published.clone(),
+                    )
+                };
                 let _ = lifecycle_for_stage.mark_indexing(total_units, total_units);
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     let _publication_lease = fair_lease
@@ -1127,12 +1426,13 @@ impl ProductionSemanticRuntimeV1 {
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let cancellation = Arc::clone(retained.cancellation());
-                    let store =
-                        GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
-                    let publication = store
-                        .publish_generation(&build, expected_active.as_ref(), cancellation)
-                        .await
-                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let publication = match published {
+                        Some(publication) => publication,
+                        None => store
+                            .publish_generation(&build, cancellation)
+                            .await
+                            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?,
+                    };
                     let _ = lifecycle_for_commit.mark_ready();
                     Ok(SemanticGenerationPointerV1 {
                         generation: publication.generation_id,
@@ -1189,8 +1489,8 @@ impl ProductionSemanticRuntimeV1 {
         scheduled
     }
 
-    /// Real application consumer for the optional semantic lane. The durable
-    /// active generation is loaded before composition; indexing/download never
+    /// Real application consumer for the optional semantic lane. The exact
+    /// configuration-pinned generation is loaded before composition; indexing/download never
     /// enters this request path.
     pub async fn execute_search<C>(
         &self,
@@ -1214,14 +1514,23 @@ impl ProductionSemanticRuntimeV1 {
                 fallback,
             );
         };
-        let (store, cancellation) = graph_vector_store(&retained);
-        let mut active = match store
-            .active_generation_for(
-                request.projection,
-                &code_generation.manifest().generation_id,
-                source_manifest_digest,
-                Arc::clone(&cancellation),
-            )
+        let cancellation = Arc::clone(retained.cancellation());
+        let store = match GraphVectorGenerationStoreV1::read_only_generation(
+            &retained,
+            &request.vector_generation,
+        ) {
+            Ok(Some(store)) => store,
+            Ok(None) | Err(_) => {
+                return execute_calibrated_semantic_query(
+                    &NeverCalledSemanticLane,
+                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
+                    mode,
+                    fallback,
+                );
+            }
+        };
+        let active = match store
+            .generation(&request.vector_generation, Arc::clone(&cancellation))
             .await
         {
             Ok(active) => active,
@@ -1234,24 +1543,6 @@ impl ProductionSemanticRuntimeV1 {
                 );
             }
         };
-        if active.is_none() {
-            let replay_digest =
-                semantic_projection_request(code_generation, request.projection, None)
-                    .map_err(|_| SemanticQueryServiceError::InvalidFallback)?
-                    .changes
-                    .manifest_digest;
-            if &replay_digest != source_manifest_digest {
-                active = store
-                    .active_generation_for(
-                        request.projection,
-                        &code_generation.manifest().generation_id,
-                        &replay_digest,
-                        Arc::clone(&cancellation),
-                    )
-                    .await
-                    .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
-            }
-        }
         let Some(active) = active else {
             return execute_calibrated_semantic_query(
                 &NeverCalledSemanticLane,
@@ -1260,6 +1551,23 @@ impl ProductionSemanticRuntimeV1 {
                 fallback,
             );
         };
+        let replay_digest = semantic_projection_request(code_generation, request.projection, None)
+            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?
+            .changes
+            .manifest_digest;
+        if active.embedding_key() != request.projection
+            || active.source_generation() != &code_generation.manifest().generation_id
+            || active.source_generation() != &request.code_generation
+            || (active.source_manifest_digest() != source_manifest_digest
+                && active.source_manifest_digest() != &replay_digest)
+        {
+            return execute_calibrated_semantic_query(
+                &NeverCalledSemanticLane,
+                SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
+                mode,
+                fallback,
+            );
+        }
         let complete = CompleteSemanticGenerationV1::new(
             active.projection_key().clone(),
             request.search_index_key.clone(),
@@ -1285,72 +1593,11 @@ impl ProductionSemanticRuntimeV1 {
             fallback,
         })
     }
-
-    pub async fn rollback(
-        &self,
-        target: &VectorGenerationIdV1,
-        expected_active: &VectorGenerationIdV1,
-    ) -> Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1> {
-        let retained = self
-            .graph
-            .graph_for_current()
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let (store, cancellation) = graph_vector_store(&retained);
-        let generation = store
-            .generation(target, Arc::clone(&cancellation))
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-            .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
-        let lifecycle = Arc::clone(&self.lifecycle);
-        let projection = generation.embedding_key().clone();
-        let resources = self.resources;
-        let mut artifact = tokio::task::spawn_blocking(move || {
-            LoadedSemanticArtifactV1::from_lifecycle_projection(&lifecycle, &projection, resources)
-        })
-        .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-        if artifact.is_err() && self.lifecycle.rollback_to_previous().is_ok() {
-            let lifecycle = Arc::clone(&self.lifecycle);
-            let projection = generation.embedding_key().clone();
-            let resources = self.resources;
-            artifact = tokio::task::spawn_blocking(move || {
-                LoadedSemanticArtifactV1::from_lifecycle_projection(
-                    &lifecycle,
-                    &projection,
-                    resources,
-                )
-            })
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-        }
-        let artifact = artifact?;
-        let pointer = SemanticGenerationPointerV1 {
-            generation: target.clone(),
-            source_generation: generation.source_generation().clone(),
-            projection_key: generation.projection_key().clone(),
-        };
-        let handle = self.handle.clone();
-        let prepared_pointer = pointer.clone();
-        let prepared_runtime =
-            tokio::task::spawn_blocking(move || handle.prepare_restore(prepared_pointer, artifact))
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
-        let _writer = self.vector_writer.lock().await;
-        let publication = store
-            .activate_generation(target, Some(expected_active), cancellation)
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        debug_assert_eq!(publication.generation_id, pointer.generation);
-        if !self.handle.commit_restore(prepared_runtime) {
-            return Err(SemanticRuntimeScheduleFailureV1::Publication);
-        }
-        let _ = self.lifecycle.mark_ready();
-        Ok(pointer)
-    }
 }
 
 pub struct PreparedSemanticEvaluationGenerationV1 {
+    code: CodeIndexPublishedGenerationV1,
+    cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     source_generation: CodeGenerationId,
     projection: tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
     search_index_key: SemanticSearchIndexKeyV1,
@@ -1369,24 +1616,13 @@ impl PreparedSemanticEvaluationGenerationV1 {
         code: CodeIndexPublishedGenerationV1,
         prepared: PreparedSemanticEvaluationProjectionV1,
         artifact_digest: ManifestDigest,
-        model_bytes: u64,
+        artifact_bytes: InstalledArtifactMemberBytesV1,
+        execution: SemanticResourceCeilings,
         clean_projection_build_micros: u64,
         projection_input_bytes: u64,
+        cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        let vector_digest = canonical_sha256(&(
-            "tracedecay.semantic-evaluation-vector-generation.v1",
-            &prepared.prepared.embedding_key,
-            &prepared.prepared.request,
-            &prepared.prepared.receipt,
-            prepared
-                .prepared
-                .vectors
-                .iter()
-                .map(|vector| &vector.output_digest)
-                .collect::<Vec<_>>(),
-        ))
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        let vector_generation = VectorGenerationIdV1::new(vector_digest);
+        let vector_generation = evaluation_vector_generation_id(&code, &prepared.prepared)?;
         let vector_bytes = prepared
             .prepared
             .vectors
@@ -1400,6 +1636,16 @@ impl PreparedSemanticEvaluationGenerationV1 {
             .ok_or(SemanticRuntimeScheduleFailureV1::Projection)?;
         let source_manifest_digest = prepared.prepared.request.changes.manifest_digest.clone();
         let source_generation = code.manifest().generation_id.clone();
+        let cold_model_load_micros = prepared
+            .query_factory
+            .cold_load_micros()
+            .filter(|elapsed| *elapsed != 0)
+            .ok_or(SemanticRuntimeScheduleFailureV1::Runtime)?;
+        let sequence_length = prepared
+            .prepared
+            .embedding_key
+            .embedding_key()
+            .truncation_length;
         let resources = ProductionCandidateNativeGenerationResourcesV1 {
             source_generation: source_generation.clone(),
             source_manifest_digest,
@@ -1412,7 +1658,14 @@ impl PreparedSemanticEvaluationGenerationV1 {
                 .clone(),
             vector_generation: Some(vector_generation.clone()),
             artifact_digest: Some(artifact_digest),
-            model_bytes,
+            model_bytes: artifact_bytes.model,
+            tokenizer_bytes: artifact_bytes.tokenizer,
+            threads: execution.max_threads,
+            max_concurrent_sessions: execution.max_concurrent_sessions,
+            batch_size: execution.max_batch_size,
+            sequence_length,
+            load_deadline_ms: execution.load_deadline_ms,
+            cold_model_load_micros,
             vector_bytes,
             index_bytes: 0,
             cache_bytes: 0,
@@ -1457,6 +1710,8 @@ impl PreparedSemanticEvaluationGenerationV1 {
             prepared_projection: prepared.prepared,
             projection_input_bytes,
             capability_manifest_digest: code.capability().manifest_digest.clone(),
+            code,
+            cancellation,
             query_factory: prepared.query_factory,
             vectors,
             query_keys,
@@ -1491,6 +1746,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
         }
         let control = SemanticEvaluationExecutionControlV1 {
             started: std::time::Instant::now(),
+            cancellation: Arc::clone(&self.cancellation),
         };
         let mut rerank_views =
             GenerationBoundCodeRerankViewsV1::new(context.code, context.query_view);
@@ -1530,7 +1786,9 @@ impl PreparedSemanticEvaluationGenerationV1 {
         request
             .validate()
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-        let embedder = self.query_factory.create(&control);
+        let embedder = self
+            .query_factory
+            .create(&control, request.budget.deadline_micros);
         let scoped_vectors = ScopedSemanticEvaluationVectorReadPortV1 {
             inner: &self.vectors,
             allowed_chunks: context.semantic_allowed_chunks,
@@ -1550,11 +1808,12 @@ impl PreparedSemanticEvaluationGenerationV1 {
 
 struct SemanticEvaluationExecutionControlV1 {
     started: std::time::Instant,
+    cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 }
 
 impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
-        false
+        self.cancellation.interruption() == Some(SemanticExecutionInterruptionV1::Cancelled)
     }
 
     fn elapsed_micros(&self) -> u64 {
@@ -1568,7 +1827,7 @@ impl RerankExecutionControlV1 for SemanticEvaluationExecutionControlV1 {
     }
 
     fn is_cancelled(&self) -> bool {
-        false
+        self.cancellation.interruption() == Some(SemanticExecutionInterruptionV1::Cancelled)
     }
 }
 
@@ -1578,7 +1837,7 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
         required: &'a crate::config::retrieval::SemanticCompatibilityPinsV1,
     ) -> SemanticRuntimeFuture<
         'a,
-        Result<SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1>,
+        Result<SemanticExecutableGenerationLeaseV1, SemanticRuntimeBackendErrorV1>,
     > {
         Box::pin(async move {
             let retained = self
@@ -1586,15 +1845,31 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
                 .graph_for_current()
                 .await
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-            let (store, cancellation) = graph_vector_store(&retained);
+            let cancellation = Arc::clone(retained.cancellation());
+            let store = GraphVectorGenerationStoreV1::read_only_generation(
+                &retained,
+                &required.vector_generation_id,
+            )
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
+            .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
             let generation = store
                 .generation(&required.vector_generation_id, cancellation)
                 .await
                 .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?
                 .ok_or(SemanticRuntimeBackendErrorV1::Rejected)?;
+            if !configured_resource_ceiling_covers(&self.resources, required.resources) {
+                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+            }
+            let artifact_bytes = installed_artifact_member_bytes(&self.lifecycle)
+                .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
+            if artifact_bytes.model != required.resources.model_bytes
+                || artifact_bytes.tokenizer != required.resources.tokenizer_bytes
+            {
+                return Err(SemanticRuntimeBackendErrorV1::Rejected);
+            }
             let lifecycle = Arc::clone(&self.lifecycle);
             let projection = generation.embedding_key().clone();
-            let resources = self.resources;
+            let resources = accepted_semantic_resources(required.resources);
             let verified = tokio::task::spawn_blocking(move || {
                 LoadedSemanticArtifactV1::from_lifecycle_projection(
                     &lifecycle,
@@ -1636,21 +1911,17 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             if required.runtime_compatibility_digest != expected_runtime_digest {
                 return Err(SemanticRuntimeBackendErrorV1::Rejected);
             }
-            SemanticExecutableGenerationV1::new(
+            let evidence = SemanticExecutableGenerationV1::new(
                 required.clone(),
-                crate::config::retrieval::SemanticResourceRequirementV1 {
-                    model_bytes: self.resources.max_model_bytes,
-                    tokenizer_bytes: self.resources.max_tokenizer_bytes,
-                    resident_bytes: self.resources.max_resident_bytes,
-                    threads: self.resources.max_threads,
-                    batch_size: self.resources.max_batch_size,
-                    sequence_length: self.resources.max_sequence_length,
-                    load_deadline_ms: self.resources.load_deadline_ms,
-                },
+                required.resources,
                 true,
                 true,
             )
-            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)
+            .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)?;
+            Ok(SemanticExecutableGenerationLeaseV1::new(
+                evidence,
+                (store, retained),
+            ))
         })
     }
 }
@@ -1659,9 +1930,15 @@ fn semantic_source_manifest_digest(request: &ProjectionBatchRequestV1) -> &Manif
     &request.changes.manifest_digest
 }
 
+#[derive(Clone, Copy)]
+struct InstalledArtifactMemberBytesV1 {
+    model: u64,
+    tokenizer: u64,
+}
+
 fn installed_artifact_member_bytes(
     lifecycle: &SemanticModelLifecycleOwnerV1,
-) -> Result<u64, SemanticRuntimeScheduleFailureV1> {
+) -> Result<InstalledArtifactMemberBytesV1, SemanticRuntimeScheduleFailureV1> {
     let status = lifecycle.status();
     let state = status
         .state
@@ -1670,12 +1947,47 @@ fn installed_artifact_member_bytes(
         .catalog()
         .get(state.model_id())
         .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)?;
-    model
-        .members
-        .get("model")
-        .map(|member| member.length)
-        .filter(|bytes| *bytes != 0)
-        .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)
+    let member_bytes = |role: &str| {
+        model
+            .members
+            .get(role)
+            .map(|member| member.length)
+            .filter(|bytes| *bytes != 0)
+            .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)
+    };
+    Ok(InstalledArtifactMemberBytesV1 {
+        model: member_bytes("model")?,
+        tokenizer: member_bytes("tokenizer")?,
+    })
+}
+
+fn configured_resource_ceiling_covers(
+    configured: &SemanticResourceCeilings,
+    required: crate::config::retrieval::SemanticResourceRequirementV1,
+) -> bool {
+    configured.max_model_bytes >= required.model_bytes
+        && configured.max_tokenizer_bytes >= required.tokenizer_bytes
+        && configured.max_resident_bytes >= required.resident_bytes
+        && configured.max_threads >= required.threads
+        && configured.max_concurrent_sessions >= required.max_concurrent_sessions
+        && configured.max_batch_size >= required.batch_size
+        && configured.max_sequence_length >= required.sequence_length
+        && configured.load_deadline_ms >= required.load_deadline_ms
+}
+
+fn accepted_semantic_resources(
+    accepted: crate::config::retrieval::SemanticResourceRequirementV1,
+) -> SemanticResourceCeilings {
+    SemanticResourceCeilings {
+        max_model_bytes: accepted.model_bytes,
+        max_tokenizer_bytes: accepted.tokenizer_bytes,
+        max_resident_bytes: accepted.resident_bytes,
+        max_threads: accepted.threads,
+        max_concurrent_sessions: accepted.max_concurrent_sessions,
+        max_batch_size: accepted.batch_size,
+        max_sequence_length: accepted.sequence_length,
+        load_deadline_ms: accepted.load_deadline_ms,
+    }
 }
 
 fn block_on_semantic_evaluation<Output>(
@@ -2004,30 +2316,26 @@ fn semantic_projection_request(
     Ok(request)
 }
 
-fn projection_input_bytes(
-    chunks: &[CodeSearchChunkV1],
-) -> Result<u64, SemanticRuntimeScheduleFailureV1> {
-    chunks.iter().try_fold(0_u64, |total, chunk| {
-        let bytes = u64::try_from(chunk.sanitized_text.as_str().len())
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        total
-            .checked_add(bytes)
-            .ok_or(SemanticRuntimeScheduleFailureV1::Projection)
-    })
-}
-
 fn evaluation_projection_plan(
     generation: &CodeIndexPublishedGenerationV1,
     prepared: &PreparedVectorGenerationV1,
     base_generation: Option<VectorGenerationIdV1>,
 ) -> Result<VectorGenerationPlanV1, SemanticRuntimeScheduleFailureV1> {
-    if prepared.request.changes.to_generation != generation.manifest().generation_id {
+    evaluation_projection_plan_from_request(generation, &prepared.request, base_generation)
+}
+
+fn evaluation_projection_plan_from_request(
+    generation: &CodeIndexPublishedGenerationV1,
+    request: &ProjectionBatchRequestV1,
+    base_generation: Option<VectorGenerationIdV1>,
+) -> Result<VectorGenerationPlanV1, SemanticRuntimeScheduleFailureV1> {
+    if request.changes.to_generation != generation.manifest().generation_id {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
     Ok(VectorGenerationPlanV1 {
-        target_projection_key: prepared.request.target_projection_key.clone(),
-        source_generation: prepared.request.changes.to_generation.clone(),
-        source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
+        target_projection_key: request.target_projection_key.clone(),
+        source_generation: request.changes.to_generation.clone(),
+        source_manifest_digest: request.changes.manifest_digest.clone(),
         expected_chunk_ids: generation
             .chunks()
             .chunks()
@@ -2038,13 +2346,48 @@ fn evaluation_projection_plan(
     })
 }
 
+fn evaluation_projection_case_store(
+    retained: &RetainedSemanticVectorGraphV1,
+    prepared: &PreparedVectorGenerationV1,
+) -> Result<GraphVectorGenerationStoreV1, SemanticRuntimeScheduleFailureV1> {
+    evaluation_projection_case_store_for_changes(
+        retained,
+        prepared.embedding_key.clone(),
+        &prepared.request.changes,
+    )
+}
+
+fn evaluation_projection_case_store_for_changes(
+    retained: &RetainedSemanticVectorGraphV1,
+    projection: tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+    changes: &ChangedCodeChunkSetV1,
+) -> Result<GraphVectorGenerationStoreV1, SemanticRuntimeScheduleFailureV1> {
+    let store = GraphVectorGenerationStoreV1::open(retained)
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+    let descriptor = SemanticVectorStageDescriptorV1::from_changes(projection, changes)
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+    store
+        .configure_stage(descriptor)
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+    Ok(store)
+}
+
+fn evaluation_vector_generation_id(
+    generation: &CodeIndexPublishedGenerationV1,
+    prepared: &PreparedVectorGenerationV1,
+) -> Result<VectorGenerationIdV1, SemanticRuntimeScheduleFailureV1> {
+    let plan = evaluation_projection_plan(generation, prepared, None)?;
+    generation_identity_digest(&plan)
+        .map(VectorGenerationIdV1::new)
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)
+}
+
 async fn publish_evaluation_projection_case_isolated(
     store: &GraphVectorGenerationStoreV1,
     cancellation: &Arc<dyn GraphCancellation>,
     generation: &CodeIndexPublishedGenerationV1,
     prepared: PreparedVectorGenerationV1,
     base_generation: Option<VectorGenerationIdV1>,
-    expected_active: Option<&VectorGenerationIdV1>,
 ) -> Result<
     crate::store::vector_generations::VectorGenerationPublicationV1,
     SemanticRuntimeScheduleFailureV1,
@@ -2053,20 +2396,22 @@ async fn publish_evaluation_projection_case_isolated(
     let build = store
         .rebuild_generation(plan, Arc::clone(cancellation))
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        .build_id()
+        .clone();
     store
         .commit_batch(&build, None, prepared, Arc::clone(cancellation))
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     let publication = store
-        .publish_generation(&build, expected_active, Arc::clone(cancellation))
+        .publish_generation(&build, Arc::clone(cancellation))
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     if store
-        .active_generation_id(Arc::clone(cancellation))
+        .generation(&publication.generation_id, Arc::clone(cancellation))
         .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-        != Some(publication.generation_id.clone())
+        .is_none()
     {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
@@ -2102,8 +2447,8 @@ fn projection_case_sample_from_prepared(
     }
 }
 
-/// Application search admits semantics only when `query_factory` observes the
-/// atomically current compatible generation.
+/// Application search admits semantics only when `query_factory` observes an
+/// exact cache match for the already-authorized request tuple.
 pub fn semantic_lane_readiness_for_request<'a>(
     handle: &DaemonSemanticRuntimeHandleV1,
     request: &'a SemanticRetrievalRequestV1<'a>,
@@ -2124,8 +2469,8 @@ pub fn semantic_lane_readiness_for_request<'a>(
     }
 }
 
-/// Obtain a query factory only for the atomically current generation.
-#[cfg(feature = "semantic-fastembed")]
+/// Inspect the process-local query factory currently held by the cache.
+#[cfg(any(test, feature = "semantic-fastembed"))]
 pub fn current_query_factory(
     handle: &DaemonSemanticRuntimeHandleV1,
 ) -> Option<(
@@ -2234,7 +2579,7 @@ where
                     fallback,
                 );
             };
-            let embedder = factory.create(control);
+            let embedder = factory.create(control, request.budget.deadline_micros);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
             execute_calibrated_semantic_query(
                 &lane,
@@ -2254,7 +2599,7 @@ where
 }
 
 /// Project-scoped application search consumer over the retained production
-/// runtime and durable active vector generation.
+/// runtime and committed configuration-selected vector generation.
 pub async fn compose_project_application_semantic_search<C>(
     project_root: &Path,
     code_generation: &CodeIndexPublishedGenerationV1,
@@ -2355,7 +2700,6 @@ impl SemanticLaneRetriever for NeverCalledSemanticLane {
 /// Daemon backend that surfaces schedule projection through the application port.
 pub struct DaemonSemanticRuntimeBackendV1 {
     handle: DaemonSemanticRuntimeHandleV1,
-    production: Option<ProductionSemanticRuntimeV1>,
     configuration: Mutex<Option<SemanticConfigurationPinV1>>,
 }
 
@@ -2364,7 +2708,6 @@ impl DaemonSemanticRuntimeBackendV1 {
     pub fn new(handle: DaemonSemanticRuntimeHandleV1) -> Self {
         Self {
             handle,
-            production: None,
             configuration: Mutex::new(None),
         }
     }
@@ -2372,7 +2715,6 @@ impl DaemonSemanticRuntimeBackendV1 {
     pub fn from_production(runtime: ProductionSemanticRuntimeV1) -> Self {
         Self {
             handle: runtime.handle.clone(),
-            production: Some(runtime),
             configuration: Mutex::new(None),
         }
     }
@@ -2424,31 +2766,7 @@ impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
     {
         Box::pin(async move {
             self.bind_configuration(command.configuration.clone());
-            let runtime = self
-                .production
-                .as_ref()
-                .ok_or(SemanticRuntimeBackendErrorV1::Unavailable)?;
-            if let Some(target_generation) = command.request.target_generation.as_ref() {
-                runtime
-                    .rollback(
-                        target_generation,
-                        &command.request.expected_active_generation,
-                    )
-                    .await
-                    .map_err(|error| match error {
-                        SemanticRuntimeScheduleFailureV1::Artifact
-                        | SemanticRuntimeScheduleFailureV1::Runtime => {
-                            SemanticRuntimeBackendErrorV1::Unavailable
-                        }
-                        SemanticRuntimeScheduleFailureV1::Projection
-                        | SemanticRuntimeScheduleFailureV1::Publication
-                        | SemanticRuntimeScheduleFailureV1::Cancelled => {
-                            SemanticRuntimeBackendErrorV1::Conflict
-                        }
-                    })?;
-            }
-            SemanticRollbackReceiptV1::issue(command, now_micros())
-                .map_err(|_| SemanticRuntimeBackendErrorV1::Rejected)
+            Err(SemanticRuntimeBackendErrorV1::Unavailable)
         })
     }
 }
@@ -2460,14 +2778,6 @@ fn index_state_from_status(status: SemanticRuntimeScheduleStatusV1) -> SemanticI
         SemanticRuntimeScheduleStatusV1::Failed { .. } => SemanticIndexStateV1::Failed,
         SemanticRuntimeScheduleStatusV1::Current { .. } => SemanticIndexStateV1::Incompatible,
     }
-}
-
-fn provisional_vector_generation(source: &CodeGenerationId) -> VectorGenerationIdV1 {
-    let digest = canonical_sha256(&("semantic.indexing.target", source)).unwrap_or_else(|_| {
-        ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-            .unwrap_or_else(|_| panic!("digest"))
-    });
-    VectorGenerationIdV1::new(digest)
 }
 
 /// Process-local registry so Doctor/`tracedecay_runtime` can observe the
@@ -2519,7 +2829,21 @@ pub fn project_semantic_production_runtime(
         .cloned()
 }
 
-/// Source generation bound to the atomically current semantic pointer.
+pub fn unbind_project_semantic_cache_if_current(
+    project_root: &Path,
+    generation: &VectorGenerationIdV1,
+) -> bool {
+    if let Some(runtime) = project_semantic_production_runtime(project_root) {
+        return runtime.unbind_cache_if_current(generation);
+    }
+    project_semantic_handles()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .is_some_and(|handle| handle.unbind_query_runtime_if_current(generation))
+}
+
+/// Source generation observed in the cache for the committed semantic pins.
 ///
 /// Query adapters compare this identity with the exact sealed code generation
 /// selected at admission. A stale or merely indexing vector generation never
@@ -2531,14 +2855,19 @@ pub fn project_semantic_source_generation(project_root: &Path) -> Option<CodeGen
 pub(crate) fn project_semantic_generation_pointer(
     project_root: &Path,
 ) -> Option<SemanticGenerationPointerV1> {
-    if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        return runtime.handle.current();
-    }
-    project_semantic_handles()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .and_then(DaemonSemanticRuntimeHandleV1::current)
+    let pins = super::project_committed_semantic_pins(project_root)?;
+    let observed = if let Some(runtime) = project_semantic_production_runtime(project_root) {
+        runtime.handle.current()
+    } else {
+        project_semantic_handles()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .and_then(DaemonSemanticRuntimeHandleV1::current)
+    }?;
+    (observed.generation == pins.vector_generation_id
+        && observed.projection_key == *pins.projection.projection_key())
+    .then_some(observed)
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
@@ -2639,6 +2968,7 @@ pub fn production_saved_generation_schedule_hook(
             queued_bytes,
             resources.max_resident_bytes,
         );
+        let project_root = project_root.clone();
         fair_scheduler
             .enqueue_work(
                 batch,
@@ -2651,12 +2981,18 @@ pub fn production_saved_generation_schedule_hook(
                         let Ok(lease) = Arc::try_unwrap(lease) else {
                             return;
                         };
-                        match runtime.restore_current(&generation).await {
-                            Ok(true) => {}
-                            Ok(false) | Err(_) => {
-                                let _ = runtime.schedule_saved_generation_fair(&generation, lease);
-                            }
+                        if let Some(required) =
+                            super::project_committed_semantic_pins(&project_root)
+                            && matches!(
+                                runtime
+                                    .restore_current(&generation, &required.vector_generation_id)
+                                    .await,
+                                Ok(true)
+                            )
+                        {
+                            return;
                         }
+                        let _ = runtime.schedule_saved_generation_fair(&generation, lease);
                     });
                 }),
             )
@@ -2722,6 +3058,41 @@ mod tests {
         VectorGenerationIdV1::new(
             canonical_sha256(&("semantic.test.vector-generation", value)).expect("manifest digest"),
         )
+    }
+
+    #[test]
+    fn configured_capacity_is_only_coverage_not_observed_resource_evidence() {
+        let configured = SemanticResourceCeilings {
+            max_model_bytes: 100,
+            max_tokenizer_bytes: 50,
+            max_resident_bytes: 500,
+            max_threads: 8,
+            max_concurrent_sessions: 2,
+            max_batch_size: 32,
+            max_sequence_length: 512,
+            load_deadline_ms: 30_000,
+        };
+        let accepted = crate::config::retrieval::SemanticResourceRequirementV1 {
+            model_bytes: 80,
+            tokenizer_bytes: 40,
+            resident_bytes: 400,
+            threads: 4,
+            max_concurrent_sessions: 1,
+            batch_size: 16,
+            sequence_length: 256,
+            load_deadline_ms: 20_000,
+        };
+
+        assert!(configured_resource_ceiling_covers(&configured, accepted));
+        let applied = accepted_semantic_resources(accepted);
+        assert_eq!(applied.max_model_bytes, accepted.model_bytes);
+        assert_eq!(applied.max_tokenizer_bytes, accepted.tokenizer_bytes);
+        assert_eq!(applied.max_resident_bytes, accepted.resident_bytes);
+        assert_eq!(
+            applied.max_concurrent_sessions,
+            accepted.max_concurrent_sessions
+        );
+        assert_ne!(applied.max_resident_bytes, configured.max_resident_bytes);
     }
 
     fn projection_key() -> ProjectionKeyV1 {
@@ -2979,7 +3350,7 @@ mod tests {
                 let _ = release_rx.recv();
                 Err(SemanticRuntimeScheduleFailureV1::Projection)
             },
-            || async { Ok(0) },
+            || async { Ok(SemanticProjectionResumeOutcomeV1::ReplayFromStart) },
             |_prepared| async { Ok(()) },
             move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
         )
@@ -3138,17 +3509,37 @@ mod tests {
             handle
                 .query_factory(&source, &vector, &projection_key)
                 .is_some(),
-            "atomically current generation must enable query_factory"
+            "exact warmed committed generation must enable query_factory"
         );
         assert!(
             current_query_factory(&handle).is_some(),
-            "current_query_factory must surface the atomically current factory"
+            "current_query_factory must surface the exact warmed factory"
         );
         assert!(
             handle
                 .query_factory(&source_generation('x'), &vector, &projection_key)
                 .is_none(),
             "incompatible source must not enable semantics"
+        );
+        let observed_pointer = SemanticGenerationPointerV1 {
+            generation: vector.clone(),
+            source_generation: source.clone(),
+            projection_key: projection_key.clone(),
+        };
+        let exact_observation = handle
+            .prepare_current_observation(&observed_pointer)
+            .expect("prepare exact warmed-cache observation");
+        assert!(
+            handle.commit_current_observation(exact_observation),
+            "unchanged exact cache observation must commit"
+        );
+        let stale_observation = handle
+            .prepare_current_observation(&observed_pointer)
+            .expect("prepare cache observation before concurrent unbind");
+        assert!(handle.unbind_query_runtime_if_current(&vector));
+        assert!(
+            !handle.commit_current_observation(stale_observation),
+            "cache observation must fail CAS after a concurrent transition"
         );
 
         let backend = DaemonSemanticRuntimeBackendV1::new(handle.clone());

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, EmbeddingMetricV1, ManifestDigest, canonical_sha256,
 };
@@ -12,7 +13,7 @@ use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 
 use super::{
-    CommittedRetrievalProfileStateV1, project_semantic_generation_pointer,
+    CommittedRetrievalProfileStateV1, SemanticRetainedVectorGenerationsV1,
     project_semantic_production_runtime,
 };
 
@@ -85,7 +86,7 @@ impl SemanticRedundancyProfileV1 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SemanticRedundancyAuthorityV1 {
     scope_digest: ManifestDigest,
     accepted_profile_digest: ManifestDigest,
@@ -94,9 +95,32 @@ struct SemanticRedundancyAuthorityV1 {
     redundancy_profile_digest: ManifestDigest,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedSemanticRedundancyAuthorityV1 {
+    revision: ConfigurationRevisionId,
+    roots: SemanticRetainedVectorGenerationsV1,
+    authority: Option<SemanticRedundancyAuthorityV1>,
+}
+
+impl PreparedSemanticRedundancyAuthorityV1 {
+    pub fn has_active_authority(&self) -> bool {
+        self.authority.is_some()
+    }
+
+    pub fn configuration_revision(&self) -> &ConfigurationRevisionId {
+        &self.revision
+    }
+}
+
 struct RetainedProjectGenerationsV1 {
     latest: CodeGenerationId,
     generations: BTreeMap<CodeGenerationId, CodeIndexPublishedGenerationV1>,
+}
+
+struct SemanticProjectRedundancyStateV1 {
+    revision: ConfigurationRevisionId,
+    roots: SemanticRetainedVectorGenerationsV1,
+    authority: Option<SemanticRedundancyAuthorityV1>,
 }
 
 fn retained_generations() -> &'static Mutex<BTreeMap<PathBuf, RetainedProjectGenerationsV1>> {
@@ -105,22 +129,80 @@ fn retained_generations() -> &'static Mutex<BTreeMap<PathBuf, RetainedProjectGen
     GENERATIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn retained_authorities() -> &'static Mutex<BTreeMap<PathBuf, SemanticRedundancyAuthorityV1>> {
-    static AUTHORITIES: OnceLock<Mutex<BTreeMap<PathBuf, SemanticRedundancyAuthorityV1>>> =
+fn redundancy_states() -> &'static Mutex<BTreeMap<PathBuf, SemanticProjectRedundancyStateV1>> {
+    static STATES: OnceLock<Mutex<BTreeMap<PathBuf, SemanticProjectRedundancyStateV1>>> =
         OnceLock::new();
-    AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
+    STATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn activation_gates() -> &'static Mutex<BTreeMap<PathBuf, std::sync::Arc<Mutex<()>>>> {
+    static GATES: OnceLock<Mutex<BTreeMap<PathBuf, std::sync::Arc<Mutex<()>>>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub fn project_semantic_activation_gate(project_root: &Path) -> std::sync::Arc<Mutex<()>> {
+    activation_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(project_root.to_path_buf())
+        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Exact semantic compatibility selected by the committed retrieval profile.
+///
+/// The process-local embedding handle is only an observed cache and must not
+/// select a generation independently of this durable activation projection.
+pub fn project_committed_semantic_pins(
+    project_root: &Path,
+) -> Option<SemanticCompatibilityPinsV1> {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .and_then(|state| state.authority.as_ref())
+        .map(|authority| authority.pins.clone())
+}
+
+pub fn project_semantic_retained_vector_generations(
+    project_root: &Path,
+) -> Option<SemanticRetainedVectorGenerationsV1> {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .map(|state| state.roots.clone())
+}
+
+pub fn project_semantic_redundancy_revision(
+    project_root: &Path,
+) -> Option<ConfigurationRevisionId> {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)
+        .map(|state| state.revision.clone())
 }
 
 /// Retain the immutable code-generation bindings needed to interpret active
 /// vector rows. The semantic schedule hook calls this before enqueueing a
-/// generation; reads still admit only the atomically current vector/source
-/// identity.
+/// generation; reads remain selected by committed compatibility pins.
 pub(crate) fn register_project_semantic_redundancy_generation(
     project_root: PathBuf,
     generation: CodeIndexPublishedGenerationV1,
 ) {
-    let current =
-        project_semantic_generation_pointer(&project_root).map(|pointer| pointer.source_generation);
     let incoming = generation.manifest().generation_id.clone();
     let mut retained = retained_generations()
         .lock()
@@ -132,82 +214,151 @@ pub(crate) fn register_project_semantic_redundancy_generation(
             generations: BTreeMap::new(),
         });
     project.latest = incoming.clone();
-    project
-        .generations
-        .retain(|source, _| current.as_ref() == Some(source) || source == &incoming);
     project.generations.insert(incoming, generation);
 }
 
-pub fn register_project_semantic_redundancy_authority(
-    project_root: PathBuf,
-    committed: &CommittedRetrievalProfileStateV1,
-) -> bool {
-    let Some(authority) = redundancy_authority_from_committed(committed) else {
-        retained_authorities()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&project_root);
-        return false;
-    };
-    retained_authorities()
+/// Prune process-local code-generation handles after the daemon retention
+/// owner has completed its durable, revision-bound liveness proof.
+///
+/// This is a maintenance mutation, not a readable-source inventory operation.
+/// Doctor and other diagnostic readers must never call it.
+pub fn retain_project_semantic_code_sources(
+    project_root: &Path,
+    configured_sources: &std::collections::BTreeSet<CodeGenerationId>,
+) {
+    let mut retained = retained_generations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(project) = retained.get_mut(project_root) {
+        let latest = project.latest.clone();
+        project
+            .generations
+            .retain(|source, _| source == &latest || configured_sources.contains(source));
+    }
+}
+
+pub fn project_semantic_retained_code_generation(
+    project_root: &Path,
+    source_generation: &CodeGenerationId,
+) -> Option<CodeIndexPublishedGenerationV1> {
+    retained_generations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(project_root, authority);
+        .get(project_root)?
+        .generations
+        .get(source_generation)
+        .cloned()
+}
+
+pub fn prepare_project_semantic_redundancy_authority(
+    committed: &CommittedRetrievalProfileStateV1,
+) -> PreparedSemanticRedundancyAuthorityV1 {
+    PreparedSemanticRedundancyAuthorityV1 {
+        revision: committed.state.configuration_revision().clone(),
+        roots: SemanticRetainedVectorGenerationsV1::from_profile_state(&committed.state),
+        authority: redundancy_authority_from_committed(committed),
+    }
+}
+
+pub fn commit_project_initial_semantic_roots(
+    project_root: PathBuf,
+    state: &crate::config::retrieval::RetrievalProfileStateV1,
+) -> bool {
+    if !state.audit().is_empty() || state.active().compatibility().semantic.is_some() {
+        return false;
+    }
+    let prepared = PreparedSemanticRedundancyAuthorityV1 {
+        revision: state.configuration_revision().clone(),
+        roots: SemanticRetainedVectorGenerationsV1::from_profile_state(state),
+        authority: None,
+    };
+    commit_project_semantic_redundancy_authority(project_root, &prepared, false);
     true
 }
 
-pub fn unregister_project_semantic_redundancy_authority(project_root: &Path) {
-    retained_authorities()
+pub fn commit_project_semantic_redundancy_authority(
+    project_root: PathBuf,
+    prepared: &PreparedSemanticRedundancyAuthorityV1,
+    install_authority: bool,
+) {
+    let activation = project_semantic_activation_gate(&project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    commit_project_semantic_redundancy_authority_under_gate(
+        project_root,
+        prepared,
+        install_authority,
+    );
+}
+
+pub fn commit_project_semantic_redundancy_authority_under_gate(
+    project_root: PathBuf,
+    prepared: &PreparedSemanticRedundancyAuthorityV1,
+    install_authority: bool,
+) {
+    let state = SemanticProjectRedundancyStateV1 {
+        revision: prepared.revision.clone(),
+        roots: prepared.roots.clone(),
+        authority: prepared.authority.clone().filter(|_| install_authority),
+    };
+    redundancy_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(project_root);
+        .insert(project_root, state);
 }
 
 pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &Path) {
+    let activation = project_semantic_activation_gate(project_root);
+    let _activation = activation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     retained_generations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
-    unregister_project_semantic_redundancy_authority(project_root);
+    redundancy_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(project_root);
+    activation_gates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(project_root);
 }
 
-/// Read only a complete active cosine generation whose source identity equals
-/// the semantic runtime's atomically current pointer.
+/// Read only the exact complete cosine generation selected by committed pins.
 pub async fn project_semantic_redundancy_generation(
     project_root: &Path,
 ) -> Option<SemanticRedundancyGenerationV1> {
-    let pointer = project_semantic_generation_pointer(project_root)?;
-    let authority = retained_authorities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(project_root)
-        .cloned()?;
-    if pointer.generation != authority.pins.vector_generation_id
-        || pointer.projection_key != *authority.pins.projection.projection_key()
-    {
-        return None;
-    }
-    let source_generation = pointer.source_generation;
-    let code = {
-        let retained = retained_generations()
+    let authority = {
+        let activation = project_semantic_activation_gate(project_root);
+        let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let project = retained.get(project_root)?;
-        if project.latest != source_generation {
-            return None;
-        }
-        project.generations.get(&source_generation).cloned()?
+        redundancy_states()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .and_then(|state| state.authority.clone())?
     };
     let vectors = project_semantic_production_runtime(project_root)?
-        .active_vector_generation()
+        .active_vector_generation(&authority.pins)
         .await?;
-    if vectors.source_generation() != &source_generation
-        || vectors.generation_id() != &authority.pins.vector_generation_id
+    if vectors.generation_id() != &authority.pins.vector_generation_id
         || vectors.embedding_key() != &authority.pins.projection
         || vectors.embedding_key().embedding_key().metric != EmbeddingMetricV1::Cosine
     {
         return None;
     }
+    let source_generation = vectors.source_generation().clone();
+    let code = retained_generations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(project_root)?
+        .generations
+        .get(&source_generation)
+        .cloned()?;
 
     let chunks = code
         .chunks()
@@ -306,4 +457,26 @@ fn redundancy_authority_from_committed(
         calibration_digest,
         redundancy_profile_digest,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_semantic_activation_gate;
+    use std::path::Path;
+
+    #[test]
+    fn activation_in_one_project_does_not_block_another_projects_reads() {
+        let project_a = project_semantic_activation_gate(Path::new("/project-a"));
+        let project_b = project_semantic_activation_gate(Path::new("/project-b"));
+        let _activation_a = project_a.lock().expect("project A activation gate");
+
+        assert!(
+            project_b.try_lock().is_ok(),
+            "project B redundancy reads must not share project A's activation gate"
+        );
+        assert!(
+            project_a.try_lock().is_err(),
+            "the exact project gate still serializes its own activation and reads"
+        );
+    }
 }
