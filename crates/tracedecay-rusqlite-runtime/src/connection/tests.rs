@@ -353,6 +353,39 @@ fn writer_open_path_preserves_platform_identity_policy() {
     assert_eq!(worker_path, path);
 }
 
+/// A WAL reader opens the `-shm` sidecar, so it needs the same sidecar-safe
+/// pathname a writer does.
+///
+/// SQLite derives sidecar names by appending to the full pathname it resolved.
+/// Linux `/proc/self/fd/*` is a symlink, so the real `<database>-shm` is
+/// derived and the descriptor pathname is safe; every other Unix host exposes
+/// `/dev/fd/*` as a non-symlink devfs entry, so SQLite would look for
+/// `/dev/fd/<fd>-shm` and fail the first schema read with `SQLITE_CANTOPEN`.
+/// Readers once used the raw descriptor policy and macOS CI failed 2284 tests
+/// on that single divergence; pinning the two policies together is what keeps
+/// them from drifting apart again on a host this suite cannot run on.
+#[cfg(any(unix, windows))]
+#[test]
+fn reader_and_writer_open_paths_share_one_sidecar_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reader-path.db");
+    std::fs::File::create(&path).unwrap();
+    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
+
+    let reader_path = pinned.reader_open_path(&path).unwrap();
+    let writer_path = pinned.writer_open_path(&path).unwrap();
+    assert_eq!(reader_path, writer_path);
+
+    #[cfg(unix)]
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        assert!(reader_path.starts_with("/proc/self/fd/"));
+    } else {
+        assert_eq!(reader_path, path);
+    }
+    #[cfg(windows)]
+    assert_eq!(reader_path, path);
+}
+
 #[cfg(unix)]
 #[test]
 fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {

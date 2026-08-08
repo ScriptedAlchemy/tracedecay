@@ -75,7 +75,7 @@ impl ExistingReaderLocator {
             || Ok(self.path.clone()),
             |opened| {
                 opened
-                    .worker_open_path(&self.path)
+                    .reader_open_path(&self.path)
                     .map_err(ReaderStartError::OpenedDatabaseIdentity)
             },
         )

@@ -118,6 +118,31 @@ impl OpenedDatabaseFile {
         }
     }
 
+    /// Selects the pathname used by a reader connection.
+    ///
+    /// A WAL reader must open the `-shm` file, so it needs the same
+    /// sidecar-safe pathname a writer does. SQLite derives sidecar names by
+    /// appending to the *full pathname* it resolved: Linux `/proc/self/fd/*`
+    /// is a symlink, so `unixFullPathname` follows it and derives the real
+    /// `<database>-shm`; macOS `/dev/fd/*` is a devfs entry that is not a
+    /// symlink, so SQLite keeps that pathname and looks for the impossible
+    /// `/dev/fd/<fd>-shm` and fails the first schema read with
+    /// `SQLITE_CANTOPEN` ("unable to open database file"). Deferring to the
+    /// writer policy keeps Linux on the descriptor pathname byte-for-byte and
+    /// gives every other Unix host the verified canonical pathname.
+    ///
+    /// The pinned-descriptor ABA fence is unaffected: the reader worker still
+    /// runs `verify_connection` (pathname inode identity plus
+    /// `SQLITE_FCNTL_HAS_MOVED`, rechecked afterwards) and re-pins the file
+    /// before it reports startup — the same fence that already makes the
+    /// writer's canonical-path open safe on these hosts.
+    pub(crate) fn reader_open_path(
+        &self,
+        canonical_path: &Path,
+    ) -> Result<PathBuf, OpenedDatabaseFileError> {
+        self.writer_open_path(canonical_path)
+    }
+
     #[cfg(not(any(unix, windows)))]
     pub(crate) fn worker_open_path(
         &self,
