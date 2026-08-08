@@ -1,5 +1,6 @@
 mod compatibility;
 mod generation;
+mod message_anchor;
 mod publication;
 mod sources;
 

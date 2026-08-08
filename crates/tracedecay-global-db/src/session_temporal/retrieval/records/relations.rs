@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     ExecutionControl, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
     TemporalRetrievalScope,
@@ -110,7 +111,7 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
         control.checkpoint()?;
         let session_id = candidate_session_id(scope, candidate)?;
         let generation = candidate_generation(snapshot, candidate, &session_id)?;
-        if candidate.channel == tracedecay_temporal_query::candidates::CandidateChannel::Summary {
+        if names_summary_record(candidate) {
             let candidate_index = candidate_offset.saturating_add(local);
             let summary_id = candidate.retriever_record_id.clone();
             let reads = store
@@ -188,8 +189,7 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
         }
         if matches!(
             candidate.channel,
-            tracedecay_temporal_query::candidates::CandidateChannel::Span
-                | tracedecay_temporal_query::candidates::CandidateChannel::Burst
+            CandidateChannel::Span | CandidateChannel::Burst
         ) {
             continue;
         }
@@ -261,6 +261,34 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
         summary_sources,
         retained_summary_anchors,
     })
+}
+
+/// The evidence role every candidate query reports for a summary node row.
+const SUMMARY_EVIDENCE_ROLE: &str = "summary";
+
+/// Reports whether a candidate names a summary node rather than an occurrence.
+///
+/// The summary channel's listing and full-text matches are summaries by
+/// construction, and an anchor lookup resolves either an occurrence or a
+/// summary node — a summary describe hydrates over its summary anchor and lands
+/// on the anchor channel. Both carry the summary identity in
+/// `retriever_record_id` and the summary evidence role, and neither has an
+/// occurrence identity whose logical copies could be loaded.
+fn names_summary_record(candidate: &RankingCandidate) -> bool {
+    match candidate.channel {
+        CandidateChannel::Summary => true,
+        CandidateChannel::Anchor => {
+            candidate.evidence_role.as_deref() == Some(SUMMARY_EVIDENCE_ROLE)
+        }
+        CandidateChannel::Scope
+        | CandidateChannel::ExactMessage
+        | CandidateChannel::Phrase
+        | CandidateChannel::Entity
+        | CandidateChannel::Time
+        | CandidateChannel::Lexical
+        | CandidateChannel::Span
+        | CandidateChannel::Burst => false,
+    }
 }
 
 fn candidate_session_id(

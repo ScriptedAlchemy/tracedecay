@@ -311,6 +311,49 @@ async fn provider_filter_uses_grafeo_retained_summary_anchors() {
     );
 }
 
+#[tokio::test]
+async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
+    let directory = tempdir().expect("temporary directory");
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .expect("registered profile runtime");
+    runtime.seed_provider_summary_fixture_for_test().await;
+    let read = runtime.retrieval_read_for_test().await;
+    // A summary describe hydrates over the summary's own anchor, so its
+    // candidate arrives on the anchor channel carrying the summary's evidence
+    // role and summary identity — never an occurrence identity.
+    let mut candidate = candidate_for_anchor("anchor-summary-provider");
+    candidate.channel = CandidateChannel::Anchor;
+    candidate.evidence_role = Some("summary".to_string());
+    candidate.retriever_record_id = "summary-provider".to_string();
+    let records = records_from_projection(
+        &read,
+        &scoped_snapshot(1, Some("claude")),
+        candidate,
+        &record_request(),
+        relation_projection(
+            "session-snapshot",
+            vec![SummaryRelationNode {
+                summary_id: "summary-provider".to_string(),
+                sources: vec![SummarySourceRef::Anchor {
+                    anchor_id: RetrievalAnchorId::new("source-claude").expect("source anchor"),
+                }],
+                predecessor_summary_id: None,
+            }],
+            Vec::new(),
+        ),
+    )
+    .await
+    .expect("anchor-channel summary relations");
+
+    assert!(
+        records
+            .iter()
+            .any(|record| matches!(record, TemporalRecord::Summary(_))),
+        "an anchor lookup that resolves a summary node must produce its summary record"
+    );
+}
+
 #[test]
 fn relation_reads_do_not_alias_profile_scope_to_project_scope() {
     let store = crate::session_temporal::relations::memory_relation_store();
