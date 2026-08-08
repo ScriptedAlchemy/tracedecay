@@ -49,6 +49,7 @@ pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 mod analytics;
 pub mod analytics_bridge;
 pub mod application;
+pub use application::host_admission;
 pub mod application_output;
 pub mod application_surface;
 pub use tracedecay_code_index::ast_grep_search;
