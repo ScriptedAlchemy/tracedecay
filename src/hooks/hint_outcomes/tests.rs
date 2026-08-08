@@ -244,16 +244,24 @@ async fn outcome_events(
     .expect("query outcomes")
 }
 
-fn registered_profile_database(db: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
+fn profile_database(db: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
+    db.profile_database_for_test()
+}
+
+fn profile_sessions_database(db: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
     db.registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database")
+        .expect("registered profile session database")
 }
 
 async fn correlate(db: &HostAdmissionTestRuntimeV1, now_secs: i64) -> HintOutcomeStats {
-    let database = registered_profile_database(db);
-    correlate_registered_hint_outcomes(database, database, PROJECT, now_secs)
-        .await
-        .expect("correlate hint outcomes through application port")
+    correlate_registered_hint_outcomes(
+        profile_database(db),
+        profile_sessions_database(db),
+        PROJECT,
+        now_secs,
+    )
+    .await
+    .expect("correlate hint outcomes through application port")
 }
 
 async fn insert_interleaved_session_activity_benchmark_rows(
@@ -463,7 +471,8 @@ async fn correlation_is_idempotent_across_runs() {
 async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
-    let database = registered_profile_database(&db);
+    let database = profile_database(&db);
+    let sessions = profile_sessions_database(&db);
     let project_root = dir.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
     let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
@@ -492,7 +501,7 @@ async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
     // activity lands.
     let settlement = settle_project_hint_outcomes(
         Some(database),
-        Some(database),
+        Some(sessions),
         vec![HookImportSource {
             path: jsonl_path,
             default_project_root: Some(project_root.clone()),
@@ -544,7 +553,7 @@ async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
     // Idempotency across passes holds through the settlement entry point too.
     let settlement = settle_project_hint_outcomes(
         Some(database),
-        Some(database),
+        Some(sessions),
         Vec::new(),
         &project_root,
         HINT_TS + 240,
@@ -560,12 +569,13 @@ async fn settlement_pass_lands_outcomes_on_the_analytics_hint_read_surface() {
 async fn settlement_without_a_mounted_authority_stays_typed_unavailable() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
-    let database = registered_profile_database(&db);
+    let database = profile_database(&db);
+    let sessions = profile_sessions_database(&db);
     let project_root = dir.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
 
     let missing_accounting =
-        settle_project_hint_outcomes(None, Some(database), Vec::new(), &project_root, HINT_TS)
+        settle_project_hint_outcomes(None, Some(sessions), Vec::new(), &project_root, HINT_TS)
             .await;
     assert!(matches!(
         missing_accounting,
@@ -645,9 +655,7 @@ async fn append_failure_is_typed_after_a_resolved_observation() {
 async fn hint_outcome_correlation_100k_session_activity_benchmark() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir).await;
-    let database = db
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("open registered profile database");
+    let database = profile_sessions_database(&db);
     for session_id in ["target", "noise"] {
         seed_session(&db, "claude", session_id).await;
     }

@@ -280,6 +280,16 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
+    /// Returns the canonical profile/global authority used for analytics and
+    /// other profile-scoped durable data in tests. The profile session
+    /// authority returned by [`Self::registered_database`] is intentionally a
+    /// different shard; callers that correlate analytics with sessions must
+    /// bind both explicitly, just as production composition does.
+    #[doc(hidden)]
+    pub(crate) fn profile_database_for_test(&self) -> &RegisteredGlobalDb {
+        self.profile_database.as_ref()
+    }
+
     #[doc(hidden)]
     pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&Path> {
         self.registered_database(scope)
