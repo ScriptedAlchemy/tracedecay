@@ -898,6 +898,34 @@ struct CursorSessionIngestHealth {
     max_transcript_pending_bytes: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPlaceholderPathsState {
+    Available(Vec<String>),
+    Unavailable(String),
+}
+
+fn cursor_placeholder_paths_state(status: &Value) -> Option<CursorPlaceholderPathsState> {
+    let value = status.get("cursor_session_placeholder_paths")?;
+    if let Some(paths) = value.as_array() {
+        return Some(CursorPlaceholderPathsState::Available(
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        ));
+    }
+    if value.get("status").and_then(Value::as_str) == Some("unavailable") {
+        let reason = value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        return Some(CursorPlaceholderPathsState::Unavailable(reason));
+    }
+    None
+}
+
 /// Flags a stalled Cursor transcript ingest using Doctor's daemon snapshot.
 fn doctor_check_session_ingest(
     dc: &mut DoctorCounters,
@@ -907,6 +935,13 @@ fn doctor_check_session_ingest(
     let Some(status) = daemon_status else {
         return;
     };
+    let placeholder_paths = cursor_placeholder_paths_state(status);
+    if let Some(CursorPlaceholderPathsState::Unavailable(reason)) = &placeholder_paths {
+        dc.warn(&format!(
+            "Cursor transcript placeholder-path diagnostics unavailable from daemon ({reason}); \
+             literal workspace placeholders could not be checked"
+        ));
+    }
     if status
         .pointer("/cursor_session_ingest/status")
         .and_then(Value::as_str)
@@ -922,13 +957,11 @@ fn doctor_check_session_ingest(
     else {
         return;
     };
-    let placeholder_paths = status
-        .get("cursor_session_placeholder_paths")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str);
-    report_cursor_session_ingest(dc, project_path, &health, placeholder_paths);
+    let paths = match placeholder_paths {
+        Some(CursorPlaceholderPathsState::Available(paths)) => paths,
+        Some(CursorPlaceholderPathsState::Unavailable(_)) | None => Vec::new(),
+    };
+    report_cursor_session_ingest(dc, project_path, &health, paths.iter().map(String::as_str));
 }
 
 fn report_cursor_session_ingest<'a>(
@@ -1634,6 +1667,65 @@ mod tests {
             cwd_sweep_target(project.path().to_path_buf(), home.path()),
             Some(project.path().to_path_buf())
         );
+    }
+
+    fn session_ingest_status(placeholder_paths: Value) -> Value {
+        json!({
+            "cursor_session_ingest": {
+                "tracked_transcripts": 1,
+                "pending_transcripts": 0,
+                "pending_bytes": 0,
+                "max_transcript_pending_bytes": 0,
+            },
+            "cursor_session_placeholder_paths": placeholder_paths,
+        })
+    }
+
+    #[test]
+    fn cursor_placeholder_paths_empty_array_remains_available() {
+        let status = session_ingest_status(json!([]));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Available(Vec::new()))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.warnings, 0);
+    }
+
+    #[test]
+    fn cursor_placeholder_paths_nonempty_array_remains_available() {
+        let status = session_ingest_status(json!(["${workspaceFolder}/cursor.jsonl"]));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Available(vec![
+                "${workspaceFolder}/cursor.jsonl".to_owned()
+            ]))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.warnings, 1);
+    }
+
+    #[test]
+    fn cursor_placeholder_paths_typed_unavailable_is_warned() {
+        let status = session_ingest_status(json!({
+            "status": "unavailable",
+            "reason": "cursor_session_placeholder_paths_query_failed",
+        }));
+        assert_eq!(
+            cursor_placeholder_paths_state(&status),
+            Some(CursorPlaceholderPathsState::Unavailable(
+                "cursor_session_placeholder_paths_query_failed".to_owned()
+            ))
+        );
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_session_ingest(&mut counters, Path::new("/project"), Some(&status));
+        assert_eq!(counters.issues, 0);
+        assert_eq!(counters.warnings, 1);
     }
 
     #[test]
