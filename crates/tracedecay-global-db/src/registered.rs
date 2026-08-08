@@ -180,6 +180,14 @@ pub struct RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    evidence: tracedecay_application::WorkProductEvidenceServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    history: tracedecay_application::WorkHistoryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 impl RegisteredWorkProductServicesV1 {
@@ -201,6 +209,28 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.mutations
+    }
+
+    /// Task evidence selection and expansion over the same verified versions
+    /// the graph reads serve.
+    pub const fn evidence(
+        &self,
+    ) -> &tracedecay_application::WorkProductEvidenceServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.evidence
+    }
+
+    /// The owner's journaled Work product events, paged in durable sequence
+    /// order.
+    pub const fn history(
+        &self,
+    ) -> &tracedecay_application::WorkHistoryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.history
     }
 }
 
@@ -731,8 +761,17 @@ impl RegisteredGlobalDb {
                 storage.clone(),
                 storage.clone(),
                 storage.clone(),
-                storage,
+                storage.clone(),
             ),
+            // Evidence and history take no catalog binding at construction:
+            // each of their operations passes its own binding per call, so one
+            // composed service can serve several mounted operations without a
+            // second copy of the storage handle per binding.
+            evidence: tracedecay_application::WorkProductEvidenceServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+            ),
+            history: tracedecay_application::WorkHistoryServiceV1::new(storage.clone(), storage),
         })
     }
 

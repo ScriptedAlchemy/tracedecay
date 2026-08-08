@@ -42,6 +42,8 @@ use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, regist
 
 mod authorization;
 mod events;
+mod evidence;
+mod history;
 mod publication;
 mod read;
 
