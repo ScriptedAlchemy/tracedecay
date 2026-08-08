@@ -10,12 +10,13 @@ use tracedecay_application::{
     ApplicationProblemKind, CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand,
     Deadline, DisclosureClass, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
     ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
-    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
-    WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
+    WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
+    WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
-    WorkStorageError, WorkStoragePort, WorkSynthesisAdmissionRecordV1, WorkSynthesisAttemptV1,
-    WorkSynthesisInsertOutcome, WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1,
-    WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1, admit_work_synthesis,
+    WorkStorageError, WorkStoragePort, WorkSynthesisAdmissionRecordV1,
+    WorkSynthesisAdmissionStoragePort, WorkSynthesisAttemptV1, WorkSynthesisInsertOutcome,
+    WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
+    WorkSynthesisSourceSetV1, admit_work_synthesis,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
@@ -290,32 +291,6 @@ impl WorkAttemptStoragePort for AttemptStore {
         Ok(WorkAttemptInsertOutcome::Inserted)
     }
 
-    fn insert_synthesis(
-        &self,
-        authority: &WorkAuthority,
-        record: &WorkSynthesisAdmissionRecordV1,
-    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
-        let key = attempt_key(authority, record.result.attempt.identity());
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(existing) = inner.rows.get(&key) {
-            let existing: StoredAttempt =
-                serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            return match existing.synthesis {
-                Some(existing) if existing.request_digest == record.request_digest => Ok(
-                    WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
-                ),
-                _ => Err(WorkAttemptStorageError::AttemptConflict),
-            };
-        }
-        let payload = serde_json::to_string(&StoredAttempt {
-            attempt: record.result.attempt.clone(),
-            synthesis: Some(record.clone()),
-        })
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        inner.rows.insert(key, payload);
-        Ok(WorkSynthesisInsertOutcome::Inserted)
-    }
-
     fn load(
         &self,
         authority: &WorkAuthority,
@@ -331,20 +306,23 @@ impl WorkAttemptStoragePort for AttemptStore {
             .map_err(|_| WorkAttemptStorageError::Unavailable)
     }
 
-    fn load_synthesis(
+    fn load_admission_kind(
         &self,
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
+    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
         let inner = self.inner.lock().unwrap();
         let payload = inner
             .rows
             .get(&attempt_key(authority, identity))
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredAttempt>(payload)
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?
-            .synthesis
-            .ok_or(WorkAttemptStorageError::AttemptConflict)
+        let record: StoredAttempt =
+            serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        Ok(if record.synthesis.is_some() {
+            WorkAttemptAdmissionKind::Synthesis
+        } else {
+            WorkAttemptAdmissionKind::Ordinary
+        })
     }
 
     fn update(
@@ -431,6 +409,50 @@ impl WorkAttemptStoragePort for AttemptStore {
             attempts: pending,
             remaining,
         })
+    }
+}
+
+impl WorkSynthesisAdmissionStoragePort for AttemptStore {
+    fn insert_synthesis(
+        &self,
+        authority: &WorkAuthority,
+        record: &WorkSynthesisAdmissionRecordV1,
+    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
+        let key = attempt_key(authority, record.result.attempt.identity());
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(existing) = inner.rows.get(&key) {
+            let existing: StoredAttempt =
+                serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            return match existing.synthesis {
+                Some(existing) if existing.request_digest == record.request_digest => Ok(
+                    WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
+                ),
+                _ => Err(WorkAttemptStorageError::AttemptConflict),
+            };
+        }
+        let payload = serde_json::to_string(&StoredAttempt {
+            attempt: record.result.attempt.clone(),
+            synthesis: Some(record.clone()),
+        })
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        inner.rows.insert(key, payload);
+        Ok(WorkSynthesisInsertOutcome::Inserted)
+    }
+
+    fn load_synthesis(
+        &self,
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
+        let inner = self.inner.lock().unwrap();
+        let payload = inner
+            .rows
+            .get(&attempt_key(authority, identity))
+            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
+        serde_json::from_str::<StoredAttempt>(payload)
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?
+            .synthesis
+            .ok_or(WorkAttemptStorageError::AttemptConflict)
     }
 }
 
@@ -1018,6 +1040,40 @@ fn changed_synthesis_request_conflicts_without_mutating_the_admitted_result() {
     let mut changed = command.clone();
     changed.output_name = id("output.synthesis.changed");
     let conflict = admit_work_synthesis(&attempts, &context, changed).unwrap_err();
+    assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
+
+    let replay = admit_work_synthesis(&attempts, &context, command).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&replay).unwrap(),
+        serde_json::to_vec(&first).unwrap()
+    );
+    assert_eq!(
+        attempt_store
+            .committed_result_count(&mine, &id("run.task.synthesis"))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn ordinary_start_conflicts_with_an_existing_synthesis_identity() {
+    let (attempts, attempt_store, work, context) = fixture("project.synthesis.cross-mode");
+    let mine = authority("project.synthesis.cross-mode");
+    admit_work(&work, &context, "task.synthesis");
+
+    let source = source_identity("task.source.citable", "attempt.1");
+    insert_terminal_source(
+        &attempt_store,
+        &mine,
+        source.clone(),
+        WorkAttemptStateV1::Succeeded,
+        vec![artifact("artifact.initial", '6')],
+        digest('7'),
+    );
+    let command = synthesis_command(vec![source]);
+    let first = admit_work_synthesis(&attempts, &context, command.clone()).unwrap();
+
+    let conflict = attempts.start(&context, command.start.clone()).unwrap_err();
     assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
 
     let replay = admit_work_synthesis(&attempts, &context, command).unwrap();

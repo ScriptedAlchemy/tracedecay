@@ -12,21 +12,24 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros,
-    WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId,
-    WorkEffectStateV1, WorkExecutionEnvelopeV1, WorkExecutionSnapshot, WorkFenceEpochV1,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkflowOperationRef,
-    canonical_sha256,
+    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestId,
+    WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1,
+    WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError,
+    WorkTerminalEvidenceV1, WorkflowOperationRef, canonical_sha256,
 };
 
 use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
 use crate::work_read::{WorkProjectionPortError, WorkProjectionReadPort};
-use crate::work_synthesis::{WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1};
 use crate::{
     ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
     SafeDiagnostic,
+};
+
+mod synthesis_admission;
+pub use synthesis_admission::{
+    WorkAttemptAdmissionKind, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
 };
 
 const WORK_ATTEMPT_EVIDENCE_DOMAIN: &str = "tracedecay.application.work-attempt-evidence.v1";
@@ -52,13 +55,6 @@ pub enum WorkAttemptInsertOutcome {
     Replayed(Box<WorkAttemptV1>),
 }
 
-/// Outcome of atomically inserting an admitted synthesis and its attempt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkSynthesisInsertOutcome {
-    Inserted,
-    Replayed(Box<WorkSynthesisAdmissionV1>),
-}
-
 /// Durable attempt persistence. Every transition is a compare-and-swap on the
 /// exact prior lease fence and state, so a fenced-out writer cannot advance a
 /// row it no longer owns.
@@ -74,30 +70,18 @@ pub trait WorkAttemptStoragePort: Send + Sync {
         attempt: &WorkAttemptV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError>;
 
-    /// Inserts the attempt and complete synthesis admission as one durable
-    /// record, or returns the stored admission for an identical request.
-    fn insert_synthesis(
-        &self,
-        _authority: &WorkAuthority,
-        _record: &WorkSynthesisAdmissionRecordV1,
-    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
-        Err(WorkAttemptStorageError::Unavailable)
-    }
-
     fn load(
         &self,
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptV1, WorkAttemptStorageError>;
 
-    /// Loads the immutable synthesis admission attached to an attempt row.
-    fn load_synthesis(
+    /// Identifies which admission authority owns an existing attempt row.
+    fn load_admission_kind(
         &self,
-        _authority: &WorkAuthority,
-        _identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
-        Err(WorkAttemptStorageError::Unavailable)
-    }
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError>;
 
     /// Replaces the attempt row only when the stored lease fence and state
     /// still match the expected pair.
@@ -397,14 +381,6 @@ pub struct WorkAttemptService<S, P, W> {
     work: WorkService<W>,
 }
 
-struct PreparedWorkAttemptAdmission {
-    authority: WorkAuthority,
-    identity: WorkAttemptIdentityV1,
-    binding: WorkAttemptProjectionBindingV1,
-    envelope: WorkExecutionEnvelopeV1,
-    requested_route: WorkProviderRouteV1,
-}
-
 impl<S, P, W> WorkAttemptService<S, P, W>
 where
     S: WorkAttemptStoragePort,
@@ -427,186 +403,7 @@ where
         context: &RequestContext,
         command: StartWorkAttemptCommand,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        let prepared = self.prepare_start(context, command)?;
-        // Replay before minting a lease: an identical admission returns the
-        // durable attempt (whatever fence it now carries), while the same
-        // identity with different content is a conflict, never a refresh.
-        //
-        // Sameness is judged on the admission content the caller supplied plus
-        // the proposal the attempt was admitted against. The stored binding's
-        // generation, sequence, and work version are not compared against
-        // freshly recomputed values: every Work event on the authority moves
-        // them, and settling this very attempt appends its own runtime
-        // evidence, so an identical replay issued after the attempt reported
-        // an outcome would otherwise be refused as a content conflict.
-        match self.attempts.load(&prepared.authority, &prepared.identity) {
-            Ok(existing) => {
-                return if existing
-                    .execution()
-                    .same_admission_content(&prepared.envelope)
-                    && existing.projection_binding().accepted_proposal()
-                        == prepared.binding.accepted_proposal()
-                {
-                    Ok(existing)
-                } else {
-                    Err(conflict_problem(
-                        "application.work-attempt.identity-conflict",
-                        "The Work attempt identity was already used with different content.",
-                    ))
-                };
-            }
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {}
-            Err(error) => return Err(storage_problem(error)),
-        }
-        let authority = prepared.authority.clone();
-        let attempt = self.lease_prepared(prepared)?;
-        match self.attempts.insert(&authority, &attempt) {
-            Ok(WorkAttemptInsertOutcome::Inserted) => Ok(attempt),
-            Ok(WorkAttemptInsertOutcome::Replayed(existing)) => Ok(*existing),
-            Err(error) => Err(storage_problem(error)),
-        }
-    }
-
-    pub(crate) fn synthesis_replay(
-        &self,
-        context: &RequestContext,
-        command: &StartWorkAttemptCommand,
-        request_digest: &ManifestDigest,
-    ) -> Result<Option<WorkSynthesisAdmissionV1>, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
-        let authority = work_authority(context)?;
-        let identity = WorkAttemptIdentityV1::new(
-            command.task_id.clone(),
-            command.run_id.clone(),
-            command.attempt_id.clone(),
-        )
-        .map_err(contract_problem)?;
-        match self.attempts.load_synthesis(&authority, &identity) {
-            Ok(record) if &record.request_digest == request_digest => Ok(Some(record.result)),
-            Ok(_) => Err(storage_problem(WorkAttemptStorageError::AttemptConflict)),
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => Ok(None),
-            Err(error) => Err(storage_problem(error)),
-        }
-    }
-
-    pub(crate) fn start_synthesis<F>(
-        &self,
-        context: &RequestContext,
-        command: StartWorkAttemptCommand,
-        request_digest: ManifestDigest,
-        build_result: F,
-    ) -> Result<WorkSynthesisAdmissionV1, ApplicationProblem>
-    where
-        F: FnOnce(WorkAttemptV1) -> WorkSynthesisAdmissionV1,
-    {
-        let prepared = self.prepare_start(context, command)?;
-        match self
-            .attempts
-            .load_synthesis(&prepared.authority, &prepared.identity)
-        {
-            Ok(record) if record.request_digest == request_digest => return Ok(record.result),
-            Ok(_) => return Err(storage_problem(WorkAttemptStorageError::AttemptConflict)),
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {}
-            Err(error) => return Err(storage_problem(error)),
-        }
-        let authority = prepared.authority.clone();
-        let attempt = self.lease_prepared(prepared)?;
-        let result = build_result(attempt);
-        let record = WorkSynthesisAdmissionRecordV1 {
-            request_digest,
-            result,
-        };
-        match self.attempts.insert_synthesis(&authority, &record) {
-            Ok(WorkSynthesisInsertOutcome::Inserted) => Ok(record.result),
-            Ok(WorkSynthesisInsertOutcome::Replayed(result)) => Ok(*result),
-            Err(error) => Err(storage_problem(error)),
-        }
-    }
-
-    fn prepare_start(
-        &self,
-        context: &RequestContext,
-        command: StartWorkAttemptCommand,
-    ) -> Result<PreparedWorkAttemptAdmission, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
-        let authority = work_authority(context)?;
-        let snapshot = self
-            .projections
-            .exact_snapshot(&authority, &command.task_id)
-            .map_err(projection_problem)?;
-        let projection = snapshot
-            .projections()
-            .iter()
-            .find(|projection| projection.task_id() == &command.task_id)
-            .ok_or_else(not_found_problem)?;
-        if !projection.is_execution_admitted() {
-            return Err(denied_problem(
-                "application.work-attempt.execution-not-admitted",
-                "Work execution has not been admitted for this task.",
-            ));
-        }
-        let accepted_proposal = projection.accepted_proposal().ok_or_else(|| {
-            denied_problem(
-                "application.work-attempt.no-accepted-proposal",
-                "Work has no accepted proposal to execute.",
-            )
-        })?;
-        let identity =
-            WorkAttemptIdentityV1::new(command.task_id.clone(), command.run_id, command.attempt_id)
-                .map_err(contract_problem)?;
-        let binding = WorkAttemptProjectionBindingV1::new(
-            snapshot.generation_id().clone(),
-            snapshot.sequence(),
-            projection.version(),
-            accepted_proposal.clone(),
-        )
-        .map_err(contract_problem)?;
-        let requested_route = command.execution_snapshot.route().clone();
-        let envelope = WorkExecutionEnvelopeV1::new(
-            identity.clone(),
-            binding.clone(),
-            command.operation,
-            command.execution_snapshot,
-            context.scope().project_id.clone(),
-            context.scope().repository_id.clone(),
-            context.scope().worktree_id.clone(),
-            command.worktree_root,
-            command.reference,
-            command.commit,
-            command.instructions,
-            1,
-            command.effect_state,
-        )
-        .map_err(contract_problem)?;
-        Ok(PreparedWorkAttemptAdmission {
-            authority,
-            identity,
-            binding,
-            envelope,
-            requested_route,
-        })
-    }
-
-    fn lease_prepared(
-        &self,
-        prepared: PreparedWorkAttemptAdmission,
-    ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        let lease = self.mint_lease(&prepared.authority, &prepared.identity)?;
-        WorkAttemptV1::new(
-            prepared.identity,
-            prepared.binding,
-            prepared.envelope,
-            lease,
-            WorkAttemptStateV1::Leased,
-            None,
-            Vec::new(),
-            WorkCancellationStateV1::None,
-            WorkRecoveryStateV1::Fresh,
-            prepared.requested_route,
-            None,
-            None,
-        )
-        .map_err(contract_problem)
+        self.start_attempt(context, command)
     }
 
     pub fn status(

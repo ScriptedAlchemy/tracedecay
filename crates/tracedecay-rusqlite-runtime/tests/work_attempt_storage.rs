@@ -7,11 +7,12 @@ mod work_registered_store;
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
-    WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
-    WorkAttemptProviderOutcomeV1, WorkAttemptStorageError, WorkAttemptStoragePort,
-    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1,
-    WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
-    WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
+    WorkAttemptAdmissionKind, WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1,
+    WorkAttemptInsertOutcome, WorkAttemptProviderOutcomeV1, WorkAttemptStorageError,
+    WorkAttemptStoragePort, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort,
+    WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1, WorkSynthesisInsertOutcome,
+    WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
+    WorkflowSynthesisDraft,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
@@ -234,6 +235,20 @@ fn insert_replays_identical_admissions_and_refuses_divergent_ones() {
         WorkAttemptInsertOutcome::Replayed(Box::new(first.clone()))
     );
     assert_eq!(store.count("work_attempts_v1"), 1);
+    assert_eq!(
+        store
+            .storage()
+            .load_admission_kind(&authority, first.identity())
+            .unwrap(),
+        WorkAttemptAdmissionKind::Ordinary
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_synthesis(&authority, first.identity())
+            .unwrap_err(),
+        WorkAttemptStorageError::AttemptConflict
+    );
     // The same identity with different content is a conflict, not a refresh.
     let divergent = attempt("attempt.storage.1", 2);
     assert_eq!(
@@ -304,6 +319,13 @@ fn synthesis_admission_replays_one_durable_result_and_refuses_changed_requests()
         WorkAttemptStorageError::AttemptConflict
     );
     assert_eq!(store.count("work_attempts_v1"), 1);
+    assert_eq!(
+        store
+            .storage()
+            .load_admission_kind(&authority, admitted_attempt.identity())
+            .unwrap(),
+        WorkAttemptAdmissionKind::Synthesis
+    );
 
     let running_attempt = running(&admitted_attempt);
     store

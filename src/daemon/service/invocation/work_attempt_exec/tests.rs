@@ -37,10 +37,10 @@ use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancelWorkAttemptCommand, CancellationContext,
     CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass, GenerateProposalRequest,
     RequestId, ResolvedScope, ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome,
-    WorkAppendRequest, WorkAttemptInsertOutcome, WorkAttemptListPageV1, WorkAttemptService,
-    WorkAttemptStatusRequestV1, WorkAttemptStorageError, WorkAttemptStoragePort,
-    WorkProjectionPortError, WorkProjectionReadPort, WorkService, WorkStorageError,
-    WorkStoragePort,
+    WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
+    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
@@ -278,6 +278,15 @@ impl WorkAttemptStoragePort for AttemptStore {
             .get(&attempt_key(authority, identity))
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
+    }
+
+    fn load_admission_kind(
+        &self,
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
+        self.load(authority, identity)
+            .map(|_| WorkAttemptAdmissionKind::Ordinary)
     }
 
     fn update(

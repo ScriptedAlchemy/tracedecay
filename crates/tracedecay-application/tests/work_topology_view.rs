@@ -11,12 +11,12 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
     ExecutionTopologyViewV1, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
     ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
-    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptListCoverageV1,
-    WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStorageError, WorkAttemptStoragePort,
-    WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1, WorkPlacementReadingV1,
-    WorkPlacementService, WorkPlacementStorageError, WorkPlacementStoragePort,
-    WorkProjectionPortError, WorkProjectionReadPort, WorkService, WorkStorageError,
-    WorkStoragePort, WorkTopologyViewRequestV1, execution_topology_view,
+    WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
+    WorkAttemptListCoverageV1, WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStorageError,
+    WorkAttemptStoragePort, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
+    WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStorageError,
+    WorkPlacementStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    WorkStorageError, WorkStoragePort, WorkTopologyViewRequestV1, execution_topology_view,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -258,6 +258,15 @@ impl WorkAttemptStoragePort for AttemptStore {
             .get(&attempt_key(authority, identity))
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
         serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
+    }
+
+    fn load_admission_kind(
+        &self,
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
+        self.load(authority, identity)
+            .map(|_| WorkAttemptAdmissionKind::Ordinary)
     }
 
     fn update(

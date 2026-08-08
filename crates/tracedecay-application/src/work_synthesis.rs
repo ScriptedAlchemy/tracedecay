@@ -29,7 +29,8 @@ use tracedecay_domain::{
 
 use crate::work::WorkStoragePort;
 use crate::work_attempt::{
-    StartWorkAttemptCommand, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStoragePort,
+    StartWorkAttemptCommand, WorkAttemptService, WorkAttemptStatusRequestV1,
+    WorkSynthesisAdmissionStoragePort,
 };
 use crate::work_read::WorkProjectionReadPort;
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
@@ -196,7 +197,7 @@ pub fn admit_work_synthesis<S, P, W>(
     command: AdmitWorkSynthesisCommand,
 ) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
 where
-    S: WorkAttemptStoragePort,
+    S: WorkSynthesisAdmissionStoragePort,
     P: WorkProjectionReadPort,
     W: WorkStoragePort,
 {
