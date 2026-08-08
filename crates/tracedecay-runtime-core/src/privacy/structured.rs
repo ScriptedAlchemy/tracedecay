@@ -801,7 +801,7 @@ fn parse_dotenv_document(
             decoded_value: decoded,
         });
     }
-    Ok((!fields.is_empty()).then(|| ParsedStructuredTextV1 {
+    Ok((!fields.is_empty()).then_some(ParsedStructuredTextV1 {
         format: StructuredTextFormatV1::Dotenv,
         value: Value::Object(map),
         fields,
@@ -902,7 +902,7 @@ fn parse_http_header_document(
             decoded_value: None,
         });
     }
-    Ok((!fields.is_empty()).then(|| ParsedStructuredTextV1 {
+    Ok((!fields.is_empty()).then_some(ParsedStructuredTextV1 {
         format: StructuredTextFormatV1::HttpHeaders,
         value: Value::Object(map),
         fields,
@@ -987,7 +987,7 @@ fn parse_url_document(
         map.insert("query".to_owned(), Value::Object(pairs));
     }
 
-    Ok((!fields.is_empty()).then(|| ParsedStructuredTextV1 {
+    Ok((!fields.is_empty()).then_some(ParsedStructuredTextV1 {
         format: StructuredTextFormatV1::Url,
         value: Value::Object(map),
         fields,

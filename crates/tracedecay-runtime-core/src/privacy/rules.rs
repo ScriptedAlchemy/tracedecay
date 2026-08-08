@@ -790,8 +790,7 @@ fn credential_assignment_ranges<'a>(
                     || matches!(byte, b' ' | b'\t')
                         && bytes[cursor..line_end]
                             .iter()
-                            .skip_while(|next| matches!(**next, b' ' | b'\t'))
-                            .next()
+                            .find(|next| !matches!(**next, b' ' | b'\t'))
                             == Some(&b'(');
                 break;
             }

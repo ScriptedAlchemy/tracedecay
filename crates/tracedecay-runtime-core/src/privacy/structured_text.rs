@@ -504,7 +504,7 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
     }
     if occurrences == 1 && value.len() >= MIN_LOCATABLE_VALUE_BYTES {
         let start = first?;
-        return Some(vec![start..start + value.len()]);
+        return Some(std::iter::once(start..start + value.len()).collect());
     }
     None
 }
