@@ -17,7 +17,7 @@ use crate::{
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::validate_graph_database_file;
+use self::path::canonical_graph_database_file;
 use self::support::{
     check_deadline, check_registration_request, check_request, open_registered_graph,
     reject_path_alias, retains_fault, status,
@@ -220,8 +220,7 @@ impl GraphDbRegistry {
     pub fn resolve(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = registration.canonical_path().to_path_buf();
-        validate_graph_database_file(&path)?;
+        let path = canonical_graph_database_file(registration.canonical_path())?;
         let expected_format = GraphFormatVersion::current();
         let binding = registration.binding().clone();
         let verified_locator = registration.verified_locator().clone();
@@ -456,8 +455,7 @@ impl GraphDbRegistry {
     ) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = registration.canonical_path().to_path_buf();
-        validate_graph_database_file(&path)?;
+        let path = canonical_graph_database_file(registration.canonical_path())?;
         let expected_format = GraphFormatVersion::current();
         if let CloseReservation::Closing(reservation) = self.reserve_close(
             registration.binding(),
@@ -503,8 +501,7 @@ impl GraphDbRegistry {
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
-        let path = registration.canonical_path().to_path_buf();
-        validate_graph_database_file(&path)?;
+        let path = canonical_graph_database_file(registration.canonical_path())?;
         let reservation = match self.reserve_close(
             registration.binding(),
             registration.verified_locator(),
@@ -627,7 +624,7 @@ impl GraphDbRegistry {
         registration: &GraphDbRegistration,
     ) -> Result<Option<GraphDbRegistryStatus>, GraphDbError> {
         validate_registration(registration)?;
-        validate_graph_database_file(registration.canonical_path())?;
+        canonical_graph_database_file(registration.canonical_path())?;
         let state = self.state_lock()?;
         let Some(entry) = state.entries.get(&registration.binding().shard_id) else {
             return Ok(None);
