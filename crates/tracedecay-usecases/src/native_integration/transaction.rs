@@ -608,10 +608,15 @@ fn advance_status<S: NativeIntegrationStore>(
 
 fn map_store_error(error: NativeIntegrationStoreError) -> NativeIntegrationPortError {
     match error {
+        // A cleanup transaction or receipt conflict is the same fact as its
+        // integration counterpart: another writer already owns this identity,
+        // so the caller must re-read rather than retry blind.
         NativeIntegrationStoreError::PreviewConflict
         | NativeIntegrationStoreError::TransactionConflict
         | NativeIntegrationStoreError::StatusConflict
-        | NativeIntegrationStoreError::ReceiptConflict => {
+        | NativeIntegrationStoreError::ReceiptConflict
+        | NativeIntegrationStoreError::CleanupTransactionConflict
+        | NativeIntegrationStoreError::CleanupReceiptConflict => {
             NativeIntegrationPortError::TransactionConflict
         }
         NativeIntegrationStoreError::ApprovalConflict => {

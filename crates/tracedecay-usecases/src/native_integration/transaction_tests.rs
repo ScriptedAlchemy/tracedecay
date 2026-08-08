@@ -126,6 +126,39 @@ impl NativeIntegrationStore for StatusStore {
     ) -> NativeIntegrationStoreResult<()> {
         Err(NativeIntegrationStoreError::Unavailable)
     }
+
+    fn begin_worktree_cleanup(
+        &self,
+        _transaction: tracedecay_domain::NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<tracedecay_store::NativeWorktreeCleanupBeginResultV1> {
+        Err(NativeIntegrationStoreError::Unavailable)
+    }
+
+    fn read_worktree_cleanup(
+        &self,
+        _confirmation_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<tracedecay_domain::NativeWorktreeCleanupTransactionV1>>
+    {
+        Ok(None)
+    }
+
+    fn compare_and_swap_worktree_cleanup(
+        &self,
+        _confirmation_digest: &ManifestDigest,
+        _expected_phase_revision: u64,
+        _replacement: tracedecay_domain::NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<tracedecay_domain::NativeWorktreeCleanupTransactionV1> {
+        Err(NativeIntegrationStoreError::Unavailable)
+    }
+
+    fn write_worktree_cleanup_terminal(
+        &self,
+        _confirmation_digest: &ManifestDigest,
+        _expected_phase_revision: u64,
+        _receipt: tracedecay_domain::NativeWorktreeCleanupReceiptV1,
+    ) -> NativeIntegrationStoreResult<tracedecay_domain::NativeWorktreeCleanupReceiptV1> {
+        Err(NativeIntegrationStoreError::Unavailable)
+    }
 }
 
 struct UnusedTopology;
