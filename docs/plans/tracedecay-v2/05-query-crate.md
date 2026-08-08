@@ -226,7 +226,14 @@ Every product surface can run the same bounded query use case and receive determ
   consumers whose consistency is already guaranteed by the landed bounded
   snapshot + watermark envelopes and restart-stable cursor pagination
   (cursors pin generation/watermark across pages); none of them holds a
-  long-lived subscription to changing results. Revisit clause: if
+  long-lived subscription to changing results. This includes the two
+  surfaces that return system context outward: hook hint returns are a
+  fresh bounded read per triggering event (a stream of independent
+  one-shot reads, each deliberately reflecting the newest state), and
+  the Plan 35 LSP gateway pins its projections to an exact generation
+  and answers staleness with typed retrigger/target-generation
+  invalidations — a poll-with-invalidation model that replaces delta
+  streaming for that surface. Revisit clause: if
   subscription-style consumers materialize post-V2 (for example MCP
   resource subscriptions letting agents watch a query), the
   snapshot/delta/gap contract described above is the design to implement
