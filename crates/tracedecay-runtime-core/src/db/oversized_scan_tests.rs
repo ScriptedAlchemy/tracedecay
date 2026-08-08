@@ -29,7 +29,7 @@ use super::coverage::{
     TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
 };
 use super::edges::{
-    bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
+    EdgeEndpoint, bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
     read_edges_by_endpoint_page_controlled, single_edges_by_endpoint_page_sql,
 };
 use super::engine::{
@@ -41,6 +41,8 @@ use super::nodes::{
 };
 use super::sql::{collect_rowid_pages, collect_rowid_pages_capped, collect_rowid_pages_with};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod edge_index_plan_tests;
 
 struct CountingConnection<'a> {
     inner: &'a TestConnection,
@@ -127,8 +129,9 @@ async fn seed_oversized_graph(directory: &TempDir) -> TestConnection {
          -- The real schema indexes both edge endpoints and the node kind. The
          -- fixture carries them too, so a page's plan here matches production's
          -- rather than degenerating into a per-row table scan.
-         CREATE INDEX idx_edges_source ON edges(source);
-         CREATE INDEX idx_edges_target ON edges(target);
+         CREATE INDEX idx_edges_source_kind ON edges(source, kind);
+         CREATE INDEX idx_edges_target_kind ON edges(target, kind);
+         CREATE INDEX idx_edges_kind ON edges(kind);
          CREATE INDEX idx_nodes_kind ON nodes(kind);
          CREATE INDEX idx_nodes_file_path ON nodes(file_path);
          CREATE INDEX idx_nodes_file_path_start_line ON nodes(file_path, start_line);",
@@ -506,7 +509,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     let hub = Value::Text(HUB_ID.to_string());
     let unfiltered = paged_ids(
         &conn,
-        &single_edges_by_endpoint_page_sql("target", 0),
+        &single_edges_by_endpoint_page_sql(EdgeEndpoint::Target, 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -516,7 +519,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let filtered = paged_ids(
         &conn,
-        &single_edges_by_endpoint_page_sql("target", 1),
+        &single_edges_by_endpoint_page_sql(EdgeEndpoint::Target, 1),
         &[hub.clone(), Value::Text("calls".to_string())],
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -528,7 +531,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     // `source` rather than silently reading the same endpoint.
     let outgoing = paged_ids(
         &conn,
-        &single_edges_by_endpoint_page_sql("source", 0),
+        &single_edges_by_endpoint_page_sql(EdgeEndpoint::Source, 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_outgoing_edges",
@@ -558,7 +561,7 @@ async fn bulk_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let edges = paged_ids(
         &conn,
-        &bulk_edges_by_endpoint_page_sql("target", 0),
+        &bulk_edges_by_endpoint_page_sql(EdgeEndpoint::Target, 0),
         &[Value::Text(
             serde_json::to_string(&[HUB_ID, "fn::00000"]).expect("endpoint JSON"),
         )],
@@ -579,7 +582,7 @@ async fn high_fan_in_impact_page_reads_only_limit_plus_one_rows() {
     };
     let page = read_edges_by_endpoint_page_controlled(
         &counted,
-        "target",
+        EdgeEndpoint::Target,
         &[HUB_ID.to_owned()],
         &[],
         100,
@@ -729,7 +732,7 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     assert!(!stable.has_more);
     let stable_edges = read_edges_by_endpoint_controlled(
         &snapshot,
-        "target",
+        EdgeEndpoint::Target,
         &[HUB_ID.to_owned()],
         &[],
         "snapshot incoming edges",

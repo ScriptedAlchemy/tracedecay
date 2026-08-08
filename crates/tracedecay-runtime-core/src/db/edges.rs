@@ -11,8 +11,34 @@ use crate::types::*;
 /// `rowid` cursor column in a paged edge scan.
 pub(super) const EDGE_COLUMNS: i32 = 4;
 
+/// The only two columns an edge traversal can use as its endpoint.
+///
+/// Keeping the column and its composite index together prevents a dynamic SQL
+/// caller from changing the query shape independently of its index hint.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum EdgeEndpoint {
+    Source,
+    Target,
+}
+
+impl EdgeEndpoint {
+    const fn column(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Target => "target",
+        }
+    }
+
+    const fn index(self) -> &'static str {
+        match self {
+            Self::Source => "idx_edges_source_kind",
+            Self::Target => "idx_edges_target_kind",
+        }
+    }
+}
+
 pub(super) fn single_edges_by_endpoint_page_sql(
-    endpoint_column: &str,
+    endpoint: EdgeEndpoint,
     kind_count: usize,
 ) -> String {
     let kind_clause = if kind_count == 0 {
@@ -26,8 +52,9 @@ pub(super) fn single_edges_by_endpoint_page_sql(
     let cursor_param = kind_count + 2;
     format!(
         "SELECT source, target, kind, line, rowid FROM edges \
-         WHERE {endpoint_column} = ?1{kind_clause} AND rowid > ?{cursor_param} \
+         WHERE {} = ?1{kind_clause} AND rowid > ?{cursor_param} \
          ORDER BY rowid LIMIT ?{}",
+        endpoint.column(),
         cursor_param + 1
     )
 }
@@ -35,7 +62,7 @@ pub(super) fn single_edges_by_endpoint_page_sql(
 /// Builds the bulk endpoint query with all endpoint ids carried in one JSON
 /// array parameter. Only the small, caller-selected edge-kind set contributes
 /// SQL bind parameters.
-pub(super) fn bulk_edges_by_endpoint_page_sql(endpoint_column: &str, kind_count: usize) -> String {
+pub(super) fn bulk_edges_by_endpoint_page_sql(endpoint: EdgeEndpoint, kind_count: usize) -> String {
     let kind_clause = if kind_count == 0 {
         String::new()
     } else {
@@ -46,9 +73,11 @@ pub(super) fn bulk_edges_by_endpoint_page_sql(endpoint_column: &str, kind_count:
     };
     let cursor_param = kind_count + 2;
     format!(
-        "SELECT source, target, kind, line, rowid FROM edges \
-         WHERE {endpoint_column} IN (SELECT value FROM json_each(?1)){kind_clause} \
+        "SELECT source, target, kind, line, rowid FROM edges INDEXED BY {} \
+         WHERE {} IN (SELECT value FROM json_each(?1)){kind_clause} \
            AND rowid > ?{cursor_param} ORDER BY rowid LIMIT ?{}",
+        endpoint.index(),
+        endpoint.column(),
         cursor_param + 1
     )
 }
@@ -62,7 +91,7 @@ pub struct EdgesByEndpointPage {
 
 pub(super) async fn read_edges_by_endpoint_page_controlled<C, F>(
     conn: &C,
-    endpoint_column: &'static str,
+    endpoint: EdgeEndpoint,
     node_ids: &[String],
     kinds: &[EdgeKind],
     limit: usize,
@@ -88,7 +117,7 @@ where
     let (mut values, sql) = if let [node_id] = node_ids {
         (
             vec![Value::Text(node_id.clone())],
-            single_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+            single_edges_by_endpoint_page_sql(endpoint, kinds.len()),
         )
     } else {
         let encoded =
@@ -98,7 +127,7 @@ where
             })?;
         (
             vec![Value::Text(encoded)],
-            bulk_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+            bulk_edges_by_endpoint_page_sql(endpoint, kinds.len()),
         )
     };
     values.extend(
@@ -153,7 +182,7 @@ where
 
 pub(super) async fn read_edges_by_endpoint_controlled<C, F>(
     conn: &C,
-    endpoint_column: &'static str,
+    endpoint: EdgeEndpoint,
     node_ids: &[String],
     kinds: &[EdgeKind],
     operation: &'static str,
@@ -169,7 +198,7 @@ where
     let (mut leading, sql) = if let [node_id] = node_ids {
         (
             vec![Value::Text(node_id.clone())],
-            single_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+            single_edges_by_endpoint_page_sql(endpoint, kinds.len()),
         )
     } else {
         let encoded =
@@ -179,7 +208,7 @@ where
             })?;
         (
             vec![Value::Text(encoded)],
-            bulk_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+            bulk_edges_by_endpoint_page_sql(endpoint, kinds.len()),
         )
     };
     for kind in kinds {
@@ -208,8 +237,15 @@ impl DatabaseEngineReadSnapshot {
     where
         F: FnMut() -> Result<()>,
     {
-        read_edges_by_endpoint_page_controlled(self, "target", target_ids, kinds, limit, checkpoint)
-            .await
+        read_edges_by_endpoint_page_controlled(
+            self,
+            EdgeEndpoint::Target,
+            target_ids,
+            kinds,
+            limit,
+            checkpoint,
+        )
+        .await
     }
 
     pub async fn get_incoming_edges_bulk_controlled<F>(
@@ -223,7 +259,7 @@ impl DatabaseEngineReadSnapshot {
     {
         read_edges_by_endpoint_controlled(
             self,
-            "target",
+            EdgeEndpoint::Target,
             target_ids,
             kinds,
             "get_incoming_edges_bulk",
@@ -383,7 +419,7 @@ impl Database {
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
         self.edges_by_endpoint(
-            "source",
+            EdgeEndpoint::Source,
             &[source_id.to_string()],
             kinds,
             "get_outgoing_edges",
@@ -402,7 +438,7 @@ impl Database {
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
         self.edges_by_endpoint(
-            "target",
+            EdgeEndpoint::Target,
             &[target_id.to_string()],
             kinds,
             "get_incoming_edges",
@@ -411,22 +447,21 @@ impl Database {
     }
 
     /// Shared keyset-paged read of every edge touching any of `node_ids`
-    /// through `endpoint_column`, which is one of the two literal column names
-    /// `"source"` / `"target"` chosen by the caller — never caller data.
+    /// through the caller-selected endpoint.
     async fn edges_by_endpoint(
         &self,
-        endpoint_column: &'static str,
+        endpoint: EdgeEndpoint,
         node_ids: &[String],
         kinds: &[EdgeKind],
         operation: &'static str,
     ) -> Result<Vec<Edge>> {
-        self.edges_by_endpoint_controlled(endpoint_column, node_ids, kinds, operation, || Ok(()))
+        self.edges_by_endpoint_controlled(endpoint, node_ids, kinds, operation, || Ok(()))
             .await
     }
 
     async fn edges_by_endpoint_controlled<F>(
         &self,
-        endpoint_column: &'static str,
+        endpoint: EdgeEndpoint,
         node_ids: &[String],
         kinds: &[EdgeKind],
         operation: &'static str,
@@ -437,7 +472,7 @@ impl Database {
     {
         read_edges_by_endpoint_controlled(
             &self.engine_conn(),
-            endpoint_column,
+            endpoint,
             node_ids,
             kinds,
             operation,
@@ -462,8 +497,13 @@ impl Database {
         source_ids: &[String],
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        self.edges_by_endpoint("source", source_ids, kinds, "get_outgoing_edges_bulk")
-            .await
+        self.edges_by_endpoint(
+            EdgeEndpoint::Source,
+            source_ids,
+            kinds,
+            "get_outgoing_edges_bulk",
+        )
+        .await
     }
 
     /// Returns all incoming edges for many target nodes in a single query.
@@ -481,8 +521,13 @@ impl Database {
         target_ids: &[String],
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        self.edges_by_endpoint("target", target_ids, kinds, "get_incoming_edges_bulk")
-            .await
+        self.edges_by_endpoint(
+            EdgeEndpoint::Target,
+            target_ids,
+            kinds,
+            "get_incoming_edges_bulk",
+        )
+        .await
     }
 
     /// [`Database::get_incoming_edges_bulk`] with cooperative page checkpoints.
@@ -496,7 +541,7 @@ impl Database {
         F: FnMut() -> Result<()>,
     {
         self.edges_by_endpoint_controlled(
-            "target",
+            EdgeEndpoint::Target,
             target_ids,
             kinds,
             "get_incoming_edges_bulk",
