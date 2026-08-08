@@ -5,6 +5,7 @@ pub mod execution;
 mod expand;
 mod hydration;
 pub mod operations;
+mod participant_freeze;
 mod projection;
 mod query;
 mod rebuild;
@@ -26,14 +27,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use serde::Deserialize;
-use serde_json::Value;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 use tracedecay_graph_db::GraphNamespace;
-use tracedecay_runtime_core::db::engine::params;
 
 use self::execution::{
-    AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
@@ -52,16 +50,14 @@ use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_curso
 use tracedecay_temporal_query::execute_temporal_kernel;
 use tracedecay_temporal_query::hydration::hydrate_selected;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, KernelVersions, MAX_TEMPORAL_PARTICIPANTS,
-    TemporalAuthorizedRoot, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
-    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalRetrievalScope,
-    TemporalSourceAccess, TemporalWatermarks,
+    BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 pub use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
+use self::participant_freeze::freeze_participants;
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content_with_checkpoint;
@@ -659,275 +655,6 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
     }
 }
 
-/// Decides what a request is actually allowed to see of one participant source.
-///
-/// This used to be the literal `Authorized`, so every source claimed authority
-/// regardless of which project owned it and the manifest could not express
-/// anything else. The session-scoped query in particular does not filter on
-/// `project_key`, so a session belonging to another project reaches this point
-/// and must be denied here.
-///
-/// An absent authorized root is a missing authority, not a permissive one, so
-/// it denies rather than reporting the source as merely unavailable.
-fn participant_authorization(
-    authorized_root: Option<&TemporalAuthorizedRoot>,
-    participant_project_key: &str,
-) -> TemporalParticipantAuthorization {
-    match authorized_root {
-        Some(root) if root.project_key() == participant_project_key => {
-            TemporalParticipantAuthorization::Authorized
-        }
-        _ => TemporalParticipantAuthorization::Denied,
-    }
-}
-
-fn participant_source_access(
-    metadata_json: Option<&str>,
-    now: i64,
-) -> Option<TemporalSourceAccess> {
-    let metadata = match metadata_json {
-        Some(encoded) => serde_json::from_str::<Value>(encoded).ok()?,
-        None => Value::Null,
-    };
-    if metadata
-        .get("retention_expires_at")
-        .and_then(Value::as_i64)
-        .is_some_and(|expires_at| expires_at <= now)
-    {
-        return Some(TemporalSourceAccess::RetentionWithheld);
-    }
-    let state = [
-        "source_access",
-        "payload_access",
-        "hydration_state",
-        "availability",
-    ]
-    .iter()
-    .find_map(|key| metadata.get(*key).and_then(Value::as_str));
-    match state {
-        None | Some("authorized" | "available" | "eligible") => {
-            Some(TemporalSourceAccess::Available)
-        }
-        Some("locked" | "quarantined") => Some(TemporalSourceAccess::Locked),
-        Some("retention_withheld" | "retention_expired") => {
-            Some(TemporalSourceAccess::RetentionWithheld)
-        }
-        Some("deleted") => Some(TemporalSourceAccess::Deleted),
-        Some("redacted") => Some(TemporalSourceAccess::Redacted),
-        Some("unavailable") => Some(TemporalSourceAccess::Unavailable),
-        Some(_) => None,
-    }
-}
-
-async fn freeze_participants(
-    read: &TemporalSqlRead<'_>,
-    request: &AuthorizedTemporalExecutionRequest,
-) -> Result<
-    (
-        TemporalParticipantManifest,
-        TemporalWatermarks,
-        Option<SignedCursorKeyRefV1>,
-    ),
-    SessionTemporalExecutionError,
-> {
-    let snapshot_request = request.snapshot_request();
-    let provider = snapshot_request.provider_scope();
-    let mut rows = match snapshot_request.retrieval_scope() {
-        TemporalRetrievalScope::Session(session_id) => {
-            read.query(
-                "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json, source.project_key,
-                        source.metadata_json, unixepoch()
-                 FROM session_temporal_generations AS generation
-                 JOIN sessions AS source ON source.session_id = generation.session_id
-                 WHERE generation.session_id = ?1
-                   AND generation.state = 'active'
-                   AND (?2 IS NULL OR source.provider = ?2)
-                 ORDER BY generation.session_id, source.provider
-                 LIMIT ?3",
-                params![
-                    session_id.as_str(),
-                    provider,
-                    i64::try_from(MAX_TEMPORAL_PARTICIPANTS + 1).unwrap_or(i64::MAX)
-                ],
-            )
-            .await
-        }
-        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
-            let project_key = snapshot_request
-                .authorized_root()
-                .ok_or(SessionTemporalExecutionError::WrongScope)?
-                .project_key();
-            read.query(
-                "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json, source.project_key,
-                        source.metadata_json, unixepoch()
-                 FROM sessions AS source
-                 JOIN session_temporal_generations AS generation
-                   ON generation.session_id = source.session_id
-                  AND generation.state = 'active'
-                 WHERE source.project_key = ?1
-                   AND (?2 IS NULL OR source.provider = ?2)
-                 ORDER BY generation.session_id, source.provider
-                 LIMIT ?3",
-                params![
-                    project_key,
-                    provider,
-                    i64::try_from(MAX_TEMPORAL_PARTICIPANTS + 1).unwrap_or(i64::MAX)
-                ],
-            )
-            .await
-        }
-    }
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-
-    let configuration_digest =
-        BindingDigest::new("configuration_digest", request.configuration_digest())
-            .map_err(map_control_error)?;
-    let mut entries = Vec::new();
-    let mut aggregate = TemporalWatermarks {
-        generation: 0,
-        source: 0,
-        projection: 0,
-        index: 0,
-        summary: 0,
-    };
-    let mut shared_cursor_key = None::<Option<SignedCursorKeyRefV1>>;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)?
-    {
-        snapshot_request
-            .execution_control()
-            .checkpoint()
-            .map_err(map_control_error)?;
-        let session_id = row
-            .get::<String>(0)
-            .ok()
-            .and_then(|value| tracedecay_domain::SessionId::new(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let source_id = row
-            .get::<String>(1)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let generation = row
-            .get::<i64>(2)
-            .ok()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(SessionTemporalExecutionError::Unavailable)?;
-        let encoded = row
-            .get::<String>(3)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_project_key = row
-            .get::<String>(4)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let participant_metadata = row
-            .get::<Option<String>>(5)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let snapshot_time = row
-            .get::<i64>(6)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        let mut authorization =
-            participant_authorization(snapshot_request.authorized_root(), &participant_project_key);
-        let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
-            .unwrap_or_else(|| {
-                authorization = TemporalParticipantAuthorization::Denied;
-                TemporalSourceAccess::Available
-            });
-        let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
-            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        if frozen.active_generation > generation {
-            return Err(SessionTemporalExecutionError::Unavailable);
-        }
-        let watermarks = TemporalWatermarks {
-            generation,
-            source: frozen.source_frontier,
-            projection: frozen.projection_frontier,
-            index: frozen.projection_frontier,
-            summary: frozen.summary_frontier,
-        };
-        aggregate.generation = aggregate.generation.max(watermarks.generation);
-        aggregate.source = aggregate.source.max(watermarks.source);
-        aggregate.projection = aggregate.projection.max(watermarks.projection);
-        aggregate.index = aggregate.index.max(watermarks.index);
-        aggregate.summary = aggregate.summary.max(watermarks.summary);
-        match &shared_cursor_key {
-            Some(expected) if expected != &frozen.cursor_key => {
-                return Err(SessionTemporalExecutionError::Unavailable);
-            }
-            None => shared_cursor_key = Some(frozen.cursor_key.clone()),
-            Some(_) => {}
-        }
-        entries.push(
-            TemporalParticipantGeneration::new(
-                session_id,
-                source_id,
-                watermarks,
-                watermarks.projection,
-                &configuration_digest,
-                snapshot_request.access_digest(),
-                authorization,
-                access,
-            )
-            .map_err(map_control_error)?,
-        );
-    }
-    drop(rows);
-    if entries.is_empty() {
-        return if authorized_scope_has_sources(read, request).await? {
-            Err(SessionTemporalExecutionError::Unavailable)
-        } else {
-            Err(SessionTemporalExecutionError::Empty {
-                freshness: SessionDataFreshness::Fresh,
-            })
-        };
-    }
-    let participants = TemporalParticipantManifest::new(entries).map_err(map_control_error)?;
-    Ok((participants, aggregate, shared_cursor_key.flatten()))
-}
-
-async fn authorized_scope_has_sources(
-    read: &TemporalSqlRead<'_>,
-    request: &AuthorizedTemporalExecutionRequest,
-) -> Result<bool, SessionTemporalExecutionError> {
-    let snapshot_request = request.snapshot_request();
-    let provider = snapshot_request.provider_scope();
-    let project_key = snapshot_request
-        .authorized_root()
-        .ok_or(SessionTemporalExecutionError::WrongScope)?
-        .project_key();
-    let mut rows = match snapshot_request.retrieval_scope() {
-        TemporalRetrievalScope::Session(session_id) => {
-            read.query(
-                "SELECT 1
-                 FROM sessions
-                 WHERE session_id = ?1
-                   AND project_key = ?2
-                   AND (?3 IS NULL OR provider = ?3)
-                 LIMIT 1",
-                params![session_id.as_str(), project_key, provider],
-            )
-            .await
-        }
-        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
-            read.query(
-                "SELECT 1
-                 FROM sessions
-                 WHERE project_key = ?1
-                   AND (?2 IS NULL OR provider = ?2)
-                 LIMIT 1",
-                params![project_key, provider],
-            )
-            .await
-        }
-    }
-    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|_| SessionTemporalExecutionError::Unavailable)
-}
-
 impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution<'_> {
     fn execute<'a, E>(
         &'a self,
@@ -983,15 +710,6 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
             ))
         })
     }
-}
-
-#[derive(Deserialize)]
-struct FrozenWatermarksWire {
-    active_generation: u64,
-    cursor_key: Option<SignedCursorKeyRefV1>,
-    projection_frontier: u64,
-    source_frontier: u64,
-    summary_frontier: u64,
 }
 
 fn map_control_error(
@@ -1092,107 +810,6 @@ fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
         | CursorError::KeyVersionMismatch
         | CursorError::KeyUnavailable
         | CursorError::InvalidKeyMaterial => SessionTemporalExecutionError::Unavailable,
-    }
-}
-
-#[cfg(test)]
-mod participant_access_tests {
-    use super::*;
-
-    fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
-        match project_id {
-            Some(project_id) => {
-                TemporalAuthorizedRoot::project("profile", project_id, "store", "root")
-            }
-            None => TemporalAuthorizedRoot::profile("profile", "store", "root"),
-        }
-        .expect("valid authorized root")
-    }
-
-    #[test]
-    fn a_source_owned_by_the_authorized_project_is_authorized() {
-        assert_eq!(
-            participant_authorization(Some(&root(Some("proj_a"))), "proj_a"),
-            TemporalParticipantAuthorization::Authorized
-        );
-    }
-
-    #[test]
-    fn a_source_owned_by_another_project_is_denied() {
-        // The session-scoped participant query does not filter on project_key,
-        // so this row really does reach the manifest builder.
-        assert_eq!(
-            participant_authorization(Some(&root(Some("proj_a"))), "proj_b"),
-            TemporalParticipantAuthorization::Denied
-        );
-    }
-
-    #[test]
-    fn a_profile_root_does_not_authorize_project_owned_sources() {
-        assert_eq!(
-            participant_authorization(Some(&root(None)), "proj_a"),
-            TemporalParticipantAuthorization::Denied
-        );
-        assert_eq!(
-            participant_authorization(Some(&root(None)), "user"),
-            TemporalParticipantAuthorization::Authorized
-        );
-    }
-
-    #[test]
-    fn a_missing_authorized_root_denies_rather_than_permits() {
-        assert_eq!(
-            participant_authorization(None, "proj_a"),
-            TemporalParticipantAuthorization::Denied
-        );
-    }
-
-    #[test]
-    fn persisted_source_lifecycle_states_are_preserved() {
-        for (metadata, expected) in [
-            (
-                r#"{"payload_access":"quarantined"}"#,
-                TemporalSourceAccess::Locked,
-            ),
-            (
-                r#"{"payload_access":"retention_expired"}"#,
-                TemporalSourceAccess::RetentionWithheld,
-            ),
-            (
-                r#"{"payload_access":"deleted"}"#,
-                TemporalSourceAccess::Deleted,
-            ),
-            (
-                r#"{"payload_access":"redacted"}"#,
-                TemporalSourceAccess::Redacted,
-            ),
-            (
-                r#"{"payload_access":"unavailable"}"#,
-                TemporalSourceAccess::Unavailable,
-            ),
-        ] {
-            assert_eq!(
-                participant_source_access(Some(metadata), 100),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn expired_source_retention_is_withheld_at_snapshot_time() {
-        assert_eq!(
-            participant_source_access(Some(r#"{"retention_expires_at":99}"#), 100),
-            Some(TemporalSourceAccess::RetentionWithheld)
-        );
-    }
-
-    #[test]
-    fn invalid_or_ambiguous_source_access_never_becomes_unavailable() {
-        assert_eq!(
-            participant_source_access(Some(r#"{"payload_access":"ambiguous"}"#), 100),
-            None
-        );
-        assert_eq!(participant_source_access(Some("{"), 100), None);
     }
 }
 
