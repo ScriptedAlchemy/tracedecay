@@ -499,8 +499,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub fn is_isolated_test_path(path: &Path) -> bool {
-    let root = std::env::temp_dir();
-    if path.starts_with(root.canonicalize().unwrap_or(root)) {
+    if under_isolated_root(path, std::env::temp_dir()) {
         return true;
     }
     std::env::var_os("TRACEDECAY_DATA_DIR")
@@ -514,8 +513,35 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join(root)
             };
-            path.starts_with(root.canonicalize().unwrap_or(root))
+            under_isolated_root(path, root)
         })
+}
+
+/// Whether `path` lives under `root`, comparing both sides in one spelling.
+///
+/// Only the root used to be resolved, so the two sides were compared in
+/// different spellings on every host that reaches its temporary directory
+/// through a symlink. macOS `std::env::temp_dir()` reports
+/// `/var/folders/.../T` and canonicalizes to `/private/var/folders/.../T`,
+/// while `tempfile` hands back a fixture path in the unresolved `/var/...`
+/// spelling; Windows `canonicalize` returns the `\\?\` verbatim long form
+/// against the `C:\Users\RUNNER~1\...` short name `temp_dir` reports. Either
+/// way `starts_with` read a fixture squarely inside the temporary directory
+/// as being outside it, which withdrew the standalone test runtime and
+/// ambient Test authority from it. Linux `/tmp` is not a symlink and its
+/// short and long names agree, so only the other two hosts ever saw it.
+///
+/// Both sides resolve through their deepest existing ancestor, so a database
+/// file whose final component has not been created yet still compares — the
+/// same rule [`crate::path_safety::same_canonical_path`] applies to registry
+/// locators.
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn under_isolated_root(path: &Path, root: PathBuf) -> bool {
+    if path.starts_with(&root) {
+        return true;
+    }
+    let root = crate::path_safety::canonicalize_path_or_existing_parent(&root);
+    crate::path_safety::canonicalize_path_or_existing_parent(path).starts_with(&root)
 }
 
 /// Matches `src/daemon/authority.rs` `LOCK_FILE`. Kept local so the access

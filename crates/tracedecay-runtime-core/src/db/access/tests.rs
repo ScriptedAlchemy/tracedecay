@@ -274,3 +274,42 @@ fn fallback_scope_is_unambiguous_only_with_one_profile_owner() {
     assert!(fallback_scoped_runtime_role(1, 1).is_err());
     assert!(fallback_scoped_runtime_role(2, 0).is_err());
 }
+
+/// Reproduces the macOS/Windows shape of the isolated-test-path check on any
+/// host: the fixture path is spelled through a symlinked root while the root
+/// itself resolves elsewhere.
+///
+/// macOS `temp_dir()` reports `/var/folders/.../T` and resolves to
+/// `/private/var/folders/.../T`; Windows reports the `RUNNER~1` short name and
+/// resolves to the `\\?\` verbatim long form. Resolving only the root compared
+/// the two sides in different spellings and reported a fixture inside the
+/// temporary directory as being outside it.
+#[cfg(unix)]
+#[test]
+fn a_root_reached_through_a_symlink_still_contains_its_fixtures() {
+    let temporary = tempfile::tempdir().unwrap();
+    let resolved = temporary.path().join("resolved");
+    std::fs::create_dir(&resolved).unwrap();
+    let reported = temporary.path().join("reported");
+    std::os::unix::fs::symlink(&resolved, &reported).unwrap();
+
+    // The root as `temp_dir()` reports it, and the fixture as `tempfile`
+    // hands it back: both in the unresolved spelling.
+    assert!(
+        under_isolated_root(&reported.join("fixture.db"), reported.clone()),
+        "a fixture under the reported root must be recognized as isolated"
+    );
+    // The mixed spellings the two APIs actually produce, in both directions.
+    assert!(under_isolated_root(
+        &reported.join("fixture.db"),
+        resolved.clone()
+    ));
+    assert!(under_isolated_root(&resolved.join("fixture.db"), reported));
+
+    // A path genuinely outside the root is still refused.
+    let outside = tempfile::tempdir().unwrap();
+    assert!(!under_isolated_root(
+        &outside.path().join("fixture.db"),
+        resolved
+    ));
+}
