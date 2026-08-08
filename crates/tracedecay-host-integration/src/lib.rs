@@ -256,6 +256,26 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
                 starts_analyzer: false,
             },
         ]),
+        // The tracedecay Gemini extension declares exactly one registration
+        // route — its own `mcpServers.tracedecay` entry, adopted by
+        // `gemini extensions install`. The extension format admits hooks, but
+        // no checked-in native Gemini event fixture exists and the staged
+        // manifest declares no hook, so the hook route is typed unavailable
+        // rather than claimed.
+        HostKindV1::Gemini => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "gemini_native_hook_fixture_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/gemini/extension.rs",
+                starts_analyzer: false,
+            },
+        ]),
     }
     evidence
 }
@@ -456,7 +476,8 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => return None,
+        | HostKindV1::Kilo
+        | HostKindV1::Gemini => return None,
     };
     let bytes = assets
         .native_fixtures

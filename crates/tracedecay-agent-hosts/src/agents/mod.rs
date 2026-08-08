@@ -652,6 +652,7 @@ pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str
         host_bundle_v2::HostKindV1::Kilo => "kilo",
         host_bundle_v2::HostKindV1::KimiCode => "kimi",
         host_bundle_v2::HostKindV1::OpenCode => "opencode",
+        host_bundle_v2::HostKindV1::Gemini => "gemini",
     }
 }
 

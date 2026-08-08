@@ -96,7 +96,9 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Hermes
         | HostKindV1::Kiro
         | HostKindV1::KimiCode
-        | HostKindV1::OpenCode => None,
+        | HostKindV1::OpenCode
+        // Gemini packages its whole integration as a CLI-installed extension.
+        | HostKindV1::Gemini => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -131,7 +133,11 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         }
         // Kiro's production integration owns a supported MCP registration.
         // Its hook route stays degraded and therefore is not part of Core.
-        HostKindV1::Kiro => vec![HostBundleComponentV1::ContextMcp],
+        //
+        // Gemini is the same shape for a different reason: its extension
+        // carries the MCP server and the context file, and declares no hook,
+        // so the separable MCP route is the whole installable set.
+        HostKindV1::Kiro | HostKindV1::Gemini => vec![HostBundleComponentV1::ContextMcp],
         HostKindV1::CursorCloud
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
@@ -551,6 +557,30 @@ fn component_assets(
             .map(|(relative, body)| {
                 (
                     format!("{}/{relative}", super::kimi::KIMI_STAGED_PLUGIN_RELATIVE),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
+    }
+
+    // Gemini's extension *source* is the deployed artifact: `gemini extensions
+    // install` copies from it into the host-owned `~/.gemini/extensions/`
+    // directory, exactly as Claude Code's marketplace source feeds
+    // `claude plugin install`. Render it through the integration's own
+    // renderer so the bytes the transaction deploys are byte-identical to the
+    // ones staging writes and the doctor reads — two renderers here would let
+    // an install and a repair disagree about what was staged.
+    if (host, component) == (HostKindV1::Gemini, HostBundleComponentV1::ContextMcp) {
+        let files = super::gemini::rendered_extension_files(tracedecay_bin)
+            .map_err(|_| HostBundleRegistryError::Incompatible)?;
+        return Ok(files
+            .into_iter()
+            .map(|(relative, body)| {
+                (
+                    format!(
+                        "{}/{relative}",
+                        super::gemini::GEMINI_STAGED_EXTENSION_RELATIVE
+                    ),
                     body.into_bytes(),
                 )
             })
@@ -1032,6 +1062,7 @@ mod tests {
             HostKindV1::Kiro,
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
+            HostKindV1::Gemini,
         ] {
             let bundles = default_components(host)
                 .into_iter()
@@ -1146,6 +1177,83 @@ mod tests {
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Kiro,
+                &[HostBundleComponentV1::Core],
+                0
+            ),
+            Err(HostBundleRegistryError::Incompatible)
+        );
+    }
+
+    /// Gemini's one installable component is the extension source that
+    /// `gemini extensions install` adopts. Core is refused because the staged
+    /// extension declares no hook and the capability matrix reports none, and
+    /// the deployed bytes must be exactly what the integration's own staging
+    /// writes — otherwise install and repair would stage two different
+    /// extensions.
+    #[test]
+    fn gemini_packages_the_extension_source_its_host_cli_installs() {
+        assert_eq!(
+            unsupported_host_component_set_reason(HostKindV1::Gemini),
+            None
+        );
+        assert_eq!(
+            default_components(HostKindV1::Gemini),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        assert_eq!(
+            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Gemini).components(),
+            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
+        );
+
+        let installed = "/opt/tracedecay-distinct/bin/tracedecay";
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::Gemini,
+            HostBundleComponentV1::ContextMcp,
+            0,
+            installed,
+        )
+        .unwrap();
+        let rendered = super::super::gemini::rendered_extension_files(installed).unwrap();
+        assert_eq!(bundle.contents.len(), rendered.len());
+        for (relative, body) in rendered {
+            let path = format!(
+                "{}/{relative}",
+                super::super::gemini::GEMINI_STAGED_EXTENSION_RELATIVE
+            );
+            let content = bundle
+                .contents
+                .iter()
+                .find(|content| content.relative_path == path)
+                .unwrap_or_else(|| panic!("catalog is missing the staged path {path}"));
+            assert_eq!(
+                content.bytes,
+                body.into_bytes(),
+                "{path} must match the staging renderer"
+            );
+        }
+
+        let manifest = bundle
+            .contents
+            .iter()
+            .find(|content| content.relative_path.ends_with("gemini-extension.json"))
+            .expect("the Gemini component deploys the extension manifest");
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest.bytes).unwrap();
+        assert_eq!(manifest["name"], "tracedecay");
+        assert_eq!(manifest["mcpServers"]["tracedecay"]["command"], installed);
+        assert_eq!(manifest["mcpServers"]["tracedecay"]["trust"], true);
+
+        // The host-owned install target is never a managed artifact: writing
+        // `~/.gemini/extensions/tracedecay/` ourselves would hand-write the
+        // very state `gemini extensions install` owns.
+        assert!(
+            bundle
+                .contents
+                .iter()
+                .all(|content| !content.relative_path.starts_with(".gemini/extensions/"))
+        );
+        assert_eq!(
+            verified_embedded_host_component_set(
+                HostKindV1::Gemini,
                 &[HostBundleComponentV1::Core],
                 0
             ),

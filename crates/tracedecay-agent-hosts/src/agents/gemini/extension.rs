@@ -100,10 +100,17 @@ fn gemini_home(home: &Path) -> PathBuf {
     home.join(".gemini")
 }
 
+/// The staged extension source relative to the profile home.
+///
+/// The first-party component catalog deploys the extension source at exactly
+/// this prefix, so [`extension_stage_dir`] and the receipt-owned artifact paths
+/// are one definition and cannot drift into two directories.
+pub(crate) const GEMINI_STAGED_EXTENSION_RELATIVE: &str = ".gemini/tracedecay-extension";
+
 /// The TraceDecay-owned extension *source*. `gemini extensions install` copies
 /// from here into the host's own extensions directory.
 pub(super) fn extension_stage_dir(home: &Path) -> PathBuf {
-    gemini_home(home).join("tracedecay-extension")
+    home.join(GEMINI_STAGED_EXTENSION_RELATIVE)
 }
 
 /// The staged manifest — presence is the signal that TraceDecay has rendered
@@ -149,7 +156,7 @@ pub(super) fn user_context_path(home: &Path) -> PathBuf {
 ///
 /// One renderer for staging, doctor, and tests, so the bytes that are staged
 /// are the same bytes every other reader reasons about.
-pub(super) fn rendered_extension_files(
+pub(crate) fn rendered_extension_files(
     tracedecay_bin: &str,
 ) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![

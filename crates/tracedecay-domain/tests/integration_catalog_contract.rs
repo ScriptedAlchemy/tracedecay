@@ -287,6 +287,7 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
             "kilo",
             "kimi_code",
             "open_code",
+            "gemini",
         ]
         .map(Value::from)
     );
@@ -318,6 +319,7 @@ fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
         HostKindV1::Kilo,
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
+        HostKindV1::Gemini,
     ] {
         assert_eq!(
             host.fixture_backed_observation_integration_id(),

@@ -42,10 +42,11 @@ pub enum HostKindV1 {
     Kilo,
     KimiCode,
     OpenCode,
+    Gemini,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -58,6 +59,7 @@ impl HostKindV1 {
         Self::Kilo,
         Self::KimiCode,
         Self::OpenCode,
+        Self::Gemini,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -75,7 +77,8 @@ impl HostKindV1 {
             | Self::RooCode
             | Self::Kilo
             | Self::KimiCode
-            | Self::OpenCode => None,
+            | Self::OpenCode
+            | Self::Gemini => None,
         }
     }
 }
@@ -192,6 +195,20 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
         ),
         HostKindV1::OpenCode => (Supported, Supported, Supported, Supported, Supported),
+        // Gemini CLI's extension lifecycle carries exactly one registration
+        // route: the `mcpServers` entry inside `gemini-extension.json`, which
+        // `gemini extensions install` adopts. It exposes no LSP registration
+        // and no diagnostics API. Its extension format does admit hooks, but
+        // no checked-in native Gemini event fixture proves that route, and the
+        // staged extension declares none — claiming Hooks here would report a
+        // capability this integration cannot drive.
+        HostKindV1::Gemini => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+            Supported,
+            Supported,
+        ),
     };
     [
         HostCapabilityRecordV1 {
@@ -428,6 +445,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::Kilo => &STOCK_HOST_CAPABILITIES[9],
             HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
             HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
+            HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
         }
     }
 
@@ -518,7 +536,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 12] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 13] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -531,6 +549,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 12] = [
     canonical_stock_host_capabilities(HostKindV1::Kilo),
     canonical_stock_host_capabilities(HostKindV1::KimiCode),
     canonical_stock_host_capabilities(HostKindV1::OpenCode),
+    canonical_stock_host_capabilities(HostKindV1::Gemini),
 ];
 
 #[derive(Serialize)]

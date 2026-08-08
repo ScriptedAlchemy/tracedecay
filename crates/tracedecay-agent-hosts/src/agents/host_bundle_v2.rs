@@ -68,7 +68,7 @@ pub fn resolved_host_bundle_lifecycle_root() -> crate::errors::Result<PathBuf> {
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
-pub const fn stock_host_kinds() -> [HostKindV1; 12] {
+pub const fn stock_host_kinds() -> [HostKindV1; 13] {
     HostKindV1::ALL
 }
 
@@ -310,6 +310,11 @@ pub fn require_component_capabilities(
             | HostKindV1::Kilo,
             Core,
         ) => &[Mcp],
+        // Gemini's extension is its MCP registration and nothing else. A Core
+        // component would install the hook surface, which this host neither
+        // reports nor drives, so requiring `Hooks` refuses it against the same
+        // capability matrix every other host is judged by.
+        (HostKindV1::Gemini, Core) => &[Hooks, Mcp],
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

@@ -190,7 +190,11 @@ impl HostKindV1 {
             Self::Codex => Some(NativeHostIdentityV1::Codex),
             Self::Hermes => Some(NativeHostIdentityV1::Hermes),
             Self::Kiro => Some(NativeHostIdentityV1::Kiro),
-            Self::ClineFamily => None,
+            // Neither host owns a native hook identity: the Cline family is an
+            // alias surface, and the Gemini extension declares no hook route,
+            // so persisting a hook key for either would name a spool no event
+            // can ever reach.
+            Self::ClineFamily | Self::Gemini => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -326,6 +330,22 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             ManagedEmbedded,
             Managed,
             OpenCodeProjectDirectory,
+        ),
+        // Gemini CLI owns extension registration through `gemini extensions
+        // install|uninstall`; TraceDecay renders and stages the extension
+        // source and drives those commands, so the assets are managed and the
+        // activation is TraceDecay-driven. There is no project-local route:
+        // a workspace-scoped extension is installed by running the host CLI
+        // inside that workspace, and the lifecycle admits only the profile
+        // home as the child working directory.
+        HostKindV1::Gemini => (
+            "gemini",
+            "gemini",
+            NotApplicable,
+            vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
         ),
     };
     HostDescriptorV1 {

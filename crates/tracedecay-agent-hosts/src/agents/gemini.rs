@@ -43,6 +43,12 @@ use super::{
 
 mod extension;
 
+/// The first-party component catalog deploys the staged extension source as
+/// this host's one receipt-owned component, then `gemini extensions install`
+/// adopts it. Both halves render from the same function, so the catalog's
+/// artifacts and the staged directory can never describe different extensions.
+pub(crate) use extension::{GEMINI_STAGED_EXTENSION_RELATIVE, rendered_extension_files};
+
 use extension::{
     EXTENSION_CONTEXT_FILE, EXTENSION_NAME, InstalledExtensionV1, MCP_SERVER_NAME,
     deploy_extension_bundle, extension_stage_dir, gemini_extension_activate_with,

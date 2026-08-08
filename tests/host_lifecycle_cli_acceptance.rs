@@ -71,6 +71,15 @@ const OPENCODE_CONFIGS: &[(&str, &[u8])] = &[(
     br#"{"$schema":"https://opencode.ai/config.json","mcp":{"foreign":{"type":"local","command":["foreign-bin"]}},"theme":"dark"}
 "#,
 )];
+/// Gemini's shared settings file is host-owned under the extension model:
+/// TraceDecay only observes it so a lifecycle can roll back whatever the host
+/// CLI changed there. It is seeded with a foreign server so a run that started
+/// merging it again would be caught.
+const GEMINI_CONFIGS: &[(&str, &[u8])] = &[(
+    ".gemini/settings.json",
+    br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"theme":"dark"}
+"#,
+)];
 
 fn host_case(host: HostKindV1) -> HostCase {
     let configs = match host {
@@ -81,6 +90,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::Kiro => KIRO_CONFIGS,
         HostKindV1::KimiCode => &[],
         HostKindV1::OpenCode => OPENCODE_CONFIGS,
+        HostKindV1::Gemini => GEMINI_CONFIGS,
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -460,19 +470,36 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
                 ("hook-opencode-event", packet_request(packet, "stop")),
             ])
         }
-        HostKindV1::Kiro => None,
+        HostKindV1::Kiro | HostKindV1::Gemini => None,
         _ => unreachable!("non-acceptance host"),
     }
 }
 
+/// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
+/// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`) or defers
+/// activation to an interactive host flow (Kimi).
+///
+/// This suite runs the production CLI against an isolated `HOME` that contains
+/// no host binaries at all, so for these hosts the lifecycle correctly refuses
+/// with the typed missing-binary error rather than emulating the registration.
+/// Their lifecycles are covered by the per-host unit suites, which inject a
+/// fake launcher.
+fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
+    matches!(
+        host,
+        HostKindV1::ClaudeCode
+            | HostKindV1::Codex
+            | HostKindV1::KimiCode
+            | HostKindV1::Kiro
+            | HostKindV1::Gemini
+    )
+}
+
 #[test]
 fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
-    for case in supported_host_cases().filter(|case| {
-        !matches!(
-            case.host,
-            HostKindV1::ClaudeCode | HostKindV1::Codex | HostKindV1::KimiCode
-        )
-    }) {
+    for case in
+        supported_host_cases().filter(|case| !lifecycle_requires_absent_host_binary(case.host))
+    {
         let cli = IsolatedCli::new();
         let originals = seed_host(case, &cli);
 

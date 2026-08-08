@@ -334,6 +334,10 @@ impl CatalogHostComponentRegistrationAuthority {
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Hermes
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
+            // Gemini's deployed artifacts are the extension *source*; the host
+            // only carries the integration once `gemini extensions install`
+            // adopts them, so the deployed bytes alone are not the lifecycle.
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Gemini
             || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
