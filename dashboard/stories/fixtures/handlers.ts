@@ -28,6 +28,15 @@ export const handlers = [
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
+  // The Work routes are the one family the dashboard reads with POST — they are
+  // nested onto the application router, whose reads take a request body. Scoped
+  // to `/api/work/*` rather than to `/api/*` on purpose: a POST catch-all would
+  // turn every unmodelled command in every other workspace's MSW test from a
+  // loud unhandled-request error into a silent empty body.
+  http.post('*/api/work/*', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+  }),
 ];
 
 /* ==========================================================================

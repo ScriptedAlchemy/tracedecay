@@ -2355,6 +2355,15 @@ const OBSERVATORY_SINCE_MICROS = nowMicros - 30 * 86_400 * 1_000_000;
  * the same hoisting reason as the constant above it. */
 const WORK_GENERATION_ID = 'work-generation-0007';
 
+// The graph version `/api/work/views` answers with, and the instant it was
+// observed at. Declared here rather than beside `workGraphViewsPayload` below
+// because `FIXTURES` is a module-level object literal that calls that builder
+// during initialization, and a `const` declared after it is still in its
+// temporal dead zone when the call runs.
+const WORK_GRAPH_VERSION = 6;
+const WORK_GRAPH_OBSERVED_AT = nowMicros;
+const WORK_HOUR_MICROS = 3_600_000_000;
+
 const ANALYTICS_DESCRIPTOR = 'analytics-observability.v1';
 const FEEDBACK_DESCRIPTOR = 'feedback-system-quality.v1';
 const COST_DESCRIPTOR = 'accounting-cost.v1';
@@ -2426,6 +2435,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // onto the application router — see `workApi.ts`, which walks that wrapper.
   '/api/work/snapshot': workEnvelope(workSnapshotPayload()),
   '/api/work/delta': workEnvelope(workDeltaPayload()),
+  // The work-product graph read. Serves the Work projections and the Agents
+  // workspace's handoff frontier and attempt failures.
+  '/api/work/views': workEnvelope(workGraphViewsPayload()),
 };
 
 /** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back
@@ -2603,6 +2615,296 @@ function workDeltaPayload(): Record<string, unknown> {
     generation_id: WORK_GENERATION_ID,
     removed: [],
     to_sequence: 6,
+  };
+}
+
+/* --------------------------------------------------------------------------
+ * `/api/work/views` (`operation.work.views`, `current` mode).
+ *
+ * Read by the Work workspace's four projections and by the Agents workspace,
+ * which derives its handoff frontier and its attempt failures from this one
+ * response. The density spec is what those two surfaces exist to render:
+ *
+ *   - handoffs on more than one task and between more than two actors, each
+ *     carrying BOTH an evidence frontier and declared unknowns, because a
+ *     handoff with no open questions is the case the surface is least likely
+ *     to get wrong;
+ *   - one task with no handoff at all, so the frontier is visibly a subset of
+ *     the graph rather than the whole of it;
+ *   - runtime attempts in a mix of clean and unclean states, so the failure
+ *     panel has both to account for.
+ * ------------------------------------------------------------------------ */
+
+function workGraphItem(spec: {
+  taskId: string;
+  title: string;
+  effort: number;
+  handoffs?: ReadonlyArray<Record<string, unknown>>;
+  dependencies?: readonly string[];
+}): Record<string, unknown> {
+  return {
+    accepted_at: null,
+    accepted_attempts: {},
+    accepted_criteria: {},
+    accepted_proposal: null,
+    accepted_route: null,
+    archived_at: null,
+    evidence_links: [],
+    handoffs: spec.handoffs ?? [],
+    input: {
+      acceptance_criteria: [],
+      causal_candidates: [],
+      created_at: WORK_GRAPH_OBSERVED_AT - 96 * WORK_HOUR_MICROS,
+      deadline: null,
+      dependencies: [...(spec.dependencies ?? [])],
+      effort: spec.effort,
+      hierarchy: {
+        initiative_id: 'initiative.v2-dashboard',
+        milestone_id: 'milestone.agents-surface',
+        plan_id: 'plan.11-dashboard-frontend',
+      },
+      informational_relations: [],
+      scheduled_at: null,
+      task_id: spec.taskId,
+      title: spec.title,
+      updated_at: WORK_GRAPH_OBSERVED_AT - 6 * WORK_HOUR_MICROS,
+    },
+  };
+}
+
+function workGraphItems(): ReadonlyArray<Record<string, unknown>> {
+  return [
+    workGraphItem({
+      taskId: 'task.agents-handoff-surface',
+      title: 'Draw the handoff frontier on Agents',
+      effort: 5,
+      handoffs: [
+        {
+          evidence_frontier: [
+            'evidence.work-views-route-mounted',
+            'evidence.handoff-record-on-work-item',
+          ],
+          from_actor: 'actor.dashboard-owner',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 9 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-frontier.1',
+          task_id: 'task.agents-handoff-surface',
+          to_actor: 'actor.agents-lane',
+          unknowns: [
+            'whether the token-redemption handoff operations can ever enumerate a frontier',
+            'which actor identity the daemon stamps on a dashboard-issued handoff',
+          ],
+        },
+        {
+          evidence_frontier: ['evidence.frontier-table-accessible'],
+          from_actor: 'actor.agents-lane',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 2 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-frontier.2',
+          task_id: 'task.agents-handoff-surface',
+          to_actor: 'actor.review',
+          unknowns: [],
+        },
+      ],
+    }),
+    workGraphItem({
+      taskId: 'task.agents-failure-context',
+      title: 'Account for failures on both authorities',
+      effort: 3,
+      dependencies: ['task.agents-handoff-surface'],
+      handoffs: [
+        {
+          evidence_frontier: [
+            'evidence.by-outcome-served',
+            'evidence.runtime-attempt-states',
+            'evidence.coverage-unavailable-is-not-zero',
+          ],
+          from_actor: 'actor.dashboard-owner',
+          handed_off_at: WORK_GRAPH_OBSERVED_AT - 5 * WORK_HOUR_MICROS,
+          handoff_id: 'handoff.agents-failures.1',
+          task_id: 'task.agents-failure-context',
+          to_actor: 'actor.agents-lane',
+          unknowns: ['which outcome words the fold may emit that this build does not classify'],
+        },
+      ],
+    }),
+    workGraphItem({
+      taskId: 'task.agents-tool-activity',
+      title: 'Attribute tool activity to agents',
+      effort: 2,
+      handoffs: [],
+    }),
+  ];
+}
+
+function workGraphRuntime(): Record<string, unknown> {
+  return {
+    attempts: [
+      {
+        identity: {
+          attempt_id: 'attempt.frontier.1',
+          run_id: 'run.frontier',
+          task_id: 'task.agents-handoff-surface',
+        },
+        state: 'succeeded',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.frontier.2',
+          run_id: 'run.frontier',
+          task_id: 'task.agents-handoff-surface',
+        },
+        state: 'failed',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.failures.1',
+          run_id: 'run.failures',
+          task_id: 'task.agents-failure-context',
+        },
+        state: 'timed_out',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.failures.2',
+          run_id: 'run.failures',
+          task_id: 'task.agents-failure-context',
+        },
+        state: 'running',
+      },
+      {
+        identity: {
+          attempt_id: 'attempt.activity.1',
+          run_id: 'run.activity',
+          task_id: 'task.agents-tool-activity',
+        },
+        state: 'recovery_required',
+      },
+    ],
+    // Partial, deliberately: the daemon naming an attempt it could not observe
+    // is what turns every count on the failure panel into a floor, and a
+    // fixture that only ever answered `complete` would never show that.
+    coverage: {
+      coverage: 'partial',
+      unavailable_attempts: [
+        {
+          attempt_id: 'attempt.activity.2',
+          run_id: 'run.activity',
+          task_id: 'task.agents-tool-activity',
+        },
+      ],
+    },
+    generation_id: WORK_GENERATION_ID,
+    graph_version: WORK_GRAPH_VERSION,
+    observed_at: WORK_GRAPH_OBSERVED_AT,
+    sequence: 6,
+  };
+}
+
+function workGraphViewsPayload(): Record<string, unknown> {
+  const items = workGraphItems();
+  const taskIds = items.map((item) => (item['input'] as Record<string, unknown>)['task_id']);
+  const runtime = workGraphRuntime();
+  return {
+    authorized_scope: {
+      owner_brain_id: 'brain.tracedecay',
+      owner_profile_id: 'profile.default',
+      selection: { selection: 'profile_owned_no_git' },
+    },
+    mode: 'current',
+    snapshot: {
+      graph: {
+        evidence: [],
+        initiatives: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 30 * 24 * WORK_HOUR_MICROS,
+            id: 'initiative.v2-dashboard',
+            title: 'TraceDecay V2 dashboard',
+          },
+        ],
+        items,
+        milestones: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 20 * 24 * WORK_HOUR_MICROS,
+            id: 'milestone.agents-surface',
+            plan_id: 'plan.11-dashboard-frontend',
+            title: 'Agents surface completeness',
+          },
+        ],
+        plans: [
+          {
+            created_at: WORK_GRAPH_OBSERVED_AT - 25 * 24 * WORK_HOUR_MICROS,
+            id: 'plan.11-dashboard-frontend',
+            initiative_id: 'initiative.v2-dashboard',
+            title: 'Dashboard frontend',
+          },
+        ],
+        proposal_decisions: [],
+        relation_replan_decisions: [],
+        version: WORK_GRAPH_VERSION,
+      },
+      observed_at: WORK_GRAPH_OBSERVED_AT,
+      projected_at: WORK_GRAPH_OBSERVED_AT,
+      projections: {
+        causal: { candidate_edges: [], graph_version: WORK_GRAPH_VERSION },
+        critical_path: {
+          graph_version: WORK_GRAPH_VERSION,
+          task_ids: ['task.agents-handoff-surface', 'task.agents-failure-context'],
+          total_effort: 8,
+        },
+        dag: {
+          gating_edges: [
+            {
+              dependency: 'task.agents-handoff-surface',
+              dependent: 'task.agents-failure-context',
+            },
+          ],
+          graph_version: WORK_GRAPH_VERSION,
+          task_ids: taskIds,
+        },
+        graph_version: WORK_GRAPH_VERSION,
+        kanban: {
+          cards: [
+            { effort: 5, lane: 'running', legal_actions: ['handoff'], task_id: taskIds[0] },
+            { effort: 3, lane: 'blocked', legal_actions: ['handoff'], task_id: taskIds[1] },
+            { effort: 2, lane: 'todo', legal_actions: [], task_id: taskIds[2] },
+          ],
+          graph_version: WORK_GRAPH_VERSION,
+        },
+        runtime,
+        timeline: {
+          entries: items.map((item) => {
+            const input = item['input'] as Record<string, unknown>;
+            return {
+              created_at: input['created_at'],
+              deadline: null,
+              scheduled_at: null,
+              task_id: input['task_id'],
+              updated_at: input['updated_at'],
+            };
+          }),
+          graph_version: WORK_GRAPH_VERSION,
+        },
+        workload: {
+          // Runtime coverage is partial, so the authority withholds every
+          // runtime-gated figure rather than answering it over a partial
+          // observation — exactly what it does live.
+          actual_concurrency: null,
+          blocked_effort: null,
+          graph_version: WORK_GRAPH_VERSION,
+          ready_effort: null,
+          requested_concurrency: null,
+          running_effort: null,
+          total_effort: 10,
+        },
+      },
+      runtime,
+      valid_at: WORK_GRAPH_OBSERVED_AT,
+      verified_version: {
+        event_sequence: 6,
+        graph_version: WORK_GRAPH_VERSION,
+        recovered_graph_digest: 'digest.work-graph.6',
+        source_watermark: { work_events: 6 },
+      },
+    },
   };
 }
 

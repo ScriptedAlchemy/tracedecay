@@ -51,6 +51,7 @@ import {
   SettingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
+  WorkGraphReadV1Schema,
   WorkProjectionDeltaV1Schema,
   WorkProjectionSnapshotV1Schema,
 } from '../../src/contracts/generated.ts';
@@ -133,6 +134,9 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
 const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/work/snapshot': WorkProjectionSnapshotV1Schema,
   '/api/work/delta': WorkProjectionDeltaV1Schema,
+  // The work-product graph read. Two workspaces derive from it: the Work
+  // projections, and the Agents handoff frontier and attempt failures.
+  '/api/work/views': WorkGraphReadV1Schema,
 };
 
 const UNCONTRACTED: Readonly<Record<string, string>> = {

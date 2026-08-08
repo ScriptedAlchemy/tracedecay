@@ -135,6 +135,64 @@ describe('AgentsPage read coverage', () => {
     expect(screen.getByText(/sessions per managed subagent · source: sessions/i)).toBeTruthy();
   });
 
+  /**
+   * The three plan-11 measures added beside the delegation rollup. The stub
+   * `fetch` below answers `/api/work/views` with a dashboard envelope rather
+   * than the application envelope that route actually carries, so the graph
+   * read is refused as a shape this build cannot decode — which is exactly the
+   * case the two graph-fed surfaces must render as a refusal rather than as a
+   * frontier of nothing and a failure count of zero.
+   */
+  it('carries handoff, tool-activity and failure-context surfaces beside the rollup', async () => {
+    stubAnalytics({
+      usage: usageSummary({
+        source: 'analytics_events',
+        message_count: 100,
+        event_count: 400,
+        by_category: [{ kind: 'tool', category: 'shell', events: 400 }],
+      }),
+      diagnostics: {
+        available: true,
+        event_count: 400,
+        tool_call_count: 200,
+        mcp_tool_call_count: 150,
+        tracedecay_call_count: 120,
+        by_tool_category: [{ tool_category: 'mcp', count: 150 }],
+        by_outcome: [
+          { outcome: 'success', count: 380 },
+          { outcome: 'error', count: 20 },
+        ],
+        by_mcp_tool: [{ tool_name: 'tracedecay_grep', count: 150 }],
+        recent_hooks: [{ agent: 'Codex', tool_name: 'tracedecay_grep', session_id: 's1' }],
+        recent_events: [
+          { timestamp: 1_700_000_000, tool_name: 'tracedecay_read', outcome: 'error' },
+        ],
+      },
+      underused: { available: true, families: [] },
+      agents: { available: true, source: 'sessions', by_agent: [] },
+    });
+    renderAgents();
+
+    expect(await screen.findByText('Handoff frontier')).toBeTruthy();
+    expect(screen.getByText('Tool activity')).toBeTruthy();
+    expect(screen.getByText('Failure context')).toBeTruthy();
+
+    // Tool activity is fed by the diagnostics read that landed.
+    expect(await screen.findByText('through MCP')).toBeTruthy();
+    expect(screen.getByText('not through MCP')).toBeTruthy();
+    expect(screen.getByText(/Codex/)).toBeTruthy();
+
+    // The failure accounting off the same read.
+    expect(screen.getByText(/5\.00%/)).toBeTruthy();
+
+    // Both graph-fed surfaces refuse rather than report a zero.
+    expect(document.querySelector('[data-agent-handoffs="refused"]')).toBeTruthy();
+    expect(document.querySelector('[data-agent-attempt-failures="refused"]')).toBeTruthy();
+    expect(screen.getByText(/there is no frontier to be empty/)).toBeTruthy();
+    expect(screen.getByText(/there is nothing to report as zero/)).toBeTruthy();
+    expect(screen.queryByText(/no handoff on graph version/)).toBeNull();
+  });
+
   it('keeps an unavailable subagent read distinct from zero delegations', async () => {
     stubAnalytics({
       usage: usageSummary({ message_count: 2 }),

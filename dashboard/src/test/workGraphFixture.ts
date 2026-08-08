@@ -40,6 +40,22 @@ export interface WorkGraphTaskSpec {
    * could not answer. */
   readonly causalCandidates?: readonly string[];
   readonly lane?: WorkTimelineLaneV1;
+  /** Handoffs recorded on this task. Omitted means the task carries none,
+   * which is a graph saying nothing was handed on — distinct from a read that
+   * never landed, and the Agents handoff surface is built to keep the two
+   * apart. `task_id` is filled from the spec so a fixture cannot record a
+   * handoff against a task it does not belong to. */
+  readonly handoffs?: readonly WorkHandoffSpec[];
+}
+
+export interface WorkHandoffSpec {
+  readonly handoffId: string;
+  readonly fromActor: string;
+  readonly toActor: string;
+  /** `UtcMicros`. */
+  readonly handedOffAt: number;
+  readonly evidenceFrontier?: readonly string[];
+  readonly unknowns?: readonly string[];
 }
 
 export interface WorkRuntimeAttemptSpec {
@@ -89,7 +105,15 @@ function workItem(task: WorkGraphTaskSpec, observedAt: number) {
     accepted_route: null,
     archived_at: null,
     evidence_links: [],
-    handoffs: [],
+    handoffs: (task.handoffs ?? []).map((handoff) => ({
+      evidence_frontier: [...(handoff.evidenceFrontier ?? [])],
+      from_actor: handoff.fromActor,
+      handed_off_at: handoff.handedOffAt,
+      handoff_id: handoff.handoffId,
+      task_id: task.taskId,
+      to_actor: handoff.toActor,
+      unknowns: [...(handoff.unknowns ?? [])],
+    })),
     input: {
       acceptance_criteria: [],
       causal_candidates: [...(task.causalCandidates ?? [])],

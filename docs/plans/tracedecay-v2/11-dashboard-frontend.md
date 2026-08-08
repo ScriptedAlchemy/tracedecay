@@ -75,6 +75,22 @@ truthful rather than being replaced with fabricated values.
   Observatory lacks hook hints, event flow, and latency; Automations lacks its
   existing-runtime run history and artifacts; Costs lacks a latency breakdown;
   and Loom's zoom/brush/playback helpers are not wired into its UI.
+- **Correction 2026-08-08 (Agents):** the "Agents lacks its planned
+  subagent/handoff context" clause in the note above is closed for its handoff,
+  tool-activity and failure-context halves. `dashboard/src/workspaces/agents/`
+  now carries `AgentHandoffs.tsx`, `AgentToolActivity.tsx` and
+  `AgentFailureContext.tsx`, each with a `.dom.test.tsx`. The handoff frontier
+  and the attempt failures are read from `operation.work.views`
+  (`POST /api/work/views`) — `WorkItemV1.handoffs` and the runtime projection on
+  the same graph version — and the tool activity from the
+  `/api/plugins/analytics/diagnostics` members the page already fetched and was
+  discarding (`tool_call_count`, `by_tool_category`, `ratios`, `recent_hooks`).
+  Two gaps stay open and are NOT claimed by this correction: the daemon serves
+  no route that enumerates handoff tokens (`open_investigation_handoff` and
+  `open_task_handoff` redeem a token the caller already holds and cannot list a
+  frontier), and no read model attributes a subagent TREE — parent/child session
+  edges — so Agents still shows subagent delegation as a per-agent session
+  rollup rather than as a tree.
 - **Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
   but no workspace currently exercises them with supplied backend state.
 - **Plan 16 owner:** Explorer's multi-project/repository/worktree pivots

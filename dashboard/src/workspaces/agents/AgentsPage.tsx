@@ -23,6 +23,12 @@ import {
   type FamilyRow,
   type UsageRow,
 } from './usage.ts';
+import { AgentFailureContext } from './AgentFailureContext.tsx';
+import { AgentHandoffs } from './AgentHandoffs.tsx';
+import { AgentToolActivity } from './AgentToolActivity.tsx';
+import { useAgentWorkGraph } from './agentWorkQuery.ts';
+import { readAttemptFailures } from './failure.ts';
+import { readHandoffFrontier } from './handoff.ts';
 
 const BASE = '/api/plugins/analytics';
 
@@ -68,6 +74,19 @@ const DiagnosticsPayload = z
     by_event_kind: CountRows.optional(),
     by_outcome: CountRows.optional(),
     by_mcp_tool: CountRows.optional(),
+    // Tool activity (plan 11). Every one of these is a member of
+    // `AnalyticsDiagnosticsPayloadV1` this page decoded and then dropped: the
+    // tool totals it needs a denominator from, the categories the calls divide
+    // into, the fold's own per-message rate, and the only rows on the payload
+    // that name an AGENT beside a tool. Declared here rather than fetched
+    // separately because the diagnostics fold is a ~14s read against a real
+    // store and this page already pays for it once.
+    by_tool: CountRows.optional(),
+    by_tool_category: CountRows.optional(),
+    tool_call_count: z.number().optional(),
+    tracedecay_call_count: z.number().optional(),
+    ratios: z.unknown().optional(),
+    recent_hooks: CountRows.optional(),
     recent_events: z
       .array(
         z
@@ -136,6 +155,12 @@ export function AgentsPage() {
     `${BASE}/agents`,
     AnalyticsAgentsPayloadV1Schema,
   );
+  // The work-product graph, read once and read twice: the handoff frontier and
+  // the attempt failures below both come off this single response, so the two
+  // describe one graph version rather than two versions captioned as one.
+  const workGraph = useAgentWorkGraph();
+  const handoffFrontier = readHandoffFrontier(workGraph.isPending ? undefined : workGraph.data);
+  const attemptFailures = readAttemptFailures(workGraph.isPending ? undefined : workGraph.data);
 
   return (
     <ReadSection
@@ -362,6 +387,58 @@ export function AgentsPage() {
                       />
                     ) : (
                       <SubagentSessions rows={payload.by_agent} source={payload.source} />
+                    );
+                  }}
+                </ReadSection>
+              </OverviewCard>
+
+              {/* Plan 11's three remaining Agents measures. Handoffs and
+                * attempt failures come off the work-product graph read;
+                * tool activity comes off the diagnostics fold this page
+                * already pays for. */}
+              <OverviewCard title="Handoff frontier">
+                <AgentHandoffs reading={handoffFrontier} />
+              </OverviewCard>
+
+              <OverviewCard title="Tool activity">
+                <ReadSection
+                  title="Tool activity"
+                  chrome="centered"
+                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                    loading: 'reading analytics diagnostics',
+                    transport: 'analytics diagnostics could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return payload.available === false ? (
+                      <ReadFailure label="Analytics diagnostics unavailable" />
+                    ) : (
+                      <AgentToolActivity payload={payload} />
+                    );
+                  }}
+                </ReadSection>
+              </OverviewCard>
+
+              <OverviewCard title="Failure context">
+                <ReadSection
+                  title="Failures"
+                  chrome="centered"
+                  state={envelopeReadState(diagnostics.isPending, diagnostics.data, {
+                    loading: 'reading analytics diagnostics',
+                    transport: 'analytics diagnostics could not be read',
+                  })}
+                >
+                  {(envelope) => {
+                    const payload = envelope.payload;
+                    return payload.available === false ? (
+                      <ReadFailure label="Analytics diagnostics unavailable" />
+                    ) : (
+                      <AgentFailureContext
+                        outcomes={payload.by_outcome ?? []}
+                        recentEvents={payload.recent_events ?? []}
+                        attempts={attemptFailures}
+                      />
                     );
                   }}
                 </ReadSection>

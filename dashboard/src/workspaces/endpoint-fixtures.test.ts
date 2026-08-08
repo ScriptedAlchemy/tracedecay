@@ -47,7 +47,9 @@ import {
   SettingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
+  WorkGraphReadV1Schema,
 } from '../contracts/generated.ts';
+import { workPayload } from './work/workApi.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -650,6 +652,45 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const stamps = (data.recent_events ?? []).map((row) => row.timestamp);
     expect(stamps.length).toBe(20);
     expect([...stamps].sort((a, b) => b - a)).toEqual(stamps);
+  });
+
+  // The one Work read this suite gates, because two workspaces derive from it:
+  // the Work projections and the Agents handoff frontier and attempt failures.
+  // Unlike every other fixture here it is wrapped in the application's
+  // `HttpJsonEnvelope`, so the walk `workApi.ts` performs is exercised first and
+  // the generated contract is applied to whatever that walk finds — the same
+  // order the live page runs in.
+  it('POST /api/work/views — work + agents (WorkGraphReadV1Schema)', () => {
+    const found = workPayload(resolveFixture('/api/work/views'));
+    expect(found.found).toBe(true);
+    const read = WorkGraphReadV1Schema.parse(found.found ? found.payload : null);
+    expect(read.mode).toBe('current');
+    if (read.mode !== 'current') return;
+    const entry = read.snapshot;
+
+    // Density spec for the Agents handoff frontier: handoffs on more than one
+    // task and between more than two actors, at least one carrying declared
+    // unknowns and at least one carrying none — and at least one task carrying
+    // no handoff, so the frontier is visibly a subset of the graph.
+    const handoffs = entry.graph.items.flatMap((item) => item.handoffs);
+    expect(handoffs.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(handoffs.map((handoff) => handoff.task_id)).size).toBeGreaterThanOrEqual(2);
+    expect(
+      new Set(handoffs.flatMap((handoff) => [handoff.from_actor, handoff.to_actor])).size,
+    ).toBeGreaterThanOrEqual(3);
+    expect(handoffs.some((handoff) => handoff.unknowns.length > 0)).toBe(true);
+    expect(handoffs.some((handoff) => handoff.unknowns.length === 0)).toBe(true);
+    expect(handoffs.every((handoff) => handoff.evidence_frontier.length > 0)).toBe(true);
+    expect(entry.graph.items.some((item) => item.handoffs.length === 0)).toBe(true);
+
+    // Density spec for the Agents failure panel: attempts in both clean and
+    // unclean states, under a coverage reading that is not `complete` — a
+    // fixture that only ever answered complete coverage would never exercise
+    // the floor disclosure the panel exists to print.
+    const states = entry.runtime.attempts.map((attempt) => attempt.state);
+    expect(states).toContain('failed');
+    expect(states.some((state) => state !== 'failed' && state !== 'timed_out')).toBe(true);
+    expect(entry.runtime.coverage.coverage).not.toBe('complete');
   });
 
   it('GET /api/automation/scheduler/status — automations (generated contract)', () => {
