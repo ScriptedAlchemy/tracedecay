@@ -364,6 +364,26 @@ pub(super) async fn node_rows_by_qualified_names(
     query_rows(conn, &sql, params_from_iter(params)).await
 }
 
+/// Source line of every relational edge incident to one node.
+///
+/// The projection decides WHICH edges exist; it carries byte-offset evidence
+/// spans and no line numbers, so the served `edge_line` / `line` fields would
+/// otherwise be silently null for every neighbor row. This lookup restores
+/// them from the same relational rows that already supply neighbor identity,
+/// keyed by the (source, target, kind) triple the projection edge maps onto.
+pub(super) async fn neighborhood_edge_line_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+) -> GraphReadResult<Vec<Value>> {
+    query_rows(
+        conn,
+        "SELECT source, target, kind, line FROM edges
+         WHERE source = ?1 OR target = ?1",
+        params![node_id],
+    )
+    .await
+}
+
 pub(super) async fn subgraph_candidate_rows(
     conn: &(impl QueryExecutor + ?Sized),
     seed_id: &str,

@@ -130,6 +130,7 @@ impl DashboardTestRuntimeV1 {
         })?;
         let graph_read_authority =
             dashboard::dashboard_graph_read_authority_for_test(cg, self.project_database.as_ref())
+                .await
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "dashboard fixture could not compose the graph read authority"
                         .to_owned(),

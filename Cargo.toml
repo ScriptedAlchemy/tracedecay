@@ -198,6 +198,10 @@ test-transport = [
     # test-transport-gated and drives the global-db session-temporal refresh
     # helpers; plain builds (no dev-dep feature unification) need the forward.
     "tracedecay-global-db/test-helpers",
+    # The graph-projection fixture bridge
+    # (`dashboard::graph_projection_fixture`) publishes the hermetic code-graph
+    # generation dashboard neighbor reads take their adjacency from.
+    "tracedecay-code-index/test-helpers",
 ]
 
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's

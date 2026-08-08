@@ -53,6 +53,13 @@ use read_models::{
 /// Safety cap on the BFS visited set for path reads.
 const PATH_VISITED_CAP: usize = 20_000;
 
+/// Fan-out ceiling for the one-hop adjacency walk behind a neighbor read.
+/// The interactive reader refuses an over-budget walk rather than truncating
+/// it, so this stays the verified-generation ceiling — the same one the
+/// per-kind edge counts already scan for the identical focus symbol — and the
+/// request's `limit` caps the served rows afterwards.
+const NEIGHBOR_ADJACENCY_BUDGET: usize = tracedecay_graph_db::MAX_VERIFIED_GENERATION_RELATIONS;
+
 /// Cap on the cached top-degree pool: the default subgraph's candidate pool
 /// is at most `node_limit * 2 = 500`, and the overview needs the top 12.
 const DEGREE_POOL_CAP: i64 = 500;
@@ -67,6 +74,25 @@ const DASHBOARD_GRAPH_PROJECTION: &str = "code-dashboard";
 const DASHBOARD_GRAPH_PROJECTOR_REVISION_V1: &str = "code-dashboard-projector.v1";
 const PROJECTION_RECORD_PROPERTY: &str = "projection-record";
 const GENERATION_DIGEST_DOMAIN: &str = "tracedecay.dashboard-code-graph-generation.v1";
+
+/// Relational line number for one incident edge of the focus node.
+///
+/// `inbound` selects the direction the neighbor sits on: an inbound edge runs
+/// neighbor → focus, an outbound edge focus → neighbor.
+fn edge_line(
+    lines: &HashMap<(String, String, String), i64>,
+    focus_id: &str,
+    neighbor_id: &str,
+    kind: &str,
+    inbound: bool,
+) -> Option<i64> {
+    let key = if inbound {
+        (neighbor_id.to_owned(), focus_id.to_owned(), kind.to_owned())
+    } else {
+        (focus_id.to_owned(), neighbor_id.to_owned(), kind.to_owned())
+    };
+    lines.get(&key).copied()
+}
 
 /// Content watermark of the topology actually served by this read.
 ///
@@ -428,7 +454,14 @@ impl DashboardGraphReadAdapter {
             ));
         }
         let focus_kind = str_field(&focus_row, "kind").to_owned();
-        let max_relations = usize::try_from(limit)
+        // `limit` is a presentation cap on the served caller/callee rows, NOT
+        // a traversal budget. The projection's relation walk refuses an
+        // over-budget fan-out (`BudgetExhausted`) instead of truncating, so
+        // handing it a small `limit` would turn "show me 2 neighbors" into an
+        // unavailable envelope for any symbol with more than 2 of them. The
+        // walk therefore runs at the verified-generation ceiling the per-kind
+        // counts already scan, and the rows are ordered and capped afterwards.
+        let row_limit = usize::try_from(limit)
             .ok()
             .filter(|limit| *limit > 0)
             .ok_or_else(|| DashboardGraphReadErrorV1::InvalidRequest {
@@ -436,7 +469,12 @@ impl DashboardGraphReadAdapter {
             })?;
         let reader = self.interactive_reader().await?;
         let neighborhood = tokio::task::spawn_blocking(move || {
-            interactive_neighborhood(&reader, &qualified_name, &focus_kind, max_relations)
+            interactive_neighborhood(
+                &reader,
+                &qualified_name,
+                &focus_kind,
+                NEIGHBOR_ADJACENCY_BUDGET,
+            )
         })
         .await
         .map_err(|error| {
@@ -444,6 +482,28 @@ impl DashboardGraphReadAdapter {
                 "interactive adjacency read did not complete: {error}"
             ))
         })??;
+
+        // Line numbers for the incident edges. The projection records
+        // byte-offset evidence spans and no lines, so the served `edge_line` /
+        // `line` fields come from the same relational rows that already supply
+        // neighbor identity, keyed by the (source, target, kind) triple.
+        let mut edge_lines: HashMap<(String, String, String), i64> = HashMap::new();
+        for row in queries::neighborhood_edge_line_rows(&conn, node_id)
+            .await
+            .map_err(unavailable)?
+        {
+            let Some(line) = row.get("line").and_then(Value::as_i64) else {
+                continue;
+            };
+            edge_lines.insert(
+                (
+                    str_field(&row, "source").to_owned(),
+                    str_field(&row, "target").to_owned(),
+                    str_field(&row, "kind").to_owned(),
+                ),
+                line,
+            );
+        }
 
         // Neighbor hydration: map projection occurrences back onto relational
         // node rows by qualified name so the served id-space stays coherent
@@ -498,10 +558,12 @@ impl DashboardGraphReadAdapter {
             );
             nodes_by_occurrence.insert(edge.neighbor.occurrence.clone(), node);
         }
-        // The caller/callee node lists keep their pre-cutover semantics:
-        // call edges only. The incident-edge list spans every semantic kind.
-        let hydrate = |edges: &[CodeGraphSemanticEdgeV1]| {
-            edges
+        // The caller/callee node lists keep their pre-cutover semantics: call
+        // edges only, ordered by qualified name and only then capped to the
+        // requested limit, so both directions cut the same ranked prefix. The
+        // incident-edge list spans every semantic kind.
+        let hydrate = |edges: &[CodeGraphSemanticEdgeV1], inbound: bool| {
+            let mut rows = edges
                 .iter()
                 .filter(|edge| edge.edge.kind == RelationEdgeKindV1::Calls)
                 .map(|edge| {
@@ -511,14 +573,24 @@ impl DashboardGraphReadAdapter {
                         .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
                             detail: "hydrated neighborhood lost a neighbor node".to_owned(),
                         })?;
-                    node.edge_kind = Some(relation_kind_str(edge.edge.kind).to_owned());
-                    node.edge_line = None;
+                    let kind = relation_kind_str(edge.edge.kind).to_owned();
+                    node.edge_line = edge_line(&edge_lines, node_id, &node.id, &kind, inbound);
+                    node.edge_kind = Some(kind);
                     Ok(node)
                 })
-                .collect::<Result<Vec<_>, DashboardGraphReadErrorV1>>()
+                .collect::<Result<Vec<_>, DashboardGraphReadErrorV1>>()?;
+            rows.sort_by(|left, right| {
+                left.qualified_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(right.qualified_name.as_deref().unwrap_or_default())
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            rows.truncate(row_limit);
+            Ok::<_, DashboardGraphReadErrorV1>(rows)
         };
-        let callers = hydrate(&neighborhood.callers)?;
-        let callees = hydrate(&neighborhood.callees)?;
+        let callers = hydrate(&neighborhood.callers, true)?;
+        let callees = hydrate(&neighborhood.callees, false)?;
         let mut edges = Vec::with_capacity(neighborhood.callers.len() + neighborhood.callees.len());
         for edge in &neighborhood.callers {
             let node = nodes_by_occurrence
@@ -526,11 +598,12 @@ impl DashboardGraphReadAdapter {
                 .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
                     detail: "hydrated neighborhood lost a caller node".to_owned(),
                 })?;
+            let kind = relation_kind_str(edge.edge.kind).to_owned();
             edges.push(DashboardGraphEdgeV1 {
                 source: node.id.clone(),
                 target: node_id.to_owned(),
-                kind: relation_kind_str(edge.edge.kind).to_owned(),
-                line: None,
+                line: edge_line(&edge_lines, node_id, &node.id, &kind, true),
+                kind,
                 source_name: node.name.clone(),
                 target_name: None,
             });
@@ -541,11 +614,12 @@ impl DashboardGraphReadAdapter {
                 .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
                     detail: "hydrated neighborhood lost a callee node".to_owned(),
                 })?;
+            let kind = relation_kind_str(edge.edge.kind).to_owned();
             edges.push(DashboardGraphEdgeV1 {
                 source: node_id.to_owned(),
                 target: node.id.clone(),
-                kind: relation_kind_str(edge.edge.kind).to_owned(),
-                line: None,
+                line: edge_line(&edge_lines, node_id, &node.id, &kind, false),
+                kind,
                 source_name: None,
                 target_name: node.name.clone(),
             });

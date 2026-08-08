@@ -18,6 +18,10 @@ pub(crate) mod assets;
 #[doc(hidden)]
 pub mod observation_seed;
 
+/// Interactive code-graph projection mount for dashboard integration fixtures.
+#[cfg(feature = "test-transport")]
+pub(crate) mod graph_projection_fixture;
+
 /// Installs root-owned values consumed by the extracted dashboard crate.
 pub(crate) fn register_runtime_ports() {
     tracedecay_dashboard_api::install_build_version(crate::version::build_version);
@@ -261,17 +265,33 @@ pub async fn dashboard_lcm_read_authority_for_test(
 /// `DashboardGraphReadAdapter` the MCP dashboard composition mounts in
 /// production. Without it every `/api/plugins/graph/*` and explorer code
 /// read answers its typed unavailable envelope.
+///
+/// The interactive code-graph resolver is mounted here for the same reason the
+/// daemon mounts one: neighbor reads take adjacency exclusively from a
+/// verified projection, so a fixture that seeded only the relational graph
+/// would answer every `/neighbors` read as unavailable. The fixture's
+/// projection is published from the graph already seeded on `cg`, so it must
+/// be composed after seeding completes.
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
-pub fn dashboard_graph_read_authority_for_test(
+pub async fn dashboard_graph_read_authority_for_test(
     cg: &crate::tracedecay::TraceDecay,
     project_database: &crate::global_db::RegisteredGlobalDb,
 ) -> Option<std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>> {
-    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(cg, project_database, None)
-        .map(|adapter| {
-            std::sync::Arc::new(adapter)
-                as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
-        })
+    let interactive = graph_projection_fixture::interactive_resolver_for_test(cg)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("dashboard fixture could not publish its code graph projection: {error}")
+        });
+    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(
+        cg,
+        project_database,
+        Some(interactive),
+    )
+    .map(|adapter| {
+        std::sync::Arc::new(adapter)
+            as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
+    })
 }
 
 /// Composes the daemon-owned git-correlation read authority over the

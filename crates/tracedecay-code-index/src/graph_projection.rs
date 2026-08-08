@@ -375,6 +375,57 @@ impl InMemoryCodeGraphProjectionBuilder {
         Ok(watermark)
     }
 
+    /// Publishes a hermetic generation that also carries its file snapshot and
+    /// symbol index, so the interactive reader can resolve qualified names and
+    /// kinds. [`Self::publish_with_cancellation`] publishes edges and chunks
+    /// alone, which leaves every symbol without metadata and therefore
+    /// unresolvable by name — the shape integration fixtures need.
+    pub fn publish_indexed_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        edges: &[CanonicalRelationEdgeV1],
+        chunks: &[CodeSearchChunkV1],
+        files: &[tracedecay_domain::SanitizedCodeFileV1],
+        symbols: &crate::lineage::GenerationSymbolIndexV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        if cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
+        if symbols.generation_id != *generation {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
+        let revision =
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?;
+        let check = {
+            let cancellation = Arc::clone(&cancellation);
+            move || {
+                if cancellation.is_cancelled() {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let manifest = build_code_graph_manifest_inputs_checked(
+            self.projection.clone(),
+            generation,
+            edges,
+            chunks,
+            Some(ProductionCodeGraphInputs { files, symbols }),
+            &revision,
+            &check,
+        )?;
+        let watermark = manifest.watermark.clone();
+        let snapshot = VerifiedGraphSnapshot::memory(manifest, cancellation)?;
+        *self.snapshot.write().map_err(|_| {
+            CodeGraphProjectionError::Unavailable(
+                "code graph verified snapshot lock is poisoned".to_owned(),
+            )
+        })? = Some(Arc::new(snapshot));
+        Ok(watermark)
+    }
+
     pub fn verified_store(
         &self,
         generation: &CodeGenerationId,
@@ -460,6 +511,28 @@ impl HermeticCodeGraphProjectionStore {
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
         self.inner
             .publish_with_cancellation(generation, edges, chunks, cancellation)
+    }
+
+    /// Publishes a hermetic generation carrying its file snapshot and symbol
+    /// index, so interactive reads can resolve symbols by qualified name and
+    /// kind the way an activated production generation does.
+    pub fn publish_indexed_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        edges: &[CanonicalRelationEdgeV1],
+        chunks: &[CodeSearchChunkV1],
+        files: &[tracedecay_domain::SanitizedCodeFileV1],
+        symbols: &crate::lineage::GenerationSymbolIndexV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        self.inner.publish_indexed_with_cancellation(
+            generation,
+            edges,
+            chunks,
+            files,
+            symbols,
+            cancellation,
+        )
     }
 
     pub fn verified_store(
