@@ -68,6 +68,71 @@
       ],
       "type": "object"
     },
+    "AdmitWorkPlacementCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "retention_eligible_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When retention makes this placement eligible for a fresh cleanup\npreflight. Eligibility is not delete authority."
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "target": {
+          "$ref": "#/$defs/WorkPlacementTargetV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "target",
+        "retention_eligible_at",
+        "occurred_at"
+      ],
+      "title": "AdmitWorkPlacementCommand",
+      "type": "object"
+    },
+    "AdmitWorkSynthesisCommand": {
+      "additionalProperties": false,
+      "description": "Admits one synthesis attempt over an ordered set of sibling sources.",
+      "properties": {
+        "output_name": {
+          "$ref": "#/$defs/WorkflowOutputName",
+          "description": "The fan-out output the synthesis belongs to, carried into the draft\nthe workflow completion path verifies."
+        },
+        "sources": {
+          "description": "The ordered sibling sources the synthesis consumes.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "array"
+        },
+        "start": {
+          "$ref": "#/$defs/StartWorkAttemptCommand",
+          "description": "The synthesis attempt's own admission facts; it is started through\nthe same admission machinery as any other attempt."
+        }
+      },
+      "required": [
+        "start",
+        "output_name",
+        "sources"
+      ],
+      "type": "object"
+    },
     "AnalyticsAgentUsageV1": {
       "properties": {
         "agent": {
@@ -1135,6 +1200,31 @@
       "description": "Strongly typed canonical identity: `BrainId`.",
       "type": "string"
     },
+    "BranchTopologyKindV1": {
+      "enum": [
+        "no_branches",
+        "unbranched",
+        "independent_branches",
+        "local_stack"
+      ],
+      "type": "string"
+    },
+    "BranchTopologyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "items": {
+            "$ref": "#/$defs/BranchTopologyKindV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "allowed"
+      ],
+      "type": "object"
+    },
     "CallChainMeasurementV1": {
       "properties": {
         "directed": {
@@ -1237,6 +1327,18 @@
         "occurred_at"
       ],
       "type": "object"
+    },
+    "CanonicalGitRefNameV1": {
+      "description": "A validated full native Git ref name, such as `refs/heads/main`.",
+      "type": "string"
+    },
+    "CanonicalGitRefPrefix": {
+      "description": "A validated ref/branch prefix. Branch naming accepts a short branch prefix\n(for example `tracedecay/`) while protected-ref selectors use full\n`refs/.../` prefixes.",
+      "type": "string"
+    },
+    "CapabilityId": {
+      "description": "Strongly typed canonical identity: `CapabilityId`.",
+      "type": "string"
     },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
@@ -1487,6 +1589,40 @@
     "CredentialReferenceId": {
       "description": "Strongly typed canonical identity: `CredentialReferenceId`.",
       "type": "string"
+    },
+    "CrossMergeModeV1": {
+      "enum": [
+        "disabled",
+        "manual_receipt_only",
+        "fast_forward_only",
+        "merge_commit",
+        "cherry_pick_exact_commits"
+      ],
+      "type": "string"
+    },
+    "CrossMergePolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_cross_repository": {
+          "type": "boolean"
+        },
+        "allowed_modes": {
+          "items": {
+            "$ref": "#/$defs/CrossMergeModeV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "default_mode": {
+          "$ref": "#/$defs/CrossMergeModeV1"
+        }
+      },
+      "required": [
+        "allowed_modes",
+        "default_mode",
+        "allow_cross_repository"
+      ],
+      "type": "object"
     },
     "DashboardAuthorizationV1": {
       "description": "Authorization outcome for the read. On the loopback single-user dashboard a\nlegal local read is [`Self::Authorized`]; the other variants are retained so\nthe contract can express `unauthorized` (identity absent/expired), `denied`\n(known identity lacks permission), and `redacted` reads without a schema\nchange.",
@@ -4871,6 +5007,64 @@
       ],
       "type": "object"
     },
+    "ExecutionTopologyViewV1": {
+      "description": "The application-owned execution-topology view. Absence of any Work in\nscope is a typed state, distinct from an authorized-but-empty page.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "No Work exists in this authority scope, so there is no topology to\ndraw. Concealed scopes are refused before any read.",
+          "properties": {
+            "state": {
+              "const": "absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The four dimensions, pinned to one verified topology generation.",
+          "properties": {
+            "branch_topology": {
+              "$ref": "#/$defs/BranchTopologyPolicyV1"
+            },
+            "coverage": {
+              "$ref": "#/$defs/WorkAttemptListCoverageV1"
+            },
+            "execution_placement": {
+              "$ref": "#/$defs/WorkTopologyExecutionPlacementV1"
+            },
+            "integration_strategy": {
+              "$ref": "#/$defs/WorkTopologyIntegrationStrategyV1"
+            },
+            "review_topology": {
+              "$ref": "#/$defs/ReviewTopologyPolicyV1"
+            },
+            "state": {
+              "const": "view",
+              "type": "string"
+            },
+            "topology": {
+              "$ref": "#/$defs/WorkAttemptTopologyBindingV1"
+            }
+          },
+          "required": [
+            "state",
+            "topology",
+            "coverage",
+            "execution_placement",
+            "branch_topology",
+            "review_topology",
+            "integration_strategy"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ExecutionTopologyViewV1"
+    },
     "ExplorerFinalityV1": {
       "enum": [
         "pending",
@@ -5115,13 +5309,22 @@
             "integer",
             "null"
           ]
+        },
+        "token_estimate_total": {
+          "description": "Complete session token estimate from the LCM size authority, or\ntyped-absent when the bounded estimate did not cover the session.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
         "message_count",
         "summary_node_count",
         "summary_token_count",
-        "source_token_count"
+        "source_token_count",
+        "token_estimate_total"
       ],
       "type": "object"
     },
@@ -5721,6 +5924,13 @@
         "decision"
       ],
       "type": "object"
+    },
+    "GitHubStackedPullRequestPolicyV1": {
+      "enum": [
+        "disabled",
+        "probe_private_preview"
+      ],
+      "type": "string"
     },
     "GraphCappedV1": {
       "properties": {
@@ -9182,6 +9392,42 @@
       ],
       "type": "object"
     },
+    "PauseWorkRunCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_authority_version": {
+          "default": null,
+          "description": "The authority version the caller read. Absent means \"no control row was\npublished yet\"; a mismatch is a conflict, never an overwrite.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "reason": {
+          "$ref": "#/$defs/WorkRunControlReasonV1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "reason",
+        "expected_authority_version",
+        "occurred_at"
+      ],
+      "title": "PauseWorkRunCommand",
+      "type": "object"
+    },
     "PolicyIdentifierV1": {
       "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
       "type": "string"
@@ -9664,6 +9910,77 @@
       "description": "Strongly typed canonical identity: `ProposalId`.",
       "type": "string"
     },
+    "ProtectedRefDispositionV1": {
+      "enum": [
+        "reject",
+        "require_human_approval_and_independent_review"
+      ],
+      "type": "string"
+    },
+    "ProtectedRefRuleV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ProtectedRefDispositionV1"
+        },
+        "selector": {
+          "$ref": "#/$defs/ProtectedRefSelectorV1"
+        }
+      },
+      "required": [
+        "selector",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "ProtectedRefSelectorV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "native_default_branch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/CanonicalGitRefNameV1"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "prefix",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/CanonicalGitRefPrefix"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ProviderId": {
       "description": "Strongly typed canonical identity: `ProviderId`.",
       "type": "string"
@@ -9829,6 +10146,33 @@
       ],
       "type": "object"
     },
+    "ReleaseWorkPlacementCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_authority_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "expected_authority_version",
+        "occurred_at"
+      ],
+      "title": "ReleaseWorkPlacementCommand",
+      "type": "object"
+    },
     "ReplanDependenciesCommand": {
       "additionalProperties": false,
       "properties": {
@@ -9868,9 +10212,37 @@
       "description": "Strongly typed canonical identity: `RepositoryId`.",
       "type": "string"
     },
+    "RequiredCheckExpectationV1": {
+      "enum": [
+        "successful_terminal"
+      ],
+      "type": "string"
+    },
+    "RequiredCheckV1": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_id": {
+          "$ref": "#/$defs/CapabilityId"
+        },
+        "expectation": {
+          "$ref": "#/$defs/RequiredCheckExpectationV1"
+        },
+        "maximum_age_seconds": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability_id",
+        "expectation",
+        "maximum_age_seconds"
+      ],
+      "type": "object"
+    },
     "ResolvedScope": {
       "additionalProperties": false,
-      "description": "The resolved resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+      "description": "The resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
       "properties": {
         "project_id": {
           "$ref": "#/$defs/ProjectId"
@@ -9914,6 +10286,37 @@
       "required": [
         "occurred_at"
       ],
+      "type": "object"
+    },
+    "ResumeWorkRunCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_authority_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "reason": {
+          "$ref": "#/$defs/WorkRunControlReasonV1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "reason",
+        "expected_authority_version",
+        "occurred_at"
+      ],
+      "title": "ResumeWorkRunCommand",
       "type": "object"
     },
     "RetrievalAnchorId": {
@@ -9975,6 +10378,82 @@
       "required": [
         "review",
         "disposition"
+      ],
+      "type": "object"
+    },
+    "ReviewRequirementV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "count": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "independent_review_count",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "code_owner_and_independent_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReviewTopologyKindV1": {
+      "enum": [
+        "no_review",
+        "independent_review",
+        "standard_pull_requests",
+        "git_hub_stacked_pull_requests"
+      ],
+      "type": "string"
+    },
+    "ReviewTopologyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "items": {
+            "$ref": "#/$defs/ReviewTopologyKindV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "github_stacked_prs": {
+          "$ref": "#/$defs/GitHubStackedPullRequestPolicyV1"
+        }
+      },
+      "required": [
+        "allowed",
+        "github_stacked_prs"
       ],
       "type": "object"
     },
@@ -12467,6 +12946,39 @@
       ],
       "type": "object"
     },
+    "TopologyGatePolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanliness": {
+          "$ref": "#/$defs/WorktreeCleanlinessRequirementV1"
+        },
+        "maximum_preflight_age_seconds": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "require_fresh_preflight": {
+          "type": "boolean"
+        },
+        "review": {
+          "$ref": "#/$defs/ReviewRequirementV1"
+        },
+        "tests": {
+          "items": {
+            "$ref": "#/$defs/RequiredCheckV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cleanliness",
+        "tests",
+        "review",
+        "require_fresh_preflight",
+        "maximum_preflight_age_seconds"
+      ],
+      "type": "object"
+    },
     "UserProfileId": {
       "description": "Strongly typed canonical identity: `UserProfileId`.",
       "type": "string"
@@ -12640,6 +13152,81 @@
       ],
       "type": "string"
     },
+    "WorkArtifactHydrationRequestV1": {
+      "additionalProperties": false,
+      "description": "One authority-scoped artifact hydration request, paged like the attempt\nlist and pinned to the same verified topology generation.",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptListCursorV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "page_size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_size",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "WorkArtifactHydrationV1": {
+      "description": "One authority-scoped artifact hydration read. Absence of any Work in\nscope is a typed state, distinct from an authorized-but-empty page.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "No Work exists in this authority scope, so there is no attempt set to\nhydrate. Concealed scopes never reach this state: they are refused as\nnot-found-or-not-authorized before any read.",
+          "properties": {
+            "state": {
+              "const": "absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One page of attempt artifact sets under the verified topology\nsnapshot.",
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/WorkAttemptArtifactsV1"
+              },
+              "type": "array"
+            },
+            "coverage": {
+              "$ref": "#/$defs/WorkAttemptListCoverageV1"
+            },
+            "state": {
+              "const": "hydrated",
+              "type": "string"
+            },
+            "topology": {
+              "$ref": "#/$defs/WorkAttemptTopologyBindingV1"
+            }
+          },
+          "required": [
+            "state",
+            "topology",
+            "attempts",
+            "coverage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "WorkArtifactId": {
       "description": "Strongly typed canonical identity: `WorkArtifactId`.",
       "type": "string"
@@ -12665,6 +13252,138 @@
         "byte_length"
       ],
       "type": "object"
+    },
+    "WorkAttemptArtifactsV1": {
+      "additionalProperties": false,
+      "description": "The artifacts and evidence one attempt declared.",
+      "properties": {
+        "artifacts": {
+          "description": "Every artifact reference the attempt declared, in its canonical\nstored order. References carry digest and byte length; bytes are\nnever part of this read.",
+          "items": {
+            "$ref": "#/$defs/WorkArtifactRefV1"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "$ref": "#/$defs/WorkAttemptEvidenceStateV1"
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        }
+      },
+      "required": [
+        "identity",
+        "artifacts",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptEvidenceRecordV1": {
+      "additionalProperties": false,
+      "description": "Sealed terminal evidence for one provider attempt. The digest of this\nrecord is the evidence digest carried by [`WorkTerminalEvidenceV1`] and by\nthe `RuntimeEvidenceRef` attached to the Work projection, so the receipt\nin Work always names an inspectable record.",
+      "properties": {
+        "actual_route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProviderRouteV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "outcome": {
+          "$ref": "#/$defs/WorkAttemptProviderOutcomeV1"
+        },
+        "provider_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProviderFallbackRecordV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only when the pinned preferred backend was disqualified before\nstartup. `None` means the attempt ran on its first-choice backend."
+        },
+        "requested_route": {
+          "$ref": "#/$defs/WorkProviderRouteV1"
+        },
+        "stderr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptStreamSummaryV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stdout": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptStreamSummaryV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "requested_route",
+        "actual_route",
+        "outcome",
+        "stdout",
+        "stderr",
+        "provider_fallback",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptEvidenceStateV1": {
+      "description": "Whether an attempt's terminal evidence has been sealed. An attempt that\nhas not reported an outcome yet is a typed state, not a missing record.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The attempt has not sealed terminal evidence yet.",
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The sealed terminal evidence record, exactly as it was written.",
+          "properties": {
+            "record": {
+              "$ref": "#/$defs/WorkAttemptEvidenceRecordV1"
+            },
+            "state": {
+              "const": "sealed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "record"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkAttemptIdentityV1": {
       "additionalProperties": false,
@@ -12881,6 +13600,126 @@
       ],
       "type": "object"
     },
+    "WorkAttemptProviderOutcomeV1": {
+      "description": "How one provider attempt ended, as observed by the daemon runtime.",
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "outcome": {
+              "const": "exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "signalled",
+              "type": "string"
+            },
+            "signal": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "outcome",
+            "signal"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "timed_out",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "provider_unavailable",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/WorkProviderAvailabilityV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "channel": {
+              "$ref": "#/$defs/WorkAttemptStreamChannelV1"
+            },
+            "outcome": {
+              "const": "stream_overflow",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "channel"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "launch_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The provider started but its typed protocol session did not reach a\nterminal answer: a malformed, out-of-order, oversized, or lost frame.\nPlan 32 requires such a stream to seal failed evidence rather than a\ntext-scraped success.",
+          "properties": {
+            "outcome": {
+              "const": "protocol_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "WorkAttemptRecoveryReportV1": {
       "additionalProperties": false,
       "description": "What resume-after-restart did to each open attempt.",
@@ -12938,6 +13777,36 @@
         "task_id",
         "run_id",
         "attempt_id"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptStreamChannelV1": {
+      "enum": [
+        "stdout",
+        "stderr"
+      ],
+      "type": "string"
+    },
+    "WorkAttemptStreamSummaryV1": {
+      "additionalProperties": false,
+      "description": "Bounded summary of one captured provider stream.",
+      "properties": {
+        "byte_length": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "byte_length",
+        "truncated",
+        "digest"
       ],
       "type": "object"
     },
@@ -13066,6 +13935,54 @@
         "worktree_id",
         "actor_id",
         "policy_digest"
+      ],
+      "type": "object"
+    },
+    "WorkCalibratedSizingV1": {
+      "additionalProperties": false,
+      "description": "Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately\nper Plan 06 :84-85; `support_floor` carries the governing floor into the record.",
+      "properties": {
+        "band": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "The sizing band itself: the stronger of the route's declared effort and\nthe derived shape magnitude, widened when the cohort error is high."
+        },
+        "cohort": {
+          "description": "Identity of the cohort the sizing was calibrated over: the top-ranked\nroute id. Sizing from one cohort is never reused for another.",
+          "type": "string"
+        },
+        "drift_valid": {
+          "description": "False when the cohort contains incomparable or stale observations, so a\nconsumer can refuse a sizing that drifted rather than silently trust it.",
+          "type": "boolean"
+        },
+        "error": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Observed adverse-outcome band over the cohort. An ordinal band, never a\nrate and never a probability."
+        },
+        "horizon": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "Latest comparable observation in the cohort. Nothing after\n`evaluated_at` contributes, so the horizon never runs ahead of the input."
+        },
+        "support": {
+          "description": "Count of comparable in-cohort outcomes backing this sizing.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "support_floor": {
+          "description": "The floor that governed this emission, carried so replay shows which\nfloor applied rather than assuming the current constant.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cohort",
+        "horizon",
+        "support",
+        "support_floor",
+        "error",
+        "drift_valid",
+        "band"
       ],
       "type": "object"
     },
@@ -13278,6 +14195,31 @@
         "graph_version",
         "task_ids",
         "gating_edges"
+      ],
+      "type": "object"
+    },
+    "WorkDecompositionProposalV1": {
+      "additionalProperties": false,
+      "description": "A one-level decomposition proposal. Never recursive: a deeper split is a\nseparate sequenced capability, not something this evaluator may invent.",
+      "properties": {
+        "candidates": {
+          "description": "The proposed sketches, ordinal ascending from 0.",
+          "items": {
+            "$ref": "#/$defs/WorkSubtaskSketchV1"
+          },
+          "type": "array"
+        },
+        "rationale": {
+          "description": "Why the proposal was emitted, in the same ordered reason vocabulary the\ndecision uses.",
+          "items": {
+            "$ref": "#/$defs/WorkProposalReasonV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates",
+        "rationale"
       ],
       "type": "object"
     },
@@ -14243,6 +15185,400 @@
       ],
       "type": "object"
     },
+    "WorkOrdinalBandV1": {
+      "description": "Ordinal band. Never a probability, never a scalar score.\n\nBands are ordered `Lowest` .. `Highest`. Comparison is the only operation\nthe evaluator performs over them, so no weighted sum can be reconstructed\nfrom a recorded decision.",
+      "enum": [
+        "lowest",
+        "low",
+        "moderate",
+        "high",
+        "highest"
+      ],
+      "type": "string"
+    },
+    "WorkPlacementBlockerV1": {
+      "description": "Exactly the conditions Plan 32 names as blocking admission or removal.",
+      "oneOf": [
+        {
+          "const": "dirty_tracked_files",
+          "description": "Tracked files differ from the index or HEAD.",
+          "type": "string"
+        },
+        {
+          "const": "untracked_data",
+          "description": "Untracked data is present in the target.",
+          "type": "string"
+        },
+        {
+          "const": "unique_commits",
+          "description": "The target holds commits reachable from nowhere else.",
+          "type": "string"
+        },
+        {
+          "const": "active_holder",
+          "description": "Another admitted placement holds this target.",
+          "type": "string"
+        },
+        {
+          "const": "unresolved_effect",
+          "description": "An effect against this placement is unresolved.",
+          "type": "string"
+        },
+        {
+          "const": "unacknowledged_receipt",
+          "description": "A receipt produced against this placement is unacknowledged.",
+          "type": "string"
+        },
+        {
+          "const": "uncertain_pull_request",
+          "description": "A pull request produced from this placement is in an uncertain state.",
+          "type": "string"
+        },
+        {
+          "const": "shared_ref",
+          "description": "A ref in this target is shared with another holder.",
+          "type": "string"
+        },
+        {
+          "const": "missing_anchor",
+          "description": "A retrieval or evidence anchor this placement referenced is missing.",
+          "type": "string"
+        },
+        {
+          "const": "stale_scope",
+          "description": "The authorized scope no longer matches the placement.",
+          "type": "string"
+        },
+        {
+          "const": "authorization_lost",
+          "description": "Authorization for this placement was lost.",
+          "type": "string"
+        },
+        {
+          "const": "target_unreadable",
+          "description": "The target could not be read, so its state is unknown.",
+          "type": "string"
+        },
+        {
+          "const": "network_required",
+          "description": "The placement declared itself network-free but the action needs network.",
+          "type": "string"
+        }
+      ],
+      "title": "WorkPlacementBlockerV1"
+    },
+    "WorkPlacementIdentityV1": {
+      "additionalProperties": false,
+      "description": "Which run a placement belongs to. Placement never redefines TaskId.",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id"
+      ],
+      "title": "WorkPlacementIdentityV1",
+      "type": "object"
+    },
+    "WorkPlacementKindV1": {
+      "description": "The supported placement choices, and only those.",
+      "oneOf": [
+        {
+          "const": "no_managed_placement",
+          "description": "TraceDecay manages no checkout for this run. No-Git work is first class.",
+          "type": "string"
+        },
+        {
+          "const": "clean_in_place",
+          "description": "The caller's own strictly clean checkout, explicitly acknowledged.",
+          "type": "string"
+        },
+        {
+          "const": "linked_worktree",
+          "description": "A linked worktree of the same repository.",
+          "type": "string"
+        },
+        {
+          "const": "isolated_clone",
+          "description": "An isolated local clone.",
+          "type": "string"
+        }
+      ],
+      "title": "WorkPlacementKindV1"
+    },
+    "WorkPlacementObservationV1": {
+      "additionalProperties": false,
+      "description": "What was actually observed at the target, in counts rather than prose.\n\nCounts are measurements: a zero is \"we looked and found none\", and\n`readable: false` is the separate state for \"we could not look\". Collapsing\nthem would let an unreadable target read as a clean one.",
+      "properties": {
+        "active_holder": {
+          "description": "Whether another admitted placement already holds this target.",
+          "type": "boolean"
+        },
+        "dirty_tracked_paths": {
+          "description": "Tracked paths that differ from the index or HEAD.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_required": {
+          "description": "Whether the declared network-free placement would require network.",
+          "type": "boolean"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "readable": {
+          "description": "Whether the target could be read at all.",
+          "type": "boolean"
+        },
+        "unique_commits": {
+          "description": "Commits in the target reachable from nowhere else.\n\n`None` means reachability was not measured, and it blocks removal\nexactly as a positive count does: Plan 32 forbids cleaning when the\nstate is \"unknown\", so an unmeasured target is retained rather than\nassumed worthless. Only removal consults this; admission does not.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "untracked_paths": {
+          "description": "Untracked paths present in the target.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dirty_tracked_paths",
+        "untracked_paths",
+        "unique_commits",
+        "readable",
+        "active_holder",
+        "network_required",
+        "observed_at"
+      ],
+      "title": "WorkPlacementObservationV1",
+      "type": "object"
+    },
+    "WorkPlacementPreflightRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "target": {
+          "$ref": "#/$defs/WorkPlacementTargetV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "target",
+        "occurred_at"
+      ],
+      "title": "WorkPlacementPreflightRequestV1",
+      "type": "object"
+    },
+    "WorkPlacementPreflightV1": {
+      "additionalProperties": false,
+      "description": "One placement preflight reading: what was asked for, what was seen, and\nexactly what blocks it.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/WorkPlacementBlockerV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkPlacementIdentityV1"
+        },
+        "observation": {
+          "$ref": "#/$defs/WorkPlacementObservationV1"
+        },
+        "target": {
+          "$ref": "#/$defs/WorkPlacementTargetV1"
+        }
+      },
+      "required": [
+        "identity",
+        "target",
+        "observation",
+        "blockers"
+      ],
+      "title": "WorkPlacementPreflightV1",
+      "type": "object"
+    },
+    "WorkPlacementReadingV1": {
+      "description": "One placement reading. Absence is a state, not an empty placement.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "No placement was ever admitted for this run.",
+          "properties": {
+            "state": {
+              "const": "absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The durable placement relation.",
+          "properties": {
+            "placement": {
+              "$ref": "#/$defs/WorkPlacementV1"
+            },
+            "state": {
+              "const": "placed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "placement"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "WorkPlacementReadingV1"
+    },
+    "WorkPlacementStateV1": {
+      "description": "The durable state of one admitted placement.",
+      "oneOf": [
+        {
+          "const": "admitted",
+          "description": "The placement holds its target.",
+          "type": "string"
+        },
+        {
+          "const": "released",
+          "description": "The placement gave its target up cleanly. Nothing was deleted by this\ntransition; removal is a separate cleanup preflight.",
+          "type": "string"
+        },
+        {
+          "const": "quarantined",
+          "description": "The placement was retained because removal is blocked.",
+          "type": "string"
+        }
+      ],
+      "title": "WorkPlacementStateV1"
+    },
+    "WorkPlacementStatusRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id"
+      ],
+      "title": "WorkPlacementStatusRequestV1",
+      "type": "object"
+    },
+    "WorkPlacementTargetV1": {
+      "additionalProperties": false,
+      "description": "The exact placement a caller asked for.",
+      "properties": {
+        "in_place_acknowledged": {
+          "description": "Set only for `CleanInPlace`: the caller states it accepts running in\nits own checkout. Plan 32 calls this \"explicitly acknowledged\".",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkPlacementKindV1"
+        },
+        "network_free": {
+          "description": "The placement declares it needs no network. Declared, not detected.",
+          "type": "boolean"
+        },
+        "root": {
+          "description": "Absolute root, present exactly when the kind manages one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "root",
+        "in_place_acknowledged",
+        "network_free"
+      ],
+      "title": "WorkPlacementTargetV1",
+      "type": "object"
+    },
+    "WorkPlacementV1": {
+      "additionalProperties": false,
+      "description": "One run's durable placement relation.",
+      "properties": {
+        "authority_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/WorkPlacementBlockerV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkPlacementIdentityV1"
+        },
+        "retention_eligible_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When retention makes this placement *eligible* for a fresh cleanup\npreflight. Eligibility is not delete authority."
+        },
+        "state": {
+          "$ref": "#/$defs/WorkPlacementStateV1"
+        },
+        "target": {
+          "$ref": "#/$defs/WorkPlacementTargetV1"
+        },
+        "transitioned_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "identity",
+        "target",
+        "state",
+        "authority_version",
+        "transitioned_at",
+        "blockers",
+        "retention_eligible_at"
+      ],
+      "title": "WorkPlacementV1",
+      "type": "object"
+    },
     "WorkPlanV1": {
       "additionalProperties": false,
       "properties": {
@@ -14769,6 +16105,17 @@
         "configuration_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
+        "decomposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkDecompositionProposalV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One-level decomposition sketch, present only when more than one\ndependency is unresolved."
+        },
         "deterministic_fallback": {
           "description": "True when the recommendation is the declared deterministic baseline\nselected because the evidence cannot support a stronger claim.",
           "type": "boolean"
@@ -14835,6 +16182,39 @@
               "type": "null"
             }
           ]
+        },
+        "route_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkRoutePlanV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The explained route plan. Present on every evaluation that reached the\ngates, including the one that found no eligible route."
+        },
+        "shape": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkTaskShapeV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Derived task shape. Absent on the invalid, cancelled, and deadline\nshort-circuits, where no planner claim is licensed."
+        },
+        "sizing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkCalibratedSizingV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Calibrated sizing, present only when in-cohort support reached the\ngoverning floor. Absence is a recorded fact, never a fabricated estimate."
         },
         "task_id": {
           "$ref": "#/$defs/TaskId"
@@ -14910,7 +16290,15 @@
         "execution_in_flight",
         "proposal_accepted",
         "dependencies_unresolved",
-        "ready"
+        "ready",
+        "insufficient_calibration_support",
+        "route_budget_exceeded",
+        "route_content_location_refused",
+        "route_evidence_sparse",
+        "route_evidence_stale",
+        "human_override_applied",
+        "no_eligible_routes",
+        "deterministic_baseline_selected"
       ],
       "type": "string"
     },
@@ -14993,6 +16381,36 @@
       ],
       "type": "object"
     },
+    "WorkProviderAvailabilityV1": {
+      "description": "Typed provider availability observed at negotiation. These are product\nstates, not transport errors: each one names why the configured native\nprovider could not run, without inventing a fallback.",
+      "oneOf": [
+        {
+          "const": "absent",
+          "description": "No executable binding is configured for the pinned executable identity.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "The configured binding no longer matches the pinned reference.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "The configured binding does not admit the pinned backend/protocol.",
+          "type": "string"
+        },
+        {
+          "const": "digest_mismatch",
+          "description": "The on-disk executable bytes do not match the pinned digest.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The configured executable could not be read or is not executable.",
+          "type": "string"
+        }
+      ]
+    },
     "WorkProviderBackendV1": {
       "description": "Provider protocol selected by the pinned Work configuration snapshot.",
       "enum": [
@@ -15001,6 +16419,52 @@
         "codex_cli"
       ],
       "type": "string"
+    },
+    "WorkProviderFallbackRecordV1": {
+      "additionalProperties": false,
+      "description": "Why an admitted attempt did not run on the backend its pinned execution\nsnapshot preferred.\n\nPlan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,\n\"Native provider execution\") admits the Codex CLI \"only when app-server is\nunsupported or absent before session start and the pinned Plan 20 snapshot\nexplicitly allows that fallback\", and the plan index requires that fallback\nto be \"reported rather than hidden\". This record is that report: it names\nthe preferred backend, the typed state that disqualified it, and the\nconfiguration-bounded fallback that was selected, so a fallback run can\nnever be read as a first choice.\n\nIt is also written when the fallback itself was refused, so a denial keeps\nboth failures instead of collapsing them into one state.",
+      "properties": {
+        "fallback_backend": {
+          "$ref": "#/$defs/WorkProviderBackendV1",
+          "description": "The backend named by the snapshot's configured fallback topology."
+        },
+        "fallback_route": {
+          "$ref": "#/$defs/WorkProviderRouteV1",
+          "description": "The route that fallback runs on."
+        },
+        "fallback_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProviderAvailabilityV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` when the fallback actually started; `Some(state)` when the\nfallback was itself refused."
+        },
+        "preferred_backend": {
+          "$ref": "#/$defs/WorkProviderBackendV1",
+          "description": "The backend the pinned snapshot named first."
+        },
+        "preferred_route": {
+          "$ref": "#/$defs/WorkProviderRouteV1",
+          "description": "The route that backend would have run on."
+        },
+        "preferred_state": {
+          "$ref": "#/$defs/WorkProviderAvailabilityV1",
+          "description": "Why the preferred backend could not be used."
+        }
+      },
+      "required": [
+        "preferred_backend",
+        "preferred_route",
+        "preferred_state",
+        "fallback_backend",
+        "fallback_route",
+        "fallback_state"
+      ],
+      "type": "object"
     },
     "WorkProviderProtocol": {
       "enum": [
@@ -15027,6 +16491,57 @@
       "required": [
         "provider_id",
         "route_id"
+      ],
+      "type": "object"
+    },
+    "WorkRankedRouteV1": {
+      "additionalProperties": false,
+      "description": "Ranked route. Dimensions stay SEPARATE — no scalar score field is permitted here.",
+      "properties": {
+        "autonomy": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Autonomy fitness, echoed unmerged."
+        },
+        "correctness": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Correctness fitness, echoed so the ranking can be audited without the input."
+        },
+        "cost": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Cost fitness, oriented so `Highest` is best-fitting."
+        },
+        "evidence_quality": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Evidence-quality fitness, echoed unmerged."
+        },
+        "latency": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Latency fitness, oriented so `Highest` is best-fitting."
+        },
+        "rank": {
+          "description": "Position in the ranking, ascending from 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "route_id": {
+          "description": "The ranked route's identity.",
+          "type": "string"
+        },
+        "sensitive_data_fitness": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Sensitive-data fitness, echoed unmerged."
+        }
+      },
+      "required": [
+        "rank",
+        "route_id",
+        "correctness",
+        "sensitive_data_fitness",
+        "latency",
+        "cost",
+        "autonomy",
+        "evidence_quality"
       ],
       "type": "object"
     },
@@ -15256,6 +16771,288 @@
         }
       ]
     },
+    "WorkRouteExclusionV1": {
+      "additionalProperties": false,
+      "description": "One refused route and the single reason that refused it. Exclusion is\nrecorded rather than silent so a missing route is always explained.",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/WorkProposalReasonV1",
+          "description": "The first limit the route failed, in the declared exclusion order."
+        },
+        "route_id": {
+          "description": "The refused route's identity.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "route_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "WorkRoutePlanV1": {
+      "additionalProperties": false,
+      "description": "The explained route plan for one decision. Recommends; never dispatches.",
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Fraction-free ordinal coverage of the cohort evidence over the ranked set."
+        },
+        "deterministic_baseline": {
+          "description": "The declared deterministic baseline, selected when evidence cannot support a\nstronger claim. Always names a route that survived exclusion, or None when none did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclusions": {
+          "description": "Every refused route with its reason, in supplied order.",
+          "items": {
+            "$ref": "#/$defs/WorkRouteExclusionV1"
+          },
+          "type": "array"
+        },
+        "human_override_applied": {
+          "description": "True only when a recorded human override named a route that survived\nexclusion. An excluded or unknown override leaves ranking untouched.",
+          "type": "boolean"
+        },
+        "ranked": {
+          "description": "Surviving routes in total, deterministic order, rank ascending from 1.",
+          "items": {
+            "$ref": "#/$defs/WorkRankedRouteV1"
+          },
+          "type": "array"
+        },
+        "uncertainty": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Widens on sparse / stale / incomparable evidence."
+        }
+      },
+      "required": [
+        "ranked",
+        "exclusions",
+        "deterministic_baseline",
+        "coverage",
+        "uncertainty",
+        "human_override_applied"
+      ],
+      "type": "object"
+    },
+    "WorkRunControlAuthorityV1": {
+      "description": "A monotonically versioned control authority.",
+      "format": "uint64",
+      "minimum": 0,
+      "title": "WorkRunControlAuthorityV1",
+      "type": "integer"
+    },
+    "WorkRunControlReadingV1": {
+      "description": "One run's control reading.\n\n`Uncontrolled` is a distinct answer from `Controlled`: it says the run is\nadmitted and running under its admitted deadline with no control transition\never published, which is not the same as a control row that happens to say\n`Running`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The run holds durable attempts but no control transition has ever been\npublished for it.",
+          "properties": {
+            "deadline": {
+              "$ref": "#/$defs/UtcMicros",
+              "description": "The admitted deadline the run is running against."
+            },
+            "live_attempts": {
+              "description": "Attempts that have not reached a terminal state.",
+              "items": {
+                "$ref": "#/$defs/AttemptId"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "uncontrolled",
+              "type": "string"
+            },
+            "total_attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "deadline",
+            "live_attempts",
+            "total_attempts"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The published control aggregate, plus the live frontier as of this\nread (which may differ from the frontier the transition fenced).",
+          "properties": {
+            "control": {
+              "$ref": "#/$defs/WorkRunControlV1"
+            },
+            "live_attempts": {
+              "items": {
+                "$ref": "#/$defs/AttemptId"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "controlled",
+              "type": "string"
+            },
+            "total_attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "control",
+            "live_attempts",
+            "total_attempts"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "WorkRunControlReadingV1"
+    },
+    "WorkRunControlReasonV1": {
+      "description": "Why a run was paused or resumed. A closed vocabulary keeps the reason out\nof free text so it can be read by a projection without being a prompt.",
+      "oneOf": [
+        {
+          "const": "operator_request",
+          "description": "An authorized operator asked for the transition.",
+          "type": "string"
+        },
+        {
+          "const": "human_wait",
+          "description": "The run is waiting on a human approval or answer.",
+          "type": "string"
+        },
+        {
+          "const": "budget_exhausted",
+          "description": "The shared budget ledger is exhausted for now.",
+          "type": "string"
+        },
+        {
+          "const": "recovery",
+          "description": "Recovery or failover is reconciling the run.",
+          "type": "string"
+        }
+      ],
+      "title": "WorkRunControlReasonV1"
+    },
+    "WorkRunControlRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id"
+      ],
+      "title": "WorkRunControlRequestV1",
+      "type": "object"
+    },
+    "WorkRunControlStateV1": {
+      "description": "The published control state of one run.\n\nThere is no `Cancelled` here: cancellation is an attempt-level authority\nthat Plan 32 already owns through the lease fence, and duplicating it as a\nrun state would create a second place a run could be \"over\".",
+      "oneOf": [
+        {
+          "const": "running",
+          "description": "New reservations are admitted.",
+          "type": "string"
+        },
+        {
+          "const": "paused",
+          "description": "New reservations are fenced; committed evidence is preserved.",
+          "type": "string"
+        }
+      ],
+      "title": "WorkRunControlStateV1"
+    },
+    "WorkRunControlV1": {
+      "additionalProperties": false,
+      "description": "One run's durable control aggregate.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/WorkRunControlAuthorityV1"
+        },
+        "deadline": {
+          "$ref": "#/$defs/WorkRunDeadlineCheckpointV1"
+        },
+        "fenced_attempts": {
+          "description": "The exact attempts that were live when the current state published.\nEmpty means \"none were live\", never \"we did not look\".",
+          "items": {
+            "$ref": "#/$defs/AttemptId"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkRunControlReasonV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkRunControlStateV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "transitioned_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "state",
+        "authority",
+        "deadline",
+        "reason",
+        "transitioned_at",
+        "fenced_attempts"
+      ],
+      "title": "WorkRunControlV1",
+      "type": "object"
+    },
+    "WorkRunDeadlineCheckpointV1": {
+      "additionalProperties": false,
+      "description": "The run's deadline as of the last control transition.\n\n`remaining_micros` is the authority; `deadline` is the absolute instant that\nremaining resolves to while the run is running. Both are recorded so a\nreader never has to recompute one from a clock it does not trust.",
+      "properties": {
+        "checkpoint_at": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "The instant the checkpoint was taken."
+        },
+        "deadline": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "The absolute deadline the run is measured against right now."
+        },
+        "remaining_micros": {
+          "description": "Micros left against that deadline at `checkpoint_at`. Never negative,\nand never larger than the value the previous checkpoint carried.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deadline",
+        "remaining_micros",
+        "checkpoint_at"
+      ],
+      "title": "WorkRunDeadlineCheckpointV1",
+      "type": "object"
+    },
     "WorkRuntimeAttemptProjectionV1": {
       "additionalProperties": false,
       "properties": {
@@ -15448,6 +17245,299 @@
       ],
       "type": "object"
     },
+    "WorkSubtaskSketchV1": {
+      "additionalProperties": false,
+      "description": "One level only (Q3). Read-only sketch; accepting it stays a separate version-checked command.",
+      "properties": {
+        "ordinal": {
+          "description": "Position in the proposal, ascending from 0. Stable across replays of the\nsame input.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shape": {
+          "$ref": "#/$defs/WorkTaskShapeKindV1",
+          "description": "Kind the sketch would carry if it were accepted as its own task."
+        },
+        "summary": {
+          "description": "What the sketch covers, phrased from the declared counts alone.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ordinal",
+        "summary",
+        "shape"
+      ],
+      "type": "object"
+    },
+    "WorkSynthesisAttemptV1": {
+      "description": "The typed outcome of a synthesis request: an admitted attempt, or the\nsealed unsynthesized set when synthesis could not truthfully begin.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The admitted synthesis attempt and everything it is accountable to.",
+          "properties": {
+            "attempt": {
+              "$ref": "#/$defs/WorkAttemptV1",
+              "description": "The leased (or idempotently replayed) synthesis attempt."
+            },
+            "draft": {
+              "$ref": "#/$defs/WorkflowSynthesisDraft",
+              "description": "The citation obligation, complete by construction: the draft cites\nevery citable source digest and is verified downstream by\n[`crate::workflow_synthesis::verify_workflow_synthesis_draft`]."
+            },
+            "groups": {
+              "description": "Disagreement structure over the succeeded sources.",
+              "items": {
+                "$ref": "#/$defs/WorkSynthesisEvidenceGroupV1"
+              },
+              "type": "array"
+            },
+            "source_set": {
+              "$ref": "#/$defs/WorkSynthesisSourceSetV1",
+              "description": "The sealed source envelopes the attempt was admitted against."
+            },
+            "synthesis": {
+              "const": "admitted",
+              "type": "string"
+            },
+            "uncited": {
+              "description": "Sources preserved without citations — failures, unknowns, and\nartifact-less successes — in the caller's requested order.",
+              "items": {
+                "$ref": "#/$defs/WorkAttemptIdentityV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "synthesis",
+            "attempt",
+            "source_set",
+            "groups",
+            "draft",
+            "uncited"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "refusal": {
+              "$ref": "#/$defs/WorkSynthesisRefusalV1"
+            },
+            "sources": {
+              "$ref": "#/$defs/WorkSynthesisSourceSetV1"
+            },
+            "synthesis": {
+              "const": "unsynthesized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "synthesis",
+            "sources",
+            "refusal"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkSynthesisEvidenceGroupV1": {
+      "additionalProperties": false,
+      "description": "Succeeded sources grouped by the exact artifact digest list they produced.\nGroups are ordered largest first; smaller groups are the minority\nevidence, and more than one group is the disagreement, preserved as\nstructure instead of being resolved by fiat.",
+      "properties": {
+        "artifacts": {
+          "description": "The artifact digest list every source in this group produced.",
+          "items": {
+            "$ref": "#/$defs/ManifestDigest"
+          },
+          "type": "array"
+        },
+        "sources": {
+          "description": "The concurring sources, in the caller's requested order.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptIdentityV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "artifacts",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "WorkSynthesisRefusalV1": {
+      "description": "Why a synthesis request was answered with the unsynthesized set instead\nof an admitted attempt.",
+      "oneOf": [
+        {
+          "const": "no_citable_sources",
+          "description": "No source contributed a citable artifact: every source failed, was\ncancelled, timed out, is still unknown, or succeeded without\ndeclaring artifacts. There is nothing a synthesis could truthfully\ncite.",
+          "type": "string"
+        }
+      ]
+    },
+    "WorkSynthesisSourceEnvelopeV1": {
+      "additionalProperties": false,
+      "description": "One immutable source envelope: which attempt, and what it truthfully\ncontributed at admission time.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/WorkSynthesisSourceOutcomeV1"
+        },
+        "source": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        }
+      },
+      "required": [
+        "source",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "WorkSynthesisSourceOutcomeV1": {
+      "description": "One sibling attempt's terminal contribution, captured verbatim from the\nWork authority at admission time.",
+      "oneOf": [
+        {
+          "description": "The source succeeded; its declared artifact digests, in declaration\norder, are the evidence a synthesis may cite.",
+          "properties": {
+            "artifacts": {
+              "items": {
+                "$ref": "#/$defs/ManifestDigest"
+              },
+              "type": "array"
+            },
+            "outcome": {
+              "const": "succeeded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "artifacts"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The source failed; its sealed terminal evidence digest is preserved\nso the failure stays visible in the synthesis record.",
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "outcome": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The source timed out; preserved like a failure.",
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "outcome": {
+              "const": "timed_out",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The source was cancelled; preserved like a failure.",
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "outcome": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The source has not reached a terminal state. The unknown is preserved\nas an unknown; it contributes no citable evidence and is never\nguessed at.",
+          "properties": {
+            "outcome": {
+              "const": "unknown",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/WorkAttemptStateV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkSynthesisSourceSetV1": {
+      "additionalProperties": false,
+      "description": "The ordered, digest-sealed source envelope set a synthesis admission\nconsumed. Reordering or mutating any envelope changes the digest, so a\nreplayed or tampered set is distinguishable from the admitted one.",
+      "properties": {
+        "set_digest": {
+          "$ref": "#/$defs/ManifestDigest",
+          "description": "Canonical digest over the ordered envelopes."
+        },
+        "sources": {
+          "description": "The envelopes, exactly in the caller's requested order.",
+          "items": {
+            "$ref": "#/$defs/WorkSynthesisSourceEnvelopeV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources",
+        "set_digest"
+      ],
+      "type": "object"
+    },
+    "WorkTaskShapeKindV1": {
+      "description": "Kind of work the snapshot facts describe. Derived only from facts already in\nthe input; `Unclassified` when those facts do not distinguish a kind.",
+      "enum": [
+        "investigation",
+        "change",
+        "verification",
+        "synthesis",
+        "unclassified"
+      ],
+      "type": "string"
+    },
+    "WorkTaskShapeV1": {
+      "additionalProperties": false,
+      "description": "The derived shape of the task: what kind of work it is and how large the\ndeclared dependency and evidence counts make it.",
+      "properties": {
+        "band": {
+          "$ref": "#/$defs/WorkOrdinalBandV1",
+          "description": "Magnitude band derived from the declared dependency and evidence counts."
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkTaskShapeKindV1",
+          "description": "Kind derived from the gate booleans and counts. No new discovery."
+        }
+      },
+      "required": [
+        "kind",
+        "band"
+      ],
+      "type": "object"
+    },
     "WorkTerminalEvidenceV1": {
       "oneOf": [
         {
@@ -15611,6 +17701,109 @@
       ],
       "type": "object"
     },
+    "WorkTopologyExecutionPlacementV1": {
+      "additionalProperties": false,
+      "description": "The execution-placement dimension: the policy's placement mode plus one\nlane per distinct `(task, run)` pair in page order.",
+      "properties": {
+        "lanes": {
+          "items": {
+            "$ref": "#/$defs/WorkTopologyPlacementLaneV1"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "$ref": "#/$defs/WorktreePlacementModeV1"
+        }
+      },
+      "required": [
+        "mode",
+        "lanes"
+      ],
+      "title": "WorkTopologyExecutionPlacementV1",
+      "type": "object"
+    },
+    "WorkTopologyIntegrationStrategyV1": {
+      "additionalProperties": false,
+      "description": "The integration-strategy dimension, read verbatim from the resolved work\ntopology policy the runs in scope are admitted against.",
+      "properties": {
+        "cross_merge": {
+          "$ref": "#/$defs/CrossMergePolicyV1"
+        },
+        "gates": {
+          "$ref": "#/$defs/TopologyGatePolicyV1"
+        },
+        "protected_refs": {
+          "items": {
+            "$ref": "#/$defs/ProtectedRefRuleV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cross_merge",
+        "gates",
+        "protected_refs"
+      ],
+      "title": "WorkTopologyIntegrationStrategyV1",
+      "type": "object"
+    },
+    "WorkTopologyPlacementLaneV1": {
+      "additionalProperties": false,
+      "description": "One execution-placement lane: a distinct `(task, run)` pair from the\nattempt page joined to its durable placement reading. Placement absence is\na state on the lane, not a dropped lane.",
+      "properties": {
+        "attempt_count": {
+          "description": "Attempts this lane carried within the requested page.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "placement": {
+          "$ref": "#/$defs/WorkPlacementReadingV1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "attempt_count",
+        "placement"
+      ],
+      "title": "WorkTopologyPlacementLaneV1",
+      "type": "object"
+    },
+    "WorkTopologyViewRequestV1": {
+      "additionalProperties": false,
+      "description": "One page-bounded topology view read. The cursor vocabulary is the attempt\nlist's: a cursor minted under a superseded topology generation is a typed\nstaleness refusal, never a silently different page.",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptListCursorV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "page_size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_size",
+        "cursor"
+      ],
+      "title": "WorkTopologyViewRequestV1",
+      "type": "object"
+    },
     "WorkWorkloadProjectionV1": {
       "additionalProperties": false,
       "properties": {
@@ -15680,9 +17873,105 @@
       "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
       "type": "string"
     },
+    "WorkflowOutputName": {
+      "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+      "type": "string"
+    },
+    "WorkflowSynthesisDraft": {
+      "additionalProperties": false,
+      "description": "A provider's claim that one artifact of a fan-out output synthesizes its\nsibling source artifacts.",
+      "properties": {
+        "cited_source_digests": {
+          "description": "Content digests of every source artifact the synthesis consumed.",
+          "items": {
+            "$ref": "#/$defs/ManifestDigest"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "output_name": {
+          "$ref": "#/$defs/WorkflowOutputName",
+          "description": "The fan-out output the synthesis belongs to."
+        },
+        "synthesis_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1",
+          "description": "The attempt that produced the synthesis artifact inside that output."
+        }
+      },
+      "required": [
+        "output_name",
+        "synthesis_attempt",
+        "cited_source_digests"
+      ],
+      "type": "object"
+    },
+    "WorktreeCleanlinessRequirementV1": {
+      "enum": [
+        "require_clean",
+        "allow_untracked_only_for_preflight",
+        "read_only_preflight_only"
+      ],
+      "type": "string"
+    },
     "WorktreeId": {
       "description": "Strongly typed canonical identity: `WorktreeId`.",
       "type": "string"
+    },
+    "WorktreePlacementModeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "existing_worktree_only",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "sibling_of_primary_checkout",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "repository_local_root",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "configured_root",
+              "type": "string"
+            },
+            "root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "root_id"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15860,6 +18149,18 @@
     "work_admit_execution_command": {
       "$ref": "#/$defs/AdmitExecutionCommand"
     },
+    "work_admit_placement_command": {
+      "$ref": "#/$defs/AdmitWorkPlacementCommand"
+    },
+    "work_admit_synthesis_command": {
+      "$ref": "#/$defs/AdmitWorkSynthesisCommand"
+    },
+    "work_artifact_hydration": {
+      "$ref": "#/$defs/WorkArtifactHydrationV1"
+    },
+    "work_artifact_hydration_request": {
+      "$ref": "#/$defs/WorkArtifactHydrationRequestV1"
+    },
     "work_attach_runtime_evidence_command": {
       "$ref": "#/$defs/AttachRuntimeEvidenceCommand"
     },
@@ -15896,6 +18197,24 @@
     "work_graph_read_request": {
       "$ref": "#/$defs/WorkGraphReadRequestV1"
     },
+    "work_pause_run_command": {
+      "$ref": "#/$defs/PauseWorkRunCommand"
+    },
+    "work_placement": {
+      "$ref": "#/$defs/WorkPlacementV1"
+    },
+    "work_placement_preflight": {
+      "$ref": "#/$defs/WorkPlacementPreflightV1"
+    },
+    "work_placement_preflight_request": {
+      "$ref": "#/$defs/WorkPlacementPreflightRequestV1"
+    },
+    "work_placement_reading": {
+      "$ref": "#/$defs/WorkPlacementReadingV1"
+    },
+    "work_placement_status_request": {
+      "$ref": "#/$defs/WorkPlacementStatusRequestV1"
+    },
     "work_projection": {
       "$ref": "#/$defs/WorkProjection"
     },
@@ -15911,11 +18230,17 @@
     "work_projection_snapshot_request": {
       "$ref": "#/$defs/WorkProjectionSnapshotRequestV1"
     },
+    "work_release_placement_command": {
+      "$ref": "#/$defs/ReleaseWorkPlacementCommand"
+    },
     "work_replan_dependencies_command": {
       "$ref": "#/$defs/ReplanDependenciesCommand"
     },
     "work_resume_attempts_command": {
       "$ref": "#/$defs/ResumeWorkAttemptsCommand"
+    },
+    "work_resume_run_command": {
+      "$ref": "#/$defs/ResumeWorkRunCommand"
     },
     "work_review_proposal_command": {
       "$ref": "#/$defs/ReviewProposalCommand"
@@ -15923,8 +18248,26 @@
     "work_review_proposal_request": {
       "$ref": "#/$defs/ReviewProposalRequestV1"
     },
+    "work_run_control": {
+      "$ref": "#/$defs/WorkRunControlV1"
+    },
+    "work_run_control_reading": {
+      "$ref": "#/$defs/WorkRunControlReadingV1"
+    },
+    "work_run_control_request": {
+      "$ref": "#/$defs/WorkRunControlRequestV1"
+    },
     "work_start_attempt_command": {
       "$ref": "#/$defs/StartWorkAttemptCommand"
+    },
+    "work_synthesis_attempt": {
+      "$ref": "#/$defs/WorkSynthesisAttemptV1"
+    },
+    "work_topology_view": {
+      "$ref": "#/$defs/ExecutionTopologyViewV1"
+    },
+    "work_topology_view_request": {
+      "$ref": "#/$defs/WorkTopologyViewRequestV1"
     }
   },
   "required": [
@@ -15988,6 +18331,8 @@
     "work_accept_task_command",
     "work_projection",
     "work_start_attempt_command",
+    "work_admit_synthesis_command",
+    "work_synthesis_attempt",
     "work_attempt_status_request",
     "work_cancel_attempt_command",
     "work_resume_attempts_command",
@@ -15997,6 +18342,22 @@
     "work_attempt_list",
     "work_graph_read_request",
     "work_graph_read",
+    "work_artifact_hydration_request",
+    "work_artifact_hydration",
+    "work_pause_run_command",
+    "work_resume_run_command",
+    "work_run_control",
+    "work_run_control_request",
+    "work_run_control_reading",
+    "work_placement_preflight_request",
+    "work_placement_preflight",
+    "work_admit_placement_command",
+    "work_release_placement_command",
+    "work_placement",
+    "work_placement_status_request",
+    "work_placement_reading",
+    "work_topology_view_request",
+    "work_topology_view",
     "multi_root_capability",
     "multi_root_scope_set_read_request",
     "multi_root_scope_set",
