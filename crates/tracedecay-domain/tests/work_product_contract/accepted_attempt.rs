@@ -142,6 +142,66 @@ fn accepted_attempt_links_exact_evidence_without_copying_runtime_state() {
 }
 
 #[test]
+fn accepted_attempt_wire_is_json_safe_deterministic_and_rejects_duplicate_or_malformed_entries() {
+    let task_id = id::<TaskId>("task.attempt.wire");
+    let evidence = |link_id: &str, suffix: &str| {
+        TaskEvidenceLinkV1::new(
+            id(link_id),
+            1,
+            task_id.clone(),
+            id(&format!("anchor.attempt.wire.{suffix}")),
+            digest('d'),
+            UtcMicros(70),
+        )
+        .unwrap()
+    };
+    let graph = graph(vec![item(task_id.as_str(), &[], 8)])
+        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
+            task_id: task_id.clone(),
+            based_on_version: WorkGraphVersionV1::initial(),
+            identity: attempt(&task_id, "z"),
+            evidence: evidence("evidence.attempt.wire.z", "z"),
+            linked_at: UtcMicros(75),
+        })
+        .unwrap()
+        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
+            task_id: task_id.clone(),
+            based_on_version: WorkGraphVersionV1::new(2).unwrap(),
+            identity: attempt(&task_id, "a"),
+            evidence: evidence("evidence.attempt.wire.a", "a"),
+            linked_at: UtcMicros(76),
+        })
+        .unwrap();
+
+    let wire = serde_json::to_value(&graph).expect("accepted attempts are JSON-safe");
+    let attempts = wire["items"][0]["accepted_attempts"]
+        .as_array()
+        .expect("accepted attempts are a JSON array of identity-link entries");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["identity"]["run_id"], "run.a");
+    assert_eq!(attempts[1]["identity"]["run_id"], "run.z");
+
+    let encoded = canonical_json_bytes(&graph).expect("accepted attempt graph is canonicalizable");
+    let recovered: WorkProductGraphV1 =
+        serde_json::from_value(wire.clone()).expect("canonical accepted-attempt wire recovers");
+    assert_eq!(recovered, graph);
+    assert_eq!(canonical_json_bytes(&recovered).unwrap(), encoded);
+
+    let mut duplicate = wire.clone();
+    let duplicate_entry = duplicate["items"][0]["accepted_attempts"][0].clone();
+    duplicate["items"][0]["accepted_attempts"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate_entry);
+    assert!(serde_json::from_value::<WorkProductGraphV1>(duplicate).is_err());
+
+    let mut malformed = wire;
+    malformed["items"][0]["accepted_attempts"][0]["identity"]["task_id"] =
+        serde_json::json!("task.someone-else");
+    assert!(serde_json::from_value::<WorkProductGraphV1>(malformed).is_err());
+}
+
+#[test]
 fn accepted_attempt_links_reject_stale_mismatched_and_duplicate_evidence() {
     let task_id = id::<TaskId>("task.attempt");
     let original = graph(vec![item(task_id.as_str(), &[], 8)]);

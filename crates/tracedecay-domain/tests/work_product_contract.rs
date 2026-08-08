@@ -16,7 +16,7 @@ use tracedecay_domain::{
     WorkRelationReplanProposalV1, WorkRouteDecisionV1, WorkRuntimeAttemptProjectionV1,
     WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
     WorkShapeAssessmentV1, WorkSizingV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
-    WorkTimelineLaneV1,
+    WorkTimelineLaneV1, canonical_json_bytes,
 };
 
 fn id<T>(value: &str) -> T

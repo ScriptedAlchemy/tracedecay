@@ -591,6 +591,8 @@ impl WorkProductGraphV1 {
         self.version = self.version.next()?;
         self.items
             .sort_by(|left, right| left.task_id().cmp(right.task_id()));
+        self.evidence
+            .sort_by(|left, right| left.link_id().cmp(right.link_id()));
         self.validate()?;
         Ok(self)
     }

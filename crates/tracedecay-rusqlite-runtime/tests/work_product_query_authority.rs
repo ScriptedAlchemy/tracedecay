@@ -13,19 +13,14 @@
 //! something — content behind an anchor, and links a caller's own limit
 //! excluded — are asserted as named absences rather than as data.
 //!
-//! ## Why the evidence is declared at creation
+//! ## Why this suite declares evidence at creation
 //!
 //! Evidence enters a graph in exactly two ways: as part of the initial graph a
 //! create request declares, or through `WorkGraphChangeV1::AcceptedAttemptLinked`.
-//! The second path cannot be exercised here, and not for a test reason:
-//! `WorkItemV1::accepted_attempts` is a `BTreeMap` keyed by
-//! `WorkAttemptIdentityV1`, and the canonical serializer rejects non-string map
-//! keys ("key must be a string"), so digesting a graph that carries an accepted
-//! attempt fails and publication reports `ReconciliationRequired`. That is a
-//! defect in the mutation/publication path, not in the read ports under test,
-//! so this suite declares its evidence through the create request — which is
-//! how a deserialized `CreateWorkProductRequestV1` carries one in production —
-//! and leaves that defect to the authority that owns it.
+//! The mutation/publication authority covers the accepted-attempt route through
+//! a registered-store restart and idempotent replay in its graph suite. This
+//! suite keeps the initial declaration route because its read assertions need
+//! evidence present in the first version, not because that mutation is absent.
 
 mod work_registered_store;
 
