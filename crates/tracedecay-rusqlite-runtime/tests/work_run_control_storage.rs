@@ -99,7 +99,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: ADMITTED_DEADLINE,
         fallback: WorkFallbackTopology::Disabled,
-        topology_policy_digest: digest('f'),
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
     .unwrap()
 }

@@ -48,14 +48,6 @@
 //! seals [`WorkAttemptProviderOutcomeV1::ProtocolFailed`] and never silently
 //! re-runs on the CLI.
 //!
-//! # Known divergence
-//!
-//! The stdio transport applies `env_clear()` plus the admitted environment
-//! allowlist. The reused app-server session client
-//! (`tracedecay_sessions::runtime::codex_app_server`) does not clear the
-//! environment, so an app-server child currently inherits the daemon's. That
-//! is a gap in the shared session machinery, not in this gate.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -209,7 +201,15 @@ async fn run_attempt(
     match select_provider(&project_root, &attempt) {
         Ok(selection) => match selection.provider.protocol {
             WorkProviderProtocol::CodexAppServerJsonRpc => {
-                execute_app_server(attempts, &context, &attempt, &selection, cancel).await;
+                execute_app_server(
+                    attempts,
+                    &context,
+                    &attempt,
+                    &selection,
+                    &admitted_environment,
+                    cancel,
+                )
+                .await;
             }
             _ => {
                 execute_provider_with_environment(
@@ -444,33 +444,14 @@ fn settle_unstarted<S, P, W>(
     }
 }
 
-async fn execute_provider<S, P, W>(
-    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
-    context: &RequestContext,
-    attempt: &WorkAttemptV1,
-    selection: &ProviderSelection,
-    cancel: Arc<Notify>,
-) where
-    S: tracedecay_application::WorkAttemptStoragePort,
-    P: tracedecay_application::WorkProjectionReadPort,
-    W: tracedecay_application::WorkStoragePort,
-{
-    let admitted_environment =
-        admitted_provider_environment(attempt.execution().execution_snapshot());
-    execute_provider_with_environment(
-        attempts,
-        context,
-        attempt,
-        selection,
-        &admitted_environment,
-        cancel,
-    )
-    .await;
-}
-
-/// Captures the exact variables the admitted snapshot permits. A missing
-/// allowlisted value stays absent; no empty replacement or ambient fallback is
-/// invented for the provider child.
+/// Resolves the values of exactly the keys the durable snapshot admits.
+///
+/// This map exists only for one child launch: an initial spawn captures the
+/// current allowed values once, while recovery resolves current values again
+/// under the same admitted key policy. Plaintext values never enter the
+/// durable attempt authority; credential references resolve just in time.
+/// A missing allowlisted value stays absent rather than receiving an invented
+/// empty replacement or an unadmitted ambient fallback.
 fn admitted_provider_environment(
     snapshot: &tracedecay_domain::WorkExecutionSnapshot,
 ) -> BTreeMap<String, std::ffi::OsString> {
@@ -635,6 +616,7 @@ async fn execute_app_server<S, P, W>(
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
+    admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
@@ -672,6 +654,7 @@ async fn execute_app_server<S, P, W>(
     let prompt = envelope.instructions().to_owned();
     let cwd = PathBuf::from(envelope.worktree_root());
     let session_cancellation = cancellation.clone();
+    let admitted_environment = admitted_environment.clone();
     let mut session = tokio::task::spawn_blocking(move || {
         run_work_with_codex_app_server(
             &prompt,
@@ -680,6 +663,7 @@ async fn execute_app_server<S, P, W>(
             &session_cancellation,
             &cwd,
             wall,
+            &admitted_environment,
         )
         .map(|summary| summary.text)
         .map_err(|error| error.to_string())

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ConfigurationRevisionId, ConfigurationSnapshotId, CredentialReferenceId, ManifestDigest,
     UtcMicros, WorkProviderBackendV1, WorkProviderRouteV1, WorkRuntimeContractError,
-    canonical_text,
+    WorkTopologyPolicyV1, canonical_text,
 };
 
 const MAX_ENVIRONMENT_KEYS: usize = 128;
@@ -209,9 +209,19 @@ pub struct WorkExecutionSnapshotInput {
     pub limits: WorkExecutionLimits,
     pub deadline: UtcMicros,
     pub fallback: WorkFallbackTopology,
-    pub topology_policy_digest: ManifestDigest,
+    /// The complete placement and Git-topology constraint admitted with this
+    /// execution: sealed worktree roots, protected refs, integration mode,
+    /// clean/test/review gates, retention eligibility, and notification level.
+    /// The policy is carried by value so a later configuration change cannot
+    /// reinterpret an active attempt, and its root locators stay sealed so no
+    /// raw path reaches an execution adapter.
+    pub topology: WorkTopologyPolicyV1,
 }
 
+/// Immutable provider and topology authority pinned for exactly one Work
+/// execution. Every constraint the execution is governed by is named here;
+/// nothing in this value is an opaque stand-in that a reader must resolve
+/// against a mutable store.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkExecutionSnapshot {
@@ -233,7 +243,10 @@ pub struct WorkExecutionSnapshot {
     limits: WorkExecutionLimits,
     deadline: UtcMicros,
     fallback: WorkFallbackTopology,
-    topology_policy_digest: ManifestDigest,
+    /// See [`WorkExecutionSnapshotInput::topology`]. Validated on construction,
+    /// so an admitted snapshot can never pin a topology that weakens the
+    /// protected-ref floor or permits a native integration without its gates.
+    topology: WorkTopologyPolicyV1,
 }
 
 impl WorkExecutionSnapshot {
@@ -257,7 +270,7 @@ impl WorkExecutionSnapshot {
             limits: input.limits,
             deadline: input.deadline,
             fallback: input.fallback,
-            topology_policy_digest: input.topology_policy_digest,
+            topology: input.topology,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -269,7 +282,7 @@ impl WorkExecutionSnapshot {
             .and_then(|_| self.configuration_snapshot_id.validate())
             .and_then(|_| self.effective_behavior_digest.validate())
             .and_then(|_| self.resolution_provenance_digest.validate())
-            .and_then(|_| self.topology_policy_digest.validate())
+            .and_then(|_| self.topology.validate())
             .map_err(|_| WorkRuntimeContractError::InvalidExecutionSnapshot)?;
         if !canonical_text::is_canonical_text_within(&self.model, 256)
             || self.deadline.0 <= 0
@@ -371,8 +384,11 @@ impl WorkExecutionSnapshot {
         &self.fallback
     }
 
-    pub fn topology_policy_digest(&self) -> &ManifestDigest {
-        &self.topology_policy_digest
+    /// The pinned placement and Git-topology constraint. Callers that need the
+    /// frozen digest derive it with [`WorkTopologyPolicyV1::compute_digest`]
+    /// rather than trusting a separately supplied one.
+    pub fn topology(&self) -> &WorkTopologyPolicyV1 {
+        &self.topology
     }
 }
 
@@ -407,7 +423,7 @@ struct WorkExecutionSnapshotInputWire {
     limits: WorkExecutionLimits,
     deadline: UtcMicros,
     fallback: WorkFallbackTopology,
-    topology_policy_digest: ManifestDigest,
+    topology: WorkTopologyPolicyV1,
 }
 
 impl From<WorkExecutionSnapshotInputWire> for WorkExecutionSnapshotInput {
@@ -431,7 +447,7 @@ impl From<WorkExecutionSnapshotInputWire> for WorkExecutionSnapshotInput {
             limits: wire.limits,
             deadline: wire.deadline,
             fallback: wire.fallback,
-            topology_policy_digest: wire.topology_policy_digest,
+            topology: wire.topology,
         }
     }
 }

@@ -499,8 +499,7 @@ fn execution_snapshot(
             .expect("execution limits"),
         deadline: UtcMicros(now_micros().saturating_add(deadline_seconds * 1_000_000)),
         fallback: WorkFallbackTopology::Disabled,
-        topology_policy_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-            .expect("topology policy digest"),
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
     .expect("valid execution snapshot");
     serde_json::to_value(snapshot).expect("execution snapshot encodes")

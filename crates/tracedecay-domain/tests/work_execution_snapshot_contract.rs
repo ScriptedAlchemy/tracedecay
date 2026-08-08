@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    ConfigurationRevisionId, ConfigurationSnapshotId, CredentialReferenceId, ManifestDigest,
-    ProviderId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFilesystemPolicy, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkRuntimeContractError, WorkSandboxPolicy,
+    AutomaticWorktreeGcV1, ConfigurationRevisionId, ConfigurationSnapshotId, CredentialReferenceId,
+    CrossMergeModeV1, ManifestDigest, ProviderId, TopologyNotificationLevelV1, UtcMicros,
+    WorkApprovalPolicy, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
+    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRuntimeContractError, WorkSandboxPolicy, WorktreeCleanlinessRequirementV1,
+    safe_work_topology_policy_v1,
 };
 
 fn id<T>(value: &str) -> T
@@ -56,7 +58,7 @@ fn input() -> WorkExecutionSnapshotInput {
             route: route("provider.work.codex-cli", "route.work.codex-cli.fallback"),
             executable: executable("executable.codex.cli", 'd'),
         },
-        topology_policy_digest: digest('e'),
+        topology: safe_work_topology_policy_v1(),
     }
 }
 
@@ -84,6 +86,70 @@ fn execution_snapshot_pins_the_complete_provider_authority() {
     assert_eq!(wire["sandbox"], "required");
     assert_eq!(wire["egress"], "deny");
     assert_eq!(wire["limits"]["max_concurrency"], 4);
+}
+
+#[test]
+fn execution_snapshot_names_its_topology_constraints_inline() {
+    let snapshot = WorkExecutionSnapshot::new(input()).unwrap();
+
+    let topology = snapshot.topology();
+    assert!(topology.meets_protected_ref_floor());
+    assert_eq!(
+        topology.notifications,
+        TopologyNotificationLevelV1::CriticalOnly
+    );
+    assert_eq!(
+        topology.cross_merge.default_mode,
+        CrossMergeModeV1::Disabled
+    );
+    assert_eq!(
+        topology.gates.cleanliness,
+        WorktreeCleanlinessRequirementV1::RequireClean
+    );
+    assert_eq!(
+        topology.retention.automatic_gc,
+        AutomaticWorktreeGcV1::Disabled
+    );
+
+    // The named constraints reach the wire; the reader never has to resolve an
+    // opaque digest against a mutable configuration store.
+    let wire = serde_json::to_value(&snapshot).unwrap();
+    assert!(wire["topology"]["protected_refs"].is_array());
+    assert_eq!(wire["topology"]["notifications"], "critical_only");
+    assert_eq!(
+        wire["topology"]["placement"]["kind"],
+        "existing_worktree_only"
+    );
+
+    let decoded: WorkExecutionSnapshot = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded, snapshot);
+}
+
+#[test]
+fn execution_snapshot_refuses_a_topology_below_the_protected_ref_floor() {
+    let mut input = input();
+    input.topology.protected_refs.clear();
+
+    assert_eq!(
+        WorkExecutionSnapshot::new(input),
+        Err(WorkRuntimeContractError::InvalidExecutionSnapshot)
+    );
+}
+
+#[test]
+fn execution_snapshot_refuses_a_native_integration_without_its_gates() {
+    let mut input = input();
+    input.topology.cross_merge.allowed_modes = BTreeSet::from([
+        CrossMergeModeV1::Disabled,
+        CrossMergeModeV1::FastForwardOnly,
+    ]);
+
+    // Native fast-forward integration requires clean/test/preflight gates, and
+    // the safe default carries no required test.
+    assert_eq!(
+        WorkExecutionSnapshot::new(input),
+        Err(WorkRuntimeContractError::InvalidExecutionSnapshot)
+    );
 }
 
 #[test]

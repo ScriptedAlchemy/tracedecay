@@ -57,7 +57,7 @@ fn execution_snapshot(model: &str) -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000),
         fallback: WorkFallbackTopology::Disabled,
-        topology_policy_digest: digest('9'),
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
     .unwrap()
 }

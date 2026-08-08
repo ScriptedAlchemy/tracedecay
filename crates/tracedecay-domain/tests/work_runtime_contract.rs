@@ -14,7 +14,7 @@ use tracedecay_domain::{
     WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
     WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
-    WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkVersion, WorkflowOperationRef, WorktreeId, safe_work_topology_policy_v1,
 };
 
 fn id<T>(value: &str) -> T
@@ -91,7 +91,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000_000),
         fallback: WorkFallbackTopology::Disabled,
-        topology_policy_digest: digest('f'),
+        topology: safe_work_topology_policy_v1(),
     })
     .unwrap()
 }

@@ -1,6 +1,7 @@
 //! Codex app-server adapter used to generate auxiliary compaction summaries.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{BufReader, ErrorKind, Write as IoWrite};
 use std::path::Path;
@@ -185,9 +186,13 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None)
+    run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None, None)
 }
 
+/// Runs a Work attempt through Codex app-server with only the environment
+/// values captured for this spawn. The durable Work authority is the
+/// snapshot's allowlisted key set; callers resolve those keys just in time, so
+/// this function never persists plaintext credential values.
 pub fn run_work_with_codex_app_server(
     prompt: &str,
     config: &CodexAppServerSummaryConfig,
@@ -195,6 +200,7 @@ pub fn run_work_with_codex_app_server(
     cancellation: &CodexAppServerCancellation,
     cwd: &Path,
     timeout: Duration,
+    admitted_environment: &BTreeMap<String, OsString>,
 ) -> Result<CodexAppServerSummary> {
     run_prompt_with_optional_cancellation(
         prompt,
@@ -203,6 +209,7 @@ pub fn run_work_with_codex_app_server(
         Some(cancellation),
         Some(cwd),
         Some(timeout),
+        Some(admitted_environment),
     )
 }
 
@@ -213,10 +220,20 @@ fn run_prompt_with_optional_cancellation(
     cancellation: Option<&CodexAppServerCancellation>,
     cwd: Option<&Path>,
     timeout: Option<Duration>,
+    admitted_environment: Option<&BTreeMap<String, OsString>>,
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
+    if let Some(admitted_environment) = admitted_environment {
+        command.env_clear();
+        for (key, value) in admitted_environment {
+            command.env(key, value);
+        }
+    }
     command
+        // The recursion guard is an internal invariant. Set it after the
+        // admitted map so a caller cannot replace it through an allowlisted
+        // key.
         .env(CODEX_SUMMARY_CHILD_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -657,6 +674,8 @@ mod tests {
     use super::*;
     use crate::runtime::lcm::{LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange};
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -756,6 +775,79 @@ mod tests {
         assert_eq!(params["ephemeral"], json!(true));
         assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));
         assert_eq!(params["model"], json!("gpt-5.5-codex"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_app_server_child_receives_only_admitted_environment() {
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let marker = temporary.path().join("environment");
+        let executable = temporary.path().join("fake-codex");
+        let admitted_key = format!("TRACEDECAY_WORK_ADMITTED_{}", std::process::id());
+        let ambient_secret = format!("TRACEDECAY_WORK_SECRET_{}", std::process::id());
+        let script = format!(
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\"}}'; exit 0 ;;\n  esac\ndone\n",
+            marker = marker.display(),
+            child_marker = CODEX_SUMMARY_CHILD_ENV,
+        );
+        std::fs::write(&executable, script).expect("write fake app-server");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake app-server metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .expect("make fake app-server executable");
+
+        let prior_admitted = std::env::var_os(&admitted_key);
+        let prior_secret = std::env::var_os(&ambient_secret);
+        // SAFETY: both process-wide test keys are unique to this process and
+        // restored before the assertion below.
+        unsafe {
+            std::env::set_var(&admitted_key, "ambient-replacement");
+            std::env::set_var(&ambient_secret, "ambient-secret");
+        }
+        let admitted_environment = std::collections::BTreeMap::from([
+            (
+                admitted_key.clone(),
+                std::ffi::OsString::from("admitted-value"),
+            ),
+            (
+                CODEX_SUMMARY_CHILD_ENV.to_string(),
+                std::ffi::OsString::from("caller-cannot-control-marker"),
+            ),
+        ]);
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: executable.to_string_lossy().into_owned(),
+            model: None,
+            timeout: Duration::from_secs(2),
+        };
+        let result = run_work_with_codex_app_server(
+            "Return a work result.",
+            &config,
+            "tracedecay_work_attempt",
+            &CodexAppServerCancellation::default(),
+            temporary.path(),
+            Duration::from_secs(2),
+            &admitted_environment,
+        );
+        // SAFETY: return the process environment to the state this test found.
+        unsafe {
+            match prior_admitted {
+                Some(value) => std::env::set_var(&admitted_key, value),
+                None => std::env::remove_var(&admitted_key),
+            }
+            match prior_secret {
+                Some(value) => std::env::set_var(&ambient_secret, value),
+                None => std::env::remove_var(&ambient_secret),
+            }
+        }
+
+        let summary = result.expect("work app-server protocol should complete");
+        assert_eq!(summary.text, "work result");
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("child environment marker"),
+            "admitted-value|missing|1"
+        );
     }
 
     #[cfg(unix)]

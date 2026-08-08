@@ -494,7 +494,7 @@ fn crossed_execution_snapshot(
         .unwrap(),
         deadline: shape.deadline,
         fallback: shape.fallback.clone(),
-        topology_policy_digest: digest('f'),
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
 }
 
@@ -846,7 +846,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn provider_child_restores_only_the_admitted_environment_snapshot() {
+async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let environment_marker = root.join("environment");
@@ -877,8 +877,10 @@ async fn provider_child_restores_only_the_admitted_environment_snapshot() {
     );
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
-    // A later ambient mutation cannot alter the child that this attempt was
-    // admitted to run, and an unadmitted secret must never cross the boundary.
+    // A later ambient mutation cannot alter this initial child, and an
+    // unadmitted secret must never cross the boundary. Recovery resolves the
+    // same snapshot allowlist again at its later spawn; it does not persist
+    // these plaintext values in the attempt row.
     // SAFETY: these unique test keys are restored below.
     unsafe {
         std::env::set_var(&sentinel, "ambient-replacement");
