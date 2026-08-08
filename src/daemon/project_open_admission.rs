@@ -567,7 +567,25 @@ impl ProjectOpenTasks {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        self.drain_retiring_routes(routes, cooperative_deadline + post_abort_deadline)
+        if self
+            .drain_retiring_routes(routes.clone(), cooperative_deadline)
+            .await
+        {
+            return true;
+        }
+        // The cooperative window expired. An open that ignores its
+        // cancellation token must not leak a tracked task past daemon
+        // shutdown, so abort what is still running and give the aborts their
+        // own bounded window; the task's completion finalizer fires on abort.
+        {
+            let registry = self.registry.lock().await;
+            for route in &routes {
+                if let Some(entry) = registry.retiring.get(route) {
+                    entry.task.abort();
+                }
+            }
+        }
+        self.drain_retiring_routes(routes, post_abort_deadline)
             .await
     }
 
