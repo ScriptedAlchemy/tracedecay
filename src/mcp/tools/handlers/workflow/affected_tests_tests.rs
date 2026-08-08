@@ -109,6 +109,101 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     cg.close();
 }
 
+/// A test nested inside a source module is only reachable through the module
+/// chain its own file contributes to the crate. Dispatching the in-file chain
+/// alone (`tests::successful_login_creates_session`) makes Cargo filter every
+/// test out and still exit `0`, so the managed run executes nothing while
+/// reporting success.
+#[tokio::test]
+async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join("src/auth")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub mod auth;\n").unwrap();
+    std::fs::write(project.join("src/auth/mod.rs"), "pub mod login;\n").unwrap();
+    std::fs::write(
+        project.join("src/auth/login.rs"),
+        concat!(
+            "pub fn login() -> bool {\n    true\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    #[test]\n",
+            "    fn successful_login_creates_session() {\n",
+            "        assert!(super::login());\n    }\n}\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        project,
+        "project.mcp-nested-module-tests",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    {
+        let database = cg.dashboard_database_guard();
+        database
+            .execute_write_batch(
+                "seed managed test-run diagnostics schema",
+                crate::diagnostics_store::SCHEMA,
+            )
+            .await
+            .unwrap();
+    }
+
+    const EXPECTED: &str = "auth::login::tests::successful_login_creates_session";
+    let result = handle_run_affected_tests_with_runner(
+        &cg,
+        json!({
+            "changed_paths": ["src/auth/login.rs"],
+            "timeout_secs": 60,
+            "max_tests": 5,
+            "format": "json"
+        }),
+        None,
+        None,
+        move |_root, _profile, tests, _timeout_duration, _control| async move {
+            assert_eq!(
+                tests,
+                [EXPECTED],
+                "the dispatched filter must carry the module chain of the test's own file"
+            );
+            Ok(TestRunOutput {
+                exit_code: Some(0),
+                stdout: format!("test {EXPECTED} ... ok\n"),
+                stderr: String::new(),
+                output_bytes: 64,
+            })
+        },
+    )
+    .await
+    .unwrap();
+
+    let text = result.value["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(output["dispatched_tests"], json!([EXPECTED]));
+    assert_eq!(output["results"][0]["test"], EXPECTED);
+    assert_eq!(output["passed"], 1);
+    assert_eq!(
+        output["terminal"]["receipt"]["termination"], "completed",
+        "an executed nested-module test must reach a completed terminal"
+    );
+    assert!(
+        output["results"][0]["covers_source_ids"]
+            .as_array()
+            .is_some_and(|covered| !covered.is_empty()),
+        "the crate-relative identity must still resolve back to its covered sources"
+    );
+
+    cg.checkpoint().await.unwrap();
+    cg.close();
+}
+
 #[tokio::test]
 async fn non_string_changed_paths_are_rejected_before_test_selection() {
     let _profile = crate::config::PinnedUserDataDir::new();

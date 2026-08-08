@@ -37,9 +37,11 @@ use super::super::render;
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 
 mod affected_test_failure;
+mod test_identity;
 mod test_request;
 mod test_runner;
 
+use test_identity::libtest_identity;
 #[cfg(test)]
 use test_request::MAX_TEST_TIMEOUT_SECS;
 use test_request::{RunAffectedArgs, TestProfile};
@@ -79,13 +81,13 @@ struct TestTarget {
 }
 
 impl TestTarget {
+    /// The dispatched identity is the one Cargo's `--exact` filter matches:
+    /// the module chain the file contributes to its test binary followed by
+    /// the in-file chain the extractor observed. Dropping the file's own
+    /// prefix filters every test out while `cargo test` still exits `0`.
     fn new(node: &Node) -> Self {
-        let prefix = format!("{}::", node.file_path);
-        let test_identity = node
-            .qualified_name
-            .strip_prefix(&prefix)
-            .unwrap_or_default()
-            .to_owned();
+        let test_identity =
+            libtest_identity(&node.file_path, &node.qualified_name).unwrap_or_default();
         Self {
             test_identity,
             qualified_name: node.qualified_name.clone(),
