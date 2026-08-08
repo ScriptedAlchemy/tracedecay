@@ -1408,6 +1408,18 @@ pub trait ContextScoutDurableStoreV1: Send + Sync {
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
 
+    /// Atomically resolves one public opaque claim proof and records its
+    /// delivery. Resolution and mutation share the store transaction so lease
+    /// takeover or supersession cannot race a transport round trip.
+    fn record_delivery_by_lease<'a>(
+        &'a self,
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: &'a ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
+
     /// Records explicit feedback only after the receipt binding has survived
     /// the caller-side validation below.
     fn record_feedback<'a>(
@@ -1465,6 +1477,17 @@ where
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
         (**self).record_delivery(claim, receipt)
+    }
+
+    fn record_delivery_by_lease<'a>(
+        &'a self,
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: &'a ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
+        (**self).record_delivery_by_lease(work, envelope_id, lease, configuration_revision, receipt)
     }
 
     fn record_feedback<'a>(
@@ -2634,6 +2657,17 @@ mod tests {
             }
             state.receipts.push(receipt.clone());
             Box::pin(async { ContextScoutDurableStoreOutcomeV1::Stored })
+        }
+
+        fn record_delivery_by_lease<'a>(
+            &'a self,
+            _work: ContextScoutWorkV1,
+            _envelope_id: [u8; 16],
+            _lease: ContextScoutLeaseV1,
+            _configuration_revision: [u8; 32],
+            _receipt: &'a ContextScoutDeliveryReceiptV1,
+        ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
+            Box::pin(async { ContextScoutDurableStoreOutcomeV1::Unavailable })
         }
 
         fn record_feedback<'a>(
