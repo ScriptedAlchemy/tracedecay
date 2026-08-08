@@ -69,3 +69,21 @@ fn structured_limits_deny_raw_expansion_depth_and_item_overruns() {
         StructuredSanitizationError::ItemCountExceeded
     );
 }
+
+/// Pins the format a table-headed document is classified as, separately from
+/// what the sanitizer then does with it. The sanitizer reports "no format" both
+/// when nothing claimed the document and when it was quarantined, so a failure
+/// at that level cannot say which happened; this asserts the parse outcome
+/// itself.
+#[test]
+fn table_headed_documents_are_classified_as_toml() {
+    let text = "[vault]\nregion = \"us-east\"\nvault_passphrase = \"placeholder\"\n";
+
+    let outcome = super::structured::parse_structured_text(text)
+        .map(|parsed| parsed.map(|parsed| parsed.format));
+
+    assert_eq!(
+        outcome,
+        Ok(Some(super::structured::StructuredTextFormatV1::Toml))
+    );
+}

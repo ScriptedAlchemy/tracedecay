@@ -92,7 +92,17 @@ pub(crate) fn sanitize_structured_payload(
     match parse_json_value(text, limits.depth, limits.items) {
         Ok(value) => sanitize_parsed(value, limits),
         Err(JsonPreflightFailureV1::Malformed) => sanitize_malformed(text, limits),
-        Err(JsonPreflightFailureV1::DuplicateKey | JsonPreflightFailureV1::LimitsExceeded) => {
+        // The preflight refuses before `Value` materializes, so it is the only
+        // place these overruns can still be attributed to a specific budget.
+        // Reporting them as one opaque "unsafe structure" would lose the
+        // distinction the post-parse expansion check already draws.
+        Err(JsonPreflightFailureV1::DepthExceeded) => {
+            Err(StructuredSanitizationError::NestingDepthExceeded)
+        }
+        Err(JsonPreflightFailureV1::ValueCountExceeded) => {
+            Err(StructuredSanitizationError::ItemCountExceeded)
+        }
+        Err(JsonPreflightFailureV1::DuplicateKey) => {
             Err(StructuredSanitizationError::UnsafeJsonStructure)
         }
     }
@@ -210,7 +220,10 @@ pub(crate) enum StructuredTextParseFailureV1 {
 pub(crate) fn parse_structured_text(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
-    if text.len() > MAX_STRUCTURED_TEXT_BYTES || text.trim().is_empty() {
+    if text.len() > MAX_STRUCTURED_TEXT_BYTES {
+        return Err(StructuredTextParseFailureV1::LimitsExceeded);
+    }
+    if text.trim().is_empty() {
         return Ok(None);
     }
     if let Some(parsed) = parse_json_document(text)? {
@@ -259,7 +272,130 @@ fn parsed(format: StructuredTextFormatV1, value: Value) -> ParsedStructuredTextV
 fn first_content_line(text: &str) -> Option<&str> {
     text.lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#') && !matches!(*line, "---" | "..."))
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !is_yaml_preamble_line(line))
+}
+
+fn is_yaml_preamble_line(line: &str) -> bool {
+    line == "..."
+        || line.starts_with("%YAML ")
+        || line
+            .strip_prefix("---")
+            .is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with('#'))
+}
+
+fn has_yaml_preamble(text: &str) -> bool {
+    text.lines().map(str::trim).any(is_yaml_preamble_line)
+}
+
+fn has_code_shape_context(text: &str) -> bool {
+    text.lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .is_some_and(|line| {
+            (line.starts_with("fn ") || line.starts_with("function ")) && line.contains('(')
+                || (line.starts_with("let ") || line.starts_with("const ")) && line.contains('=')
+                || (line.starts_with("class ")
+                    || line.starts_with("impl ")
+                    || line.starts_with("struct ")
+                    || line.starts_with("enum "))
+                    && line.contains('{')
+                || (line.starts_with("if ")
+                    || line.starts_with("for ")
+                    || line.starts_with("while ")
+                    || line.starts_with("match "))
+                    && line.contains(['{', '('])
+                || line.ends_with(';')
+                    && line
+                        .split_once('=')
+                        .is_some_and(|(key, _)| key.ends_with(char::is_whitespace))
+                || line.starts_with("return ") && line.ends_with(';')
+                || (line.starts_with("import ") || line.starts_with("export "))
+                    && line.ends_with(';')
+        })
+}
+
+fn looks_like_yaml_mapping(line: &str) -> bool {
+    let line = line.trim_start();
+    let line = line.strip_prefix("- ").unwrap_or(line);
+    let line = line.strip_prefix('{').map(str::trim_start).unwrap_or(line);
+    let Some((key, rest)) = split_yaml_mapping_entry(line) else {
+        return false;
+    };
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return false;
+    }
+    is_yaml_mapping_key(key.trim_end())
+}
+
+fn split_yaml_mapping_entry(line: &str) -> Option<(&str, &str)> {
+    if let Some(quote) = line
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '\'' | '"'))
+    {
+        let quoted = line.strip_prefix(quote)?;
+        let closing = quoted.find(quote)?;
+        let key_end = quote.len_utf8() + closing + quote.len_utf8();
+        let rest = line.get(key_end..)?.trim_start().strip_prefix(':')?;
+        return Some((&line[..key_end], rest));
+    }
+    line.split_once(':')
+}
+
+fn is_yaml_mapping_key(key: &str) -> bool {
+    let quoted = key.len() >= 2
+        && ((key.starts_with('"') && key.ends_with('"'))
+            || (key.starts_with('\'') && key.ends_with('\'')));
+    if quoted {
+        return true;
+    }
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-' | b'.'))
+}
+
+fn has_yaml_mapping_intent(text: &str) -> bool {
+    if !has_yaml_preamble(text) && has_code_shape_context(text) {
+        return false;
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !is_yaml_preamble_line(line))
+        .any(looks_like_yaml_mapping)
+}
+
+fn is_assignment_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with(|character: char| character.is_ascii_digit())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn is_dotenv_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with(|character: char| character.is_ascii_digit())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+}
+
+fn has_assignment_intent(text: &str) -> bool {
+    if has_code_shape_context(text) {
+        return false;
+    }
+    text.lines().any(|line| {
+        let mut body = line.trim();
+        if body.is_empty() || body.starts_with('#') {
+            return false;
+        }
+        if let Some(rest) = body.strip_prefix("export ") {
+            body = rest.trim_start();
+        }
+        body.split_once('=')
+            .is_some_and(|(key, _)| is_assignment_key(key.trim()))
+    })
 }
 
 fn parse_json_document(
@@ -270,17 +406,67 @@ fn parse_json_document(
         return Ok(None);
     }
     let policy = ParseLimits::default_policy();
-    let value =
-        parse_json_value(text, policy.depth, policy.values).map_err(|error| match error {
-            JsonPreflightFailureV1::LimitsExceeded => StructuredTextParseFailureV1::LimitsExceeded,
-            JsonPreflightFailureV1::Malformed | JsonPreflightFailureV1::DuplicateKey => {
-                StructuredTextParseFailureV1::Malformed
-            }
-        })?;
+    let value = match parse_json_value(text, policy.depth, policy.values) {
+        Ok(value) => value,
+        Err(JsonPreflightFailureV1::DepthExceeded | JsonPreflightFailureV1::ValueCountExceeded) => {
+            return Err(StructuredTextParseFailureV1::LimitsExceeded);
+        }
+        // A duplicate member is ambiguity inside a document that *is* JSON, so
+        // it is refused outright rather than handed on.
+        Err(JsonPreflightFailureV1::DuplicateKey) => {
+            return Err(StructuredTextParseFailureV1::Malformed);
+        }
+        // `[` opens a JSON array and a TOML table header alike, so a leading
+        // bracket is not evidence of JSON -- only a successful parse is. When
+        // the parse fails, hand the document to the formats that have not had
+        // their turn instead of quarantining a perfectly good TOML table. `{`
+        // is not shared with any format here, so a broken object stays a
+        // refusal rather than falling through to a raw scan.
+        Err(JsonPreflightFailureV1::Malformed) => {
+            return if trimmed.starts_with('[') {
+                Ok(None)
+            } else {
+                Err(StructuredTextParseFailureV1::Malformed)
+            };
+        }
+    };
     (value.is_object() || value.is_array())
         .then(|| parsed(StructuredTextFormatV1::Json, value))
         .ok_or(StructuredTextParseFailureV1::Malformed)
         .map(Some)
+}
+
+/// Walks a YAML document through the same structural preflight the JSON path
+/// uses.
+///
+/// A YAML mapping repeats keys as freely as a JSON object does, and a
+/// materialized `serde_json::Value` keeps only the last of them -- so an
+/// earlier sensitive value would never reach the field scanner. The preflight
+/// seed only ever sees serde's data model, so it applies unchanged here rather
+/// than existing as a second, separately-maintained copy of the rule.
+fn preflight_yaml_structure(text: &str) -> Result<(), StructuredTextParseFailureV1> {
+    let policy = ParseLimits::default_policy();
+    let mut budget = JsonStructureBudget {
+        max_depth: policy.depth,
+        max_values: policy.values,
+        values: 0,
+    };
+    let mut failure = None;
+    let walked = JsonStructurePreflight {
+        budget: &mut budget,
+        failure: &mut failure,
+        depth: 1,
+    }
+    .deserialize(serde_yaml_ng::Deserializer::from_str(text));
+    if walked.is_ok() {
+        return Ok(());
+    }
+    Err(match failure {
+        Some(
+            JsonPreflightFailureV1::DepthExceeded | JsonPreflightFailureV1::ValueCountExceeded,
+        ) => StructuredTextParseFailureV1::LimitsExceeded,
+        _ => StructuredTextParseFailureV1::Malformed,
+    })
 }
 
 /// Walks the JSON stream with serde before `Value` materializes it. `Value`
@@ -315,7 +501,14 @@ pub(crate) fn parse_json_value(
 pub(crate) enum JsonPreflightFailureV1 {
     Malformed,
     DuplicateKey,
-    LimitsExceeded,
+    /// The document nests deeper than the canonical parse policy allows.
+    ///
+    /// Depth and value-count overruns stay distinct because the sanitizer
+    /// contract reports them as distinct refusals: collapsing them into one
+    /// "limits exceeded" would tell a caller that its payload was rejected
+    /// without telling it which budget to look at.
+    DepthExceeded,
+    ValueCountExceeded,
 }
 
 struct JsonStructureBudget {
@@ -327,14 +520,14 @@ struct JsonStructureBudget {
 impl JsonStructureBudget {
     fn record_value(&mut self, depth: usize) -> Result<(), JsonPreflightFailureV1> {
         if depth > self.max_depth {
-            return Err(JsonPreflightFailureV1::LimitsExceeded);
+            return Err(JsonPreflightFailureV1::DepthExceeded);
         }
         self.values = self
             .values
             .checked_add(1)
-            .ok_or(JsonPreflightFailureV1::LimitsExceeded)?;
+            .ok_or(JsonPreflightFailureV1::ValueCountExceeded)?;
         if self.values > self.max_values {
-            return Err(JsonPreflightFailureV1::LimitsExceeded);
+            return Err(JsonPreflightFailureV1::ValueCountExceeded);
         }
         Ok(())
     }
@@ -477,18 +670,24 @@ fn parse_yaml_document(
     // indentation. Both are cheap to reject before paying for a parse, and
     // rejecting an apparent YAML document quarantines it rather than giving a
     // raw scan an opportunity to miss field semantics.
-    if text.bytes().any(|byte| matches!(byte, b'&' | b'*' | b'\t')) {
-        return Err(StructuredTextParseFailureV1::Malformed);
-    }
     let Some(first) = first_content_line(text) else {
         return Ok(None);
     };
-    if !(first.ends_with(':') || first.contains(": ")) {
+    let explicit_yaml_preamble = has_yaml_preamble(text);
+    let yaml_intent = explicit_yaml_preamble || has_yaml_mapping_intent(text);
+    let established_mapping =
+        looks_like_yaml_mapping(first) && (!has_code_shape_context(text) || explicit_yaml_preamble);
+    if !established_mapping {
+        if yaml_intent {
+            return Err(StructuredTextParseFailureV1::Malformed);
+        }
         return Ok(None);
     }
+    if text.bytes().any(|byte| matches!(byte, b'&' | b'*' | b'\t')) {
+        return Err(StructuredTextParseFailureV1::Malformed);
+    }
     preflight_tree_document(text)?;
-    // serde_yaml_ng rejects duplicate mapping entries while deserializing into
-    // Value, so no earlier value can be overwritten before field scanning.
+    preflight_yaml_structure(text)?;
     let value: Value =
         serde_yaml_ng::from_str(text).map_err(|_| StructuredTextParseFailureV1::Malformed)?;
     (value.is_object() || value.is_array())
@@ -503,22 +702,37 @@ fn parse_toml_document(
     let Some(first) = first_content_line(text) else {
         return Ok(None);
     };
-    let table_header = first.starts_with('[') && first.ends_with(']');
+    let table_candidate = first
+        .split_once('#')
+        .map_or(first, |(header, _)| header.trim_end());
+    let table_header = table_candidate.starts_with('[') && table_candidate.ends_with(']');
     if first.starts_with('[') && !table_header {
         return Err(StructuredTextParseFailureV1::Malformed);
     }
     if !table_header && !first.contains('=') {
+        if looks_like_yaml_mapping(first) {
+            return Ok(None);
+        }
+        if has_assignment_intent(text) {
+            return Err(StructuredTextParseFailureV1::Malformed);
+        }
         return Ok(None);
     }
     preflight_tree_document(text)?;
     // A dotenv document is syntactically close to TOML but permits unquoted
     // values, so leave a TOML parse failure for the dotenv parser to classify.
-    let Ok(value) = toml::from_str::<Value>(text) else {
+    // Deserialize through TOML's own table model and re-encode, rather than
+    // asking TOML to fill a `serde_json::Value` directly: the latter drives the
+    // whole document through `deserialize_any`, which TOML does not answer for
+    // a document root, so every well-formed table was being classified as
+    // unparseable and quarantined.
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
         if table_header {
             return Err(StructuredTextParseFailureV1::Malformed);
         }
         return Ok(None);
     };
+    let value = serde_json::to_value(table).map_err(|_| StructuredTextParseFailureV1::Malformed)?;
     value
         .is_object()
         .then(|| parsed(StructuredTextFormatV1::Toml, value))
@@ -531,6 +745,9 @@ fn parse_toml_document(
 fn parse_dotenv_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
+    let assignment_intent = has_assignment_intent(text);
+    let yaml_mapping_intent = first_content_line(text).is_some_and(looks_like_yaml_mapping)
+        && (!has_code_shape_context(text) || has_yaml_preamble(text));
     let mut map = Map::new();
     let mut fields = Vec::new();
     let mut consumed = 0usize;
@@ -550,19 +767,14 @@ fn parse_dotenv_document(
             body = rest.trim_start();
         }
         let Some((key, value)) = body.split_once('=') else {
-            return if fields.is_empty() {
+            return if fields.is_empty() && (!assignment_intent || yaml_mapping_intent) {
                 Ok(None)
             } else {
                 Err(StructuredTextParseFailureV1::Malformed)
             };
         };
-        if key.is_empty()
-            || key.starts_with(|character: char| character.is_ascii_digit())
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
-        {
-            return if fields.is_empty() {
+        if !is_dotenv_key(key) {
+            return if fields.is_empty() && (!assignment_intent || yaml_mapping_intent) {
                 Ok(None)
             } else {
                 Err(StructuredTextParseFailureV1::Malformed)
@@ -645,6 +857,7 @@ fn parse_http_header_document(
         return Ok(None);
     }
     let mut map = Map::new();
+    let mut header_names = BTreeSet::new();
     let mut fields = Vec::new();
     let mut consumed = 0usize;
     let mut ended = false;
@@ -657,28 +870,27 @@ fn parse_http_header_document(
             continue;
         }
         if ended {
-            return if has_start_line {
-                Err(StructuredTextParseFailureV1::Malformed)
-            } else {
-                Ok(None)
-            };
+            return Err(StructuredTextParseFailureV1::Malformed);
         }
         if index == 0 && has_start_line {
             continue;
         }
         let Some((name, value)) = content.split_once(':') else {
-            return if has_start_line {
+            return if has_start_line || !fields.is_empty() {
                 Err(StructuredTextParseFailureV1::Malformed)
             } else {
                 Ok(None)
             };
         };
         if !is_http_field_name(name) {
-            return if has_start_line {
+            return if has_start_line || !fields.is_empty() {
                 Err(StructuredTextParseFailureV1::Malformed)
             } else {
                 Ok(None)
             };
+        }
+        if !header_names.insert(name.to_ascii_lowercase()) {
+            return Err(StructuredTextParseFailureV1::Malformed);
         }
         let padding = value.len() - value.trim_start().len();
         let value_start = line_start + name.len() + 1 + padding;
@@ -705,7 +917,11 @@ fn parse_url_document(
     text: &str,
 ) -> Result<Option<ParsedStructuredTextV1>, StructuredTextParseFailureV1> {
     let trimmed = text.trim();
-    if trimmed.bytes().any(|byte| byte.is_ascii_whitespace()) || !trimmed.contains("://") {
+    let url_intent = has_url_intent(trimmed);
+    if trimmed.bytes().any(|byte| byte.is_ascii_whitespace()) || !url_intent {
+        if url_intent {
+            return Err(StructuredTextParseFailureV1::Malformed);
+        }
         return Ok(None);
     }
     let offset = text.len() - text.trim_start().len();
@@ -776,6 +992,27 @@ fn parse_url_document(
         value: Value::Object(map),
         fields,
     }))
+}
+
+fn has_url_intent(text: &str) -> bool {
+    let Some((scheme, remainder)) = text.split_once(':') else {
+        return false;
+    };
+    let scheme = scheme.trim().to_ascii_lowercase();
+    matches!(
+        scheme.as_str(),
+        "http"
+            | "https"
+            | "ws"
+            | "wss"
+            | "ftp"
+            | "file"
+            | "postgres"
+            | "postgresql"
+            | "mysql"
+            | "redis"
+            | "mongodb"
+    ) && remainder.trim_start().starts_with("//")
 }
 
 fn decoded_component(raw: &str) -> Option<String> {
