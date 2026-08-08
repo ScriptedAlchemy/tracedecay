@@ -28,8 +28,9 @@ use tracedecay_application::{
     ResultProjection, RetrievalOrder, RetrievalRequestMeta, now_micros,
 };
 use tracedecay_domain::feedback::{
-    FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackFindingLifecycleV1,
-    FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
+    FeedbackContentIdentityV1, FeedbackCycleResultV1, FeedbackDiagnosticProducerV1,
+    FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
+    ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, ManifestDigest, UtcMicros,
@@ -82,6 +83,8 @@ mod overlay_admission;
 use overlay_admission::admit_overlay;
 mod diagnostic_records;
 pub use diagnostic_records::LspFeedbackDiagnosticRecordPort;
+#[cfg(test)]
+mod advisory_source_tests;
 
 /// Current canonical Git/graph address for an admitted LSP root.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +95,10 @@ pub struct LspFeedbackProjectionScope {
     pub invalidation_digest: ManifestDigest,
     pub snapshot_content_digest: ContentDigest,
     pub document_content_digest: Option<ContentDigest>,
+    /// Canonical project-relative document identity for a document-scoped
+    /// request. Findings from another file must never receive an expansion
+    /// handle for this document.
+    pub document_relative_path: Option<String>,
     pub generation: u64,
 }
 
@@ -221,8 +228,11 @@ impl ProjectionChangeQueue {
                     ContextProjectionKind::DIAGNOSTICS => 0,
                     ContextProjectionKind::POST_EDIT_IMPACT => 1,
                     ContextProjectionKind::AFFECTED_TESTS => 2,
-                    ContextProjectionKind::TEST_RUN_RESULTS => 3,
-                    _ => 4,
+                    ContextProjectionKind::GITHUB_REVIEW => 3,
+                    ContextProjectionKind::CI_FAILURE_LOCALIZATION => 4,
+                    ContextProjectionKind::AGENT_PROXIMITY => 5,
+                    ContextProjectionKind::TEST_RUN_RESULTS => 6,
+                    _ => 7,
                 },
                 change.document_uri.clone(),
             )
@@ -387,9 +397,11 @@ impl RegisteredProjectLspAuthority {
             .map_err(|_| LspRuntimeFailure::new("registered-project-scope-invalid"))?;
         let identity = self
             .code_index
-            .current_identity(self.project_root.clone(), document_relative_path)
+            .current_identity(self.project_root.clone(), document_relative_path.clone())
             .await?;
-        identity.admit_for_scope(scope)
+        let mut projection = identity.admit_for_scope(scope)?;
+        projection.document_relative_path = document_relative_path;
+        Ok(projection)
     }
 }
 
@@ -546,6 +558,8 @@ pub enum FeedbackDiagnosticProjectionSkipV1 {
     ImpactTargetFileMismatch,
     /// The cycle carries no impact target to compare the record's file with.
     ImpactTargetAbsent,
+    /// The finding belongs to another file than the admitted document.
+    DocumentFileMismatch,
     /// The record belongs to a different clean generation.
     GenerationMismatch,
     /// The record was collected against different file content.
@@ -566,6 +580,7 @@ impl FeedbackDiagnosticProjectionSkipV1 {
             Self::AnchorNotPublished => "anchor-not-published",
             Self::ImpactTargetFileMismatch => "impact-target-file-mismatch",
             Self::ImpactTargetAbsent => "impact-target-absent",
+            Self::DocumentFileMismatch => "document-file-mismatch",
             Self::GenerationMismatch => "generation-mismatch",
             Self::ContentDigestMismatch => "content-digest-mismatch",
             Self::RecordNotCurrent => "record-not-current",
@@ -715,6 +730,13 @@ where
             let impact_target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
             for finding in &cycle.findings {
                 let finding_id = finding.finding_id.as_str();
+                if !finding_matches_document(finding, &scope, impact_target_file) {
+                    skipped(
+                        finding_id,
+                        FeedbackDiagnosticProjectionSkipV1::DocumentFileMismatch,
+                    );
+                    continue;
+                }
                 if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
                     skipped(
                         finding_id,
@@ -1433,16 +1455,41 @@ impl ConcreteFeedbackLspSource {
         };
         let identity = current.scope.projection_identity();
         let generation = current.scope.generation;
-        let (source_revision, producer_state, coverages) = match current.result.as_ref() {
+        let (source_revision, changes) = match current.result.as_ref() {
             Some(result) => {
                 let cycle = &result.cycle;
+                let aggregate_state = producer_state_for_cycle(cycle);
+                let github =
+                    advisory_projection_status(cycle, FeedbackDiagnosticProducerV1::GitHubReview);
+                let ci =
+                    advisory_projection_status(cycle, FeedbackDiagnosticProducerV1::CiLocalization);
+                let proximity =
+                    advisory_projection_status(cycle, FeedbackDiagnosticProducerV1::Proximity);
                 (
                     cycle.result_id.as_str().to_owned(),
-                    producer_state_for_cycle(cycle),
-                    [
-                        cycle_coverage(cycle),
-                        impact_projection(cycle).0,
-                        affected_test_projection(cycle).0,
+                    vec![
+                        (
+                            ContextProjectionKind::diagnostics(),
+                            cycle_coverage(cycle),
+                            aggregate_state,
+                        ),
+                        (
+                            ContextProjectionKind::post_edit_impact(),
+                            impact_projection(cycle).0,
+                            aggregate_state,
+                        ),
+                        (
+                            ContextProjectionKind::affected_tests(),
+                            affected_test_projection(cycle).0,
+                            aggregate_state,
+                        ),
+                        (ContextProjectionKind::github_review(), github.0, github.1),
+                        (ContextProjectionKind::ci_failure_localization(), ci.0, ci.1),
+                        (
+                            ContextProjectionKind::agent_proximity(),
+                            proximity.0,
+                            proximity.1,
+                        ),
                     ],
                 )
             }
@@ -1453,19 +1500,20 @@ impl ConcreteFeedbackLspSource {
                 let (coverage, producer_state) = incomplete_read_projection(current.termination);
                 (
                     format!("incomplete-read.{producer_state:?}"),
-                    producer_state,
-                    [coverage; 3],
+                    [
+                        ContextProjectionKind::diagnostics(),
+                        ContextProjectionKind::post_edit_impact(),
+                        ContextProjectionKind::affected_tests(),
+                        ContextProjectionKind::github_review(),
+                        ContextProjectionKind::ci_failure_localization(),
+                        ContextProjectionKind::agent_proximity(),
+                    ]
+                    .map(|kind| (kind, coverage, producer_state))
+                    .to_vec(),
                 )
             }
         };
-        for (kind, coverage) in [
-            ContextProjectionKind::diagnostics(),
-            ContextProjectionKind::post_edit_impact(),
-            ContextProjectionKind::affected_tests(),
-        ]
-        .into_iter()
-        .zip(coverages)
-        {
+        for (kind, coverage, producer_state) in changes {
             self.changes.offer(
                 source_revision.clone(),
                 ContextProjectionChange {
@@ -1552,12 +1600,14 @@ impl ConcreteFeedbackLspSource {
         })
     }
 
-    fn current_finding_items(
+    fn current_finding_items<'a>(
         &self,
         root: &AdmittedRoot,
         document_uri: Option<&str>,
         scope: &LspFeedbackProjectionScope,
-        findings: &[FeedbackFindingV1],
+        impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
+        kind: ContextProjectionKind,
+        findings: impl Iterator<Item = &'a FeedbackFindingV1>,
         maximum_items: usize,
     ) -> Result<Vec<ContextProjectionItem>, LspRuntimeFailure> {
         let observed_at = now_micros();
@@ -1566,7 +1616,7 @@ impl ConcreteFeedbackLspSource {
             .request_expiry_at(observed_at)
             .map_err(|_| LspRuntimeFailure::new("feedback-finding-expiry-unavailable"))?;
         findings
-            .iter()
+            .filter(|finding| finding_matches_document(finding, scope, impact_target_file))
             .filter_map(|finding| finding_item(finding).map(|item| (finding, item)))
             .take(maximum_items)
             .map(|(finding, item)| {
@@ -1616,7 +1666,7 @@ impl ConcreteFeedbackLspSource {
                 self.attach_context_handle(
                     root,
                     document_uri,
-                    ContextProjectionKind::diagnostics(),
+                    kind.clone(),
                     scope,
                     observed_at,
                     expires_at,
@@ -1822,7 +1872,9 @@ impl ManagedDiagnosticSnapshotPort for ConcreteFeedbackLspSource {
                     &request.root,
                     Some(&request.document_uri),
                     &scope,
-                    &cycle.findings,
+                    cycle.impact.as_ref().map(|impact| &impact.target.file),
+                    ContextProjectionKind::diagnostics(),
+                    cycle.findings.iter(),
                     MAX_CONTEXT_PROJECTION_ITEMS,
                 )?
                 .into_iter()
@@ -1856,6 +1908,9 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
             ContextProjectionKind::post_edit_impact(),
             ContextProjectionKind::affected_tests(),
             ContextProjectionKind::test_run_results(),
+            ContextProjectionKind::github_review(),
+            ContextProjectionKind::ci_failure_localization(),
+            ContextProjectionKind::agent_proximity(),
         ]
         .into_iter()
         .map(|kind| ContextProjectionRegistration {
@@ -1906,6 +1961,7 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                 if request.kind != ContextProjectionKind::diagnostics()
                     && request.kind != ContextProjectionKind::post_edit_impact()
                     && request.kind != ContextProjectionKind::affected_tests()
+                    && advisory_projection_producer(&request.kind).is_none()
                 {
                     return ContextProjectionOutcome::Unsupported;
                 }
@@ -1934,7 +1990,9 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                         &root,
                         request.document_uri.as_deref(),
                         &scope,
-                        &cycle.findings,
+                        cycle.impact.as_ref().map(|impact| &impact.target.file),
+                        ContextProjectionKind::diagnostics(),
+                        cycle.findings.iter(),
                         MAX_CONTEXT_PROJECTION_ITEMS,
                     ) {
                         Ok(items) => items,
@@ -1947,6 +2005,13 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                     let active_findings = cycle
                         .findings
                         .iter()
+                        .filter(|finding| {
+                            finding_matches_document(
+                                finding,
+                                &scope,
+                                cycle.impact.as_ref().map(|impact| &impact.target.file),
+                            )
+                        })
                         .filter(|finding| finding.lifecycle == FeedbackFindingLifecycleV1::Active)
                         .count();
                     let omitted_count = usize::try_from(cycle.omitted_findings)
@@ -1961,10 +2026,58 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                     impact_projection(&cycle)
                 } else if request.kind == ContextProjectionKind::affected_tests() {
                     affected_test_projection(&cycle)
+                } else if let Some(producer) = advisory_projection_producer(&request.kind) {
+                    let projected_item_count = cycle
+                        .findings
+                        .iter()
+                        .filter(|finding| {
+                            finding_matches_document(
+                                finding,
+                                &scope,
+                                cycle.impact.as_ref().map(|impact| &impact.target.file),
+                            )
+                        })
+                        .filter(|finding| advisory_finding_matches(finding, producer))
+                        .filter_map(finding_item)
+                        .count();
+                    let items = match source.current_finding_items(
+                        &root,
+                        request.document_uri.as_deref(),
+                        &scope,
+                        cycle.impact.as_ref().map(|impact| &impact.target.file),
+                        kind.clone(),
+                        cycle
+                            .findings
+                            .iter()
+                            .filter(|finding| advisory_finding_matches(finding, producer)),
+                        MAX_CONTEXT_PROJECTION_ITEMS,
+                    ) {
+                        Ok(items) => items,
+                        Err(error) => {
+                            return ContextProjectionOutcome::Deferred {
+                                reason: error.class().to_owned(),
+                            };
+                        }
+                    };
+                    let omitted_count = projected_item_count.saturating_sub(items.len());
+                    let coverage = match (
+                        advisory_projection_status(&cycle, producer).0,
+                        omitted_count,
+                    ) {
+                        (ContextCoverage::Complete, 1..) => ContextCoverage::Partial,
+                        (coverage, _) => coverage,
+                    };
+                    (coverage, items, omitted_count)
                 } else {
                     return ContextProjectionOutcome::Unsupported;
                 };
-            if kind != ContextProjectionKind::diagnostics() {
+            // Advisory finding items already carry per-finding canonical
+            // expand/get handles from `current_finding_items`; replacing them
+            // with a cycle-level diagnostics handle would discard the exact
+            // authority that expansion must reauthorize.
+            if kind != ContextProjectionKind::diagnostics()
+                && advisory_projection_producer(&kind).is_none()
+            {
                 items = match items
                     .into_iter()
                     .map(|item| {
@@ -2012,7 +2125,9 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                     };
                 }
             };
-            let producer_state = producer_state_for_cycle(&cycle);
+            let producer_state = advisory_projection_producer(&kind)
+                .map(|producer| advisory_projection_status(&cycle, producer).1)
+                .unwrap_or_else(|| producer_state_for_cycle(&cycle));
             let omission_reasons =
                 projection_omission_reasons(coverage, omitted_count, producer_state);
             ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
@@ -2048,10 +2163,23 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        let mut changes = self.changes.snapshot(root, subscriptions);
-        changes.extend(self.test_runs.poll_changes(root, subscriptions));
-        changes
+        ordered_context_changes(
+            self.changes.snapshot(root, subscriptions),
+            self.test_runs.poll_changes(root, subscriptions),
+        )
     }
+}
+
+/// Feedback-cycle changes describe the saved edit that triggered the cycle;
+/// managed test-run changes are a distinct later execution result. Preserve
+/// that production chronology after the bounded feedback lanes have been
+/// ordered, rather than giving the test run an artificial earlier rank.
+fn ordered_context_changes(
+    mut feedback_changes: Vec<ContextProjectionChange>,
+    test_run_changes: Vec<ContextProjectionChange>,
+) -> Vec<ContextProjectionChange> {
+    feedback_changes.extend(test_run_changes);
+    feedback_changes
 }
 
 fn feedback_content_is_current(
@@ -2436,6 +2564,55 @@ fn finding_item(finding: &FeedbackFindingV1) -> Option<ContextProjectionItem> {
     )
 }
 
+/// Maps a negotiated advisory projection to the canonical producer that owns
+/// its findings. No gateway-local source or inferred contributor is involved.
+fn advisory_projection_producer(
+    kind: &ContextProjectionKind,
+) -> Option<FeedbackDiagnosticProducerV1> {
+    match kind.as_str() {
+        ContextProjectionKind::GITHUB_REVIEW => Some(FeedbackDiagnosticProducerV1::GitHubReview),
+        ContextProjectionKind::CI_FAILURE_LOCALIZATION => {
+            Some(FeedbackDiagnosticProducerV1::CiLocalization)
+        }
+        ContextProjectionKind::AGENT_PROXIMITY => Some(FeedbackDiagnosticProducerV1::Proximity),
+        _ => None,
+    }
+}
+
+/// A finding is visible in exactly the advisory projection backed by its
+/// canonical diagnostic producer. Lifecycle filtering remains centralized in
+/// `finding_item`, so a saved cycle that clears the finding clears the LSP
+/// projection as well.
+fn advisory_finding_matches(
+    finding: &FeedbackFindingV1,
+    producer: FeedbackDiagnosticProducerV1,
+) -> bool {
+    finding
+        .diagnostic_projection
+        .as_ref()
+        .is_some_and(|projection| projection.producer == producer)
+}
+
+/// Checks document membership before an LSP context handle can be bound. An
+/// advisory finding names its own file; ordinary canonical findings are
+/// document-scoped through the cycle impact target. If neither can establish
+/// that relationship, this document cannot safely expose the finding.
+fn finding_matches_document(
+    finding: &FeedbackFindingV1,
+    scope: &LspFeedbackProjectionScope,
+    impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
+) -> bool {
+    let Some(document_relative_path) = scope.document_relative_path.as_deref() else {
+        return true;
+    };
+    let finding_file = finding
+        .diagnostic_projection
+        .as_ref()
+        .map(|projection| &projection.file)
+        .or(impact_target_file);
+    finding_file.is_some_and(|file| file.as_str() == document_relative_path)
+}
+
 fn impact_projection(
     cycle: &FeedbackCycleResultV1,
 ) -> (ContextCoverage, Vec<ContextProjectionItem>, usize) {
@@ -2508,6 +2685,69 @@ fn cycle_coverage(cycle: &FeedbackCycleResultV1) -> ContextCoverage {
         ContextCoverage::Unavailable
     } else {
         ContextCoverage::Partial
+    }
+}
+
+/// The production feedback cycle appends the three advisory provider states
+/// in canonical GitHub, CI, proximity order. Keep that authority intact when
+/// projecting a single advisory lane; the aggregate cycle state describes a
+/// different product surface.
+fn advisory_provider_state(
+    provider_states: &[ProviderEvaluationStateV1],
+    producer: FeedbackDiagnosticProducerV1,
+) -> Option<ProviderEvaluationStateV1> {
+    let advisory_offset = provider_states.len().checked_sub(3)?;
+    let producer_offset = match producer {
+        FeedbackDiagnosticProducerV1::GitHubReview => 0,
+        FeedbackDiagnosticProducerV1::CiLocalization => 1,
+        FeedbackDiagnosticProducerV1::Proximity => 2,
+    };
+    provider_states
+        .get(advisory_offset.saturating_add(producer_offset))
+        .copied()
+}
+
+/// Translate one canonical provider evaluation, without allowing an unrelated
+/// provider's incomplete coverage to downgrade this projection.
+fn advisory_projection_status(
+    cycle: &FeedbackCycleResultV1,
+    producer: FeedbackDiagnosticProducerV1,
+) -> (ContextCoverage, ContextProducerState) {
+    advisory_provider_status(advisory_provider_state(&cycle.provider_states, producer))
+}
+
+fn advisory_provider_status(
+    provider_state: Option<ProviderEvaluationStateV1>,
+) -> (ContextCoverage, ContextProducerState) {
+    match provider_state {
+        Some(ProviderEvaluationStateV1::SupportedCompletedComplete) => {
+            (ContextCoverage::Complete, ContextProducerState::Complete)
+        }
+        Some(
+            ProviderEvaluationStateV1::Unsupported
+            | ProviderEvaluationStateV1::Absent
+            | ProviderEvaluationStateV1::Unavailable,
+        )
+        | None => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Unavailable,
+        ),
+        Some(ProviderEvaluationStateV1::Indexing) => {
+            (ContextCoverage::Partial, ContextProducerState::Indexing)
+        }
+        Some(ProviderEvaluationStateV1::Stale | ProviderEvaluationStateV1::Partial) => {
+            (ContextCoverage::Partial, ContextProducerState::Partial)
+        }
+        Some(ProviderEvaluationStateV1::Cancelled) => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Cancelled,
+        ),
+        Some(ProviderEvaluationStateV1::TimedOut) => {
+            (ContextCoverage::Unavailable, ContextProducerState::TimedOut)
+        }
+        Some(ProviderEvaluationStateV1::Failed) => {
+            (ContextCoverage::Failed, ContextProducerState::Failed)
+        }
     }
 }
 
@@ -2991,6 +3231,7 @@ mod context_expansion_tests {
                 .document_content_digest
                 .as_ref()
                 .map(|digest| ContentDigest::new(digest.clone()).expect("document content digest")),
+            document_relative_path: None,
             generation: record.generation,
         };
         assert!(context_expansion_scope_is_current(&record, &current));
@@ -3008,16 +3249,22 @@ mod projection_tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        LspFeedbackProjectionScope, ProjectionChangeQueue, bind_test_run_document_content,
-        feedback_content_is_current, finding_item, test_run_projection,
+        LspFeedbackProjectionScope, ProjectionChangeQueue, advisory_finding_matches,
+        advisory_projection_producer, advisory_provider_state, advisory_provider_status,
+        bind_test_run_document_content, feedback_content_is_current, finding_item,
+        finding_matches_document, ordered_context_changes, test_run_projection,
     };
     use crate::operation_stream::{ManagedTestRunResult, ManagedTestRunSnapshot, OperationId};
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
-        FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1, FeedbackFindingId,
+        FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1,
+        FeedbackDiagnosticProducerV1, FeedbackDiagnosticProjectionV1, FeedbackFindingId,
         FeedbackFindingLifecycleV1, FeedbackFindingV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
+    use tracedecay_domain::{
+        CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, FileOccurrenceId,
+        ManifestDigest, SourceSpan, UtcMicros,
+    };
     use tracedecay_lsp::{
         AdmittedRoot, ContextCoverage, ContextFreshness, ContextProducerState,
         ContextProjectionChange, ContextProjectionKind, ContextProjectionOutcome,
@@ -3036,6 +3283,28 @@ mod projection_tests {
         }
     }
 
+    fn advisory_finding(
+        producer: FeedbackDiagnosticProducerV1,
+        lifecycle: FeedbackFindingLifecycleV1,
+    ) -> FeedbackFindingV1 {
+        FeedbackFindingV1 {
+            diagnostic_projection: Some(FeedbackDiagnosticProjectionV1 {
+                file: FileOccurrenceId::new("src/lib.rs").expect("file"),
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+                symbol: None,
+                code: "advisory".to_owned(),
+                severity: DiagnosticSeverityV1::Warning,
+                safe_bounded_message: "bounded advisory finding".to_owned(),
+                producer,
+                code_description_uri: None,
+            }),
+            ..finding(lifecycle)
+        }
+    }
+
     fn projection_scope() -> LspFeedbackProjectionScope {
         LspFeedbackProjectionScope {
             head_commit_id: CommitId::new("0123456789abcdef0123456789abcdef01234567")
@@ -3049,6 +3318,7 @@ mod projection_tests {
             snapshot_content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
                 .expect("snapshot content digest"),
             document_content_digest: None,
+            document_relative_path: Some("src/lib.rs".to_owned()),
             generation: 42,
         }
     }
@@ -3069,7 +3339,7 @@ mod projection_tests {
     }
 
     #[test]
-    fn projection_changes_replay_latest_negotiated_state_in_kind_order() {
+    fn feedback_change_queue_replays_latest_advisory_state_in_delivery_order() {
         let root = AdmittedRoot::new("file:///root");
         let queue = ProjectionChangeQueue::default();
         queue.offer(
@@ -3083,6 +3353,9 @@ mod projection_tests {
             ContextProjectionKind::post_edit_impact(),
             ContextProjectionKind::affected_tests(),
             ContextProjectionKind::test_run_results(),
+            ContextProjectionKind::github_review(),
+            ContextProjectionKind::ci_failure_localization(),
+            ContextProjectionKind::agent_proximity(),
         ]
         .into_iter()
         .map(|kind| ContextProjectionRegistration {
@@ -3099,9 +3372,11 @@ mod projection_tests {
             change(ContextProjectionKind::diagnostics(), 2),
         );
         for (revision, kind) in [
-            ("test-1", ContextProjectionKind::test_run_results()),
             ("affected-1", ContextProjectionKind::affected_tests()),
             ("impact-1", ContextProjectionKind::post_edit_impact()),
+            ("github-1", ContextProjectionKind::github_review()),
+            ("ci-1", ContextProjectionKind::ci_failure_localization()),
+            ("proximity-1", ContextProjectionKind::agent_proximity()),
         ] {
             queue.offer(revision.to_owned(), change(kind, 1));
         }
@@ -3116,7 +3391,9 @@ mod projection_tests {
                 "diagnostics",
                 "postEditImpact",
                 "affectedTests",
-                "testRunResults"
+                "githubReview",
+                "ciFailureLocalization",
+                "agentProximity",
             ]
         );
         assert_eq!(changes[0].generation, 2);
@@ -3132,8 +3409,29 @@ mod projection_tests {
             change(ContextProjectionKind::diagnostics(), 3),
         );
         let latest = queue.snapshot(&root, &subscriptions);
-        assert_eq!(latest.len(), 4);
+        assert_eq!(latest.len(), 6);
         assert_eq!(latest[0].generation, 3);
+
+        let delivered = ordered_context_changes(
+            latest,
+            vec![change(ContextProjectionKind::test_run_results(), 1)],
+        );
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|change| change.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "diagnostics",
+                "postEditImpact",
+                "affectedTests",
+                "githubReview",
+                "ciFailureLocalization",
+                "agentProximity",
+                "testRunResults",
+            ],
+            "the source appends a test execution only after its saved-edit feedback cycle"
+        );
     }
 
     #[test]
@@ -3149,6 +3447,113 @@ mod projection_tests {
                 "{lifecycle:?} finding remained visible"
             );
         }
+    }
+
+    #[test]
+    fn advisory_projection_keeps_only_its_active_canonical_producer_findings() {
+        let findings = [
+            advisory_finding(
+                FeedbackDiagnosticProducerV1::GitHubReview,
+                FeedbackFindingLifecycleV1::Active,
+            ),
+            advisory_finding(
+                FeedbackDiagnosticProducerV1::CiLocalization,
+                FeedbackFindingLifecycleV1::Active,
+            ),
+            advisory_finding(
+                FeedbackDiagnosticProducerV1::Proximity,
+                FeedbackFindingLifecycleV1::Cleared,
+            ),
+        ];
+
+        assert!(advisory_finding_matches(
+            &findings[0],
+            FeedbackDiagnosticProducerV1::GitHubReview
+        ));
+        assert!(!advisory_finding_matches(
+            &findings[1],
+            FeedbackDiagnosticProducerV1::GitHubReview
+        ));
+        assert!(finding_item(&findings[0]).is_some());
+        assert!(
+            finding_item(&findings[2]).is_none(),
+            "a cleared advisory finding must clear its LSP projection"
+        );
+        assert_eq!(
+            advisory_projection_producer(&ContextProjectionKind::github_review()),
+            Some(FeedbackDiagnosticProducerV1::GitHubReview)
+        );
+        assert_eq!(
+            advisory_projection_producer(&ContextProjectionKind::ci_failure_localization()),
+            Some(FeedbackDiagnosticProducerV1::CiLocalization)
+        );
+        assert_eq!(
+            advisory_projection_producer(&ContextProjectionKind::agent_proximity()),
+            Some(FeedbackDiagnosticProducerV1::Proximity)
+        );
+    }
+
+    #[test]
+    fn advisory_projection_uses_its_canonical_provider_state_and_document() {
+        let github = advisory_finding(
+            FeedbackDiagnosticProducerV1::GitHubReview,
+            FeedbackFindingLifecycleV1::Active,
+        );
+        let mut other_file = github.clone();
+        other_file
+            .diagnostic_projection
+            .as_mut()
+            .expect("advisory projection")
+            .file = FileOccurrenceId::new("src/other.rs").expect("other file");
+        let scope = projection_scope();
+
+        assert!(finding_matches_document(&github, &scope, None));
+        assert!(
+            !finding_matches_document(&other_file, &scope, None),
+            "a finding for another document must not receive this document's handle"
+        );
+        let states = [
+            ProviderEvaluationStateV1::Partial,
+            ProviderEvaluationStateV1::SupportedCompletedComplete,
+            ProviderEvaluationStateV1::Unavailable,
+            ProviderEvaluationStateV1::Failed,
+        ];
+        assert_eq!(
+            advisory_provider_state(&states, FeedbackDiagnosticProducerV1::GitHubReview),
+            Some(ProviderEvaluationStateV1::SupportedCompletedComplete)
+        );
+        assert_eq!(
+            advisory_provider_state(&states, FeedbackDiagnosticProducerV1::CiLocalization),
+            Some(ProviderEvaluationStateV1::Unavailable)
+        );
+        assert_eq!(
+            advisory_provider_state(&states, FeedbackDiagnosticProducerV1::Proximity),
+            Some(ProviderEvaluationStateV1::Failed)
+        );
+        assert_eq!(
+            advisory_provider_status(advisory_provider_state(
+                &states,
+                FeedbackDiagnosticProducerV1::GitHubReview,
+            )),
+            (ContextCoverage::Complete, ContextProducerState::Complete)
+        );
+        assert_eq!(
+            advisory_provider_status(advisory_provider_state(
+                &states,
+                FeedbackDiagnosticProducerV1::CiLocalization,
+            )),
+            (
+                ContextCoverage::Unavailable,
+                ContextProducerState::Unavailable
+            )
+        );
+        assert_eq!(
+            advisory_provider_status(advisory_provider_state(
+                &states,
+                FeedbackDiagnosticProducerV1::Proximity,
+            )),
+            (ContextCoverage::Failed, ContextProducerState::Failed)
+        );
     }
 
     #[test]

@@ -342,6 +342,7 @@ impl GatewayMethod {
 pub enum MethodUnavailableReason {
     ExplicitlyUnavailable,
     CapabilityNotNegotiated,
+    Denied,
     OutsideAdmittedRoot,
     AmbiguousAdmittedRoot,
     ProviderUnavailable,

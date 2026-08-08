@@ -369,10 +369,16 @@ where
         let envelope = match outcome {
             ContextProjectionOutcome::Ready(envelope) => envelope,
             ContextProjectionOutcome::Pending => return Ok(None),
-            ContextProjectionOutcome::Unsupported | ContextProjectionOutcome::Denied => {
+            ContextProjectionOutcome::Unsupported => {
                 return Err(RpcFailure::unavailable(
                     TRACEDECAY_CONTEXT_METHOD,
                     MethodUnavailableReason::CapabilityNotNegotiated,
+                ));
+            }
+            ContextProjectionOutcome::Denied => {
+                return Err(RpcFailure::unavailable(
+                    TRACEDECAY_CONTEXT_METHOD,
+                    MethodUnavailableReason::Denied,
                 ));
             }
             ContextProjectionOutcome::Deferred { reason } => {
@@ -549,7 +555,7 @@ where
             }
             ContextExpansionOutcome::Denied => Err(RpcFailure::unavailable(
                 TRACEDECAY_CONTEXT_EXPAND_METHOD,
-                MethodUnavailableReason::CapabilityNotNegotiated,
+                MethodUnavailableReason::Denied,
             )),
             ContextExpansionOutcome::Pending => Ok(None),
             ContextExpansionOutcome::Failed { reason } => Err(RpcFailure {
@@ -810,15 +816,20 @@ where
         let Some(context) = self.context.port.clone() else {
             return;
         };
-        let changes = self
-            .lifecycle
-            .gateway
-            .workspace()
-            .roots()
-            .iter()
-            .flat_map(|root| context.poll_changes(root, &self.context.subscriptions))
-            .collect::<Vec<_>>();
-        for mut change in changes.into_iter().take(MAX_CONTEXT_CHANGES_PER_POLL) {
+        let mut changes = Vec::with_capacity(MAX_CONTEXT_CHANGES_PER_POLL);
+        for root in self.lifecycle.gateway.workspace().roots() {
+            let remaining = MAX_CONTEXT_CHANGES_PER_POLL.saturating_sub(changes.len());
+            if remaining == 0 {
+                break;
+            }
+            changes.extend(
+                context
+                    .poll_changes(root, &self.context.subscriptions, remaining)
+                    .into_iter()
+                    .take(remaining),
+            );
+        }
+        for mut change in changes {
             if !self.valid_context_change(&change) {
                 continue;
             }

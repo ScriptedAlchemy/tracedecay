@@ -480,6 +480,7 @@ pub(crate) fn unavailable_reason(reason: MethodUnavailableReason) -> &'static st
     match reason {
         MethodUnavailableReason::ExplicitlyUnavailable => "explicitlyUnavailable",
         MethodUnavailableReason::CapabilityNotNegotiated => "capabilityNotNegotiated",
+        MethodUnavailableReason::Denied => "denied",
         MethodUnavailableReason::OutsideAdmittedRoot => "outsideAdmittedRoot",
         MethodUnavailableReason::AmbiguousAdmittedRoot => "ambiguousAdmittedRoot",
         MethodUnavailableReason::ProviderUnavailable => "providerUnavailable",

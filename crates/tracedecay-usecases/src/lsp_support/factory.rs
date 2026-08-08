@@ -384,10 +384,11 @@ impl ContextProjectionPort for FederatedContext {
         &self,
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
+        maximum: usize,
     ) -> Vec<ContextProjectionChange> {
-        self.roots
-            .get(root.uri())
-            .map_or_else(Vec::new, |port| port.poll_changes(root, subscriptions))
+        self.roots.get(root.uri()).map_or_else(Vec::new, |port| {
+            port.poll_changes(root, subscriptions, maximum)
+        })
     }
 
     fn update_subscriptions(

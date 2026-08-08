@@ -27,14 +27,11 @@ struct TraceDecayClientCapabilities {
 /// The protocol version implemented by the gateway contract.
 pub const LSP_PROTOCOL_VERSION: &str = "3.17";
 
+/// Single source of truth for the kinds this gateway will negotiate. Baseline
+/// reader projections and advisory-cycle contributions are both admitted here;
+/// whether a given kind is actually mounted stays a producer-registration fact.
 pub(crate) fn is_supported_context_projection(kind: &ContextProjectionKind) -> bool {
-    matches!(
-        kind.as_str(),
-        ContextProjectionKind::DIAGNOSTICS
-            | ContextProjectionKind::POST_EDIT_IMPACT
-            | ContextProjectionKind::AFFECTED_TESTS
-            | ContextProjectionKind::TEST_RUN_RESULTS
-    )
+    kind.is_supported()
 }
 
 /// LSP 3.17 client position encodings. The gateway advertises only UTF-16.
@@ -903,6 +900,32 @@ mod tests {
                 Err(CapabilityParseError::InvalidTraceDecayCapabilities)
             );
         }
+    }
+
+    #[test]
+    fn context_capability_dto_accepts_recognized_advisory_projections() {
+        let capabilities = ClientCapabilities::from_initialize_capabilities(&json!({
+            "experimental": {
+                "tracedecay": {
+                    "revision": TRACEDECAY_CONTEXT_REVISION,
+                    "projections": [
+                        { "kind": "githubReview", "revision": TRACEDECAY_CONTEXT_REVISION },
+                        { "kind": "ciFailureLocalization", "revision": TRACEDECAY_CONTEXT_REVISION },
+                        { "kind": "agentProximity", "revision": TRACEDECAY_CONTEXT_REVISION },
+                    ],
+                }
+            }
+        }))
+        .expect("recognized advisory projection capabilities");
+
+        assert_eq!(
+            capabilities
+                .context_projections
+                .keys()
+                .map(ContextProjectionKind::as_str)
+                .collect::<Vec<_>>(),
+            vec!["agentProximity", "ciFailureLocalization", "githubReview"]
+        );
     }
 
     #[test]

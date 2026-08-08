@@ -38,6 +38,20 @@ impl ContextProjectionKind {
     pub const POST_EDIT_IMPACT: &'static str = "postEditImpact";
     pub const AFFECTED_TESTS: &'static str = "affectedTests";
     pub const TEST_RUN_RESULTS: &'static str = "testRunResults";
+    /// GitHub review ingest contribution of the composed advisory cycle.
+    pub const GITHUB_REVIEW: &'static str = "githubReview";
+    /// CI failure localization contribution of the composed advisory cycle.
+    pub const CI_FAILURE_LOCALIZATION: &'static str = "ciFailureLocalization";
+    /// Agent proximity contribution of the composed advisory cycle.
+    pub const AGENT_PROXIMITY: &'static str = "agentProximity";
+
+    /// Advisory contributions the canonical feedback source can expose through
+    /// the typed context projection authority.
+    pub const ADVISORY: [&'static str; 3] = [
+        Self::GITHUB_REVIEW,
+        Self::CI_FAILURE_LOCALIZATION,
+        Self::AGENT_PROXIMITY,
+    ];
 
     pub fn diagnostics() -> Self {
         Self(Self::DIAGNOSTICS.to_owned())
@@ -53,6 +67,18 @@ impl ContextProjectionKind {
 
     pub fn test_run_results() -> Self {
         Self(Self::TEST_RUN_RESULTS.to_owned())
+    }
+
+    pub fn github_review() -> Self {
+        Self(Self::GITHUB_REVIEW.to_owned())
+    }
+
+    pub fn ci_failure_localization() -> Self {
+        Self(Self::CI_FAILURE_LOCALIZATION.to_owned())
+    }
+
+    pub fn agent_proximity() -> Self {
+        Self(Self::AGENT_PROXIMITY.to_owned())
     }
 
     pub fn new(value: impl Into<String>) -> Option<Self> {
@@ -75,7 +101,13 @@ impl ContextProjectionKind {
                 | Self::POST_EDIT_IMPACT
                 | Self::AFFECTED_TESTS
                 | Self::TEST_RUN_RESULTS
-        )
+        ) || self.is_advisory()
+    }
+
+    /// Whether this kind is one of the advisory-cycle contributions carried by
+    /// the context extension rather than a baseline reader projection.
+    pub fn is_advisory(&self) -> bool {
+        Self::ADVISORY.contains(&self.as_str())
     }
 
     fn is_valid_str(value: &str) -> bool {
@@ -480,22 +512,32 @@ impl ContextProjectionPort for ContextProjectionAdapter {
         &self,
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
+        maximum: usize,
     ) -> Vec<ContextProjectionChange> {
+        if maximum == 0 {
+            return Vec::new();
+        }
         let changes = self.authority.poll_changes(root, subscriptions);
         let Ok(mut delivered) = self.delivered_changes.try_lock() else {
             return Vec::new();
         };
-        changes
-            .into_iter()
-            .filter(|change| {
-                let key = (
-                    change.root_uri.clone(),
-                    change.document_uri.clone(),
-                    change.kind.clone(),
-                );
-                !matches!(delivered.insert(key, change.clone()), Some(previous) if previous == *change)
-            })
-            .collect()
+        let mut ready = Vec::with_capacity(maximum);
+        for change in changes {
+            if ready.len() == maximum {
+                break;
+            }
+            let key = (
+                change.root_uri.clone(),
+                change.document_uri.clone(),
+                change.kind.clone(),
+            );
+            if matches!(delivered.get(&key), Some(previous) if previous == &change) {
+                continue;
+            }
+            delivered.insert(key, change.clone());
+            ready.push(change);
+        }
+        ready
     }
 
     fn update_subscriptions(
@@ -559,10 +601,14 @@ pub trait ContextProjectionPort {
         false
     }
 
+    /// Returns at most `maximum` undelivered changes. Implementors must not
+    /// mark a change as delivered unless it is included in this result, so the
+    /// session can resume a bounded notification stream on its next poll.
     fn poll_changes(
         &self,
         _root: &AdmittedRoot,
         _subscriptions: &BTreeSet<ContextProjectionRegistration>,
+        _maximum: usize,
     ) -> Vec<ContextProjectionChange> {
         Vec::new()
     }
@@ -625,8 +671,9 @@ where
         &self,
         root: &AdmittedRoot,
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
+        maximum: usize,
     ) -> Vec<ContextProjectionChange> {
-        (**self).poll_changes(root, subscriptions)
+        (**self).poll_changes(root, subscriptions, maximum)
     }
 
     fn update_subscriptions(
@@ -663,7 +710,9 @@ mod tests {
         }
     }
 
-    struct Authority;
+    struct Authority {
+        change_count: usize,
+    }
 
     fn identity() -> ContextProjectionIdentity {
         ContextProjectionIdentity {
@@ -747,26 +796,32 @@ mod tests {
             };
             subscriptions
                 .contains(&registration)
-                .then(|| ContextProjectionChange {
-                    root_uri: root.uri().to_owned(),
-                    document_uri: Some("file:///root/a.rs".to_owned()),
-                    kind: ContextProjectionKind::diagnostics(),
-                    generation: 7,
-                    identity: identity(),
-                    freshness: ContextFreshness::Current,
-                    producer_state: ContextProducerState::Complete,
-                    coverage: ContextCoverage::Complete,
-                    revision: TRACEDECAY_CONTEXT_REVISION,
-                    retrieval_handle: None,
+                .then(|| {
+                    (0..self.change_count)
+                        .map(|index| ContextProjectionChange {
+                            root_uri: root.uri().to_owned(),
+                            document_uri: Some(format!("file:///root/{index}.rs")),
+                            kind: ContextProjectionKind::diagnostics(),
+                            generation: 7,
+                            identity: identity(),
+                            freshness: ContextFreshness::Current,
+                            producer_state: ContextProducerState::Complete,
+                            coverage: ContextCoverage::Complete,
+                            revision: TRACEDECAY_CONTEXT_REVISION,
+                            retrieval_handle: None,
+                        })
+                        .collect()
                 })
-                .into_iter()
-                .collect()
+                .unwrap_or_default()
         }
     }
 
     #[test]
     fn context_broker_correlates_pending_work_by_project_and_request() {
-        let adapter = ContextProjectionAdapter::new(Arc::new(InlineSpawner), Arc::new(Authority));
+        let adapter = ContextProjectionAdapter::new(
+            Arc::new(InlineSpawner),
+            Arc::new(Authority { change_count: 1 }),
+        );
         let root = AdmittedRoot::new("file:///root");
         let request_id = LspRequestId::Number(4);
         let request = ContextProjectionRequest::new(
@@ -809,7 +864,38 @@ mod tests {
         .into_iter()
         .collect();
         adapter.update_subscriptions(&root, &subscriptions);
-        assert_eq!(adapter.poll_changes(&root, &subscriptions).len(), 1);
-        assert!(adapter.poll_changes(&root, &subscriptions).is_empty());
+        assert_eq!(adapter.poll_changes(&root, &subscriptions, 1).len(), 1);
+        assert!(adapter.poll_changes(&root, &subscriptions, 1).is_empty());
+    }
+
+    #[test]
+    fn bounded_change_delivery_resumes_without_acknowledging_the_tail() {
+        let root = AdmittedRoot::new("file:///root");
+        let subscriptions = [ContextProjectionRegistration {
+            kind: ContextProjectionKind::diagnostics(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        }]
+        .into_iter()
+        .collect();
+        let adapter = ContextProjectionAdapter::new(
+            Arc::new(InlineSpawner),
+            Arc::new(Authority { change_count: 17 }),
+        );
+
+        let first = adapter.poll_changes(&root, &subscriptions, 16);
+        assert_eq!(first.len(), 16);
+        assert_eq!(first[0].document_uri.as_deref(), Some("file:///root/0.rs"));
+        assert_eq!(
+            first[15].document_uri.as_deref(),
+            Some("file:///root/15.rs")
+        );
+
+        let second = adapter.poll_changes(&root, &subscriptions, 16);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].document_uri.as_deref(),
+            Some("file:///root/16.rs")
+        );
+        assert!(adapter.poll_changes(&root, &subscriptions, 16).is_empty());
     }
 }

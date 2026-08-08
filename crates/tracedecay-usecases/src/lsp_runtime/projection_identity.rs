@@ -58,6 +58,7 @@ impl LspCodeIndexProjectionIdentity {
             invalidation_digest: self.invalidation_digest,
             snapshot_content_digest: self.snapshot_content_digest,
             document_content_digest: self.document_content_digest,
+            document_relative_path: None,
             generation,
         })
     }
