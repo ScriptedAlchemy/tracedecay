@@ -10,7 +10,10 @@ async fn bench_runs_and_returns_report() {
         "pub fn hello() {}\npub fn world() {}\n",
     )
     .unwrap();
-    let cg = TraceDecay::init(tmp.path()).await.unwrap();
+    let cg =
+        TraceDecay::init_with_options(tmp.path(), crate::fixture_profile::open_options(tmp.path()))
+            .await
+            .unwrap();
 
     let queries_path = tmp.path().join("q.toml");
     std::fs::write(

@@ -959,7 +959,7 @@ pub fn helper() -> String {
     )
     .expect("failed to write utils.rs");
 
-    let cg = TraceDecay::init(project)
+    let cg = TraceDecay::init_with_options(project, crate::fixture_profile::open_options(project))
         .await
         .expect("failed to init TraceDecay");
     cg.index_all().await.expect("failed to index project");
