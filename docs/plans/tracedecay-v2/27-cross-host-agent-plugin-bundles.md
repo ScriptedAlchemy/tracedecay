@@ -281,6 +281,55 @@ the host observation replay spool.
   conformance evidence for Doctor consumption. Host lifecycle owns the actual
   repair mechanics; Doctor owns diagnosis and orchestration.
 
+## Host-native CLI adoption register
+
+**Owner policy (Zack, 2026-08-08) — CLI-first.** Every host's own native CLI is
+the preferred install/uninstall mechanism. Writing the host's configuration
+files by hand is the *fallback*, permitted only where the host's CLI is
+genuinely inadequate for what this integration needs, and every manual verdict
+must carry evidence — a doc citation or a probed invocation — to the same
+standard as the OpenCode reversal. A host whose CLI *is* adequate while we
+still hand-write its config is a defect, not a style choice.
+
+Inadequacy reason codes used below:
+
+- **(a) no non-interactive mode** — the command exists but requires a TTY or a
+  wizard, so it cannot run inside a lifecycle;
+- **(b) no removal counterpart** — the command can register but never
+  deregister, so an adopted install could not be uninstalled by the authority
+  that created it;
+- **(c) cannot carry the components we need** — the command's flag surface has
+  no representation for a local stdio server, its arguments, or its scope;
+- **(d) driving it would misbehave** — adoption would duplicate, double-load,
+  or otherwise corrupt a registration the host already derives from a file it
+  auto-discovers.
+
+### Verdicts (verified 2026-08-08 unless a different date is given)
+
+| Host | Verdict | Command driven / reason code | Evidence |
+| --- | --- | --- | --- |
+| Claude Code | ADOPT-CLI | `claude plugin marketplace add` / `install` / `uninstall` | owner ruling; `agents/claude.rs` |
+| Gemini CLI | ADOPT-CLI | `gemini extensions install <staged dir>` / `uninstall tracedecay` | `agents/gemini/extension.rs`; <https://github.com/google-gemini/gemini-cli/blob/main/docs/extensions/index.md> |
+| Codex | ADOPT-CLI (MCP only) | `codex mcp add` / `remove`; plugin activation stays interactive-only (a) | `agents/codex/mcp_registry.rs`; <https://developers.openai.com/codex/cli> |
+| Copilot CLI | ADOPT-CLI | `copilot mcp add NAME -- CMD ARGS` / `remove` | `agents/copilot.rs`; <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers> |
+| Kiro | ADOPT-CLI | `kiro-cli mcp add --name … --command … --args …` / `remove`; steering + managed agent stay TraceDecay-written (c) | `agents/kiro.rs`; <https://kiro.dev/docs/cli/mcp/registry/> |
+| OpenCode | MANUAL-ONLY (d) | `opencode plugin` de-duplicates by resolved `file://` URL, so driving it beside the auto-discovered `plugin/*.ts` deployment double-loads every hook, and it has no removal counterpart (b) | shipped host v1.18.4 config loader; recorded as executable invariants in `agents/opencode/plugin_cli.rs` |
+| Kilo | MANUAL-ONLY (b + c) | `kilo mcp add` exposes only `--url`/`--env`/`--header` — no `--command`/`--args` for a local stdio server — and the subcommand set is `add \| list \| auth \| logout \| debug` with no remove/delete | <https://kilo.ai/docs/code-with-ai/platforms/cli-reference>; <https://kilo.ai/docs/automate/mcp/using-in-cli>; <https://github.com/Kilo-Org/kilocode/issues/7079> |
+| Cursor | MANUAL-ONLY (a + c) | probed `cursor-agent mcp --help`: `login \| list \| list-tools \| enable \| disable` only. `enable` toggles approval for a server that already exists in `mcp.json`; there is no `add` and no CLI plugin install | probed 2026-08-08; <https://cursor.com/docs/cli/mcp> |
+| Kimi Code | MANUAL-ONLY (a) | probed `kimi --help`: no `mcp` subcommand exists at all; servers are managed only through the in-TUI `/mcp-config`. Matches what `agents/kimi.rs` already assumes — stage the source, defer registration | probed 2026-08-08; <https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html> |
+| Cline | MANUAL-ONLY (a) | a standalone `cline` CLI now exists with `cline mcp install <name> -- <cmd>`, but its own README states the command opens the add-server wizard and **requires a TTY**; no remove/uninstall is documented (b) | <https://github.com/cline/cline/blob/main/apps/cli/README.md>; <https://github.com/cline/cline/issues/9385> |
+| Zed | MANUAL-ONLY (a) | non-interactive CLI extension installation is an open feature request, not implemented | <https://github.com/zed-industries/zed/discussions/58417> |
+| Antigravity | MANUAL-ONLY (c) | `agy` has `plugin list/install/disable` for the marketplace layer only; MCP servers are configured through the interactive `/mcp` overlay or by editing `mcp_config.json`. No `agy mcp add`/`remove` exists | <https://antigravity.google/docs/mcp>; <https://antigravity.google/docs/cli/plugins> |
+| Vibe | MANUAL-ONLY (c) | `vibe mcp add` is genuinely non-interactive but **remote-transport only** (`--url`, `--transport`, `--header`, `--api-key-*`); it has no `--command`/`--args`, and stdio servers are documented only as a manual `[[mcp_servers]]` entry in `config.toml`. `vibe mcp remove <name>` does exist, so a future stdio `add` flag would make this host adoptable outright | <https://github.com/mistralai/mistral-vibe/blob/main/README.md>; <https://docs.mistral.ai/vibe/code/cli/mcp-servers> |
+| Roo Code | MANUAL-ONLY (a), frozen | the product shut down and its repository was archived read-only on 2026-05-15; no CLI work is ongoing, so no adoption is possible or worth pursuing | <https://kilo.ai/compare/roo-code-shutdown-roomote> |
+| Hermes | N/A | first-party profile-plugin host; its lifecycle is already TraceDecay-native | `agents/hermes.rs` |
+
+Each MANUAL-ONLY verdict is recorded again as a module-level doc comment on the
+host it governs, so the reason travels with the code that would otherwise look
+like an unexamined config write. Re-open a verdict only when the specific
+missing capability named in its reason code ships — for Kilo that means a
+`--command`/`--args` form **and** an `mcp remove`, not either alone.
+
 ## Replacement and deletion
 
 - Delete source-only provider-capture compatibility generators and duplicate integration

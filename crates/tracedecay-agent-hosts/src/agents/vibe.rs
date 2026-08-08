@@ -3,6 +3,20 @@
 //! Handles registration of the tracedecay MCP server in Vibe's
 //! `~/.vibe/config.toml` as a `[[mcp_servers]]` entry with stdio transport,
 //! and prompt rules via `~/.vibe/prompts/cli.md`.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so this config write needs a justification. Vibe's
+//! `vibe mcp add` is genuinely non-interactive and `vibe mcp remove <name>`
+//! exists — but `add` is **remote-transport only** (`--url`, `--transport`,
+//! `--header`, `--api-key-*`). It has no `--command`/`--args`, so a local
+//! stdio server, which is exactly what `tracedecay serve` is, has no
+//! representation on that command line; Mistral's own documentation registers
+//! stdio servers by editing `config.toml`. Adopting `remove` alone would leave
+//! the lifecycle half-driven, with the registration created by one authority
+//! and destroyed by another. This is the closest host to adoptable: a single
+//! stdio `add` flag would flip the verdict outright. See
+//! <https://github.com/mistralai/mistral-vibe/blob/main/README.md> and
+//! <https://docs.mistral.ai/vibe/code/cli/mcp-servers>.
 
 use std::path::Path;
 

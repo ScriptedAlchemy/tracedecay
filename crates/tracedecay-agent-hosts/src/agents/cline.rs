@@ -2,6 +2,18 @@
 //!
 //! Handles registration of the tracedecay MCP server in Cline's
 //! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so this config write needs a justification. A
+//! standalone `cline` CLI does now exist and it does expose
+//! `cline mcp install <name> -- <cmd> <args>`, but its own README states that
+//! the command opens the add-server *wizard* and therefore **requires a TTY** —
+//! it cannot run inside a lifecycle. No remove or uninstall counterpart is
+//! documented either, so an adopted registration could not be undone by the
+//! authority that created it. See
+//! <https://github.com/cline/cline/blob/main/apps/cli/README.md> and
+//! <https://github.com/cline/cline/issues/9385>. Re-open this if a headless
+//! (non-TTY) form plus a removal command ship together.
 
 use std::env;
 use std::path::{Path, PathBuf};

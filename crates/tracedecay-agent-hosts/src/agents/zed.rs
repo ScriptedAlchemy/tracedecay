@@ -2,6 +2,14 @@
 //!
 //! Handles registration of the tracedecay MCP server in Zed's `settings.json`
 //! under the `context_servers.tracedecay` key.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so this config write needs a justification. Zed ships
+//! no non-interactive extension or context-server installation command at all:
+//! that capability is an open feature request, not an implemented one, and
+//! extensions are installed through the Command Palette and the Agent Panel.
+//! There is nothing to drive, so the settings merge below is the only route.
+//! See <https://github.com/zed-industries/zed/discussions/58417>.
 
 use std::path::{Path, PathBuf};
 

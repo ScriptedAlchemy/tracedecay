@@ -2,6 +2,15 @@
 //!
 //! Handles registration of the tracedecay MCP server in Roo Code's
 //! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so this config write needs a justification. Roo Code
+//! never shipped a non-interactive MCP command — registration was documented
+//! only through the UI's "Edit Global MCP" or a hand-edited `mcp.json` — and
+//! the product has since shut down, with its repository archived read-only on
+//! 2026-05-15. There is no CLI to adopt and none is coming. See
+//! <https://docs.roocode.com/features/mcp/using-mcp-in-roo> and
+//! <https://kilo.ai/compare/roo-code-shutdown-roomote>.
 
 use std::path::{Path, PathBuf};
 

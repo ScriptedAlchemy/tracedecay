@@ -11,6 +11,15 @@
 //! `<project>/.kimi-code/mcp.json` plus prompt rules in `<project>/AGENTS.md`.
 //!
 //! Kimi Code owns the plugin registry; TraceDecay owns only its staged source.
+//!
+//! **Deferral re-verified 2026-08-08 under the CLI-first policy.** `kimi
+//! --help` was probed directly: its command set is
+//! `export, provider, acp, web, server, login, doctor, vis, migrate, upgrade`
+//! — there is no `mcp` subcommand and no plugin subcommand of any kind. The
+//! documented way to add, edit, or delete a server is the in-TUI
+//! `/mcp-config`. So there is nothing to adopt, and the deferral above is the
+//! honest lifecycle rather than a preference. See
+//! <https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html>.
 
 use std::path::{Path, PathBuf};
 

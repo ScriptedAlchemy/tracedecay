@@ -9,6 +9,16 @@
 //!   is not picked up by the CLI (#85).
 //!
 //! `doctor` checks both locations and reports them separately.
+//!
+//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
+//! policy is CLI-first, so these two config writes need a justification. The
+//! `agy` CLI has a plugin/marketplace layer (`agy plugin list|install|disable`)
+//! but no MCP command at all: Antigravity's own documentation directs users to
+//! the interactive `/mcp` overlay or to editing `mcp_config.json` by hand, and
+//! no `agy mcp add`/`remove` exists. The plugin commands cannot carry an MCP
+//! server registration, so neither of the two files below has a command to
+//! drive. See <https://antigravity.google/docs/mcp> and
+//! <https://antigravity.google/docs/cli/plugins>.
 
 use std::path::Path;
 
