@@ -131,7 +131,7 @@ impl FeedbackListRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackFindingReadV1 {
     pub result_id: FeedbackResultId,
@@ -151,26 +151,26 @@ pub struct FeedbackFindingReadV1 {
     pub expand_handle: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDiagnosticsReadResultV1 {
     pub cycle: FeedbackCycleResultV1,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackGetResultV1 {
     pub finding: FeedbackFindingReadV1,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExpandResultV1 {
     pub finding: FeedbackFindingReadV1,
     pub expansion: AnchorExpandResult,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackListResultV1 {
     pub findings: Vec<FeedbackFindingReadV1>,
@@ -181,8 +181,8 @@ pub struct FeedbackListResultV1 {
 /// The daemon-side projection owner (usecases) re-exports this type; it lives
 /// here so the catalog contribution can register its schema body as the single
 /// Rust-owned wire authority. Results project from an authorized completed
-/// cycle, so the type is serialize-only like the ledger rows it mirrors.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+/// cycle, and the canonical response wire remains consumable by typed SDKs.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalFeedbackImpactProjectionV1 {
     pub result_id: FeedbackResultId,
@@ -194,7 +194,7 @@ pub struct CanonicalFeedbackImpactProjectionV1 {
 }
 
 /// Canonical affected-tests projection returned by `affected_tests`.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalAffectedTestsProjectionV1 {
     pub result_id: FeedbackResultId,
@@ -689,12 +689,201 @@ fn evidence_envelope<T>(
 
 #[cfg(test)]
 mod invocation_tests {
-    use super::FeedbackHandleRequestV1;
+    use std::fmt::Debug;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+    use tracedecay_domain::feedback::{
+        FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDurabilityV1,
+        FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
+        FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
+    };
+    use tracedecay_domain::{
+        CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, SymbolOccurrenceId,
+        WorktreeId,
+    };
+
+    use super::{
+        CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
+        FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackFindingReadV1,
+        FeedbackGetResultV1, FeedbackHandleRequestV1, FeedbackListResultV1,
+    };
+    use crate::OpaqueCursor;
 
     #[test]
     fn invocation_handle_rejects_unbounded_or_noncanonical_feedback_reads() {
         assert!(FeedbackHandleRequestV1::new("feedback.handle.v1").is_ok());
         assert!(FeedbackHandleRequestV1::new(" feedback.handle.v1").is_err());
         assert!(FeedbackHandleRequestV1::new("x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn feedback_sdk_read_result_payloads_round_trip_through_json() {
+        assert_json_round_trip(diagnostics());
+        assert_json_round_trip(FeedbackGetResultV1 {
+            finding: finding_read(),
+        });
+        assert_json_round_trip(FeedbackExpandResultV1 {
+            finding: finding_read(),
+            expansion: crate::AnchorExpandResult {
+                anchors: Vec::new(),
+            },
+        });
+        assert_json_round_trip(FeedbackListResultV1 {
+            findings: vec![finding_read()],
+        });
+        assert_json_round_trip(CanonicalFeedbackImpactProjectionV1 {
+            result_id: result_id(),
+            cycle_id: cycle_id(),
+            scope: scope(),
+            content_identity: None,
+            impact: None,
+            state: Some(FeedbackImpactStateV1::Unavailable),
+        });
+        assert_json_round_trip(CanonicalAffectedTestsProjectionV1 {
+            result_id: result_id(),
+            cycle_id: cycle_id(),
+            scope: scope(),
+            content_identity: None,
+            target: None,
+            affected_tests: vec![SymbolOccurrenceId::new("symbol.feedback-test").expect("symbol")],
+            evidence_anchors: vec![
+                RetrievalAnchorId::new("anchor.feedback-test").expect("retrieval anchor"),
+            ],
+            state: Some(FeedbackImpactStateV1::Partial),
+        });
+    }
+
+    #[test]
+    fn feedback_sdk_read_result_payloads_reject_unknown_wire_shapes() {
+        assert_unknown_field_rejected(&diagnostics());
+        assert_unknown_field_rejected(&FeedbackGetResultV1 {
+            finding: finding_read(),
+        });
+        assert_unknown_field_rejected(&FeedbackExpandResultV1 {
+            finding: finding_read(),
+            expansion: crate::AnchorExpandResult {
+                anchors: Vec::new(),
+            },
+        });
+        assert_unknown_field_rejected(&FeedbackListResultV1 {
+            findings: vec![finding_read()],
+        });
+        assert_unknown_field_rejected(&CanonicalFeedbackImpactProjectionV1 {
+            result_id: result_id(),
+            cycle_id: cycle_id(),
+            scope: scope(),
+            content_identity: None,
+            impact: None,
+            state: None,
+        });
+        assert_unknown_field_rejected(&CanonicalAffectedTestsProjectionV1 {
+            result_id: result_id(),
+            cycle_id: cycle_id(),
+            scope: scope(),
+            content_identity: None,
+            target: None,
+            affected_tests: Vec::new(),
+            evidence_anchors: Vec::new(),
+            state: None,
+        });
+        let mut nested = serde_json::to_value(FeedbackGetResultV1 {
+            finding: finding_read(),
+        })
+        .expect("serialize feedback finding result");
+        nested["finding"]["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<FeedbackGetResultV1>(nested).is_err());
+    }
+
+    fn assert_json_round_trip<T>(value: T)
+    where
+        T: Serialize + DeserializeOwned + Debug + PartialEq,
+    {
+        let encoded = serde_json::to_value(&value).expect("serialize feedback SDK result");
+        let decoded: T = serde_json::from_value(encoded).expect("deserialize feedback SDK result");
+        assert_eq!(decoded, value);
+    }
+
+    fn assert_unknown_field_rejected<T>(value: &T)
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let mut encoded = serde_json::to_value(value).expect("serialize feedback SDK result");
+        encoded
+            .as_object_mut()
+            .expect("feedback SDK result object")
+            .insert("unexpected".to_owned(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<T>(encoded).is_err());
+    }
+
+    fn diagnostics() -> FeedbackDiagnosticsReadResultV1 {
+        FeedbackDiagnosticsReadResultV1 {
+            cycle: FeedbackCycleResultV1 {
+                result_id: result_id(),
+                cycle_id: cycle_id(),
+                scope: scope(),
+                content_identity: None,
+                durability: FeedbackDurabilityV1::Durable,
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                termination: FeedbackCycleTerminationV1::Blocked,
+                provider_states: Vec::new(),
+                advisory_provider_states: Vec::new(),
+                baseline_states: Vec::new(),
+                impact: None,
+                impact_state: None,
+                affected_tests_state: None,
+                findings: Vec::new(),
+                total_findings: 0,
+                returned_findings: 0,
+                omitted_findings: 0,
+                advisory_only: true,
+            },
+        }
+    }
+
+    fn finding_read() -> FeedbackFindingReadV1 {
+        FeedbackFindingReadV1 {
+            result_id: result_id(),
+            cycle_id: cycle_id(),
+            scope: scope(),
+            finding: FeedbackFindingV1 {
+                finding_id: FeedbackFindingId::new("finding.feedback-test").expect("finding"),
+                classification: tracedecay_domain::FeedbackDiagnosticClassificationV1::New,
+                lifecycle: FeedbackFindingLifecycleV1::Active,
+                retrieval_anchor_id: Some(
+                    RetrievalAnchorId::new("anchor.feedback-test").expect("retrieval anchor"),
+                ),
+                provider_state: ProviderEvaluationStateV1::Partial,
+                safe_bounded_preview: Some("feedback preview".to_owned()),
+                diagnostic_projection: None,
+            },
+            get_handle: OpaqueCursor::new("cursor.feedback-get").expect("get handle"),
+            expand_handle: Some(
+                OpaqueCursor::new("cursor.feedback-expand").expect("expand handle"),
+            ),
+        }
+    }
+
+    fn scope() -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.feedback-test").expect("project"),
+            repository_id: RepositoryId::new("repository.feedback-test").expect("repository"),
+            worktree_id: WorktreeId::new("worktree.feedback-test").expect("worktree"),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: CommitId::new("commit.feedback-test").expect("commit"),
+        }
+    }
+
+    fn result_id() -> FeedbackResultId {
+        FeedbackResultId::new("result.feedback-test").expect("result")
+    }
+
+    fn cycle_id() -> FeedbackCycleId {
+        FeedbackCycleId::new("cycle.feedback-test").expect("cycle")
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
     }
 }
