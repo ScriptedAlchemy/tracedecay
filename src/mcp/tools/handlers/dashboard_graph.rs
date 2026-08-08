@@ -454,14 +454,22 @@ impl DashboardGraphReadAdapter {
             }
         }
         let name_list: Vec<String> = names.into_iter().collect();
-        let mut rows_by_name: BTreeMap<String, Value> = BTreeMap::new();
+        // Hydration is keyed on the (qualified name, kind) pair, never on the
+        // qualified name alone: a qualified name repeats BY CONSTRUCTION in
+        // this projection, which is exactly why the same-name occurrence index
+        // exists. Every row that shares a key is retained so an ambiguous key
+        // can be refused; picking one would silently serve a different
+        // symbol's metadata and wire id under the requested name.
+        let mut rows_by_identity: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
         for row in queries::node_rows_by_qualified_names(&conn, &name_list)
             .await
             .map_err(unavailable)?
         {
-            rows_by_name
-                .entry(str_field(&row, "qualified_name").to_owned())
-                .or_insert(row);
+            let key = (
+                str_field(&row, "qualified_name").to_owned(),
+                str_field(&row, "kind").to_owned(),
+            );
+            rows_by_identity.entry(key).or_default().push(row);
         }
         let mut nodes_by_occurrence: BTreeMap<SymbolOccurrenceId, DashboardGraphNodeV1> =
             BTreeMap::new();
@@ -473,7 +481,7 @@ impl DashboardGraphReadAdapter {
             if nodes_by_occurrence.contains_key(&edge.neighbor.occurrence) {
                 continue;
             }
-            let mut node = neighbor_node(&edge.neighbor, &rows_by_name)?;
+            let mut node = neighbor_node(&edge.neighbor, &rows_by_identity)?;
             node.degree = Some(
                 neighborhood
                     .degrees
@@ -1019,14 +1027,34 @@ fn single_seed_batch(
 /// occurrence, never dropped.
 fn neighbor_node(
     summary: &CodeGraphSymbolSummaryV1,
-    rows_by_name: &BTreeMap<String, Value>,
+    rows_by_identity: &BTreeMap<(String, String), Vec<Value>>,
 ) -> Result<DashboardGraphNodeV1, DashboardGraphReadErrorV1> {
-    if let Some(row) = summary
-        .metadata
-        .as_ref()
-        .and_then(|metadata| rows_by_name.get(&metadata.qualified_name))
-    {
-        return decode_node(row.clone());
+    if let Some(metadata) = summary.metadata.as_ref() {
+        let key = (metadata.qualified_name.clone(), metadata.kind.clone());
+        match rows_by_identity.get(&key).map(Vec::as_slice) {
+            Some([row]) => return decode_node(row.clone()),
+            Some(rows) if rows.len() > 1 => {
+                // More than one relational row answers this projected symbol's
+                // (qualified name, kind). The projection distinguishes them by
+                // file identity, but the node table is keyed by path and the
+                // two are not joinable, so no correct row can be chosen here.
+                // Refuse rather than pick: a silently-picked row serves the
+                // wrong symbol's wire id. Resolving this needs the pending
+                // `nodes.symbol_occurrence_id` column, which supersedes the
+                // qualified-name key with a direct occurrence join.
+                return Err(DashboardGraphReadErrorV1::Corrupt {
+                    detail: format!(
+                        "the node index holds {} rows for qualified name {:?} of kind {:?}; \
+                         the qualified-name key cannot identify one and the direct \
+                         occurrence join is not yet available",
+                        rows.len(),
+                        metadata.qualified_name,
+                        metadata.kind,
+                    ),
+                });
+            }
+            _ => {}
+        }
     }
     let metadata = summary.metadata.as_ref();
     Ok(DashboardGraphNodeV1 {

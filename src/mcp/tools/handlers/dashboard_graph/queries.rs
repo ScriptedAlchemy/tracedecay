@@ -335,10 +335,17 @@ pub(super) async fn node_row(
     .next())
 }
 
-/// Node rows for neighbor hydration, keyed by qualified name. Adjacency for
+/// Node rows for neighbor hydration, selected by qualified name. Adjacency for
 /// the neighborhood read comes from the verified code graph projection; this
 /// lookup only maps projection symbols back onto the relational id-space the
 /// other read operations still serve.
+///
+/// The qualified name is a SELECTION key here, not an identity: it is not
+/// unique, so the caller narrows each result by kind and refuses a key that
+/// still matches more than one row. This whole lookup is provisional. Once
+/// `nodes.symbol_occurrence_id` lands, the projection's occurrence joins the
+/// node table directly and this name-keyed query is superseded — the
+/// occurrence is the identity, the qualified name never was.
 pub(super) async fn node_rows_by_qualified_names(
     conn: &(impl QueryExecutor + ?Sized),
     qualified_names: &[String],
