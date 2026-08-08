@@ -1979,8 +1979,8 @@ mod tests {
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
         )
         .expect("catalog registration authority");
-        let component_set = crate::agents::host_bundle_registry::
-            verified_embedded_default_host_component_set(
+        let component_set =
+            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 crate::agents::host_bundle_v2::HostKindV1::Gemini,
                 0,
             )
@@ -2001,8 +2001,8 @@ mod tests {
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
         )
         .expect("catalog registration authority");
-        let cursor_set = crate::agents::host_bundle_registry::
-            verified_embedded_default_host_component_set(
+        let cursor_set =
+            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
                 crate::agents::host_bundle_v2::HostKindV1::CursorDesktop,
                 0,
             )

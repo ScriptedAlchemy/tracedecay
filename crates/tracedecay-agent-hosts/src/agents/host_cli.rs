@@ -248,11 +248,10 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
     #[cfg(windows)]
     admit_windows_profile_environment(&mut command, home);
 
-    let mut child = spawn_admitting_recent_writes(&mut command).map_err(|error| {
-        TraceDecayError::Config {
+    let mut child =
+        spawn_admitting_recent_writes(&mut command).map_err(|error| TraceDecayError::Config {
             message: format!("could not run `{}`: {error}", resolved_program.display()),
-        }
-    })?;
+        })?;
 
     // Drain both pipes concurrently: a command that writes more than one pipe
     // buffer would otherwise block on write while we block on wait.
