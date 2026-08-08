@@ -258,6 +258,40 @@ pub(super) fn project_open_error_response(
                 })),
             )
         }
+        TraceDecayError::ResetRequired { authority, reason } => JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            error.to_string(),
+            Some(json!({
+                "kind": "reset_required",
+                "retryable": false,
+                "authority": authority,
+                "reason": reason,
+            })),
+        ),
         _ => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_required_project_open_is_serialized_as_a_non_retryable_typed_failure() {
+        let response = project_open_error_response(
+            serde_json::json!(41),
+            &TraceDecayError::reset_required("graph store", "schema v26 is incompatible"),
+        );
+        let data = response
+            .error
+            .expect("project-open refusal")
+            .data
+            .expect("typed reset-required data");
+
+        assert_eq!(data["kind"], "reset_required");
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["authority"], "graph store");
+        assert_eq!(data["reason"], "schema v26 is incompatible");
     }
 }

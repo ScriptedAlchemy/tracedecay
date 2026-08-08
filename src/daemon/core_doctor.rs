@@ -14,28 +14,14 @@ use crate::application::semantic_runtime::{
 use crate::errors::Result;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DoctorGraphSchemaState {
-    ReleasedV0067,
-    PreviousV2Candidate,
-    Current,
-    Unsupported,
-}
+#[path = "core_doctor_schema.rs"]
+mod schema;
 
-fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
-    match actual {
-        18 => DoctorGraphSchemaState::ReleasedV0067,
-        // V2 development builds stamped 24 through 26 before the final shape
-        // settled; they are refused at open but diagnosed distinctly from
-        // stores no supported binary ever produced.
-        24..=26 => DoctorGraphSchemaState::PreviousV2Candidate,
-        actual if actual == i64::from(crate::db::migrations::SCHEMA_VERSION) => {
-            DoctorGraphSchemaState::Current
-        }
-        _ => DoctorGraphSchemaState::Unsupported,
-    }
-}
+use schema::{DoctorGraphSchemaState, doctor_graph_schema_state};
+
+#[cfg(test)]
+#[path = "core_doctor_truthful_tests.rs"]
+mod truthful_tests;
 
 #[derive(Debug)]
 pub(crate) struct DoctorRuntimeRequest {
@@ -295,23 +281,25 @@ async fn doctor_runtime_value_inner(
         graph.storage_page_counts().await.ok()
     };
     let db_size_bytes = match page_counts {
-        Some((page_size, page_count, _)) => page_size.saturating_mul(page_count),
+        Some((page_size, page_count, _)) => Some(page_size.saturating_mul(page_count)),
         // Filesystem metadata, not a SQLite probe, sizes the live store.
-        None => std::fs::metadata(&graph_path).map_or(0, |metadata| metadata.len()),
+        None => std::fs::metadata(&graph_path)
+            .ok()
+            .map(|metadata| metadata.len()),
     };
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let expected_schema_version = crate::db::migrations::SCHEMA_VERSION;
     let schema_version = if route_live {
-        // Opening a project store migrates or refuses it; a mounted live
-        // graph is therefore at the current schema by the open contract.
-        i64::from(expected_schema_version)
+        // Retained liveness proves that this route was admitted, but the fast
+        // Doctor snapshot deliberately does not re-read the schema pragma.
+        None
     } else {
         match graph
             .db()
             .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version")
             .await
         {
-            Ok(version) => version,
+            Ok(version) => Some(version),
             Err(_) => {
                 return doctor_runtime_unavailable(
                     Some(project_path),
@@ -320,7 +308,8 @@ async fn doctor_runtime_value_inner(
             }
         }
     };
-    let schema_state = doctor_graph_schema_state(schema_version);
+    let schema_state = schema_version.map(doctor_graph_schema_state);
+    let schema_drift = schema_state.map(|state| state != DoctorGraphSchemaState::Current);
     let mut value = json!({
         "tracedecay_version": crate::version::build_version(),
         "process": {
@@ -337,7 +326,7 @@ async fn doctor_runtime_value_inner(
             "schema_version": schema_version,
             "expected_schema_version": expected_schema_version,
             "schema_state": schema_state,
-            "schema_drift": (schema_state != DoctorGraphSchemaState::Current),
+            "schema_drift": schema_drift,
         },
         "doctor_runtime": {
             "status": if route_live { "live" } else { "complete" },

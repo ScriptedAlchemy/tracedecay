@@ -452,23 +452,28 @@ impl TraceDecay {
         }
     }
 
+    async fn ensure_database_schema_current(db: &Database) -> Result<()> {
+        let current = Self::schema_version(db, "ensure_schema_current").await?;
+        let supported = crate::db::migrations::SCHEMA_VERSION;
+        if current != supported {
+            return Err(TraceDecayError::reset_required(
+                "graph store",
+                format!(
+                    "database schema v{current} is not the v{supported} shape this binary \
+                     creates; this store was created by an incompatible binary and cannot be \
+                     upgraded in place. Remove the store directory and let this binary create a \
+                     fresh one."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Refuses a read-only store that is not at the one schema shape this
     /// binary creates. There is no upgrade path to name: the store was written
     /// by an incompatible binary, so the only remedy is a fresh one.
     pub async fn ensure_schema_current(&self) -> Result<()> {
-        let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
-        let supported = crate::db::migrations::SCHEMA_VERSION;
-        if current != supported {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "TraceDecay database schema v{current} is not the v{supported} shape this \
-                     binary creates; this store was created by an incompatible binary and cannot \
-                     be upgraded in place. Remove the store directory and let this binary create \
-                     a fresh one."
-                ),
-            });
-        }
-        Ok(())
+        Self::ensure_database_schema_current(&self.db).await
     }
 
     /// Opens an existing `TraceDecay` project at the given root.
@@ -841,6 +846,9 @@ impl TraceDecay {
             DatabaseAccessMode::ReadOnly,
         )
         .await?;
+        // Refuse an incompatible nonempty graph before configuration open,
+        // hooks, or any other normal project-open work can observe it.
+        Self::ensure_database_schema_current(&db).await?;
         install_usecase_runtime_configuration_authority()?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database_read_only(
@@ -883,5 +891,46 @@ fn configuration_runtime_unavailable() -> TraceDecayError {
         message:
             "configuration authority unavailable: a registered project session runtime is required"
                 .to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn nonempty_wrong_schema_read_only_open_returns_reset_required() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let initialized = TraceDecay::init_with_options(&project, options.clone())
+            .await
+            .expect("initialize project graph");
+        let db_path = initialized.store_layout().graph_db_path.clone();
+        initialized.close();
+        let connection = rusqlite::Connection::open(&db_path).expect("open graph fixture");
+        connection
+            .pragma_update(
+                None,
+                "user_version",
+                crate::db::migrations::SCHEMA_VERSION - 1,
+            )
+            .expect("stamp incompatible graph schema");
+        drop(connection);
+
+        let error = match TraceDecay::open_read_only_with_options(&project, options).await {
+            Ok(_) => panic!("nonempty graph at another schema must require a reset"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            TraceDecayError::ResetRequired { ref authority, .. } if authority == "graph store"
+        ));
     }
 }
