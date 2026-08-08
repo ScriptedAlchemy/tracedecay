@@ -35,7 +35,7 @@ pub use files::{
 };
 use files::{
     excluded_source_artifact, is_coordination_lock, is_reference_artifact, is_runtime_lock,
-    is_sqlite_database, is_sqlite_sidecar, tree_stats,
+    is_sqlite_database, is_sqlite_sidecar, is_volatile_hook_telemetry, tree_stats,
 };
 use finalize::{cut_over_markers, register_destination, verify_destination};
 use preflight::{acquire_store_locks, ensure_profile_offline, preflight_disk_space};
@@ -993,7 +993,13 @@ fn fingerprint_inputs(
             }
         }
         for (relative, path) in files {
-            if is_runtime_lock(&relative) || is_sqlite_sidecar(&relative) {
+            if is_runtime_lock(&relative)
+                || is_sqlite_sidecar(&relative)
+                || is_volatile_hook_telemetry(&relative)
+            {
+                // Hooks may append this telemetry between dry-run and apply. It is
+                // omitted only from the confirmation fingerprint; backup and
+                // artifact merge still copy and checksum every telemetry byte.
                 continue;
             }
             hash.update(relative.to_string_lossy().as_bytes());

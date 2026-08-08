@@ -795,6 +795,62 @@ fn maintenance_scope_requires_and_inherits_exclusive_profile_lease() {
 }
 
 #[test]
+fn consolidation_input_session_databases_inherit_profile_maintenance_scope() {
+    let _lock = SCOPE_TEST_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let expected_profile = platform_identity_key(&temp.path().canonicalize().unwrap());
+    let expected_lock_parent = expected_profile.join(".tracedecay-database-locks");
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        temp.path(),
+        "consolidation maintenance test",
+    )
+    .unwrap();
+    let scope =
+        enter_maintenance_database_scope(&lifecycle, temp.path(), "consolidation maintenance test")
+            .unwrap();
+
+    for file_name in ["source-sessions.db", "target-sessions.db"] {
+        let path = temp
+            .path()
+            .join("projects/p1/.consolidation-input")
+            .join(file_name);
+        let identity = DatabaseIdentity::for_path(&path).unwrap();
+        assert_eq!(
+            identity.profile_root,
+            expected_profile,
+            "{}",
+            path.display()
+        );
+        assert_eq!(
+            identity.access_lock_path.parent(),
+            Some(expected_lock_parent.as_path()),
+            "{}",
+            path.display()
+        );
+        assert!(
+            !identity.allows_ambient_profile_scope,
+            "{} must require its exact profile authority",
+            path.display()
+        );
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "merge consolidation sessions").unwrap();
+        assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
+    }
+
+    let unrelated = temp
+        .path()
+        .join("projects/p1/other-input/source-sessions.db");
+    let unrelated_identity = DatabaseIdentity::for_path(&unrelated).unwrap();
+    assert_ne!(unrelated_identity.profile_root, expected_profile);
+    let unrelated_authority =
+        DatabaseAuthority::for_runtime(&unrelated, "unrelated nested database").unwrap();
+    assert_eq!(unrelated_authority.role(), DatabaseAuthorityRole::Test);
+
+    drop(scope);
+    drop(lifecycle);
+}
+
+#[test]
 fn daemon_scopes_are_isolated_by_profile() {
     let _lock = SCOPE_TEST_LOCK.lock().unwrap();
     let first = tempfile::tempdir().unwrap();

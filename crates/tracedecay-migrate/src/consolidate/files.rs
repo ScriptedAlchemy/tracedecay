@@ -214,6 +214,10 @@ pub(super) fn is_sqlite_sidecar(relative: &Path) -> bool {
         .is_some_and(|value| value.ends_with("-shm") || value.ends_with("-wal"))
 }
 
+pub(super) fn is_volatile_hook_telemetry(relative: &Path) -> bool {
+    relative == Path::new("hook_analytics.jsonl")
+}
+
 pub(super) fn is_sqlite_database(relative: &Path) -> bool {
     relative
         .extension()
