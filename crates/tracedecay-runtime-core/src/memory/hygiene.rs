@@ -127,7 +127,7 @@ mod tests {
         assert!(detect_secret_like("sk-proj1234567890abcdefghijklmn").is_some());
         assert!(detect_secret_like("Deploys used sk-test-742913 before rotation").is_some());
         assert!(detect_secret_like("ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ").is_some());
-        assert!(detect_secret_like("AKIAIOSFODNN7EXAMPLE is the access key").is_some());
+        assert!(detect_secret_like("AKIA4S27TQXBVCZ5MJ6L is the access key").is_some());
         assert!(detect_secret_like(concat!("api_", "key=", "0000000000000000")).is_some());
         assert!(detect_secret_like("password: hunter2hunter2hunter2").is_some());
     }

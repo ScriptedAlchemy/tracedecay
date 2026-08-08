@@ -41,12 +41,20 @@ commentary lives in this file and in `rules.rs`.
 
 Faithful to upstream:
 
-* `regex`, `entropy`, `secretGroup`, and rule-level `[[rules.allowlists]]`
-  (`regexes`, `stopwords`, `regexTarget`, `condition`) are honoured.
+* `regex`, `keywords`, `entropy`, `secretGroup`, and rule-level
+  `[[rules.allowlists]]` (`regexes`, `stopwords`, `regexTarget`, `condition`)
+  are all honoured.
+* `keywords` gate whether a rule runs at all, as upstream does. This is a
+  precondition, not an optimisation: `sourcegraph-access-token` accepts a bare
+  40-character hex string — every git SHA ever written — and is only safe
+  because it never runs unless "sourcegraph" or "sgp_" is nearby.
 * Secret extraction follows gitleaks: `secretGroup` when set, otherwise the
   first non-empty capture group, otherwise the whole match.
 * The entropy threshold is applied to the extracted secret and a finding is
   dropped when its entropy is at or below the rule's threshold.
+* `regexTarget` steers an allowlist's *regexes*. Its stopwords always read the
+  secret — aimed at the match instead, the keyword that triggered a rule would
+  excuse it.
 
 Deliberate deviations, all in the safe direction:
 
@@ -109,6 +117,19 @@ ruleset bump changes what leaves the process, so it wants a human and a diff.
 6. Commit the data refresh on its own, separately from any engine change.
 
 Gitleaks regexes are written for Go's RE2, which — like Rust's `regex` crate —
-has no backreferences and no lookaround. That is why the catalogue transfers
-without rewriting. If upstream ever adopts a non-RE2 engine, step 5 is what will
-tell you.
+has no backreferences and no lookaround. That is why the catalogue transfers at
+all. The two engines disagree in exactly two places, and `rules.rs` translates
+both at load rather than editing the vendored file:
+
+* RE2 reads a `{` that opens no valid repetition as a literal; Rust refuses it.
+  Upstream depends on the RE2 reading (`^\$(?:\d+|{\d+})$` matches a shell
+  placeholder). Those braces are escaped; real quantifiers are untouched.
+* RE2's `\w` is exactly `[0-9A-Za-z_]`; Rust's is Unicode-aware. Reading it the
+  Rust way is both a different match and far larger to compile — three rules
+  that repeat `\w` over a wide bound exceed the 10 MB program limit. Expanding
+  `\w` to its RE2 meaning fixes the semantics and the size together, so every
+  rule compiles under the default limit with no rule dropped.
+
+`\W`, `\D` and `\S` would need the same treatment and appear nowhere in the
+catalogue today. A refresh that introduces one, or any construct Rust has no
+equivalent for, fails at step 5 with a typed error naming the rule id.

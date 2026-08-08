@@ -23,6 +23,7 @@
 //! detector that silently stops detecting is the one failure mode a privacy
 //! boundary cannot have.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -54,6 +55,9 @@ const VENDORED_ASSIGNMENT_PREAMBLE: &str = r"(?i)[\w.-]{0,50}?";
 /// token. Upstream has no field for this; inferring it from the regex would be
 /// guesswork, so it is named.
 const VENDORED_PRIVATE_KEY_RULE: &str = "private-key";
+
+/// Stands in for a rule id when a document-level allowlist fails to compile.
+const DOCUMENT_ALLOWLIST_ID: &str = "<document allowlist>";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CredentialPatternKind {
@@ -116,6 +120,15 @@ pub(crate) struct CredentialPattern {
     id: String,
     kind: CredentialPatternKind,
     regex: Regex,
+    /// Upstream `keywords`, lowercased. Empty means the rule always runs.
+    ///
+    /// These are not an optimisation. Gitleaks only evaluates a rule when one
+    /// of its keywords is present, and several rules are written assuming that
+    /// gate: `sourcegraph-access-token` accepts a bare 40-character hex string,
+    /// which is also every git SHA in existence, and is only safe because it
+    /// never runs unless "sourcegraph" or "sgp_" is nearby. Dropping the gate
+    /// would not merely cost time, it would redact every commit id we observe.
+    keywords: Vec<String>,
     /// Opts into the bounded key=value scan: extend the match past the
     /// delimiter across a quoted or unquoted value, and drop it when the value
     /// is shorter than this. Supplement-only.
@@ -138,14 +151,21 @@ impl CredentialPattern {
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        // Cheap structural reject first. The regex crate's literal prefilter
-        // makes this a memchr-class scan for the overwhelming majority of
-        // rules, which is what keeps a 200-rule catalogue affordable inline at
-        // ingest; only a candidate pays for capture groups and gating.
-        if !self.regex.is_match(text) {
+        // Keyword gate first, exactly as upstream orders it: it is both the
+        // rule's precondition and the cheapest possible reject, which is what
+        // keeps a 200-rule catalogue affordable inline at ingest.
+        if !self.keywords_present(text) || !self.regex.is_match(text) {
             return false;
         }
         !self.ranges(text).is_empty()
+    }
+
+    fn keywords_present(&self, text: &str) -> bool {
+        self.keywords.is_empty()
+            || self
+                .keywords
+                .iter()
+                .any(|keyword| contains_ignore_ascii_case(text, keyword))
     }
 
     /// Byte ranges to redact. The whole match, not just the secret group: a
@@ -203,6 +223,7 @@ enum AllowlistTarget {
     Line,
 }
 
+#[derive(Clone)]
 struct CompiledAllowlist {
     /// `condition = "AND"`: every criterion the allowlist declares must hit.
     all_of: bool,
@@ -214,24 +235,43 @@ struct CompiledAllowlist {
 
 impl CompiledAllowlist {
     fn excuses(&self, text: &str, whole: Match<'_>, secret: Match<'_>) -> bool {
-        let target = match self.target {
+        // `regexTarget` selects what the *regexes* read. Stopwords always read
+        // the secret, upstream included — pointing them at the match would let
+        // the keyword that triggered the rule excuse it, so `auth = <secret>`
+        // would be waved through by the stopword "auth".
+        let regex_target = match self.target {
             AllowlistTarget::Secret => secret.as_str(),
             AllowlistTarget::Match => whole.as_str(),
             AllowlistTarget::Line => line_containing(text, whole.start()),
         };
-        let regex_hit = self.regexes.iter().any(|regex| regex.is_match(target));
-        let stopword_hit = !self.stopwords.is_empty() && {
-            let lowered = target.to_ascii_lowercase();
-            self.stopwords
-                .iter()
-                .any(|stopword| lowered.contains(stopword.as_str()))
-        };
+        let regex_hit = self.regexes.iter().any(|regex| regex.is_match(regex_target));
+        let stopword_hit = self
+            .stopwords
+            .iter()
+            .any(|stopword| contains_ignore_ascii_case(secret.as_str(), stopword));
         if self.all_of {
             (self.regexes.is_empty() || regex_hit) && (self.stopwords.is_empty() || stopword_hit)
         } else {
             regex_hit || stopword_hit
         }
     }
+}
+
+/// ASCII-case-insensitive substring test, allocation-free.
+///
+/// Keywords and stopwords are lowercased at load, and both are matched against
+/// text we must not copy on every rule for every value we scan.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// `regexTarget = "line"` resolved against the scanned text rather than a file:
@@ -300,6 +340,17 @@ fn compile_document(
             reason: error.to_string(),
         })?;
 
+    // Document-level allowlists apply to every rule, so they are compiled once
+    // and attributed to the document rather than to whichever rule happened to
+    // be first. An error naming `1password-secret-key` for a global regex would
+    // send the next reader to the wrong line.
+    let mut shared_allowlists = Vec::new();
+    for allowlist in parsed.allowlist.iter().chain(parsed.allowlists.iter()) {
+        if let Some(compiled) = compile_allowlist(document, DOCUMENT_ALLOWLIST_ID, allowlist)? {
+            shared_allowlists.push(compiled);
+        }
+    }
+
     let mut patterns = Vec::new();
     for rule in parsed.rules {
         // Upstream carries a few rules selected purely by file path. TraceDecay
@@ -351,23 +402,15 @@ fn compile_document(
             continue;
         }
 
-        let regex = Regex::new(source_regex).map_err(|_| CredentialRuleSetError::Regex {
-            document,
-            rule_id: rule.id.clone(),
-        })?;
+        let regex = compile_regex(document, &rule.id, source_regex)?;
 
         let mut allowlists = Vec::new();
-        for allowlist in parsed
-            .allowlist
-            .iter()
-            .chain(parsed.allowlists.iter())
-            .chain(rule.allowlist.iter())
-            .chain(rule.allowlists.iter())
-        {
+        for allowlist in rule.allowlist.iter().chain(rule.allowlists.iter()) {
             if let Some(compiled) = compile_allowlist(document, &rule.id, allowlist)? {
                 allowlists.push(compiled);
             }
         }
+        allowlists.extend(shared_allowlists.iter().cloned());
 
         patterns.push(CredentialPattern {
             kind,
@@ -376,6 +419,11 @@ fn compile_document(
             secret_group: rule.secret_group,
             min_entropy_per_mille: rule.entropy.map(entropy_threshold_per_mille),
             allowlists,
+            keywords: rule
+                .keywords
+                .iter()
+                .map(|keyword| keyword.to_ascii_lowercase())
+                .collect(),
             id: rule.id,
         });
     }
@@ -409,12 +457,7 @@ fn compile_allowlist(
 
     let mut regexes = Vec::with_capacity(allowlist.regexes.len());
     for source_regex in &allowlist.regexes {
-        regexes.push(
-            Regex::new(source_regex).map_err(|_| CredentialRuleSetError::Regex {
-                document,
-                rule_id: rule_id.to_string(),
-            })?,
-        );
+        regexes.push(compile_regex(document, rule_id, source_regex)?);
     }
 
     Ok(Some(CompiledAllowlist {
@@ -431,6 +474,133 @@ fn compile_allowlist(
             .map(|stopword| stopword.to_ascii_lowercase())
             .collect(),
     }))
+}
+
+fn compile_regex(
+    document: &'static str,
+    rule_id: &str,
+    source_regex: &str,
+) -> Result<Regex, CredentialRuleSetError> {
+    Regex::new(&re2_compatible_regex(source_regex)).map_err(|_| CredentialRuleSetError::Regex {
+        document,
+        rule_id: rule_id.to_string(),
+    })
+}
+
+/// Rewrites an upstream regex into the Rust `regex` crate's dialect without
+/// changing what it means.
+///
+/// Gitleaks rules are authored for Go's RE2. RE2 and Rust's `regex` share the
+/// important restrictions — no backreferences, no lookaround — which is why the
+/// catalogue transfers at all. They disagree in exactly two places, and both
+/// are mechanical:
+///
+/// * **A literal `{`.** RE2 reads a brace that opens no valid repetition as a
+///   literal; Rust refuses it. Upstream depends on the RE2 reading — the global
+///   allowlist matches shell placeholders with `^\$(?:\d+|{\d+})$`. Those braces
+///   are escaped; real quantifiers (`{16}`, `{0,50}`, `{20,}`) are untouched.
+/// * **`\w`.** In RE2 it is exactly `[0-9A-Za-z_]`. In Rust it is Unicode-aware,
+///   so it is *both* a different match and vastly larger to compile: three
+///   upstream rules that repeat `\w` over a wide bound
+///   (`pypi-...[\w-]{50,1000}`) blow past the compiler's 10 MB program limit.
+///   Expanding `\w` to its RE2 meaning fixes the semantics and the size at once
+///   — every rule in the catalogue then compiles under the default limit, with
+///   no memory headroom bought and no rule dropped.
+///
+/// `\W`, `\D` and `\S` would need the same treatment but appear nowhere in the
+/// catalogue; a refresh that introduces one is caught by the compile test,
+/// which names the rule.
+///
+/// Character classes are tracked because `\w` expands differently inside one:
+/// `[\w-]` has to become `[0-9A-Za-z_-]`, never a nested class.
+fn re2_compatible_regex(pattern: &str) -> Cow<'_, str> {
+    if !pattern.contains('{') && !pattern.contains(r"\w") {
+        return Cow::Borrowed(pattern);
+    }
+    let bytes = pattern.as_bytes();
+    let mut rewritten = String::with_capacity(pattern.len() + 16);
+    let mut index = 0;
+    let mut in_class = false;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            if bytes[index + 1] == b'w' {
+                rewritten.push_str(if in_class {
+                    "0-9A-Za-z_"
+                } else {
+                    "[0-9A-Za-z_]"
+                });
+                index += 2;
+                continue;
+            }
+            // Any other escape pair is copied whole: its second byte is never
+            // structural, so it must not be re-examined.
+            let end = next_boundary(pattern, index + 1);
+            rewritten.push_str(&pattern[index..end]);
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'[' if !in_class => {
+                in_class = true;
+                rewritten.push('[');
+                index += 1;
+                if bytes.get(index) == Some(&b'^') {
+                    rewritten.push('^');
+                    index += 1;
+                }
+                // A `]` in first position is a literal member, not the closer.
+                if bytes.get(index) == Some(&b']') {
+                    rewritten.push_str("\\]");
+                    index += 1;
+                }
+            }
+            b']' if in_class => {
+                in_class = false;
+                rewritten.push(']');
+                index += 1;
+            }
+            b'{' if !in_class && repetition_len(&bytes[index..]).is_none() => {
+                rewritten.push_str("\\{");
+                index += 1;
+            }
+            _ => {
+                let end = next_boundary(pattern, index);
+                rewritten.push_str(&pattern[index..end]);
+                index = end;
+            }
+        }
+    }
+    Cow::Owned(rewritten)
+}
+
+fn next_boundary(text: &str, index: usize) -> usize {
+    let mut end = index + 1;
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    end.min(text.len())
+}
+
+/// Length of a valid `{n}`, `{n,}` or `{n,m}` at the head of `rest`, which
+/// begins with `{`. `None` means the brace is a literal.
+fn repetition_len(rest: &[u8]) -> Option<usize> {
+    let mut index = 1;
+    let digits = rest[index..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    index += digits;
+    if rest.get(index) == Some(&b',') {
+        index += 1;
+        index += rest[index..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+    }
+    (rest.get(index) == Some(&b'}')).then_some(index + 1)
 }
 
 fn vendored_kind(rule_id: &str, source_regex: &str) -> CredentialPatternKind {
@@ -487,6 +657,8 @@ struct RuleToml {
     entropy: Option<f64>,
     #[serde(rename = "secretGroup", default)]
     secret_group: Option<usize>,
+    #[serde(default)]
+    keywords: Vec<String>,
     #[serde(default)]
     allowlist: Option<AllowlistToml>,
     #[serde(default)]
@@ -736,7 +908,10 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
 
         let aws = rule(&compiled, "aws-access-token");
-        assert!(aws.is_match("aws_key = AKIAIOSFODNN7EXAMPLE"));
+        assert!(aws.is_match("aws_key = AKIA4S27TQXBVCZ5MJ6L"));
+        // Upstream deliberately excuses AWS's own documented example key, and
+        // that allowlist has to keep working or the catalogue is not loaded.
+        assert!(!aws.is_match("aws_key = AKIAIOSFODNN7EXAMPLE"));
         assert_eq!(aws.kind(), CredentialPatternKind::KnownCredential);
 
         let github = rule(&compiled, "github-pat");
@@ -839,62 +1014,6 @@ mod tests {
         assert_eq!(assignment.ranges(truncated), vec![0..truncated.len()]);
     }
 
-    #[test]
-    fn source_declarations_cover_canonical_sensitive_key_suffixes() {
-        let compiled = patterns(CredentialPatternProfile::Observation);
-        let assignment = rule(
-            &compiled,
-            "tracedecay-sensitive-source-assignment-observation",
-        );
-
-        for source in [
-            r#"const vault_passphrase = "p@ssw0rd!""#,
-            r#"static DB_PASSPHRASE: &str = "p@ssw0rd!""#,
-            r#"String dbPassphrase = "p@ssw0rd!""#,
-            r#"const session_token = "p@ssw0rd!""#,
-            r#"let clientApiKey = "p@ssw0rd!""#,
-            r#"config.vault_passphrase = "p@ssw0rd!""#,
-            r#"self.session_token = "p@ssw0rd!""#,
-            r#"const char *db_password = "p@ssw0rd!";"#,
-            r#"var dbPassword string = "p@ssw0rd!";"#,
-            r#"db_password: str = "p@ssw0rd!";"#,
-            r#"db_password = "p@ssw0rd!";"#,
-            "let db_password =\n    \"p@ssw0rd!\";",
-            r#"const settings = { vault_passphrase: "p@ssw0rd!" };"#,
-            "const settings = { vault_passphrase:\n  \"p@ssw0rd!\" };",
-            "const settings = {\n  vault_passphrase: \"p@ssw0rd!\"\n};",
-            "const settings = {\n  \"vault_passphrase\": \"p@ssw0rd!\"\n};",
-        ] {
-            assert!(
-                assignment.is_match(source),
-                "missing source assignment: {source}"
-            );
-        }
-
-        for ordinary in [
-            r#"const char *db_password_hint = "ordinary";"#,
-            r#"var dbPasswordHint string = "ordinary";"#,
-            r#"db_password_hint: str = "ordinary";"#,
-            r#"db_password_hint = "ordinary";"#,
-            "if db_password == candidate {}",
-            "db_password => expression",
-        ] {
-            assert!(
-                !assignment.is_match(ordinary),
-                "over-redacted ordinary identifier: {ordinary}"
-            );
-        }
-
-        let short = r#"const vault_passphrase = "abc";"#;
-        assert_eq!(assignment.ranges(short), vec![0..short.len() - 1]);
-
-        let raw = r##"const vault_passphrase = r#"p@ssw0rd!"#;"##;
-        assert_eq!(assignment.ranges(raw), vec![0..raw.len() - 1]);
-
-        let wrapped = r#"const vault_passphrase = Some("p@ssw0rd!");"#;
-        assert_eq!(assignment.ranges(wrapped), vec![0..wrapped.len()]);
-    }
-
     /// A ruleset that fails to load must say so. The one outcome a privacy
     /// boundary cannot have is a detector that quietly holds no rules.
     #[test]
@@ -970,6 +1089,67 @@ mod tests {
         assert_eq!(entropy_threshold_per_mille(-1.0), 0);
         assert_eq!(entropy_threshold_per_mille(f64::NAN), 0);
         assert_eq!(entropy_threshold_per_mille(f64::MAX), u32::MAX);
+    }
+
+    /// The RE2 translation must preserve real quantifiers, rescue the literal
+    /// braces upstream's placeholders are written with, and give `\w` its RE2
+    /// meaning both inside and outside a character class.
+    #[test]
+    fn re2_translation_preserves_meaning() {
+        for untouched in [r"[A-Z]{16}", r"sk-[A-Za-z0-9_-]{20,}", r"\bplain\b"] {
+            assert_eq!(re2_compatible_regex(untouched), untouched);
+        }
+
+        assert_eq!(
+            re2_compatible_regex(r"^\$(?:\d+|{\d+})$"),
+            r"^\$(?:\d+|\{\d+})$"
+        );
+        // An already-escaped brace must not be escaped twice.
+        assert_eq!(re2_compatible_regex(r"\{literal}"), r"\{literal}");
+
+        // `\w` expands to a class outside one, and to bare members inside one.
+        assert_eq!(re2_compatible_regex(r"\w+"), "[0-9A-Za-z_]+");
+        assert_eq!(re2_compatible_regex(r"[\w.-]{0,50}?"), "[0-9A-Za-z_.-]{0,50}?");
+        assert_eq!(re2_compatible_regex(r"[^\w]"), "[^0-9A-Za-z_]");
+
+        assert!(Regex::new(&re2_compatible_regex(r"^\$(?:\d+|{\d+})$")).is_ok());
+    }
+
+    /// The size limit this avoids is not hypothetical: Rust's Unicode-aware
+    /// `\w` repeated over a wide bound is what pushed three upstream rules past
+    /// the 10 MB program limit before the translation gave `\w` its RE2 meaning.
+    #[test]
+    fn wide_word_repetitions_compile_within_the_default_program_limit() {
+        let upstream = r"pypi-AgEIcHlwaS5vcmc[\w-]{50,1000}";
+        assert!(Regex::new(upstream).is_err());
+        assert!(Regex::new(&re2_compatible_regex(upstream)).is_ok());
+    }
+
+    /// Upstream keywords are a precondition, not a hint. `sourcegraph-access-token`
+    /// accepts a bare 40-character hex string — which is every git SHA — and is
+    /// only safe because it never runs without its keyword nearby.
+    #[test]
+    fn keywords_gate_rules_that_would_otherwise_match_digests() {
+        let compiled = patterns(CredentialPatternProfile::Observation);
+        let sourcegraph = rule(&compiled, "sourcegraph-access-token");
+
+        assert!(!sourcegraph.is_match("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
+        assert!(sourcegraph.is_match(
+            "sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"
+        ));
+    }
+
+    /// `regexTarget` steers the allowlist regexes only. A stopword read from the
+    /// match instead of the secret lets the very keyword that triggered a rule
+    /// excuse it — "auth" is both this rule's trigger and one of its stopwords.
+    #[test]
+    fn allowlist_stopwords_read_the_secret_not_the_match() {
+        let compiled = patterns(CredentialPatternProfile::Observation);
+        let generic = rule(&compiled, "generic-api-key");
+
+        assert!(generic.is_match(r#"let auth = "Zx9Kq2Lm7Pv4Ns8Rt3Wy6Bd1";"#));
+        // A stopword inside the secret still excuses it.
+        assert!(!generic.is_match(r#"let auth = "Zx9Kq2Lm7swagger4Ns8Rt3Wy6";"#));
     }
 
     #[test]

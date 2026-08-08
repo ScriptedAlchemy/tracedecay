@@ -62,8 +62,11 @@ mod tests {
         protect_sensitive_structural_id,
     };
 
+    /// Split so this file never contains a contiguous credential-shaped token.
+    /// The tail is base32 (`[A-Z2-7]`) because that is the alphabet real AWS
+    /// key ids use, and the vendored rule reads it precisely.
     fn credential_shaped_fixture() -> String {
-        ["AKIA", "SYNTHETIC", "CANARY", "1"].concat()
+        ["AKIA", "SYNTHETIC", "CANARY", "7"].concat()
     }
 
     #[test]

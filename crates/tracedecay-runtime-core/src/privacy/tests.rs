@@ -538,7 +538,7 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
 
 #[test]
 fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
-    let raw = ["AKIA", "STRUCTURAL", "000000"].concat();
+    let raw = ["AKIA", "STRUCTURAL", "234567"].concat();
     let record = serde_json::to_vec(&json!({"message": "protected identity fixture"})).unwrap();
     let range = ClaudeByteRangeV1::new(50, 51).unwrap();
     let provider = ProviderId::new("provider-neutral-fixture").unwrap();
