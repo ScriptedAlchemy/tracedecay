@@ -684,7 +684,13 @@ async fn daemon_http_shutdown_releases_loopback_listener() {
     let endpoint = service.endpoint();
     service.shutdown().await.expect("shutdown HTTP service");
 
-    assert!(tokio::net::TcpStream::connect(endpoint).await.is_err());
+    // Rebinding the exact address proves the listener was released. A raw
+    // connect probe can false-positive on a freed ephemeral port when the
+    // kernel self-connects (source port == destination port) or when a
+    // parallel test rebinds the port first.
+    tokio::net::TcpListener::bind(endpoint)
+        .await
+        .expect("released daemon HTTP loopback address must be rebindable");
 }
 
 #[tokio::test]
