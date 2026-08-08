@@ -1,6 +1,4 @@
-use tracedecay_domain::{
-    BlockedCauseV1, ConflictOutcomeV1, CoverageStateV1, ObservabilityEnvelopeV1,
-};
+use tracedecay_domain::CoverageStateV1;
 
 use crate::observability::{
     MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1, MetricSourceV1,
@@ -63,6 +61,7 @@ pub(super) fn measurement(input: MeasurementInput<'_>) -> ExecutionTopologyMeasu
             reason: unavailable.map(|reason| reason.as_str().to_owned()),
         },
     };
+    let local_support = coverage.eligible.unwrap_or(coverage.observed);
     ExecutionTopologyMeasurementV1 {
         dimensions,
         unavailable,
@@ -94,7 +93,19 @@ pub(super) fn measurement(input: MeasurementInput<'_>) -> ExecutionTopologyMeasu
             calibration: None,
             unavailable_reason: unavailable.map(|reason| reason.as_str().to_owned()),
         },
+        // Scalar descriptors use their own denominator as the safe default;
+        // dimensional projectors override this with the exact cell support.
+        local_support,
     }
+}
+
+/// Attach exact support for one dimensional entity cell without exposing it
+/// through the public measurement contract.
+pub(super) fn measurement_with_local_support(
+    input: MeasurementInput<'_>,
+    local_support: u64,
+) -> ExecutionTopologyMeasurementV1 {
+    measurement(input).with_local_support(local_support)
 }
 
 pub(super) fn unavailable_model(
@@ -103,7 +114,45 @@ pub(super) fn unavailable_model(
     observed_at_micros: i64,
     reason: ExecutionMetricUnavailableV1,
 ) -> ExecutionTopologyMetricsV1 {
-    let watermark = "execution-topology:unavailable".to_owned();
+    unavailable_model_at(
+        authorized_scope_ref,
+        horizon,
+        observed_at_micros,
+        "execution-topology:unavailable".to_owned(),
+        reason,
+    )
+}
+
+pub(super) fn unavailable_model_at(
+    authorized_scope_ref: String,
+    horizon: ObservabilityHorizonV1,
+    observed_at_micros: i64,
+    watermark: String,
+    reason: ExecutionMetricUnavailableV1,
+) -> ExecutionTopologyMetricsV1 {
+    let state = match reason {
+        ExecutionMetricUnavailableV1::EventBudgetExceeded
+        | ExecutionMetricUnavailableV1::CellBudgetExceeded => CoverageStateV1::Capped,
+        _ => CoverageStateV1::Unknown,
+    };
+    unavailable_model_with_state_at(
+        authorized_scope_ref,
+        horizon,
+        observed_at_micros,
+        watermark,
+        reason,
+        state,
+    )
+}
+
+pub(super) fn unavailable_model_with_state_at(
+    authorized_scope_ref: String,
+    horizon: ObservabilityHorizonV1,
+    observed_at_micros: i64,
+    watermark: String,
+    reason: ExecutionMetricUnavailableV1,
+    state: CoverageStateV1,
+) -> ExecutionTopologyMetricsV1 {
     let coverage = MetricCoverageV1 {
         eligible: None,
         observed: 0,
@@ -111,12 +160,13 @@ pub(super) fn unavailable_model(
         censored: 0,
         unknown: 1,
         excluded: 0,
-        state: CoverageStateV1::Unknown,
+        state,
     };
     let context = ProjectionContext {
         horizon: horizon.clone(),
         watermark: watermark.clone(),
         complete: false,
+        source_state: state,
     };
     let mut measurements = Vec::new();
     for (metric, unit, denominator) in ALL_DESCRIPTORS_V1 {
@@ -139,6 +189,28 @@ pub(super) fn unavailable_model(
         observed_at_micros,
         current: false,
         coverage,
+        emission_coverage: super::ExecutionTopologyEmissionCoverageV1 {
+            emitted: None,
+            delayed: None,
+            dropped: None,
+            sampled_events: None,
+        },
+        github_stack_capability: super::ExecutionGitHubStackCapabilityReadingV1 {
+            capability: None,
+            standard_git_fallback_available: None,
+            other_forge_fallback_available: None,
+            coverage: MetricCoverageV1 {
+                eligible: None,
+                observed: 0,
+                completed: 0,
+                censored: 0,
+                unknown: 1,
+                excluded: 0,
+                state,
+            },
+            unavailable: Some(reason),
+        },
+        drill_anchors: Vec::new(),
         measurements,
     }
 }
@@ -146,7 +218,7 @@ pub(super) fn unavailable_model(
 /// Every Plan 26 execution-topology descriptor, with its unit and eligible
 /// population. An unreadable horizon still returns one typed-absent row per
 /// descriptor so a consumer never sees a shrinking descriptor set.
-const ALL_DESCRIPTORS_V1: [(&str, &str, &str); 20] = [
+const ALL_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
     (
         "work_execution_concurrency_width",
         "microseconds",
@@ -187,11 +259,6 @@ const ALL_DESCRIPTORS_V1: [(&str, &str, &str); 20] = [
         "work_conflict_prediction_recall",
         "ratio",
         "observed_conflicts_with_prediction",
-    ),
-    (
-        "work_ready_to_integrated_seconds",
-        "events",
-        "ready_work_item_versions",
     ),
     (
         "work_merge_attempts_total",
@@ -237,24 +304,40 @@ const ALL_DESCRIPTORS_V1: [(&str, &str, &str); 20] = [
     ),
 ];
 
-pub(super) fn family_state(
-    page: CoverageStateV1,
-    events: &[ObservabilityEnvelopeV1],
-    invalid: u64,
-) -> CoverageStateV1 {
-    let mut worst = page;
-    for event in events {
-        worst = worse_state(worst, event.coverage);
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_ready_to_integrated_metric_is_absent_from_catalog_and_projection() {
+        let unsupported = "work_ready_to_integrated_seconds";
+        assert!(
+            ALL_DESCRIPTORS_V1
+                .iter()
+                .all(|(metric, _, _)| *metric != unsupported)
+        );
+
+        let model = unavailable_model(
+            "project.descriptor-regression".to_owned(),
+            ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: 1,
+            },
+            1,
+            ExecutionMetricUnavailableV1::StoreUnavailable,
+        );
+        assert!(
+            model
+                .measurements
+                .iter()
+                .all(|measurement| measurement.value.metric != unsupported)
+        );
     }
-    if invalid > 0 {
-        worst = worse_state(worst, CoverageStateV1::Partial);
-    }
-    worst
 }
 
 /// Coverage ladder: the least trustworthy observation in a population decides
 /// the population's state.
-const fn worse_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+pub(super) const fn worse_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
     if state_rank(right) > state_rank(left) {
         right
     } else {
@@ -404,12 +487,6 @@ pub(super) fn seconds(micros: u64) -> f64 {
     as_f64(micros) / 1_000_000.0
 }
 
-/// Exact cardinality of a recorded population. A count is evidence, so it
-/// saturates rather than wrapping on a platform where it cannot be widened.
-pub(super) fn count(length: usize) -> u64 {
-    u64::try_from(length).unwrap_or(u64::MAX)
-}
-
 /// A valid-time interval contributes a duration only when both bounds are
 /// recorded and ordered. A missing or inverted bound is censored, never a
 /// zero-length interval.
@@ -444,35 +521,7 @@ pub(super) fn union_micros(intervals: &mut [(i64, i64)]) -> u64 {
 }
 
 fn span(start: i64, end: i64) -> u64 {
-    u64::try_from(end.saturating_sub(start)).unwrap_or(0)
-}
-
-pub(super) const fn outcome_key(outcome: ConflictOutcomeV1) -> &'static str {
-    match outcome {
-        ConflictOutcomeV1::Conflict => "conflict",
-        ConflictOutcomeV1::NoConflict => "no_conflict",
-        ConflictOutcomeV1::Censored => "censored",
-        ConflictOutcomeV1::Unknown => "unknown",
-    }
-}
-
-pub(super) const fn blocked_key(cause: BlockedCauseV1) -> &'static str {
-    match cause {
-        BlockedCauseV1::Dependency => "dependency",
-        BlockedCauseV1::NeedsInput => "needs_input",
-        BlockedCauseV1::Capability => "capability",
-        BlockedCauseV1::Policy => "policy",
-        BlockedCauseV1::Scope => "scope",
-        BlockedCauseV1::Conflict => "conflict",
-        BlockedCauseV1::Lease => "lease",
-        BlockedCauseV1::Backpressure => "backpressure",
-        BlockedCauseV1::Test => "test",
-        BlockedCauseV1::Ci => "ci",
-        BlockedCauseV1::Review => "review",
-        BlockedCauseV1::EffectUnknown => "effect_unknown",
-        BlockedCauseV1::Other => "other",
-        BlockedCauseV1::Unknown => "unknown",
-    }
+    end.abs_diff(start)
 }
 
 pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {

@@ -25,16 +25,34 @@
 //! in for measured evidence.
 
 mod projection;
+mod rollup;
+mod rollup_build;
+mod rollup_read;
 mod support;
 
-pub use projection::execution_topology_metrics;
+pub use rollup::{
+    ExecutionTopologyBoundaryFragmentV1, ExecutionTopologyRollupErrorV1,
+    ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupRetentionV1,
+    MAX_EXECUTION_TOPOLOGY_ROLLUP_DAYS_V1, MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1,
+    MAX_EXECUTION_TOPOLOGY_ROLLUP_READ_BYTES_V1, build_execution_topology_boundary_fragment,
+    build_execution_topology_rollup_fragment, check_execution_topology_rollup_retention_json,
+    project_execution_topology_fragments, project_execution_topology_fragments_with_boundaries,
+};
+pub use rollup_build::{
+    ExecutionTopologyRollupBuildErrorV1, ExecutionTopologyRollupBuildV1,
+    build_empty_execution_topology_daily_rollup, build_execution_topology_daily_rollup,
+};
+pub use rollup_read::{
+    ExecutionTopologyRollupFragmentPageV1, ExecutionTopologyRollupFragmentQueryV1,
+    ExecutionTopologyRollupQueryPort, execution_topology_rollup_metrics,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BlockedCauseV1, ConflictKindV1, ConflictOutcomeV1, DeliverySurfaceFamilyV1,
-    DuplicateEffectOutcomeV1, DuplicateEffortKindV1, DurationBucketV1, IntegrationOperationKindV1,
-    IntegrationResultV1, IntervalStateV1, RerunCauseV1, RerunSourceV1, StackDriftKindV1,
+    DuplicateEffectOutcomeV1, DuplicateEffortKindV1, DurationBucketV1, GitHubStackCapabilityV1,
+    IntegrationOperationKindV1, IntegrationResultV1, RerunCauseV1, RerunSourceV1,
     WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1,
 };
 
@@ -49,14 +67,14 @@ pub const EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1: &str = "execution-topology-
 pub const EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "execution-topology-projector.v1";
 
 /// The persisted execution-topology event family, in the exact event-kind
-/// spelling the domain contract stamps. The projection reads these kinds and
-/// no others: a metric can never be fed by an event outside this family.
-pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 11] = [
+/// spelling the domain contract stamps. Only these kinds feed topology
+/// descriptors; the read additionally consumes the cross-cutting telemetry
+/// drop receipt solely for producer-loss coverage.
+pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 10] = [
     "work.execution_topology.sampled.v1",
     "work.conflict_prediction.observed.v1",
     "work.conflict_outcome.linked.v1",
     "work.integration.transition.observed.v1",
-    "work.stack_drift.observed.v1",
     "work.github_stack_capability.observed.v1",
     "work.duplicate_effort.observed.v1",
     "work.blocked_interval.observed.v1",
@@ -68,14 +86,30 @@ pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 11] = [
 /// Upper bound on events one read may draw. A horizon that holds more events
 /// than this returns a `Capped` page, and every derived metric becomes
 /// unavailable rather than reporting a partial denominator as a total.
-pub const MAX_EXECUTION_TOPOLOGY_EVENTS_V1: u32 = 20_000;
+pub const MAX_EXECUTION_TOPOLOGY_EVENTS_V1: u32 = 10_000;
+
+/// Canonical Work read authority mounted by the topology-metrics operation.
+/// Structural topology and its observability projection remain separately
+/// grantable because the latter reads retained execution evidence.
+pub const EXECUTION_TOPOLOGY_CAPABILITY_ID_V1: &str = "capability.work.topology_metrics";
+pub const EXECUTION_TOPOLOGY_USE_CASE_ID_V1: &str = "use-case.work.topology_metrics";
+
+/// Plan 26 permits at most eight local source-event anchors in a read. These
+/// are registered observation cursors, never event payload identifiers.
+pub const MAX_EXECUTION_TOPOLOGY_DRILL_ANCHORS_V1: usize = 8;
+
+/// Maximum number of cells returned by one Plan 26 read.
+pub const MAX_EXECUTION_TOPOLOGY_CELLS_V1: usize = 256;
+
+/// Small local cells remain typed but do not expose their value or support
+/// counts. Suppression is applied only after every daily fragment is merged.
+pub const MIN_EXECUTION_TOPOLOGY_LOCAL_CELL_SUPPORT_V1: u64 = 5;
 
 /// Independently adjudicated eligible cases a conflict kind needs before
 /// precision or recall is rendered at all.
 pub const CONFLICT_MIN_ADJUDICATED_CASES_V1: u64 = 50;
 
-/// Eligible cases merge-success, rerun rate, and ready-to-integrated latency
-/// need before a rate or distribution is rendered.
+/// Eligible cases merge-success and rerun rate need before a rate is rendered.
 pub const RATE_MIN_ELIGIBLE_CASES_V1: u64 = 20;
 
 /// Minimum observed-over-eligible ratio any rate or distribution requires.
@@ -170,9 +204,9 @@ projection_enum!(
 );
 
 mirrored_enum!(
-    /// Fixed duration buckets shared by ready-to-integrated latency, stale
-    /// stack age, blocked time, and rerun latency. Raw timestamps and exact
-    /// durations stay authorized local detail.
+    /// Fixed duration buckets shared by stale stack age, blocked time, and
+    /// rerun latency. Raw timestamps and exact durations stay authorized
+    /// local detail.
     ExecutionDurationBucketV1 from DurationBucketV1 {
         Under1m,
         From1mTo5m,
@@ -182,6 +216,17 @@ mirrored_enum!(
         From4hTo24h,
         From1dTo7d,
         Over7d,
+    }
+);
+
+mirrored_enum!(
+    /// Last bounded GitHub stacked-PR capability state observed in the
+    /// horizon. This remains orthogonal to GitHub ingress and item lifecycle.
+    ExecutionGitHubStackCapabilityV1 from GitHubStackCapabilityV1 {
+        Unavailable,
+        PrivatePreviewDisabled,
+        Enabled,
+        Degraded,
     }
 );
 
@@ -289,29 +334,6 @@ mirrored_enum!(
 );
 
 mirrored_enum!(
-    /// Proved stack-invalidating observation.
-    ExecutionDriftKindV1 from StackDriftKindV1 {
-        HeadAdvanced,
-        BaseAdvanced,
-        MergeBaseChanged,
-        DependencyMissing,
-        RefDeleted,
-        WorktreeGenerationChanged,
-        Retargeted,
-        Superseded,
-        Unknown,
-    }
-);
-
-mirrored_enum!(
-    /// Whether a drift interval is still open or has a proved terminal.
-    ExecutionIntervalStateV1 from IntervalStateV1 {
-        Open,
-        Closed,
-    }
-);
-
-mirrored_enum!(
     /// Cause a work item was blocked for.
     ExecutionBlockedCauseV1 from BlockedCauseV1 {
         Dependency,
@@ -409,8 +431,6 @@ pub enum ExecutionTopologyDimensionV1 {
     ConflictOutcome(ExecutionConflictOutcomeV1),
     IntegrationKind(ExecutionIntegrationKindV1),
     IntegrationOutcome(ExecutionIntegrationOutcomeV1),
-    DriftKind(ExecutionDriftKindV1),
-    IntervalState(ExecutionIntervalStateV1),
     BlockedCause(ExecutionBlockedCauseV1),
     RerunSource(ExecutionRerunSourceV1),
     RerunCause(ExecutionRerunCauseV1),
@@ -430,6 +450,9 @@ pub enum ExecutionMetricUnavailableV1 {
     /// The horizon holds more events than one read may draw, so every
     /// denominator here would be a partial count presented as a total.
     EventBudgetExceeded,
+    /// The bounded projection would exceed the Plan 26 result-cell ceiling.
+    /// The whole read refuses rather than returning a misleading subset.
+    CellBudgetExceeded,
     /// No recorded event in the family supplies this metric's numerator or
     /// denominator.
     NoEligibleEvidence,
@@ -454,6 +477,7 @@ impl ExecutionMetricUnavailableV1 {
         match self {
             Self::StoreUnavailable => "store_unavailable",
             Self::EventBudgetExceeded => "event_budget_exceeded",
+            Self::CellBudgetExceeded => "cell_budget_exceeded",
             Self::NoEligibleEvidence => "no_eligible_evidence",
             Self::SupportFloorUnmet => "support_floor_unmet",
             Self::CoverageFloorUnmet => "coverage_floor_unmet",
@@ -477,6 +501,65 @@ pub struct ExecutionTopologyMeasurementV1 {
     /// `None`, so a reader can never mistake a refused metric for a zero.
     pub unavailable: Option<ExecutionMetricUnavailableV1>,
     pub value: MetricValueV1,
+    /// Internal support for this exact dimensional cell. The value is kept
+    /// out of both the wire model and generated schema; serde defaults it to
+    /// zero when a local value is reconstructed without projection context.
+    #[serde(skip, default)]
+    #[schemars(skip)]
+    local_support: u64,
+}
+
+impl ExecutionTopologyMeasurementV1 {
+    pub(in crate::execution_topology_metrics) fn with_local_support(
+        mut self,
+        local_support: u64,
+    ) -> Self {
+        self.local_support = local_support;
+        self
+    }
+
+    pub(in crate::execution_topology_metrics) const fn local_support(&self) -> u64 {
+        self.local_support
+    }
+}
+
+/// An opaque cursor minted by the registered observation authority. It can be
+/// resolved only through that same authorized local query boundary and is not
+/// a metric dimension or exportable identity.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "ExecutionTopologyDrillAnchorV1")]
+pub struct ExecutionTopologyDrillAnchorV1 {
+    pub cursor: String,
+}
+
+/// Envelope-level delivery evidence for this read. `None` means the store did
+/// not answer, so no zero may be inferred. `dropped` is the proved lower bound
+/// from the bound producer scope, deduplicated across explicit loss receipts
+/// and their next-envelope carriers; it is not attributed to a topology
+/// family. Sampling stays a count of sampled topology envelopes and is never
+/// expanded into a fabricated population estimate.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "ExecutionTopologyEmissionCoverageV1")]
+pub struct ExecutionTopologyEmissionCoverageV1 {
+    pub emitted: Option<u64>,
+    pub delayed: Option<u64>,
+    pub dropped: Option<u64>,
+    pub sampled_events: Option<u64>,
+}
+
+/// Latest trustworthy GitHub stacked-PR capability observation in the
+/// horizon. It is a typed operational state, not a metric or success claim.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "ExecutionGitHubStackCapabilityReadingV1")]
+pub struct ExecutionGitHubStackCapabilityReadingV1 {
+    pub capability: Option<ExecutionGitHubStackCapabilityV1>,
+    pub standard_git_fallback_available: Option<bool>,
+    pub other_forge_fallback_available: Option<bool>,
+    pub coverage: MetricCoverageV1,
+    pub unavailable: Option<ExecutionMetricUnavailableV1>,
 }
 
 /// The canonical execution-topology read model. Observatory and Costs render
@@ -499,6 +582,11 @@ pub struct ExecutionTopologyMetricsV1 {
     /// Family-level coverage over the event population, independent of any
     /// single descriptor's denominator.
     pub coverage: MetricCoverageV1,
+    pub emission_coverage: ExecutionTopologyEmissionCoverageV1,
+    pub github_stack_capability: ExecutionGitHubStackCapabilityReadingV1,
+    /// Bounded registered source cursors for authorized local drill-down.
+    /// Payload anchors, traces, and scope identifiers never enter this list.
+    pub drill_anchors: Vec<ExecutionTopologyDrillAnchorV1>,
     pub measurements: Vec<ExecutionTopologyMeasurementV1>,
 }
 
@@ -537,17 +625,6 @@ const ALL_WIDTH_BUCKETS_V1: [ExecutionWidthBucketV1; 9] = [
     ExecutionWidthBucketV1::From17To32,
     ExecutionWidthBucketV1::From33To64,
     ExecutionWidthBucketV1::Over64,
-];
-
-const ALL_DURATION_BUCKETS_V1: [ExecutionDurationBucketV1; 8] = [
-    ExecutionDurationBucketV1::Under1m,
-    ExecutionDurationBucketV1::From1mTo5m,
-    ExecutionDurationBucketV1::From5mTo15m,
-    ExecutionDurationBucketV1::From15mTo1h,
-    ExecutionDurationBucketV1::From1hTo4h,
-    ExecutionDurationBucketV1::From4hTo24h,
-    ExecutionDurationBucketV1::From1dTo7d,
-    ExecutionDurationBucketV1::Over7d,
 ];
 
 const ALL_QUANTITY_UNITS_V1: [ExecutionQuantityUnitV1; 5] = [
