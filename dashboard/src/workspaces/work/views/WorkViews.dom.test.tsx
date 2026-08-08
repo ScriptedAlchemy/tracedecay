@@ -96,11 +96,11 @@ function workEnvelope(payload: unknown, bindingId: string) {
   };
 }
 
-function snapshotBody(projections: readonly unknown[]) {
+function snapshotBody(projections: readonly unknown[], generation = 'generation-7') {
   return workEnvelope(
     {
       coverage: { state: 'complete', returned: projections.length, total: projections.length },
-      generation_id: 'generation-7',
+      generation_id: generation,
       projections,
       sequence: 12,
     },
@@ -171,7 +171,78 @@ function viewsBody(spec: WorkGraphVersionSpec = VIEWS_GRAPH) {
   };
 }
 
-/** Serve all three Work reads the page issues. Routed by path rather than
+/** The generated `ExecutionTopologyViewV1` payload behind the topology lens.
+ * Its policy dimensions are deliberately unlike anything the attempt envelope
+ * could reconstruct, which makes the DOM test prove the mounted canonical
+ * route is the one the view consumed. */
+function topologyBody(
+  generation = 'generation-7',
+  lanes: readonly unknown[] = [
+    {
+      task_id: 'middle',
+      run_id: 'run-1',
+      attempt_count: 2,
+      placement: {
+        state: 'placed',
+        placement: {
+          authority_version: 4,
+          blockers: [],
+          identity: { task_id: 'middle', run_id: 'run-1' },
+          retention_eligible_at: null,
+          state: 'admitted',
+          target: {
+            kind: 'linked_worktree',
+            in_place_acknowledged: false,
+            network_free: true,
+            root: '/w/main',
+          },
+          transitioned_at: 10,
+        },
+      },
+    },
+    {
+      task_id: 'leaf',
+      run_id: 'run-1',
+      attempt_count: 1,
+      placement: { state: 'absent' },
+    },
+  ],
+) {
+  return {
+    status: 200,
+    body: workEnvelope(
+      {
+        state: 'view',
+        topology: { generation, task_count: 6 },
+        coverage: { coverage: 'complete', returned: 3 },
+        execution_placement: { mode: { kind: 'existing_worktree_only' }, lanes },
+        branch_topology: { allowed: ['unbranched', 'independent_branches'] },
+        review_topology: {
+          allowed: ['no_review', 'standard_pull_requests'],
+          github_stacked_prs: 'disabled',
+        },
+        integration_strategy: {
+          cross_merge: {
+            allow_cross_repository: false,
+            allowed_modes: ['disabled', 'fast_forward_only'],
+            default_mode: 'fast_forward_only',
+          },
+          gates: {
+            cleanliness: 'require_clean',
+            maximum_preflight_age_seconds: 300,
+            require_fresh_preflight: true,
+            review: { kind: 'independent_review_count', count: 1 },
+            tests: [],
+          },
+          protected_refs: [],
+        },
+      },
+      'binding.http.work.topology',
+    ),
+  };
+}
+
+/** Serve every Work read the page issues. Routed by path rather than
  * answered with one body, so a projection cannot pass by reading the wrong
  * contract. */
 function serveWork(
@@ -181,13 +252,17 @@ function serveWork(
   },
   projections: readonly unknown[] = GRAPH,
   views: { status: number; body: unknown } = viewsBody(),
+  topology: { status: number; body: unknown } = topologyBody(),
+  snapshotGeneration = 'generation-7',
 ) {
   serve((url) =>
     url.includes('/work/list-attempts')
       ? attempts
       : url.includes('/work/views')
         ? views
-        : { status: 200, body: snapshotBody(projections) },
+        : url.includes('/work/topology')
+          ? topology
+        : { status: 200, body: snapshotBody(projections, snapshotGeneration) },
   );
 }
 
@@ -772,17 +847,9 @@ describe('the execution record', () => {
   });
 });
 
-/**
- * The execution-topology lens, over the same mounted attempt read.
- *
- * Plan 11's full lens decodes `ExecutionTopologyViewV1`; this build's
- * generated catalog does not carry it. The lens therefore draws exactly what
- * the attempt page proves — the executor weave and the worktree lanes of
- * `execution_placement`, pinned to the verified topology generation — and
- * must state the other three dimensions as typed schema absences that never
- * disappear. Every assertion here reads real wire data parsed by the same
- * generated schema the model tests prove the fixture against.
- */
+/** The canonical `operation.work.topology` route publishes every structural
+ * dimension under one generation. The DOM assertions below prove the mounted
+ * route is consumed, rather than a browser reconstruction from attempt data. */
 describe('the execution-topology lens', () => {
   async function openTopology() {
     const page = renderPage('/work?view=topology');
@@ -801,63 +868,35 @@ describe('the execution-topology lens', () => {
     );
   });
 
-  it('threads the weave by executor identity and names the diversion onto the fallback', async () => {
+  it('renders placement lanes and every policy dimension from the canonical topology payload', async () => {
     const container = await openTopology();
-    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-work-topology-lanes="2"]')).not.toBeNull());
 
-    // Two executors: the primary carried two attempts, the fallback took one.
-    const threads = container.querySelectorAll('[data-work-executor]');
-    expect(
-      Array.from(threads).map((thread) => thread.getAttribute('data-work-executor')),
-    ).toEqual(['codex/route-primary', 'claude/route-fallback']);
-    expect(threads[0]?.getAttribute('data-work-attempts')).toBe('2');
-    expect(threads[1]?.getAttribute('data-work-attempts')).toBe('1');
-    // The diversion is said on the thread that received it.
-    expect(within(threads[1] as HTMLElement).getByText(/1 diverted here by fallback/)).toBeTruthy();
-    // Every mark is hollow: the field says so structurally.
-    expect(container.querySelector('[data-work-span="hollow"]')).not.toBeNull();
-  });
-
-  it('pins each worktree lane to its exact repository, ref, and commit identities', async () => {
-    const container = await openTopology();
-    await waitFor(() => expect(container.querySelector('[data-work-worktree]')).not.toBeNull());
-
-    const lane = container.querySelector<HTMLElement>('[data-work-worktree="worktree"]');
+    const lane = container.querySelector<HTMLElement>('[data-work-topology-lane="middle:run-1"]');
     expect(lane).not.toBeNull();
+    expect(within(lane as HTMLElement).getByText(/linked_worktree/)).toBeTruthy();
     expect(within(lane as HTMLElement).getByText(/\/w\/main/)).toBeTruthy();
-    expect(within(lane as HTMLElement).getByText(/repository/)).toBeTruthy();
-    const pin = lane?.querySelector('[data-work-commit="commit-1"]');
-    expect(pin?.getAttribute('data-work-ref')).toBe('none');
-    // A null ref is printed as the recorded absence it is, never a guessed branch.
-    expect(within(lane as HTMLElement).getByText(/no ref recorded/)).toBeTruthy();
-  });
+    expect(
+      container.querySelector('[data-work-topology-lane="leaf:run-1"] [data-state="complete_zero_findings"]'),
+    ).not.toBeNull();
 
-  it('states the three undecodable dimensions as schema absences that never disappear', async () => {
-    const container = await openTopology();
-    await waitFor(() =>
-      expect(container.querySelector('[data-work-topology-dimensions="4"]')).not.toBeNull(),
-    );
-
-    for (const dimension of ['branch_topology', 'review_topology', 'integration_strategy']) {
+    for (const [dimension, detail] of [
+      ['branch_topology', 'independent_branches'],
+      ['review_topology', 'standard_pull_requests'],
+      ['integration_strategy', 'fast_forward_only'],
+    ] as const) {
       const row = container.querySelector<HTMLElement>(`[data-work-dimension="${dimension}"]`);
       expect(row).not.toBeNull();
-      expect(within(row as HTMLElement).getByText('Unsupported schema')).toBeTruthy();
-      expect(within(row as HTMLElement).getByText(/ExecutionTopologyViewV1/)).toBeTruthy();
+      expect(within(row as HTMLElement).getByText('Ready')).toBeTruthy();
+      expect(row?.textContent).toContain(detail);
     }
-    // The readable dimension states its source rather than just passing.
-    const placement = container.querySelector<HTMLElement>(
-      '[data-work-dimension="execution_placement"]',
-    );
-    expect(within(placement as HTMLElement).getByText(/mounted attempt list/)).toBeTruthy();
   });
 
-  it('draws a refused attempt read as a refusal, never as an empty weave', async () => {
-    serveWork({ status: 503, body: { kind: 'problem', value: { problem: {} } } });
+  it('draws a refused canonical topology read as a refusal, never as an empty lane set', async () => {
+    serveWork(undefined, GRAPH, viewsBody(), { status: 503, body: { kind: 'problem' } });
     const container = await openTopology();
 
-    expect(container.querySelector('[data-work-executors]')).toBeNull();
-    expect(container.querySelector('[data-work-worktree]')).toBeNull();
-    // The daemon's own reason, on the weave and on the lanes.
+    expect(container.querySelector('[data-work-topology-lane]')).toBeNull();
     const absences = container.querySelectorAll('[data-work-channel="absent"]');
     expect(absences.length).toBeGreaterThan(0);
     expect(
@@ -867,11 +906,8 @@ describe('the execution-topology lens', () => {
     ).toBe(true);
   });
 
-  it('draws an authorized empty page as a statement, not a failed render', async () => {
-    serveWork({
-      status: 200,
-      body: workEnvelope(workAttemptList([]), 'binding.http.work.list_attempts'),
-    });
+  it('draws an authorized empty canonical page as a statement, not a failed render', async () => {
+    serveWork(undefined, GRAPH, viewsBody(), topologyBody('generation-7', []));
     const container = await openTopology();
 
     await waitFor(() =>
@@ -883,14 +919,13 @@ describe('the execution-topology lens', () => {
     ).not.toBeNull();
   });
 
-  it('selects a task on a landing and keeps that selection when the camera moves', async () => {
+  it('selects a canonical placement lane and keeps that selection when the camera moves', async () => {
     const container = await openTopology();
     const user = userEvent.setup();
-    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-work-topology-lane]')).not.toBeNull());
 
-    // 'middle' carries attempts, so it lands on the primary thread.
     const landing = container.querySelector<HTMLElement>(
-      '[data-work-executors] [data-work-task="middle"]',
+      '[data-work-topology-lane="middle:run-1"] [data-work-task="middle"]',
     );
     expect(landing).not.toBeNull();
     await user.click(landing as HTMLElement);
@@ -911,7 +946,68 @@ describe('the execution-topology lens', () => {
 
   it('resolves every ARIA reference it makes while the lens is drawn', async () => {
     const container = await openTopology();
-    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-work-topology-lane]')).not.toBeNull());
     expect(danglingReferences(container)).toEqual([]);
+  });
+
+  it('refuses graph runtime figures when the mounted canonical topology generation differs', async () => {
+    serveWork(undefined, GRAPH, viewsBody(), topologyBody('generation-other'));
+    const container = await openTopology();
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-accounting="concurrency_and_fanout"]')).not.toBeNull(),
+    );
+    const concurrency = container.querySelector<HTMLElement>(
+      '[data-work-accounting="concurrency_and_fanout"]',
+    );
+    expect(concurrency).not.toBeNull();
+    expect(concurrency?.getAttribute('data-work-accounting-reading')).toBe('absent');
+    expect(concurrency?.textContent).toContain('generation-7');
+    expect(concurrency?.textContent).toContain('generation-other');
+    expect(concurrency?.textContent).toContain('unbound');
+  });
+
+  it('refuses snapshot titles and attempt accounting across independently refreshed generations', async () => {
+    const mismatchedAttempts = workAttemptList(ATTEMPTS);
+    serveWork(
+      {
+        status: 200,
+        body: workEnvelope(
+          {
+            ...mismatchedAttempts,
+            topology: { ...mismatchedAttempts.topology, generation: 'generation-attempt' },
+          },
+          'binding.http.work.list_attempts',
+        ),
+      },
+      GRAPH,
+      viewsBody(),
+      topologyBody('generation-topology'),
+      'generation-snapshot',
+    );
+    const container = await openTopology();
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-snapshot-title-join="conflicting"]')).not.toBeNull(),
+    );
+    const titleJoin = container.querySelector<HTMLElement>(
+      '[data-work-snapshot-title-join="conflicting"]',
+    );
+    expect(titleJoin?.textContent).toContain('generation-snapshot');
+    expect(titleJoin?.textContent).toContain('generation-topology');
+    expect(titleJoin?.textContent).toContain('unbound');
+
+    const lane = container.querySelector<HTMLElement>('[data-work-topology-lane="middle:run-1"]');
+    expect(lane?.textContent).toContain('middle');
+    expect(lane?.textContent).not.toContain('Middle task');
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-accounting="reruns"]')).not.toBeNull(),
+    );
+    const reruns = container.querySelector<HTMLElement>('[data-work-accounting="reruns"]');
+    expect(reruns?.getAttribute('data-work-accounting-reading')).toBe('absent');
+    expect(reruns?.textContent).toContain('generation-attempt');
+    expect(reruns?.textContent).toContain('generation-topology');
+    expect(reruns?.textContent).toContain('unbound');
+    expect(reruns?.querySelector('[data-work-accounting-value]')).toBeNull();
   });
 });

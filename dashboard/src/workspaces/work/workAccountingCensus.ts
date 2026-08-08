@@ -25,9 +25,10 @@ import type {
  * to say so rather than to pick.
  *
  * The provenance built here is the honest one for a page read: the eligible
- * denominator is the authorized set a capped page was cut from and not the
- * page, the censored count is the open attempts, and the horizon says outright
- * that a page is not an interval because the read carries no time window.
+ * denominator is unavailable when the page is capped (the page can establish
+ * only a floor, not its full eligible set), the censored count is the open
+ * attempts, and the horizon says outright that a page is not an interval
+ * because the read carries no time window.
  */
 
 // --- The attempt page --------------------------------------------------------
@@ -152,7 +153,7 @@ export function coverageSentence(page: WorkAttemptListV1 & { state: 'listed' }):
     case 'complete':
       return `complete over ${coverage.returned} ${coverage.returned === 1 ? 'attempt' : 'attempts'}`;
     case 'capped':
-      return `capped at ${coverage.returned} of ${coverage.returned + coverage.remaining} attempts — every count below is a floor`;
+      return `capped attempt page: ${coverage.returned} returned and ${coverage.remaining} remaining — every count below is a floor`;
     default: {
       const unhandled: never = coverage;
       return unhandled;
@@ -169,12 +170,10 @@ function eligibleFromCoverage(
       return { available: true, value: { value: coverage.returned, unit: 'attempts' } };
     case 'capped':
       return {
-        available: true,
-        value: {
-          value: coverage.returned + coverage.remaining,
-          unit: 'attempts',
-          note: 'the authorized set the page was cut from, not the page',
-        },
+        available: false,
+        state: 'partial',
+        detail:
+          'the capped attempt page establishes only returned and remaining page facts, not a full eligible denominator; treating their sum as one would derive a total the contract did not publish',
       };
     default: {
       const unhandled: never = coverage;
@@ -190,7 +189,17 @@ export function attemptProvenance(
   censoringNote: string,
 ): WorkAccountingProvenance {
   return {
-    support: { available: true, value: { value: census.attempts, unit: 'attempts' } },
+    support: {
+      available: true,
+      value: {
+        value: census.attempts,
+        unit: 'attempts',
+        note:
+          page.coverage.coverage === 'capped'
+            ? 'count on the capped attempt page — a floor, not a total'
+            : undefined,
+      },
+    },
     eligible: eligibleFromCoverage(page),
     censoring: {
       available: true,

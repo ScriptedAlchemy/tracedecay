@@ -6,7 +6,7 @@ import type { WorkResult } from './workApi.ts';
 import { WorkTopologyAccounting } from './views/WorkTopologyAccounting.tsx';
 
 describe('Work topology accounting', () => {
-  it('renders a capped page’s full authorized denominator without promoting page counts to totals', () => {
+  it('renders a capped page as a floor without deriving an eligible total', () => {
     const attemptList: WorkResult<WorkAttemptListV1> = {
       outcome: 'value',
       value: WorkAttemptListV1Schema.parse(
@@ -26,9 +26,9 @@ describe('Work topology accounting', () => {
 
     const reruns = screen.getByRole('region', { name: 'Reruns' });
     expect(reruns.textContent).toContain('1 attempts');
-    expect(reruns.textContent).toContain('42 attempts');
-    expect(reruns.textContent).toContain('capped at 1 of 42 attempts');
+    expect(reruns.textContent).toContain('1 returned and 41 remaining');
     expect(reruns.textContent).toContain('every count below is a floor');
-    expect(reruns.textContent).not.toContain('42 runtime reruns');
+    expect(reruns.textContent).toContain('not a full eligible denominator');
+    expect(reruns.textContent).not.toContain('42 attempts');
   });
 });

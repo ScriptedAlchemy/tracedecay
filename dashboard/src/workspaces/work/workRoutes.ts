@@ -4,6 +4,7 @@ import {
   AdmitExecutionCommandSchema,
   AttachRuntimeEvidenceCommandSchema,
   CreateWorkCommandSchema,
+  ExecutionTopologyViewV1Schema,
   ReplanDependenciesCommandSchema,
   ReviewProposalRequestV1Schema,
   WorkAttemptListRequestV1Schema,
@@ -15,11 +16,12 @@ import {
   WorkProjectionSchema,
   WorkProjectionSnapshotRequestV1Schema,
   WorkProjectionSnapshotV1Schema,
+  WorkTopologyViewRequestV1Schema,
 } from "../../contracts/index.ts";
 import type { WorkRoute } from "./workApi.ts";
 
 /**
- * The eleven Work routes this build can reach, and no others.
+ * The twelve Work routes this build can reach, and no others.
  *
  * Each one names a core operation of the canonical `WorkOperation` descriptor
  * (`crates/tracedecay-api/src/work.rs`), which is what the daemon mounts and
@@ -29,14 +31,14 @@ import type { WorkRoute } from "./workApi.ts";
  * the dashboard side, and a route invented here would be a request the daemon
  * has never mounted.
  *
- * The descriptor mounts sixteen; these eleven are the ones the dashboard
+ * The descriptor mounts twenty-six; these twelve are the ones the dashboard
  * declares. The five it leaves alone are `generate_proposal` and the four
  * attempt operations — start, the single-attempt status read, cancel, and
  * resume — which drive execution rather than read it, and belong to whichever
  * surface takes on running Work.
  *
- * Declared is not the same as called, and the difference is deliberate. Eight
- * of the eleven have a caller in this build; `review_proposal`,
+ * Declared is not the same as called, and the difference is deliberate. Nine
+ * of the twelve have a caller in this build; `review_proposal`,
  * `accept_proposal` and `attach_runtime_evidence` are declared and unbound.
  * They stay because this table is the dashboard's record of what the daemon
  * mounts and what contracts sit on either side of it — deleting a row would
@@ -72,6 +74,20 @@ export const WORK_LIST_ATTEMPTS_ROUTE = {
   path: "/api/work/list-attempts",
   request: WorkAttemptListRequestV1Schema,
   response: WorkAttemptListV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/**
+ * The canonical structural execution-topology view. Unlike the attempt page,
+ * this route publishes all four topology dimensions from the same verified
+ * topology generation: placement lanes, branch policy, review policy, and
+ * integration strategy. The topology lens must consume this projection rather
+ * than reconstructing policy or placement groups from raw attempts.
+ */
+export const WORK_TOPOLOGY_ROUTE = {
+  operation: "operation.work.topology",
+  path: "/api/work/topology",
+  request: WorkTopologyViewRequestV1Schema,
+  response: ExecutionTopologyViewV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**

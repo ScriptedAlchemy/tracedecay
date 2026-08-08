@@ -54,6 +54,7 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
   const page = graphPageOf(graph);
   const workload = entry?.projections.workload ?? null;
   const runtime = entry?.runtime ?? null;
+  const runtimeCoverage = runtime?.coverage;
 
   // Both figures are gated on complete runtime coverage by the authority, so
   // they are withheld together and are absent together. Withheld is `partial`,
@@ -67,8 +68,26 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
   };
   const unread = graphAbsence(graph, 'this width');
 
+  const runtimeGap: WorkChannel<never> | null =
+    runtimeCoverage === undefined || runtimeCoverage.coverage === 'complete'
+      ? null
+      : runtimeCoverage.coverage === 'partial'
+        ? {
+            available: false,
+            state: 'partial',
+            detail:
+              'the runtime projection omitted some attempts, so this graph cannot establish a complete execution population',
+          }
+        : {
+            available: false,
+            state: 'unavailable',
+            detail:
+              'the runtime projection is unavailable, so every runtime observation on this graph is unread rather than observed as zero',
+          };
+
   function widthOf(value: number | null | undefined): WorkChannel<WorkAccountingFigure> {
     if (workload === null) return unread;
+    if (runtimeGap !== null) return runtimeGap;
     if (value === null || value === undefined) return withheld;
     return { available: true, value: { value, unit: 'width' } };
   }
@@ -126,7 +145,9 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
   }
 
   const reading: WorkChannel<string> =
-    requested.available && active.available
+    runtimeGap !== null
+      ? runtimeGap
+      : requested.available && active.available
       ? {
           available: true,
           value: `requested ${requested.value.value} · active ${active.value.value} — three of the mandate's five rungs are unavailable`,
@@ -153,12 +174,17 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       support:
         runtime === null
           ? graphAbsence(graph, 'the supporting observation count')
+          : runtimeCoverage?.coverage === 'unavailable'
+            ? runtimeGap!
           : {
               available: true,
               value: {
                 value: runtime.attempts.length,
                 unit: 'attempts',
-                note: 'attempts the runtime projection carried under this graph version',
+                note:
+                  runtimeCoverage?.coverage === 'partial'
+                    ? 'attempts the partial runtime projection carried — a floor, not the complete population'
+                    : 'attempts the runtime projection carried under this graph version',
               },
             },
       eligible:
@@ -175,6 +201,8 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       censoring:
         coverage === undefined
           ? graphAbsence(graph, 'the censored and unknown counts')
+          : coverage.coverage === 'unavailable'
+            ? runtimeGap!
           : {
               available: true,
               value: {
@@ -192,6 +220,8 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       intervalCoverage:
         coverage === undefined
           ? graphAbsence(graph, 'interval coverage')
+          : coverage.coverage === 'unavailable'
+            ? runtimeGap!
           : {
               available: true,
               value:
@@ -221,6 +251,8 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       anchors:
         runtime === null
           ? graphAbsence(graph, 'safe drill anchors')
+          : runtimeCoverage?.coverage === 'unavailable'
+            ? runtimeGap!
           : {
               available: true,
               value: runtime.attempts.slice(0, ANCHOR_CAP).map((attempt) => ({
@@ -274,10 +306,18 @@ export function rerunCard(
 
   function count(value: number | undefined, note?: string): WorkChannel<WorkAccountingFigure> {
     if (census === null || value === undefined) return gap('a rerun');
+    const pageFloor = page?.coverage.coverage === 'capped';
     const figure: WorkAccountingFigure =
-      note === undefined
+      note === undefined && !pageFloor
         ? { value, unit: 'attempts' }
-        : { value, unit: 'attempts', note };
+        : {
+            value,
+            unit: 'attempts',
+            note:
+              pageFloor
+                ? `${note === undefined ? 'count on the capped attempt page' : note} — a floor, not a total`
+                : note,
+          };
     return { available: true, value: figure };
   }
 
@@ -341,22 +381,18 @@ export function rerunCard(
     });
   }
 
-  const runtimeReruns =
-    census === null
-      ? null
-      : census.recovery.restarted + census.recovery.resumed + census.recovery.recoveryRequired;
-
   return {
     dimension,
     title: accountingDimensionTitle(dimension),
     mandate: RERUN_MANDATE,
     reading:
-      runtimeReruns === null
+      census === null
         ? gap('the rerun census')
-        : {
-            available: true,
-            value: `${runtimeReruns} runtime ${runtimeReruns === 1 ? 'rerun' : 'reruns'} on this page · test and CI reruns unavailable and never folded in`,
-          },
+        : metricsGap(
+            dimension,
+            'the completed runtime rerun total',
+            'The page carries restarted, resumed, and recovery-required separately. Recovery-required is a rerun owed, not a completed rerun, and no canonical aggregate total is published.',
+          ),
     rows,
     matrices: null,
     contradictions,
@@ -391,9 +427,19 @@ export function duplicateEffectCard(
           ? {
               value: census.effects[state],
               unit: 'attempts',
-              note: 'the only class in which an effect could be duplicated',
+              note:
+                pageRead?.coverage.coverage === 'capped'
+                  ? 'the only class in which an effect could be duplicated — count on a capped page, a floor not a total'
+                  : 'the only class in which an effect could be duplicated',
             }
-          : { value: census.effects[state], unit: 'attempts' };
+          : {
+              value: census.effects[state],
+              unit: 'attempts',
+              note:
+                pageRead?.coverage.coverage === 'capped'
+                  ? 'count on a capped attempt page — a floor, not a total'
+                  : undefined,
+            };
       channel = { available: true, value: figure };
     }
     return {
@@ -420,6 +466,13 @@ export function duplicateEffectCard(
   const eligible: WorkChannel<WorkAccountingFigure> =
     census === null
       ? metricsGap(dimension, 'the eligible denominator')
+      : pageRead?.coverage.coverage === 'capped'
+        ? {
+            available: false,
+            state: 'partial',
+            detail:
+              'the capped page establishes only a lower-bound effect census, not a full eligible denominator for duplicate-effect adjudication',
+          }
       : {
           available: true,
           value: {
@@ -447,14 +500,11 @@ export function duplicateEffectCard(
         ? { ...base, eligible }
         : {
             ...base,
-            support: {
-              available: true,
-              value: {
-                value: 0,
-                unit: 'cases',
-                note: 'no adjudication has been read; this is a support of zero observations, not a duplicate-effect count of zero',
-              },
-            },
+            support: metricsGap(
+              dimension,
+              'adjudication support',
+              'No duplicate-effect adjudication read is mounted, so the observation support is unknown rather than a case count of zero.',
+            ),
             eligible,
             intervalCoverage: { available: true, value: coverageSentence(pageRead) },
             horizon: {

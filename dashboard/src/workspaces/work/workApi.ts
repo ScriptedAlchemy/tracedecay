@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 /**
- * The wire for the nine canonical Work routes.
+ * The wire for the twelve canonical Work routes.
  *
  * Every request body and every response payload on this surface is a generated
  * contract; nothing here declares a payload shape of its own. What this module

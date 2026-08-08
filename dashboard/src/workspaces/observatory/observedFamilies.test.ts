@@ -131,9 +131,9 @@ describe('eligibleVersusObserved', () => {
     expect(reading.kind).toBe('under_rate_floor');
   });
 
-  it('computes ratio and remainder only when both totals are real and the floor is cleared', () => {
+  it('keeps an independently published count pair without deriving a dashboard ratio or remainder', () => {
     const reading = eligibleVersusObserved(30, 40);
-    expect(reading).toEqual({ kind: 'measured', observed: 30, eligible: 40, ratio: 0.75, remainder: 10 });
+    expect(reading).toEqual({ kind: 'measured', observed: 30, eligible: 40 });
   });
 });
 

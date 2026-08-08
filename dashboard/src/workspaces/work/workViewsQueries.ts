@@ -1,9 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import type { WorkAttemptListV1, WorkGraphReadV1 } from '../../contracts/index.ts';
+import type {
+  ExecutionTopologyViewV1,
+  WorkAttemptListV1,
+  WorkGraphReadV1,
+} from '../../contracts/index.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
-import { WORK_LIST_ATTEMPTS_ROUTE, WORK_VIEWS_ROUTE } from './workRoutes.ts';
+import {
+  WORK_LIST_ATTEMPTS_ROUTE,
+  WORK_TOPOLOGY_ROUTE,
+  WORK_VIEWS_ROUTE,
+} from './workRoutes.ts';
 
 /**
  * The two reads behind the four Work projections.
@@ -53,6 +61,25 @@ export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMP
         // cursor invented here would name a generation the daemon never minted.
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_LIST_ATTEMPTS_ROUTE.path),
+      ),
+  });
+}
+
+/** The canonical structural topology page. It shares the attempt cursor
+ * vocabulary but is its own application projection: policy lanes and durable
+ * placement state are not reconstructed from attempt envelopes in the browser.
+ */
+export function useWorkTopology(enabled: boolean, pageSize: number = WORK_ATTEMPT_PAGE_SIZE) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<ExecutionTopologyViewV1>>({
+    queryKey: workQueryKey(key, 'topology', pageSize),
+    enabled,
+    queryFn: () =>
+      callWork(
+        WORK_TOPOLOGY_ROUTE,
+        { cursor: null, page_size: pageSize },
+        scopedUrl(scope, WORK_TOPOLOGY_ROUTE.path),
       ),
   });
 }

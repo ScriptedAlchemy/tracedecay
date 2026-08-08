@@ -1,4 +1,8 @@
-import type { WorkAttemptListV1 } from '../../contracts/index.ts';
+import type {
+  ExecutionTopologyViewV1,
+  WorkAttemptListV1,
+  WorkAttemptTopologyBindingV1,
+} from '../../contracts/index.ts';
 import type { WorkResult } from './workApi.ts';
 import { workAttemptReading } from './workAttemptModel.ts';
 import type { WorkGraphReading } from './workGraphModel.ts';
@@ -13,6 +17,7 @@ import {
 import {
   unavailableCard,
   type WorkAccountingCard,
+  type WorkAttemptPageV1,
   type WorkTopologyAccountingReading,
 } from './workAccountingModel.ts';
 
@@ -93,28 +98,36 @@ import {
 // --- The reading -------------------------------------------------------------
 
 /**
- * The twelve accounting cards, from the two mounted reads.
+ * The twelve accounting cards, from the mounted Work reads.
  *
  * Takes the raw attempt result rather than a derived reading because the
  * effect and recovery censuses walk the attempts' execution envelopes and
  * recovery records, which the derived attempt page deliberately does not
  * restate. The reading state is still computed once, by `workAttemptReading`,
  * so a refusal is reported in exactly the words every other Work projection
- * reports it in.
+ * reports it in. The canonical topology read supplies the population binding;
+ * no attempt census is emitted after that authority identifies a different
+ * generation.
  */
 export function workTopologyAccounting(
   result: WorkResult<WorkAttemptListV1> | undefined,
   graph: WorkGraphReading,
+  topology?: WorkResult<ExecutionTopologyViewV1> | undefined,
 ): WorkTopologyAccountingReading {
-  const reading = workAttemptReading(result);
+  const canonicalTopology = topologyBinding(topology);
+  const boundAttempts = attemptsBoundToTopology(result, canonicalTopology);
+  const reading = workAttemptReading(boundAttempts);
   const page =
-    result !== undefined && result.outcome === 'value' && result.value.state === 'listed'
-      ? result.value
+    boundAttempts !== undefined &&
+    boundAttempts.outcome === 'value' &&
+    boundAttempts.value.state === 'listed'
+      ? boundAttempts.value
       : null;
   const census = page === null ? null : attemptCensus(page.attempts);
+  const boundGraph = graphBoundToTopology(graph, canonicalTopology ?? page?.topology ?? null);
 
   const cards: WorkAccountingCard[] = [
-    concurrencyCard(graph),
+    concurrencyCard(boundGraph),
     unavailableCard(
       'duplicate_work',
       'independently adjudicated duplicate work',
@@ -145,7 +158,7 @@ export function workTopologyAccounting(
       ],
       'WorkFallbackTopology on the execution snapshot is the provider-EXECUTABLE fallback (codex_cli or disabled) and is not the review-surface generic fallback; it is named here so it is never counted into this card.',
     ),
-    blockedTimeCard(graph),
+    blockedTimeCard(boundGraph),
     rerunCard(reading, page, census),
     duplicateEffectCard(reading, page, census),
     unavailableCard('operational_leaks', 'operational leaks', [
@@ -160,5 +173,68 @@ export function workTopologyAccounting(
   return {
     cards,
     measured: cards.filter((card) => card.reading.available).length,
+  };
+}
+
+/**
+ * A graph runtime and an attempt page can only describe one execution
+ * population when they name the same topology generation. The endpoint reads
+ * independently, so an older graph is not a harmless background refresh: its
+ * runtime figures are unbound from this page and must stay unavailable.
+ */
+function topologyBinding(
+  topology: WorkResult<ExecutionTopologyViewV1> | undefined,
+): WorkAttemptTopologyBindingV1 | null {
+  if (topology === undefined || topology.outcome !== 'value' || topology.value.state !== 'view') {
+    return null;
+  }
+  return topology.value.topology;
+}
+
+/**
+ * The attempt list is a separately refreshed execution population. Once the
+ * canonical topology page is available, its generation is the authority that
+ * lets this ledger join recovery and effect evidence to the placement lanes.
+ * A mismatched attempt page is therefore a typed refusal rather than a source
+ * of stale counts.
+ */
+function attemptsBoundToTopology(
+  result: WorkResult<WorkAttemptListV1> | undefined,
+  topology: WorkAttemptTopologyBindingV1 | null,
+): WorkResult<WorkAttemptListV1> | undefined {
+  if (
+    topology === null ||
+    result === undefined ||
+    result.outcome !== 'value' ||
+    result.value.state !== 'listed' ||
+    result.value.topology.generation === topology.generation
+  ) {
+    return result;
+  }
+
+  return {
+    outcome: 'refused',
+    state: 'conflicting',
+    detail:
+      `the attempt page is pinned to topology generation ${result.value.topology.generation}, but the canonical ` +
+      `topology page is pinned to ${topology.generation}; their execution populations are unbound, so attempt-derived accounting figures are not rendered`,
+  };
+}
+
+function graphBoundToTopology(
+  graph: WorkGraphReading,
+  topology: WorkAttemptTopologyBindingV1 | null,
+): WorkGraphReading {
+  if (topology === null || graph.state !== 'read' || graph.page.entry === null) return graph;
+
+  const graphGeneration = graph.page.entry.runtime.generation_id;
+  if (graphGeneration === topology.generation) return graph;
+
+  return {
+    state: 'refused',
+    chip: 'conflicting',
+    detail:
+      `the graph runtime is pinned to topology generation ${graphGeneration}, but the canonical ` +
+      `topology page is pinned to ${topology.generation}; their execution populations are unbound, so graph-derived measurements are not rendered`,
   };
 }

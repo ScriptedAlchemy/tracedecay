@@ -34,7 +34,12 @@
  * 90% coverage) is stated as the bar that is not cleared rather than quietly
  * skipped.
  */
-import type { MetricValueV1, ObservatoryReadModelV1 } from '../../contracts/generated.ts';
+import type {
+  CoverageStateV1,
+  MetricValueV1,
+  ObservatoryReadModelV1,
+} from '../../contracts/generated.ts';
+import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
 import {
   RATE_MIN_COVERAGE,
@@ -53,6 +58,42 @@ const NO_LATENESS_PROJECTION =
   'OperationResourceObservedV1 records scheduled-arrival evidence and the observability envelope ' +
   'carries a producer sequence per process boot, but no landed read route projects late or ' +
   'out-of-order arrival';
+
+/**
+ * The coverage state belongs to the metric, not to the enclosing snapshot.
+ *
+ * A current snapshot can faithfully report stale, sampled, partial, or unknown
+ * metric evidence. Mapping `current` to Ready would turn those source states
+ * into a claim the source did not make, so only the wire's `known` state is
+ * ready here. A missing metric is unknown rather than a clean zero.
+ */
+export interface CoverageWindowTruth {
+  readonly metricState: CoverageStateV1 | 'missing';
+  readonly presentation: DomainStateKind;
+}
+
+export function coverageWindowTruth(model: ObservatoryReadModelV1): CoverageWindowTruth {
+  const metricState = model.metrics.find((metric) => metric.metric === 'observability_events')
+    ?.coverage.state;
+  switch (metricState) {
+    case 'known':
+      return { metricState, presentation: 'ready' };
+    case 'capped':
+    case 'partial':
+    case 'sampled':
+      return { metricState, presentation: 'partial' };
+    case 'stale':
+      return { metricState, presentation: 'stale' };
+    case 'unknown':
+      return { metricState, presentation: 'unknown' };
+    case undefined:
+      return { metricState: 'missing', presentation: 'unknown' };
+    default: {
+      const unhandled: never = metricState;
+      return unhandled;
+    }
+  }
+}
 
 /**
  * Whether a measurement's eligible denominator is independent of its own
@@ -105,13 +146,21 @@ export function denominatorIntegrity(metric: MetricValueV1 | undefined): Denomin
 export function eventCoverageReading(model: ObservatoryReadModelV1): {
   integrity: DenominatorIntegrity;
   reading: EligibleVersusObserved | null;
+  coverage: CoverageStateV1 | 'missing';
 } {
   const metric = model.metrics.find((candidate) => candidate.metric === 'observability_events');
   const integrity = denominatorIntegrity(metric);
-  if (integrity.kind !== 'independent') return { integrity, reading: null };
+  const coverage = metric?.coverage.state ?? 'missing';
+  // Numeric fields in a capped, sampled, stale, partial, or unknown metric are
+  // source facts, not a complete eligible/observed measurement. Do not let a
+  // pair-shaped value promote its source state to `measured` in the UI.
+  if (integrity.kind !== 'independent' || coverage !== 'known') {
+    return { integrity, reading: null, coverage };
+  }
   return {
     integrity,
     reading: eligibleVersusObserved(integrity.observed, integrity.eligible),
+    coverage,
   };
 }
 
@@ -216,6 +265,30 @@ export function denominatorFailures(model: ObservatoryReadModelV1): {
     total: model.metrics.length,
     missing,
     selfReferential,
+  };
+}
+
+/** A denominator audit requires at least one published metric. `0 of 0` says
+ * the audit had no population, not that every denominator independently passed. */
+export function denominatorFailureTruth(failures: ReturnType<typeof denominatorFailures>): {
+  state: DomainStateKind;
+  detail: string;
+} {
+  if (failures.total === 0) {
+    return {
+      state: 'unknown',
+      detail: 'no metric carried an eligible denominator, so no denominator audit is available',
+    };
+  }
+  if (failures.failed === 0) {
+    return {
+      state: 'ready',
+      detail: 'every published metric carried an independent eligible denominator',
+    };
+  }
+  return {
+    state: 'conflicting',
+    detail: `${failures.failed} published measurement${failures.failed === 1 ? '' : 's'} lacks an independent denominator`,
   };
 }
 

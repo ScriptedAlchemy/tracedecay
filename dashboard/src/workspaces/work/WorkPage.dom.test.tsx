@@ -1,5 +1,5 @@
 /**
- * The Work page over the nine mounted routes.
+ * The Work page over the twelve mounted routes.
  *
  * These replace the assertions that pinned the old absence ledger. That ledger
  * said no generated Work read model existed in the build, which `3f43664cb`
@@ -115,7 +115,7 @@ describe('the Work page over mounted routes', () => {
   it('labels the default Work view as the active project', async () => {
     renderPage();
     expect(
-      await screen.findByText('canonical task graph · the active project · nine mounted routes'),
+      await screen.findByText('canonical task graph · the active project · twelve mounted routes'),
     ).toBeTruthy();
   });
 
@@ -131,7 +131,7 @@ describe('the Work page over mounted routes', () => {
     renderPage();
 
     const provenance = await screen.findByText(
-      'canonical task graph · Beta (project-beta) · selected project · nine mounted routes',
+      'canonical task graph · Beta (project-beta) · selected project · twelve mounted routes',
     );
     expect(provenance.textContent).not.toContain('active project');
   });
@@ -149,7 +149,7 @@ describe('the Work page over mounted routes', () => {
 
     expect(
       await screen.findByText(
-        'canonical task graph · Alpha (project-alpha) · selected active project · nine mounted routes',
+        'canonical task graph · Alpha (project-alpha) · selected active project · twelve mounted routes',
       ),
     ).toBeTruthy();
   });

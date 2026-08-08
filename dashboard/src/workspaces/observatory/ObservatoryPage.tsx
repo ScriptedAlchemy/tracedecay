@@ -12,8 +12,11 @@ import {
   type TableGrowthThresholdV1,
   type DashboardCoverageV1,
   type DashboardEnvelopeV1,
+  AnalyticsDiagnosticsPayloadV1Schema,
+  ObservatoryReadModelV1Schema,
 } from '../../contracts/generated.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { CapacityBar } from '../../ui/ActivityColumns.tsx';
@@ -45,6 +48,7 @@ import {
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
+import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
 /** Observatory storage health: independent typed telemetry and Doctor finding
  * read models. A failed source never hides the other source or becomes empty. */
@@ -59,6 +63,32 @@ export function ObservatoryPage() {
   // Shared with the nav rail's Doctor dot, through the module that owns the
   // key, the route, and the poll: one entry, one period, one contract.
   const findings = useStorageFindings();
+  const accountingSnapshot = useEnvelope(
+    ['observatory', 'accounting-snapshot'],
+    '/api/observatory',
+    ObservatoryReadModelV1Schema,
+    { staleTime: 30_000 },
+  );
+  const accountingDiagnostics = useEnvelope(
+    ['observatory', 'accounting-diagnostics'],
+    '/api/plugins/analytics/diagnostics',
+    AnalyticsDiagnosticsPayloadV1Schema,
+    { staleTime: 30_000 },
+  );
+  const accountingReads: ObservatoryAccountingReads = {
+    observatory: {
+      result: accountingSnapshot.data,
+      pending: accountingSnapshot.isPending,
+      refreshing: accountingSnapshot.isFetching,
+      refresh: () => void accountingSnapshot.refetch(),
+    },
+    diagnostics: {
+      result: accountingDiagnostics.data,
+      pending: accountingDiagnostics.isPending,
+      refreshing: accountingDiagnostics.isFetching,
+      refresh: () => void accountingDiagnostics.refetch(),
+    },
+  };
 
   return (
     // The page column is the scroll container, and wide telemetry read-out
@@ -82,11 +112,11 @@ export function ObservatoryPage() {
 
       <CanonicalObservations />
 
-      <AdoptionCoverage />
+      <AdoptionCoverage reads={accountingReads} />
 
-      <AdoptionOutcomes />
+      <AdoptionOutcomes reads={accountingReads} />
 
-      <RetrievalQuality />
+      <RetrievalQuality reads={accountingReads} />
 
       <HookHints />
 

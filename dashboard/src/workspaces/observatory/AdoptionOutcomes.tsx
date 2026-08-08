@@ -20,13 +20,10 @@
  */
 import type { ReactNode } from 'react';
 import {
-  AnalyticsDiagnosticsPayloadV1Schema,
-  ObservatoryReadModelV1Schema,
   type AnalyticsDiagnosticsPayloadV1,
   type DashboardEnvelopeV1,
   type ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { EnvelopeTruth, OmissionReasons } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection, envelopeReadState, type ReadState } from '../../ui/ReadSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
@@ -51,21 +48,11 @@ import {
   funnelStageCounts,
   outcomeCoverage,
 } from './adoptionOutcomes.ts';
+import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
-export function AdoptionOutcomes() {
-  const read = useEnvelope(
-    ['observatory', 'adoption-outcomes'],
-    '/api/observatory',
-    ObservatoryReadModelV1Schema,
-    { staleTime: 60_000 },
-  );
-  const diagnostics = useEnvelope(
-    ['observatory', 'adoption-outcomes', 'families'],
-    '/api/plugins/analytics/diagnostics',
-    AnalyticsDiagnosticsPayloadV1Schema,
-    { staleTime: 60_000 },
-  );
-  const families = envelopeReadState(diagnostics.isPending, diagnostics.data, {
+export function AdoptionOutcomes({ reads }: { reads: ObservatoryAccountingReads }) {
+  const { observatory: read, diagnostics } = reads;
+  const families = envelopeReadState(diagnostics.pending, diagnostics.result, {
     loading: 'requesting adoption observation counts',
     transport: 'adoption observation counts could not be read',
   });
@@ -77,8 +64,8 @@ export function AdoptionOutcomes() {
         'the Eligible → Enabled → Available → Invoked → Terminal → IndependentlyUseful →' +
         ' RepeatUseful funnel, correct abstention, independently useful and retained use'
       }
-      result={read.data}
-      pending={read.isPending}
+      result={read.result}
+      pending={read.pending}
       loadingDetail="requesting adoption read anchors"
       transportDetail="adoption read anchors could not be read"
     >
@@ -90,8 +77,8 @@ export function AdoptionOutcomes() {
             <>
               <EnvelopeTruth
                 envelope={envelope}
-                refreshing={read.isFetching}
-                onRefresh={() => void read.refetch()}
+                refreshing={read.refreshing}
+                onRefresh={read.refresh}
               />
               <OmissionReasons coverage={envelope.coverage} />
             </>

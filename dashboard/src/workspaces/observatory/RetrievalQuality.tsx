@@ -19,13 +19,10 @@
  */
 import type { ReactNode } from 'react';
 import {
-  AnalyticsDiagnosticsPayloadV1Schema,
-  ObservatoryReadModelV1Schema,
   type AnalyticsDiagnosticsPayloadV1,
   type DashboardEnvelopeV1,
   type ObservatoryReadModelV1,
 } from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { EnvelopeTruth, OmissionReasons } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection, envelopeReadState, type ReadState } from '../../ui/ReadSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
@@ -47,21 +44,11 @@ import {
   retrievalCoverage,
   retrievalQualityBands,
 } from './retrievalQuality.ts';
+import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
-export function RetrievalQuality() {
-  const read = useEnvelope(
-    ['observatory', 'retrieval-quality'],
-    '/api/observatory',
-    ObservatoryReadModelV1Schema,
-    { staleTime: 30_000 },
-  );
-  const diagnostics = useEnvelope(
-    ['observatory', 'retrieval-quality', 'families'],
-    '/api/plugins/analytics/diagnostics',
-    AnalyticsDiagnosticsPayloadV1Schema,
-    { staleTime: 30_000 },
-  );
-  const families = envelopeReadState(diagnostics.isPending, diagnostics.data, {
+export function RetrievalQuality({ reads }: { reads: ObservatoryAccountingReads }) {
+  const { observatory: read, diagnostics } = reads;
+  const families = envelopeReadState(diagnostics.pending, diagnostics.result, {
     loading: 'requesting retrieval observation counts',
     transport: 'retrieval observation counts could not be read',
   });
@@ -74,8 +61,8 @@ export function RetrievalQuality() {
         ' planner/fan-out/synthesis spans, context precision, task-outcome linkage, and' +
         ' equal-budget ablations'
       }
-      result={read.data}
-      pending={read.isPending}
+      result={read.result}
+      pending={read.pending}
       loadingDetail="requesting canonical retrieval measurements"
       transportDetail="canonical retrieval measurements could not be read"
     >
@@ -87,8 +74,8 @@ export function RetrievalQuality() {
             <>
               <EnvelopeTruth
                 envelope={envelope}
-                refreshing={read.isFetching}
-                onRefresh={() => void read.refetch()}
+                refreshing={read.refreshing}
+                onRefresh={read.refresh}
               />
               <OmissionReasons coverage={envelope.coverage} />
             </>

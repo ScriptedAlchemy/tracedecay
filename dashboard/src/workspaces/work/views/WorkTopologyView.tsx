@@ -1,78 +1,48 @@
 import type {
+  ExecutionTopologyViewV1,
   WorkAttemptListCoverageV1,
   WorkAttemptListV1,
+  WorkPlacementV1,
   WorkProjectionSnapshotV1,
+  WorkTopologyPlacementLaneV1,
 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
-import { Meter, Panel } from '../../../ui/instrument.tsx';
-import { cn } from '../../../ui/cn.ts';
-import { kindColorVars } from '../../../viz/graph/kindColor.ts';
+import { Panel } from '../../../ui/instrument.tsx';
 import type { WorkResult } from '../workApi.ts';
 import type { WorkChannel } from '../workChannel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
-import { WorkTopologyAccounting } from './WorkTopologyAccounting.tsx';
 import {
   WORK_TOPOLOGY_DIMENSIONS,
   topologyDimensionLabel,
   workTopologyReading,
-  type WorkTopologyLanding,
+  type WorkTopologyDimension,
   type WorkTopologyReading,
-  type WorkTopologyThread,
-  type WorkTopologyWorktreeLane,
 } from '../workTopologyModel.ts';
+import { WorkTopologyAccounting } from './WorkTopologyAccounting.tsx';
 import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * Execution topology — where the work actually ran.
+ * Execution topology — the canonical structural view for Work.
  *
- * The lens over the canonical Work selection that Plan 11 adds with the Work
- * delivery. Its full contract decodes `ExecutionTopologyViewV1`; this build's
- * generated catalog does not carry that DTO, so the lens draws exactly what
- * the mounted attempt read proves — the executor weave and the worktree lanes
- * of the `execution_placement` dimension, pinned to the verified topology
- * generation the page was read under — and states the other three dimensions
- * as the typed schema absences they are. `workTopologyModel.ts` is the binding
- * point for the real view when it lands; nothing here will need to un-learn a
- * fabricated lane.
+ * `operation.work.topology` publishes placement, branch, review, and
+ * integration policy under one topology generation. This lens renders those
+ * generated fields directly. It intentionally does not rebuild an executor
+ * weave, worktree groups, or policy lanes by walking the attempt page: those
+ * would be browser-owned alternatives to the application projection.
  *
- * The weave is 11c's loom row: executors as warp threads, hue hashed from the
- * stable executor identity (the same provider route wears the same hue on
- * every screen of the app), tasks as landings, a retry as a repeated crossing
- * of the same landing. Every mark is hollow because the record holds an end
- * and never a start; the absence is printed where the axis would have been.
- *
- * Selection is the canonical one: a landing names a task, clicking it selects
- * that task everywhere, and the lens never owns the selection.
- *
- * PLAN 26'S ACCOUNTING SITS UNDER THE STRUCTURE, NOT BESIDE IT.
- *
- * Plan 26 mandates an `execution-topology` product view over twelve measured
- * dimensions, and it is explicit that this rides the views that already exist
- * rather than adding a second surface. So the accounting ledger is rendered
- * here, at the bottom of this lens, and not as a seventh projection: the weave
- * and the lanes above say what the topology IS, and the ledger below says what
- * has been measured about how it behaved. `WorkTopologyAccounting.tsx` draws
- * the ledger and `workTopologyAccounting.ts` derives it; the split between the
- * structural dimensions above and the measured dimensions below mirrors the
- * split the plan itself draws between `ExecutionTopologyViewV1` and
- * `ExecutionTopologyMetricsV1`, which the Rust deliberately refuses to join.
+ * The accounting ledger below still reads the separate attempt and graph
+ * projections for measurements the structural topology view does not contain.
+ * It binds snapshot titles, attempt-derived figures, and graph runtime figures
+ * to this canonical generation before drawing them, so independently refreshed
+ * reads cannot silently form one population.
  */
-
-/** Which of the readings the lens is drawing. The middle case is a page that
- * answered and held nothing — a statement, not an empty field. */
-type TopologyBodyState = 'unread' | 'empty_page' | 'placed';
-
-function topologyBodyState(reading: WorkTopologyReading): TopologyBodyState {
-  if (reading.attempts.state !== 'listed') return 'unread';
-  return reading.threads.available ? 'placed' : 'empty_page';
-}
 
 function coverageSentence(coverage: WorkAttemptListCoverageV1): string {
   switch (coverage.coverage) {
     case 'complete':
-      return `${coverage.returned} ${coverage.returned === 1 ? 'attempt' : 'attempts'} · complete`;
+      return `${coverage.returned} ${coverage.returned === 1 ? 'attempt' : 'attempts'} returned · complete`;
     case 'capped':
-      return `${coverage.returned} of ${coverage.returned + coverage.remaining} attempts · capped, every count a floor`;
+      return `${coverage.returned} returned · capped with ${coverage.remaining} remaining; every page count is a floor`;
     default: {
       const unhandled: never = coverage;
       return unhandled;
@@ -83,91 +53,116 @@ function coverageSentence(coverage: WorkAttemptListCoverageV1): string {
 export function WorkTopologyView({
   snapshot,
   attemptList,
+  topology,
   graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  /** The separate attempt page is solely for the accounting facts not present
+   * in `ExecutionTopologyViewV1`; structural lanes always use `topology`. */
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
-  /** The work-product graph read, for the Plan 26 accounting ledger below: the
-   * concurrency widths and the blocked-effort figure are properties of one
-   * graph version and are read from it rather than from the attempt page. */
+  topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workTopologyReading(attemptList);
-  const titles = new Map(snapshot.projections.map((p) => [p.task_id, p.title]));
+  const reading = workTopologyReading(topology);
+  const titleJoin = snapshotTitlesBoundToTopology(snapshot, reading);
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-view="topology">
-      <Panel
-        legend="Execution topology"
-        actions={<TopologyBindingChip reading={reading} />}
-        elevation="well"
-      >
+      <Panel legend="Execution topology" actions={<TopologyBindingChip reading={reading} />} elevation="well">
         <div className="flex min-w-0 flex-col gap-3">
           <TopologyCaption reading={reading} />
-
           <p className="text-3xs leading-snug text-text-muted">
-            Warp threads are executors — provider routes, each wearing the hue its stable
-            identity hashes to everywhere in this app. Landings are tasks; repeated ticks on
-            one landing are repeated crossings, which is a retry as the weave draws one.
-            Every mark is hollow: an attempt records the instant it finished and nothing
-            records when it started, so no thread here has a width to fill.
+            Placement lanes, branch policy, review policy, and integration strategy are decoded
+            from the canonical topology page. A lane is one task/run identity with the durable
+            placement state the authority published; no browser tally substitutes for it.
           </p>
-
-          {/* The absence sits where a time axis would have been drawn. */}
+          {titleJoin.channel === null ? null : <SnapshotTitleAbsence channel={titleJoin.channel} />}
+          <PlacementLanes reading={reading} titles={titleJoin.titles} selected={selected} onSelect={onSelect} />
           <ChannelAbsence measure="wall-clock spans and durations" channel={reading.wallClock} />
-
-          <TopologyBody reading={reading} titles={titles} selected={selected} onSelect={onSelect} />
+          <DimensionLedger reading={reading} />
         </div>
       </Panel>
 
-      <WorktreeLanes reading={reading} titles={titles} selected={selected} onSelect={onSelect} />
-
-      <DimensionLedger reading={reading} />
-
-      <WorkTopologyAccounting attemptList={attemptList} graph={graph} />
+      <WorkTopologyAccounting attemptList={attemptList} topology={topology} graph={graph} />
     </div>
   );
 }
 
-/** The identity this lens pins: the verified topology generation the attempt
- * page was read under. Rendered as the panel's state chip so the pin and the
- * read state are one mark — an unpinned lens is exactly an unread one. */
+interface SnapshotTitleJoin {
+  readonly titles: ReadonlyMap<string, string>;
+  readonly channel: WorkChannel<never> | null;
+}
+
+function SnapshotTitleAbsence({ channel }: { channel: WorkChannel<never> }) {
+  if (channel.available) return null;
+  return (
+    <div data-work-snapshot-title-join={channel.state}>
+      <ChannelAbsence measure="snapshot task titles" channel={channel} />
+    </div>
+  );
+}
+
+/**
+ * Titles belong to the projection snapshot, not the topology response. They
+ * can decorate canonical lanes only when both independently refreshed reads
+ * identify the same topology population.
+ */
+function snapshotTitlesBoundToTopology(
+  snapshot: WorkProjectionSnapshotV1,
+  reading: WorkTopologyReading,
+): SnapshotTitleJoin {
+  if (!reading.binding.available) {
+    return { titles: new Map(), channel: null };
+  }
+
+  const topologyGeneration = reading.binding.value.generation;
+  if (snapshot.generation_id !== topologyGeneration) {
+    return {
+      titles: new Map(),
+      channel: {
+        available: false,
+        state: 'conflicting',
+        detail:
+          `the Work snapshot is pinned to topology generation ${snapshot.generation_id}, but the canonical ` +
+          `topology page is pinned to ${topologyGeneration}; their task titles are unbound, so canonical lanes use durable task identities`,
+      },
+    };
+  }
+
+  return {
+    titles: new Map(snapshot.projections.map((projection) => [projection.task_id, projection.title])),
+    channel: null,
+  };
+}
+
 function TopologyBindingChip({ reading }: { reading: WorkTopologyReading }) {
   const binding = reading.binding;
-  if (binding.available) {
-    return (
-      <span
-        className="td-value text-3xs text-text-muted"
-        data-work-topology-generation={binding.value.generation}
-        data-cell="numeric"
-      >
-        generation {binding.value.generation} · {binding.value.task_count} tasks
-      </span>
-    );
-  }
-  return <StateChip kind={binding.state} detail="topology generation" />;
+  if (!binding.available) return <StateChip kind={binding.state} detail="topology generation" />;
+  return (
+    <span
+      className="td-value text-3xs text-text-muted"
+      data-work-topology-generation={binding.value.generation}
+      data-cell="numeric"
+    >
+      generation {binding.value.generation} · {binding.value.task_count} tasks
+    </span>
+  );
 }
 
 function TopologyCaption({ reading }: { reading: WorkTopologyReading }) {
-  const threads = reading.threads.available ? reading.threads.value : [];
-  const lanes = reading.worktreeLanes.available ? reading.worktreeLanes.value : [];
-  const landings = threads.reduce((total, thread) => total + thread.landings.length, 0);
-  const crossings = threads.reduce((total, thread) => total + thread.attempts, 0);
   return (
     <ViewCaption
-      population={`${threads.length} executors · ${landings} landings · ${crossings} crossings · ${lanes.length} worktree lanes`}
-      note={
-        reading.coverage.available ? coverageSentence(reading.coverage.value) : undefined
-      }
+      population="canonical execution-topology page"
+      note={reading.coverage.available ? coverageSentence(reading.coverage.value) : undefined}
     />
   );
 }
 
-function TopologyBody({
+function PlacementLanes({
   reading,
   titles,
   selected,
@@ -178,322 +173,115 @@ function TopologyBody({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const state = topologyBodyState(reading);
-  switch (state) {
-    case 'unread':
-      // The read's own reason, in the daemon's taxonomy: pending, refused, or
-      // the typed absence. Never an empty weave.
-      return (
-        <ChannelAbsence measure="the executor placement weave" channel={asAbsent(reading.threads)} />
-      );
-    case 'empty_page':
-      return (
-        <EmptyReading>
-          The attempt page was read under this topology generation and holds no attempts, so
-          no executor has placed anything. This is an authorized empty execution record, not
-          a lens that failed to draw.
-        </EmptyReading>
-      );
-    case 'placed':
-      return (
-        <ExecutorWeave
-          threads={reading.threads.available ? reading.threads.value : []}
-          titles={titles}
-          selected={selected}
-          onSelect={onSelect}
-        />
-      );
-    default: {
-      const unhandled: never = state;
-      return unhandled;
-    }
+  const placement = reading.executionPlacement;
+  if (!placement.available) {
+    return <ChannelAbsence measure="execution placement" channel={placement} />;
   }
-}
-
-/** Narrow a channel to its absent half for `ChannelAbsence`. The one caller
- * above only reaches this when the reading is not `listed`, where the channel
- * is provably absent; the fallback keeps the narrowing total anyway. */
-function asAbsent(channel: WorkChannel<unknown>): WorkChannel<never> {
-  if (!channel.available) return channel;
-  return {
-    available: false,
-    state: 'unknown',
-    detail: 'the channel answered while the read did not — an inconsistency worth reporting',
-  };
-}
-
-function ExecutorWeave({
-  threads,
-  titles,
-  selected,
-  onSelect,
-}: {
-  threads: readonly WorkTopologyThread[];
-  titles: ReadonlyMap<string, string>;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
-  // Threads arrive sorted by attempt count, so the ceiling is the first row.
-  const ceiling = Math.max(1, threads[0]?.attempts ?? 1);
+  if (placement.value.lanes.length === 0) {
+    return (
+      <EmptyReading>
+        The canonical topology page is authorized and contains no placement lanes. This is an
+        empty page, not an inferred absence of execution.
+      </EmptyReading>
+    );
+  }
+  const capped = reading.coverage.available && reading.coverage.value.coverage === 'capped';
   return (
-    <ol
-      className="flex min-w-0 flex-col gap-1.5"
-      data-work-executors={threads.length}
-      data-work-span="hollow"
-    >
-      {threads.map((thread) => (
-        <li key={thread.executorKey} className="min-w-0">
-          <ExecutorThread
-            thread={thread}
-            ceiling={ceiling}
-            titles={titles}
-            selected={selected}
-            onSelect={onSelect}
-          />
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-/**
- * One warp thread: an executor, its admission evidence, and its landings.
- *
- * The hue mark is hashed from the executor identity — provider and route —
- * which IS a stable app-wide identity, unlike the run-keyed thread of the
- * timeline weave. It is the only solid ink on the row: identity, not a span.
- */
-function ExecutorThread({
-  thread,
-  ceiling,
-  titles,
-  selected,
-  onSelect,
-}: {
-  thread: WorkTopologyThread;
-  ceiling: number;
-  titles: ReadonlyMap<string, string>;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
-  const notes: string[] = [];
-  if (thread.diverted > 0) notes.push(`${thread.diverted} diverted here by fallback`);
-  if (thread.unobserved > 0) notes.push(`${thread.unobserved} not yet observed to run here`);
-  return (
-    <div
-      className="flex min-w-0 flex-col gap-1.5 border border-edge-subtle bg-surface-1 p-2"
-      data-work-executor={thread.executorKey}
-      data-work-attempts={thread.attempts}
-    >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          aria-hidden
-          style={kindColorVars(thread.executorKey)}
-          className="h-3 w-1 shrink-0 bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
-        />
-        <span className="min-w-0 flex-1 truncate font-mono text-2xs text-text-secondary">
-          {thread.executorKey}
-        </span>
-        <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
-          {thread.attempts} {thread.attempts === 1 ? 'attempt' : 'attempts'} ·{' '}
-          {thread.backends.join(', ')} · {thread.models.join(', ')}
-        </span>
-      </div>
-
-      {notes.length > 0 ? (
-        <p className="text-3xs leading-snug text-text-muted">{notes.join(' · ')}</p>
-      ) : null}
-
-      {/* The attempt count a second time as a length, so a stack of threads
-        * ranks without reading digits. Hidden: the figure is printed above. */}
-      <Meter fraction={thread.attempts / ceiling} height="row" />
-
-      <ul className="flex min-w-0 flex-wrap items-stretch gap-1">
-        {thread.landings.map((landing) => (
-          <li key={landing.taskId} className="min-w-0">
-            <TopologyLandingMark
-              landing={landing}
-              executorKey={thread.executorKey}
-              title={titles.get(landing.taskId) ?? landing.taskId}
-              selected={selected === landing.taskId}
+    <section aria-label="Canonical placement lanes" className="flex min-w-0 flex-col gap-2">
+      <p className="text-3xs text-text-muted">
+        placement mode: {placementMode(placement.value.mode)}
+      </p>
+      <ol className="flex min-w-0 flex-col gap-2" data-work-topology-lanes={placement.value.lanes.length}>
+        {placement.value.lanes.map((lane) => (
+          <li key={`${lane.task_id}\u0000${lane.run_id}`} className="min-w-0">
+            <PlacementLane
+              lane={lane}
+              title={titles.get(lane.task_id) ?? lane.task_id}
+              selected={selected === lane.task_id}
+              capped={capped}
               onSelect={onSelect}
             />
           </li>
         ))}
-      </ul>
-    </div>
+      </ol>
+    </section>
   );
 }
 
-/** Ticks stop repeating past this; the printed count carries the rest. */
-const TALLY_CAP = 6;
+function placementMode(mode: { kind: string; root_id?: string }): string {
+  return mode.kind === 'configured_root' && mode.root_id !== undefined
+    ? `${mode.kind} · ${mode.root_id}`
+    : mode.kind;
+}
 
-function TopologyLandingMark({
-  landing,
-  executorKey,
+function PlacementLane({
+  lane,
   title,
   selected,
+  capped,
   onSelect,
 }: {
-  landing: WorkTopologyLanding;
-  executorKey: string;
+  lane: WorkTopologyPlacementLaneV1;
   title: string;
   selected: boolean;
+  capped: boolean;
   onSelect: (taskId: string) => void;
 }) {
-  const ticks = Math.min(landing.crossings, TALLY_CAP);
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(landing.taskId)}
-      aria-pressed={selected}
-      aria-label={`${title} · ${landing.crossings} ${
-        landing.crossings === 1 ? 'crossing' : 'crossings'
-      } by ${executorKey}${landing.open ? ' · open' : ''}`}
-      data-work-task={landing.taskId}
-      data-work-crossings={landing.crossings}
-      className={cn(
-        // Hollow on purpose: a landing is an incidence, not a span.
-        'flex min-h-[44px] min-w-0 flex-col justify-center gap-1 border bg-transparent px-2 py-1 text-left',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-        selected
-          ? 'border-edge-strong text-text-primary'
-          : 'border-edge-subtle text-text-secondary hover:bg-surface-2',
-      )}
-    >
-      <span className="max-w-44 truncate text-2xs">{title}</span>
-      <span className="flex items-center gap-1" aria-hidden>
-        {Array.from({ length: ticks }, (_, index) => (
-          <span
-            key={index}
-            className={cn('h-1.5 w-1.5 border', landing.terminal ? 'border-edge-strong' : 'border-edge-subtle')}
-          />
-        ))}
-        {landing.crossings > TALLY_CAP ? (
-          <span className="text-3xs text-text-muted">×{landing.crossings}</span>
-        ) : null}
-        {landing.open ? <span className="text-3xs text-text-muted">open</span> : null}
-      </span>
-    </button>
-  );
-}
-
-/**
- * The worktree lanes: every attempt pinned to the exact repository, worktree,
- * ref, and commit its execution envelope was admitted against. These are the
- * placement identities Plan 11 says the lens pins — read, not inferred, and a
- * `null` ref is printed as the recorded absence it is.
- */
-function WorktreeLanes({
-  reading,
-  titles,
-  selected,
-  onSelect,
-}: {
-  reading: WorkTopologyReading;
-  titles: ReadonlyMap<string, string>;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
-  const lanes = reading.worktreeLanes;
-  return (
-    <Panel legend="Worktree lanes">
-      {lanes.available ? (
-        <ol className="flex min-w-0 flex-col gap-2" data-work-worktree-lanes={lanes.value.length}>
-          {lanes.value.map((lane) => (
-            <li key={lane.worktreeId} className="min-w-0">
-              <WorktreeLaneRow lane={lane} titles={titles} selected={selected} onSelect={onSelect} />
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <ChannelAbsence measure="worktree placement" channel={lanes} />
-      )}
-    </Panel>
-  );
-}
-
-function WorktreeLaneRow({
-  lane,
-  titles,
-  selected,
-  onSelect,
-}: {
-  lane: WorkTopologyWorktreeLane;
-  titles: ReadonlyMap<string, string>;
-  selected: string | null;
-  onSelect: (taskId: string) => void;
-}) {
+  const identity = `${lane.task_id} · ${lane.run_id}`;
   return (
     <div
       className="flex min-w-0 flex-col gap-1.5 border border-edge-subtle bg-surface-1 p-2"
-      data-work-worktree={lane.worktreeId}
+      data-work-topology-lane={`${lane.task_id}:${lane.run_id}`}
     >
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 truncate font-mono text-2xs text-text-secondary">
-          {lane.worktreeId}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-3xs text-text-muted">{lane.worktreeRoot}</span>
+        <button
+          type="button"
+          onClick={() => onSelect(lane.task_id)}
+          aria-pressed={selected}
+          data-work-task={lane.task_id}
+          className="min-h-[44px] min-w-0 flex-1 truncate text-left text-2xs text-text-secondary underline-offset-2 hover:underline"
+        >
+          {title}
+        </button>
         <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
-          {lane.attempts} {lane.attempts === 1 ? 'attempt' : 'attempts'} · repository{' '}
-          {lane.repositoryIds.join(', ')}
+          {lane.attempt_count} {lane.attempt_count === 1 ? 'attempt' : 'attempts'}
+          {capped ? ' · page floor' : ''}
         </span>
       </div>
-
-      <ul className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-3xs text-text-muted">
-        {lane.refs.map((pin) => (
-          <li
-            key={`${pin.reference ?? 'none'}-${pin.commit}`}
-            className="min-w-0 truncate font-mono"
-            data-work-ref={pin.reference ?? 'none'}
-            data-work-commit={pin.commit}
-          >
-            {pin.reference ?? 'no ref recorded'} @ {pin.commit}
-          </li>
-        ))}
-      </ul>
-
-      <ul className="flex min-w-0 flex-wrap items-center gap-1">
-        {lane.taskIds.map((taskId) => (
-          <li key={taskId} className="min-w-0">
-            <button
-              type="button"
-              onClick={() => onSelect(taskId)}
-              aria-pressed={selected === taskId}
-              data-work-task={taskId}
-              className={cn(
-                'min-h-[44px] max-w-44 truncate border px-2 text-left text-2xs',
-                'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-                selected === taskId
-                  ? 'border-edge-strong text-text-primary'
-                  : 'border-edge-subtle text-text-secondary hover:bg-surface-2',
-              )}
-            >
-              {titles.get(taskId) ?? taskId}
-            </button>
-          </li>
-        ))}
-        {lane.executorKeys.map((executorKey) => (
-          <li key={executorKey} className="flex min-w-0 items-center gap-1" aria-hidden>
-            <span
-              style={kindColorVars(executorKey)}
-              className="h-3 w-1 shrink-0 bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
-            />
-            <span className="truncate font-mono text-3xs text-text-muted">{executorKey}</span>
-          </li>
-        ))}
-      </ul>
+      <span className="font-mono text-3xs text-text-muted">{identity}</span>
+      {lane.placement.state === 'absent' ? (
+        <span className="flex min-w-0 flex-col gap-1">
+          <StateChip kind="complete_zero_findings" detail="no managed placement was admitted" />
+          <span className="text-3xs text-text-muted">
+            The canonical lane is retained even when its durable placement is absent.
+          </span>
+        </span>
+      ) : (
+        <PlacementDetail placement={lane.placement.placement} />
+      )}
     </div>
   );
 }
 
-/**
- * The four dimensions, every one on screen in every state. Plan 11:
- * unsupported, unavailable, denied, partial, stale, or omitted lane families
- * remain explicit and never disappear into the base board. The readable one
- * states what it is read from; the three the catalog cannot answer wear their
- * `unsupported_schema` chips here, beside it, rather than in a footnote.
- */
+function PlacementDetail({ placement }: { placement: WorkPlacementV1 }) {
+  return (
+    <dl className="flex min-w-0 flex-col gap-1 text-3xs text-text-muted">
+      <div className="flex min-w-0 gap-1.5">
+        <dt className="shrink-0 uppercase tracking-[0.08em]">placement</dt>
+        <dd className="min-w-0 break-words text-text-secondary">
+          {placement.state} · {placement.target.kind} · {placement.target.root ?? 'no managed root'}
+        </dd>
+      </div>
+      <div className="flex min-w-0 gap-1.5">
+        <dt className="shrink-0 uppercase tracking-[0.08em]">blockers</dt>
+        <dd className="min-w-0 break-words text-text-secondary">
+          {placement.blockers.length === 0 ? 'none recorded' : placement.blockers.join(', ')}
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
 function DimensionLedger({ reading }: { reading: WorkTopologyReading }) {
   return (
     <section
@@ -516,58 +304,57 @@ function DimensionLedger({ reading }: { reading: WorkTopologyReading }) {
   );
 }
 
-function DimensionRow({
-  reading,
-  dimension,
-}: {
-  reading: WorkTopologyReading;
-  dimension: (typeof WORK_TOPOLOGY_DIMENSIONS)[number];
-}) {
+function DimensionRow({ reading, dimension }: { reading: WorkTopologyReading; dimension: WorkTopologyDimension }) {
   switch (dimension) {
     case 'execution_placement':
-      return (
-        <div className="flex min-w-0 flex-col gap-1">
-          {reading.threads.available ? (
-            <>
-              <StateChip kind="ready" detail={topologyDimensionLabel(dimension)} />
-              <p className="text-3xs leading-snug text-text-muted">
-                read from the mounted attempt list: each attempt&apos;s execution envelope
-                names its executor route and the exact repository, worktree, ref, and commit
-                it was admitted against
-              </p>
-            </>
-          ) : (
-            <ChannelAbsence
-              measure={topologyDimensionLabel(dimension)}
-              channel={asAbsent(reading.threads)}
-            />
-          )}
-        </div>
+      return dimensionValue(
+        topologyDimensionLabel(dimension),
+        reading.executionPlacement,
+        reading.executionPlacement.available
+          ? `mode ${placementMode(reading.executionPlacement.value.mode)} · ${reading.executionPlacement.value.lanes.length} canonical lanes`
+          : null,
       );
     case 'branch_topology':
-      return (
-        <ChannelAbsence
-          measure={topologyDimensionLabel(dimension)}
-          channel={reading.branchTopology}
-        />
+      return dimensionValue(
+        topologyDimensionLabel(dimension),
+        reading.branchTopology,
+        reading.branchTopology.available
+          ? `allowed: ${reading.branchTopology.value.allowed.join(', ')}`
+          : null,
       );
     case 'review_topology':
-      return (
-        <ChannelAbsence
-          measure={topologyDimensionLabel(dimension)}
-          channel={reading.reviewTopology}
-        />
+      return dimensionValue(
+        topologyDimensionLabel(dimension),
+        reading.reviewTopology,
+        reading.reviewTopology.available
+          ? `allowed: ${reading.reviewTopology.value.allowed.join(', ')} · GitHub stacked PRs: ${reading.reviewTopology.value.github_stacked_prs}`
+          : null,
       );
     case 'integration_strategy':
-      return (
-        <ChannelAbsence
-          measure={topologyDimensionLabel(dimension)}
-          channel={reading.integrationStrategy}
-        />
+      return dimensionValue(
+        topologyDimensionLabel(dimension),
+        reading.integrationStrategy,
+        reading.integrationStrategy.available
+          ? `default cross-merge: ${reading.integrationStrategy.value.cross_merge.default_mode} · cross-repository: ${reading.integrationStrategy.value.cross_merge.allow_cross_repository ? 'allowed' : 'not allowed'}`
+          : null,
       );
     default: {
       const unhandled: never = dimension;
       return unhandled;
     }
   }
+}
+
+function dimensionValue(
+  label: string,
+  channel: WorkChannel<unknown>,
+  detail: string | null,
+) {
+  if (!channel.available) return <ChannelAbsence measure={label} channel={channel} />;
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <StateChip kind="ready" detail={label} />
+      <p className="text-3xs leading-snug text-text-muted">{detail}</p>
+    </div>
+  );
 }

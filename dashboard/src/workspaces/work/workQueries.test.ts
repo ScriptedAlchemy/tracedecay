@@ -15,7 +15,11 @@ import {
 } from "../../data/scope/store.ts";
 
 import { resumeCursor } from "./workQueries.ts";
-import { WORK_ACCEPT_TASK_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
+import {
+  WORK_ACCEPT_TASK_ROUTE,
+  WORK_SNAPSHOT_ROUTE,
+  WORK_TOPOLOGY_ROUTE,
+} from "./workRoutes.ts";
 
 function project(
   activation: "active" | "selected" | "unresolved",
@@ -43,6 +47,13 @@ describe("where a Work read is sent", () => {
     );
     expect(scopedUrl(project("unresolved"), WORK_SNAPSHOT_ROUTE.path)).toBe(
       "/api/projects/project.beta/work/snapshot",
+    );
+  });
+
+  it("routes the canonical execution-topology projection through the selected project", () => {
+    expect(WORK_TOPOLOGY_ROUTE.operation).toBe("operation.work.topology");
+    expect(scopedUrl(project("selected"), WORK_TOPOLOGY_ROUTE.path)).toBe(
+      "/api/projects/project.beta/work/topology",
     );
   });
 });

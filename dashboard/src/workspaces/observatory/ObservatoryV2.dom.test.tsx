@@ -40,9 +40,25 @@ describe('the mounted Observatory V2 accounting surface', () => {
       expect(await screen.findByRole('heading', { name: heading })).toBeTruthy();
     }
 
-    // No source reading is silently promoted to a complete window because the
-    // diagnostics envelope itself says its record window was partial.
-    expect(document.querySelector('[data-coverage-window="capped"]')).toBeTruthy();
+    // All three panels bind to one diagnostics snapshot. Separate panel-local
+    // query keys would issue three calls and could put their ledgers under
+    // different watermarks.
+    const diagnosticsCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([input]) => new URL(String(input), 'http://localhost').pathname === '/api/plugins/analytics/diagnostics');
+    expect(diagnosticsCalls).toHaveLength(1);
+
+    // The observability metric is absent, so its status is unknown even though
+    // the separate diagnostics record window is partial.
+    const coverageWindow = await screen.findByLabelText('Window truthfulness');
+    expect(coverageWindow.getAttribute('data-coverage-window')).toBe('missing');
+    expect(coverageWindow.querySelector('[data-state]')?.getAttribute('data-state')).toBe('unknown');
+    expect(coverageWindow.textContent).toContain('partial · bounded at 10,000 rows');
+
+    const denominator = await screen.findByLabelText('Denominator failures');
+    expect(denominator.getAttribute('data-coverage-failures')).toBe('0');
+    expect(denominator.querySelector('[data-state]')?.getAttribute('data-state')).toBe('unknown');
+    expect(denominator.textContent).toContain('empty audit is unknown');
 
     const suppressed = document.querySelector(
       '[data-family-ledger="adoption"] [data-family="adoption.eligibility_observed.v1"]',
@@ -58,6 +74,100 @@ describe('the mounted Observatory V2 accounting surface', () => {
     expect(censored?.textContent).toContain('cannot tell a family that produced nothing');
     expect(censored?.querySelector('[data-cell="numeric"]')?.textContent).toBe('—');
   });
+
+  it('preserves a stale metric coverage state even while the read model is current', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost');
+        if (url.pathname === '/api/observatory') {
+          return response(envelope(observatoryModel([eventMetric('stale')]), 'complete'));
+        }
+        if (url.pathname === '/api/plugins/analytics/diagnostics') {
+          return response(envelope(diagnosticsModel(), 'complete'));
+        }
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+
+    renderObservatory();
+
+    const window = await screen.findByLabelText('Window truthfulness');
+    expect(window?.getAttribute('data-coverage-window')).toBe('stale');
+    expect(window?.querySelector('[data-state]')?.getAttribute('data-state')).toBe('stale');
+  });
+
+  it('renders an under-floor eligible-versus-observed pair as partial instead of unsupported', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost');
+        if (url.pathname === '/api/observatory') {
+          return response(envelope(observatoryModel([eventMetric('known', 4, 5)]), 'complete'));
+        }
+        if (url.pathname === '/api/plugins/analytics/diagnostics') {
+          return response(envelope(diagnosticsModel(), 'complete'));
+        }
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+
+    renderObservatory();
+
+    const pair = await screen.findByLabelText('Eligible versus observed');
+    expect(pair.getAttribute('data-coverage-ratio')).toBe('under_rate_floor');
+    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
+    expect(pair.textContent).toContain('a rate requires 20 eligible units');
+    expect(pair.textContent).not.toContain('Unsupported');
+  });
+
+  it('does not promote a numerically populated partial metric to a measured ready pair', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost');
+        if (url.pathname === '/api/observatory') {
+          return response(envelope(observatoryModel([eventMetric('partial', 24, 30)]), 'complete'));
+        }
+        if (url.pathname === '/api/plugins/analytics/diagnostics') {
+          return response(envelope(diagnosticsModel(), 'complete'));
+        }
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+
+    renderObservatory();
+
+    const pair = await screen.findByLabelText('Eligible versus observed');
+    expect(pair.getAttribute('data-coverage-ratio')).toBe('coverage_limited');
+    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
+    expect(pair.textContent).toContain('not rendered as a complete pair');
+    expect(pair.textContent).not.toContain('24 observed of 30 eligible');
+  });
+
+  it('renders a self-referential denominator as non-independent conflict, not unsupported', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost');
+        if (url.pathname === '/api/observatory') {
+          return response(envelope(observatoryModel([eventMetric('known', 24, 24)]), 'complete'));
+        }
+        if (url.pathname === '/api/plugins/analytics/diagnostics') {
+          return response(envelope(diagnosticsModel(), 'complete'));
+        }
+        return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+
+    renderObservatory();
+
+    const pair = await screen.findByLabelText('Eligible versus observed');
+    expect(pair.getAttribute('data-coverage-ratio')).toBe('self_referential');
+    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('conflicting');
+    expect(pair.textContent).toContain('non-independent denominator');
+    expect(pair.textContent).not.toContain('Unsupported');
+  });
 });
 
 function renderObservatory() {
@@ -69,12 +179,12 @@ function renderObservatory() {
   );
 }
 
-function observatoryModel() {
+function observatoryModel(metrics: unknown[] = []) {
   return {
     authorized_scope_ref: 'project.tracedecay',
     current: true,
     horizon: { since_micros: 0, until_micros: NOW_MICROS },
-    metrics: [],
+    metrics,
     observed_at_micros: NOW_MICROS,
     watermark: 'analytics:4821',
   };
@@ -126,7 +236,7 @@ function diagnosticsModel() {
   };
 }
 
-function envelope(payload: unknown) {
+function envelope(payload: unknown, completeness: 'complete' | 'partial' = 'partial') {
   return {
     schema_revision: 1,
     scope: { project_id: 'tracedecay', storage_mode: 'project', store_root: '/store' },
@@ -135,7 +245,7 @@ function envelope(payload: unknown) {
     source_watermark: { source: 'analytics', watermark: 'analytics:4821' },
     authorization: { outcome: 'authorized' },
     coverage: {
-      completeness: 'partial',
+      completeness,
       eligible: 10_000,
       examined: 4,
       matched: null,
@@ -147,9 +257,52 @@ function envelope(payload: unknown) {
       omission_reasons: ['diagnostics window capped at 10,000 rows'],
     },
     freshness: { state: 'fresh', observed_at_micros: NOW_MICROS, watermark: 'analytics:4821' },
-    domain_state: 'partial',
+    domain_state: completeness === 'complete' ? 'ready' : 'partial',
     legal_actions: [{ kind: 'refresh', operation: 'use-case.dashboard.observatory.refresh' }],
     payload,
+  };
+}
+
+function eventMetric(
+  state: 'capped' | 'known' | 'partial' | 'sampled' | 'stale' | 'unknown',
+  observed = 24,
+  eligible = 24,
+) {
+  return {
+    calibration: null,
+    cohort: {
+      descriptor_revision: 'eligible_observability_events.v1',
+      eligible_population: 'eligible_observability_events',
+    },
+    coverage: {
+      censored: 0,
+      completed: observed,
+      eligible,
+      excluded: 0,
+      observed,
+      state,
+      unknown: 0,
+    },
+    denominator: 'eligible_observability_events',
+    denominator_value: eligible,
+    descriptor_revision: 'analytics-observability.v1',
+    evidence_class: 'measurement',
+    metric: 'observability_events',
+    provenance: {
+      projector_revision: 'observatory-projector.v1',
+      source: 'observability_envelope',
+      source_revision: 'observability-envelope.v1',
+      watermark: 'analytics:4821',
+    },
+    temporal: {
+      baseline_watermark: null,
+      delta: null,
+      horizon: { since_micros: 0, until_micros: NOW_MICROS },
+    },
+    unavailable_reason: null,
+    uncertainty: { lower: observed, reason: null, upper: observed },
+    unit: 'events',
+    value: observed,
   };
 }
 

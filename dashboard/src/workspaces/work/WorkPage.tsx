@@ -1,4 +1,8 @@
-import type { WorkAttemptListV1, WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
+import type {
+  ExecutionTopologyViewV1,
+  WorkAttemptListV1,
+  WorkProjectionSnapshotV1,
+} from '../../contracts/index.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { type DashboardScope, useScope } from '../../data/scope/store.ts';
@@ -6,7 +10,7 @@ import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
-import { useWorkAttempts, useWorkGraphViews } from './workViewsQueries.ts';
+import { useWorkAttempts, useWorkGraphViews, useWorkTopology } from './workViewsQueries.ts';
 import { workAttemptReading, type WorkAttemptReading } from './workAttemptModel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
@@ -27,7 +31,7 @@ import type { WorkResult } from './workApi.ts';
 /**
  * Work — channel thirteen.
  *
- * This page reads. The daemon mounts the nine canonical Work routes and
+ * This page reads. The daemon mounts the twelve canonical Work routes and
  * contracts their payloads, so the projections below are the daemon's own
  * `WorkProjectionSnapshotV1` rather than an inferred stand-in. Every value
  * here came off a generated contract; nothing is inferred, and a route that
@@ -52,18 +56,18 @@ import type { WorkResult } from './workApi.ts';
 export function workScopeProvenance(scope: DashboardScope): string {
   switch (scope.kind) {
     case 'all':
-      return 'canonical task graph · the active project · nine mounted routes';
+      return 'canonical task graph · the active project · twelve mounted routes';
     case 'project': {
       const identity = `${scope.label} (${scope.projectId})`;
       switch (scope.activation) {
         case 'active':
-          return `canonical task graph · ${identity} · selected active project · nine mounted routes`;
+          return `canonical task graph · ${identity} · selected active project · twelve mounted routes`;
         case 'selected':
-          return `canonical task graph · ${identity} · selected project · nine mounted routes`;
+          return `canonical task graph · ${identity} · selected project · twelve mounted routes`;
         case 'unresolved':
-          return `canonical task graph · ${identity} · selected project, registry unresolved · nine mounted routes`;
+          return `canonical task graph · ${identity} · selected project, registry unresolved · twelve mounted routes`;
         case 'absent':
-          return `canonical task graph · ${identity} · selected project absent from registry · nine mounted routes`;
+          return `canonical task graph · ${identity} · selected project absent from registry · twelve mounted routes`;
         default: {
           const exhaustive: never = scope.activation;
           return exhaustive;
@@ -84,6 +88,7 @@ function WorkProjectionView({
   snapshot,
   attempts,
   attemptList,
+  topology,
   graph,
   selected,
   onSelect,
@@ -95,6 +100,7 @@ function WorkProjectionView({
    * derivations walk the attempts' execution envelopes, which the derived
    * reading deliberately does not restate. */
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
+  topology: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
@@ -134,6 +140,7 @@ function WorkProjectionView({
         <WorkTopologyView
           snapshot={snapshot}
           attemptList={attemptList}
+          topology={topology}
           graph={graph}
           selected={selected}
           onSelect={onSelect}
@@ -155,6 +162,7 @@ export function WorkPage() {
   // the attempt list is read when one of those projections is the camera and
   // not on every visit to the page.
   const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
+  const topology = useWorkTopology(projection === 'topology');
   const attemptReading = workAttemptReading(attempts.data);
   // The work-product graph feeds all four projections beside the board and
   // nothing on the board itself, so it is read when the camera is on one of
@@ -252,6 +260,7 @@ export function WorkPage() {
                 snapshot={value}
                 attempts={attemptReading}
                 attemptList={attempts.data}
+                topology={topology.data}
                 graph={graphReading}
                 selected={selected}
                 onSelect={setSelected}

@@ -159,20 +159,18 @@ export function familyState(reading: FamilyReading): DomainStateKind {
 }
 
 /**
- * Eligible versus observed, and the remainder between them.
+ * Eligible versus observed, without a dashboard-derived rate or remainder.
  *
  * Plan 26 §"Required product views": `adoption-coverage` shows "eligible versus
  * observed … and denominator failures". Today no landed read route projects an
  * eligible denominator for any adoption family, so every call resolves to
- * `denominator_missing` — but the arithmetic is written out rather than
- * hard-coded to that answer, because the rule that matters is what happens when
- * a denominator *does* arrive: a remainder is withheld when either total is
- * missing, an eligible population below the rate floor produces no rate at all,
- * and an observed count larger than its denominator is reported as a
- * contradiction rather than clamped to a remainder of zero.
+ * `denominator_missing` — but the state machine is written out rather than
+ * hard-coded to that answer. When a denominator arrives, the two canonical
+ * counts remain distinct; a rate or remainder would be a new dashboard metric
+ * the read model never published.
  */
 export type EligibleVersusObserved =
-  | { kind: 'measured'; observed: number; eligible: number; ratio: number; remainder: number }
+  | { kind: 'measured'; observed: number; eligible: number }
   | { kind: 'denominator_missing'; observed: number | null; reason: string }
   | { kind: 'observed_missing'; eligible: number; reason: string }
   | { kind: 'under_rate_floor'; observed: number; eligible: number; reason: string }
@@ -223,8 +221,6 @@ export function eligibleVersusObserved(
     kind: 'measured',
     observed,
     eligible,
-    ratio: observed / eligible,
-    remainder: eligible - observed,
   };
 }
 

@@ -1,4 +1,4 @@
-import type { WorkAttemptListV1 } from '../../../contracts/index.ts';
+import type { ExecutionTopologyViewV1, WorkAttemptListV1 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -45,12 +45,14 @@ import { ChannelAbsence, ViewCaption } from './WorkViewChannel.tsx';
 
 export function WorkTopologyAccounting({
   attemptList,
+  topology,
   graph,
 }: {
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
+  topology?: WorkResult<ExecutionTopologyViewV1> | undefined;
   graph: WorkGraphReading;
 }) {
-  const reading = workTopologyAccounting(attemptList, graph);
+  const reading = workTopologyAccounting(attemptList, graph, topology);
   return (
     <Panel legend="Execution-topology accounting" elevation="well">
       <div className="flex min-w-0 flex-col gap-3">

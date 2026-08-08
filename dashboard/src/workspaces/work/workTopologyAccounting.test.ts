@@ -52,6 +52,23 @@ function graphOf(spec: WorkGraphVersionSpec = BASE_GRAPH): WorkGraphReading {
   });
 }
 
+function graphWithRuntimeGeneration(generationId: string): WorkGraphReading {
+  const graph = graphOf();
+  if (graph.state !== 'read' || graph.page.entry === null) {
+    throw new Error('fixture graph did not carry a version');
+  }
+  return {
+    state: 'read',
+    page: {
+      ...graph.page,
+      entry: {
+        ...graph.page.entry,
+        runtime: { ...graph.page.entry.runtime, generation_id: generationId },
+      },
+    },
+  };
+}
+
 function cardOf(
   reading: { cards: readonly WorkAccountingCard[] },
   dimension: WorkAccountingDimension,
@@ -176,7 +193,7 @@ describe('the shape of the ledger', () => {
       }
     }
 
-    expect(reading.measured).toBe(2);
+    expect(reading.measured).toBe(1);
   });
 });
 
@@ -281,6 +298,65 @@ describe('the concurrency ladder', () => {
       expect(card.provenance[facet].available, facet).toBe(false);
     }
   });
+
+  it('refuses graph-derived measurements when its runtime generation is not bound to the attempt page', () => {
+    const card = cardOf(
+      workTopologyAccounting(
+        listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
+        graphWithRuntimeGeneration('generation-other'),
+      ),
+      'concurrency_and_fanout',
+    );
+
+    expect(absence(card.reading).state).toBe('conflicting');
+    expect(absence(card.reading).detail).toContain('generation-other');
+    expect(absence(card.reading).detail).toContain('generation-7');
+    expect(absence(card.provenance.support).state).toBe('conflicting');
+  });
+
+  it('keeps an unavailable runtime projection unread rather than reporting zero censoring', () => {
+    const card = cardOf(
+      workTopologyAccounting(
+        listed([]),
+        graphOf({
+          ...BASE_GRAPH,
+          actualConcurrency: null,
+          requestedConcurrency: null,
+          runtimeCoverage: { coverage: 'unavailable' },
+        }),
+      ),
+      'concurrency_and_fanout',
+    );
+
+    const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
+    expect(absence(card.reading).state).toBe('unavailable');
+    expect(absence(rows.get('requested')!).state).toBe('unavailable');
+    expect(absence(rows.get('active')!).state).toBe('unavailable');
+    expect(absence(card.provenance.support).state).toBe('unavailable');
+    expect(absence(card.provenance.censoring).state).toBe('unavailable');
+    expect(absence(card.provenance.intervalCoverage).state).toBe('unavailable');
+    expect(absence(card.provenance.anchors).state).toBe('unavailable');
+  });
+
+  it('lets partial runtime coverage own the concurrency headline before a graph fallback', () => {
+    const card = cardOf(
+      workTopologyAccounting(
+        listed([]),
+        graphOf({
+          ...BASE_GRAPH,
+          runtimeCoverage: {
+            coverage: 'partial',
+            unavailable_attempts: [{ attempt_id: 'missing-1', run_id: 'run-9', task_id: 'beta' }],
+          },
+        }),
+      ),
+      'concurrency_and_fanout',
+    );
+
+    expect(absence(card.reading).state).toBe('partial');
+    expect(absence(card.reading).detail).toContain('omitted some attempts');
+    expect(absence(card.reading).state).not.toBe('complete_zero_findings');
+  });
 });
 
 describe('the rerun census', () => {
@@ -324,8 +400,8 @@ describe('the rerun census', () => {
     // A measured zero: this page holds no attempt restarted for this cause.
     expect(figure(rows.get('reason_process_lost')!).value).toBe(0);
 
-    if (!card.reading.available) throw new Error('expected a reading');
-    expect(card.reading.value).toContain('3 runtime reruns');
+    expect(absence(card.reading).state).toBe('unsupported_schema');
+    expect(absence(card.reading).detail).toContain('completed runtime rerun total');
   });
 
   /** Three populations, never summed. Test and CI reruns are absent and the
@@ -339,8 +415,8 @@ describe('the rerun census', () => {
       expect(stated.state, key).toBe('unsupported_schema');
       expect(stated.detail, key).toContain('never summed');
     }
-    if (!card.reading.available) throw new Error('expected a reading');
-    expect(card.reading.value).toContain('never folded in');
+    expect(absence(card.reading).state).toBe('unsupported_schema');
+    expect(absence(card.reading).detail).toContain('Recovery-required is a rerun owed');
   });
 
   /** Right-censoring: an attempt still running may owe a rerun nobody can see
@@ -395,7 +471,7 @@ describe('the rerun census', () => {
     }
   });
 
-  it('reports the capped page’s eligible denominator as the authorized set', () => {
+  it('keeps a capped page’s eligible denominator partial instead of deriving a full set', () => {
     const capped: WorkResult<WorkAttemptListV1> = {
       outcome: 'value',
       value: WorkAttemptListV1Schema.parse(
@@ -410,9 +486,10 @@ describe('the rerun census', () => {
         }),
       ),
     };
-    const card = cardOf(workTopologyAccounting(capped, graphOf()), 'reruns');
-    expect(figure(card.provenance.support).value).toBe(1);
-    expect(figure(card.provenance.eligible).value).toBe(42);
+    const card = cardOf(workTopologyAccounting(capped, graphOf()), 'duplicate_effects');
+    expect(absence(card.provenance.support).state).toBe('unsupported_schema');
+    expect(absence(card.provenance.eligible).state).toBe('partial');
+    expect(absence(card.provenance.eligible).detail).toContain('not a full eligible denominator');
     const coverage = card.provenance.intervalCoverage;
     if (!coverage.available) throw new Error('expected coverage');
     expect(coverage.value).toContain('floor');
@@ -457,14 +534,10 @@ describe('duplicate effects', () => {
       note: expect.stringContaining('compound non-repeatable'),
     });
 
-    // Support is zero OBSERVATIONS, said as such, and never as a duplicate
-    // count of zero.
-    const support = figure(card.provenance.support);
-    expect(support).toEqual({
-      value: 0,
-      unit: 'cases',
-      note: expect.stringContaining('not a duplicate-effect count of zero'),
-    });
+    // No adjudication read exists. Its support is unknown, not a case count of
+    // zero; zero would be an observed answer the contract never supplied.
+    expect(absence(card.provenance.support).state).toBe('unsupported_schema');
+    expect(absence(card.provenance.support).detail).toContain('adjudication support');
 
     const rows = new Map(card.rows.map((row) => [row.key, row.channel]));
     expect(figure(rows.get('effect_compound_non_repeatable')!).value).toBe(2);
