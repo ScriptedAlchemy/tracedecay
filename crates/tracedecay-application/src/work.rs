@@ -11,8 +11,9 @@ use tracedecay_domain::{
     WorkProjectionStateV1, WorkVersion, canonical_sha256,
 };
 use tracedecay_policy::work_loop::{
-    WorkEvidenceFrontierV1, WorkProposalCancellationV1, WorkProposalDecisionV1,
-    WorkProposalEvaluator, WorkProposalEvaluatorV1, WorkProposalPolicyInputV1,
+    WorkBudgetEnvelopeV1, WorkContentLocationLimitV1, WorkEvidenceFrontierV1, WorkPriorOutcomeV1,
+    WorkProposalCancellationV1, WorkProposalDecisionV1, WorkProposalEvaluator,
+    WorkProposalEvaluatorV1, WorkProposalPolicyInputV1, WorkRouteCandidateV1, WorkRouteOverrideV1,
 };
 
 use crate::{
@@ -62,6 +63,55 @@ impl WorkAppendOutcome {
     }
 }
 
+/// Authorized routing state the Work authority holds for one scoped task.
+///
+/// Every field is application-held, scope-bound state read back through the
+/// Work authority. Routes are the ones the authority has already declared
+/// eligible; policy never discovers a provider and never synthesizes a route
+/// of its own. Prior outcomes are the authority's own recorded terminals, so a
+/// worker cannot report its own track record into its own calibration cohort.
+///
+/// An authority that holds no routing state answers with the empty snapshot.
+/// That is an honest, typed answer, not a missing one: the proposal planner
+/// then records `NoEligibleRoutes` rather than inventing a default route, a
+/// budget ceiling, or a calibration cohort.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkRoutingSnapshotV1 {
+    #[serde(default)]
+    pub eligible_routes: Vec<WorkRouteCandidateV1>,
+    #[serde(default)]
+    pub budget: Option<WorkBudgetEnvelopeV1>,
+    #[serde(default)]
+    pub content_location: Option<WorkContentLocationLimitV1>,
+    #[serde(default)]
+    pub prior_outcomes: Vec<WorkPriorOutcomeV1>,
+    #[serde(default)]
+    pub human_override: Option<WorkRouteOverrideV1>,
+}
+
+impl WorkRoutingSnapshotV1 {
+    /// Canonical order, so the evaluated input digest is a property of the
+    /// authorized state and not of the order an adapter happened to return.
+    ///
+    /// Routes order by `route_id`; a repeated route identity collapses to the
+    /// first one the authority returned, because two rows claiming one route
+    /// identity are one route. Prior outcomes order by `(route_id,
+    /// observed_at)`. Nothing is added, reweighted, or filtered here: exclusion
+    /// and ranking are the evaluator's, and this only fixes the order.
+    fn canonicalize(mut self) -> Self {
+        self.eligible_routes
+            .sort_by(|left, right| left.route_id.cmp(&right.route_id));
+        self.eligible_routes
+            .dedup_by(|left, right| left.route_id == right.route_id);
+        self.prior_outcomes.sort_by(|left, right| {
+            (left.route_id.as_str(), left.observed_at)
+                .cmp(&(right.route_id.as_str(), right.observed_at))
+        });
+        self
+    }
+}
+
 /// Exact-authority storage boundary. Implementations must compare both the
 /// expected version and `(command_id, input_digest)` atomically.
 ///
@@ -83,6 +133,26 @@ pub trait WorkStoragePort: Send + Sync {
     ) -> Result<WorkProjection, WorkStorageError>;
 
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError>;
+
+    /// Authorized routing state for one scoped task: the declared eligible
+    /// routes, the budget envelope, the content-location limit, the recorded
+    /// prior outcomes, and any recorded human route override.
+    ///
+    /// This is a read of state the authority already holds, on the same scope
+    /// check as every other method here; it is not a provider-discovery path
+    /// and it must never enumerate providers the authority has not declared.
+    ///
+    /// The default answer is the empty snapshot. An adapter that holds no
+    /// routing state reports exactly that and the planner answers
+    /// `NoEligibleRoutes`; supplying a fabricated route or budget instead would
+    /// put evidence into a decision record that no authority ever declared.
+    fn routing_snapshot(
+        &self,
+        _authority: &WorkAuthority,
+        _task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkStorageError> {
+        Ok(WorkRoutingSnapshotV1::default())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -294,6 +364,13 @@ where
     /// version by evaluating an immutable snapshot through the work-loop
     /// policy evaluator. Nothing is appended; acceptance, rejection,
     /// supersession, replanning, and admission remain separate commands.
+    ///
+    /// The snapshot carries the authority's routing state as well as its Work
+    /// facts, so the evaluator can shape, size, decompose, and rank routes
+    /// without reading storage, reading a clock, or discovering a provider. An
+    /// authority holding no routing state contributes an empty route set, and
+    /// the returned decision records `NoEligibleRoutes`; that is a decision,
+    /// not a failure, and generation still succeeds.
     pub fn generate_proposal(
         &self,
         context: &RequestContext,
@@ -318,6 +395,15 @@ where
                 .filter(|evidence| evidence.is_terminal())
                 .count(),
         )?;
+        // Routing evidence is read under the same authority as the Work
+        // history and canonicalized here, so the evaluator receives one
+        // authorized, order-stable snapshot and never sources a route,
+        // a budget, or a prior outcome for itself.
+        let routing = self
+            .storage
+            .routing_snapshot(&authority, &request.task_id)
+            .map_err(storage_problem)?
+            .canonicalize();
         let input = WorkProposalPolicyInputV1 {
             task_id: request.task_id.clone(),
             based_on_version: projection.version().get(),
@@ -344,6 +430,11 @@ where
                 }
             },
             evaluated_at: request.occurred_at,
+            eligible_routes: routing.eligible_routes,
+            budget: routing.budget,
+            content_location: routing.content_location,
+            prior_outcomes: routing.prior_outcomes,
+            human_override: routing.human_override,
         };
         let decision = WorkProposalEvaluatorV1::default().evaluate(&input);
         let proposal_digest = work_input_digest(&(
