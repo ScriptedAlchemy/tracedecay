@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_api::HandoffOperation;
 use tracedecay_application::{
-    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
-    OpenTaskHandoffResultV1,
+    IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, OpenInvestigationHandoffRequestV1,
+    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -69,6 +69,39 @@ async fn invoke_operation(
         body,
     } = request;
     match operation {
+        HandoffOperation::IssueTaskHandoff => {
+            let Ok(decoded) = serde_json::from_value::<IssueTaskHandoffRequestV1>(body) else {
+                return tracedecay_api::handoff_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::handoff_application(
+                request_id.as_str(),
+                HandoffApplicationInvocationV1::IssueTaskHandoff(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_registered_http::<IssueTaskHandoffResultV1, _>(
+                executor.as_ref(),
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon_contract::DaemonInvocationOutcome::HandoffApplication {
+                        scope,
+                        outcome:
+                            HandoffApplicationOutcomeV1::IssueTaskHandoff(
+                                tracedecay_application::ApplicationOutcome::Effect(outcome),
+                            ),
+                    } => Some((
+                        scope,
+                        tracedecay_application::ApplicationOutcome::Effect(outcome),
+                    )),
+                    _ => None,
+                },
+            )
+            .await
+        }
         HandoffOperation::OpenInvestigationHandoff => {
             let Ok(decoded) = serde_json::from_value::<OpenInvestigationHandoffRequestV1>(body)
             else {

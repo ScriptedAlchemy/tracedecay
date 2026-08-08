@@ -12,8 +12,9 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblem, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
-    OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, RequestId, RetryDirective,
+    ApplicationProblem, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
+    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
+    OpenTaskHandoffResultV1, RequestId, RetryDirective,
 };
 
 use crate::http::{
@@ -27,15 +28,21 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HandoffOperation {
+    IssueTaskHandoff,
     OpenInvestigationHandoff,
     OpenTaskHandoff,
 }
 
 impl HandoffOperation {
-    pub const ALL: [Self; 2] = [Self::OpenInvestigationHandoff, Self::OpenTaskHandoff];
+    pub const ALL: [Self; 3] = [
+        Self::IssueTaskHandoff,
+        Self::OpenInvestigationHandoff,
+        Self::OpenTaskHandoff,
+    ];
 
     pub const fn operation_id_str(self) -> &'static str {
         match self {
+            Self::IssueTaskHandoff => "operation.handoff.issue_task_handoff",
             Self::OpenInvestigationHandoff => "operation.handoff.open_investigation_handoff",
             Self::OpenTaskHandoff => "operation.handoff.open_task_handoff",
         }
@@ -43,6 +50,7 @@ impl HandoffOperation {
 
     pub const fn route_segment(self) -> &'static str {
         match self {
+            Self::IssueTaskHandoff => "issue-task",
             Self::OpenInvestigationHandoff => "open-investigation",
             Self::OpenTaskHandoff => "open-task",
         }
@@ -50,6 +58,7 @@ impl HandoffOperation {
 
     pub const fn route_path(self) -> &'static str {
         match self {
+            Self::IssueTaskHandoff => "/handoff/issue-task",
             Self::OpenInvestigationHandoff => "/handoff/open-investigation",
             Self::OpenTaskHandoff => "/handoff/open-task",
         }
@@ -57,6 +66,7 @@ impl HandoffOperation {
 
     pub const fn application_route_path(self) -> &'static str {
         match self {
+            Self::IssueTaskHandoff => "/application/handoff/issue-task",
             Self::OpenInvestigationHandoff => "/application/handoff/open-investigation",
             Self::OpenTaskHandoff => "/application/handoff/open-task",
         }
@@ -64,6 +74,7 @@ impl HandoffOperation {
 
     pub fn request_schema_name(self) -> Cow<'static, str> {
         match self {
+            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffRequestV1>(),
             Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffRequestV1>(),
             Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffRequestV1>(),
         }
@@ -71,6 +82,7 @@ impl HandoffOperation {
 
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
+            Self::IssueTaskHandoff => schema_name::<IssueTaskHandoffResultV1>(),
             Self::OpenInvestigationHandoff => schema_name::<OpenInvestigationHandoffResultV1>(),
             Self::OpenTaskHandoff => schema_name::<OpenTaskHandoffResultV1>(),
         }

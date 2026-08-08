@@ -8,7 +8,7 @@
 //! durability here.
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrant, TaskHandoffScope,
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowDefinitionAuthorityPort,

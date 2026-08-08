@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tracedecay_application::{
     HandoffOpenAuthorityError, HandoffOpenAuthorityPort, HandoffOpenConsumeOutcomeV1,
-    HandoffOpenConsumptionV1, HandoffOpenContextV1, HandoffOpenGrantV1, RequestId,
+    HandoffOpenConsumptionV1, HandoffOpenExpectationV1, HandoffOpenGrantV1, RequestId,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
@@ -19,6 +19,7 @@ use crate::exact_sql::{
 const HANDOFF_OPEN_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS handoff_open_grants_v1 (
     token_digest TEXT NOT NULL PRIMARY KEY,
+    issued_request_id TEXT NOT NULL UNIQUE,
     grant_payload TEXT NOT NULL,
     issued_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
@@ -120,42 +121,56 @@ fn decode<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, HandoffOpe
 }
 
 impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
-    fn issue(&self, grant: &HandoffOpenGrantV1) -> Result<(), HandoffOpenAuthorityError> {
+    fn issue(
+        &self,
+        grant: &HandoffOpenGrantV1,
+    ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError> {
         let payload = encode(grant)?;
         let transaction = self.handle.begin_immediate().map_err(unavailable)?;
         let existing = query_tx(
             &transaction,
-            "SELECT 1 FROM handoff_open_grants_v1 WHERE token_digest = ?1",
-            vec![ExactSqlValue::Text(
-                grant.token_digest().as_str().to_owned(),
-            )],
+            "SELECT grant_payload FROM handoff_open_grants_v1
+             WHERE token_digest = ?1 OR issued_request_id = ?2",
+            vec![
+                ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
+                ExactSqlValue::Text(grant.issued_request_id().as_str().to_owned()),
+            ],
         )
         .map_err(unavailable)?;
-        if !existing.rows.is_empty() {
+        if let Some(row) = existing.rows.first() {
+            let persisted_payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+            let persisted: HandoffOpenGrantV1 = decode(persisted_payload)?;
             let _ = transaction.rollback();
+            if persisted.same_issue_identity(grant) {
+                return Ok(persisted);
+            }
             return Err(HandoffOpenAuthorityError::Conflict);
         }
         execute_tx(
             &transaction,
             "INSERT INTO handoff_open_grants_v1 (
-                 token_digest, grant_payload, issued_at, expires_at,
+                 token_digest, issued_request_id, grant_payload, issued_at, expires_at,
                  consumed_request_id, consumed_input_digest, consumption_payload
-             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
             vec![
                 ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
+                ExactSqlValue::Text(grant.issued_request_id().as_str().to_owned()),
                 ExactSqlValue::Text(payload),
                 ExactSqlValue::Integer(grant.issued_at().0),
                 ExactSqlValue::Integer(grant.expires_at().0),
             ],
         )
         .map_err(unavailable)?;
-        transaction.commit().map(|_| ()).map_err(unavailable)
+        transaction
+            .commit()
+            .map(|_| grant.clone())
+            .map_err(unavailable)
     }
 
     fn resolve(
         &self,
         token_digest: &ManifestDigest,
-        expected: &HandoffOpenContextV1,
+        expected: &HandoffOpenExpectationV1,
         observed_at: UtcMicros,
     ) -> Result<Option<HandoffOpenGrantV1>, HandoffOpenAuthorityError> {
         let rows = query_handle(
@@ -169,7 +184,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         };
         let payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
         let grant: HandoffOpenGrantV1 = decode(payload)?;
-        if grant.context() != expected || observed_at >= *grant.expires_at() {
+        if !expected.matches(grant.context()) || observed_at >= *grant.expires_at() {
             return Ok(None);
         }
         Ok(Some(grant))
@@ -178,7 +193,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected: &HandoffOpenContextV1,
+        expected: &HandoffOpenExpectationV1,
         request_id: &RequestId,
         input_digest: &ManifestDigest,
         consumed_at: UtcMicros,
@@ -199,7 +214,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         };
         let grant_payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
         let grant: HandoffOpenGrantV1 = decode(grant_payload)?;
-        if grant.context() != expected || consumed_at >= *grant.expires_at() {
+        if !expected.matches(grant.context()) || consumed_at >= *grant.expires_at() {
             let _ = transaction.rollback();
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
         }

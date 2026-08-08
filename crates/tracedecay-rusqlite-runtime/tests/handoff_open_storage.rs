@@ -7,9 +7,9 @@ use std::pin::Pin;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
-    HandoffOpenBindingV1, HandoffOpenError, HandoffOpenService, HandoffOpenTargetError,
-    HandoffOpenTargetPort, HandoffOpenToken, HandoffSessionId, OpenTaskHandoffRequestV1,
-    RequestContext, RequestId, ResolvedScope,
+    HandoffOpenBindingV1, HandoffOpenError, HandoffOpenExpectationV1, HandoffOpenKindV1,
+    HandoffOpenService, HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenToken,
+    HandoffSessionId, OpenTaskHandoffRequestV1, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
@@ -65,11 +65,11 @@ fn context(request_id: &str) -> RequestContext {
         UtcMicros(120_000_000),
         scope.clone(),
         BTreeSet::from([
-            CapabilityId::new("capability.handoff.issue").unwrap(),
+            CapabilityId::new("capability.handoff.issue_task_handoff").unwrap(),
             CapabilityId::new("capability.handoff.open_task_handoff").unwrap(),
         ]),
         BTreeSet::from([
-            UseCaseId::new("use-case.handoff.issue").unwrap(),
+            UseCaseId::new("use-case.handoff.issue_task_handoff").unwrap(),
             UseCaseId::new("use-case.handoff.open_task_handoff").unwrap(),
         ]),
         DisclosureClass::Metadata,
@@ -96,6 +96,7 @@ fn binding(context: &RequestContext) -> HandoffOpenBindingV1 {
         id::<HandoffSessionId>("lsp-session.handoff.runtime-store"),
         id::<TaskId>("task.handoff.runtime-store"),
         WorkVersion::new(8).unwrap(),
+        context.actor().clone(),
         authority_snapshot(),
     )
     .unwrap()
@@ -115,7 +116,7 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
     let issue_context = context("request.handoff.issue");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
-    run(service.issue(
+    let issued = run(service.issue(
         &issue_context,
         binding(&issue_context),
         &token,
@@ -123,6 +124,15 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
         UtcMicros(61_000_000),
     ))
     .unwrap();
+    let issue_replay = run(service.issue(
+        &issue_context,
+        binding(&issue_context),
+        &token,
+        UtcMicros(1_100_000),
+        UtcMicros(61_100_000),
+    ))
+    .unwrap();
+    assert_eq!(issue_replay, issued);
 
     store.inspect(|connection| {
         let (token_digest, grant_payload): (String, String) = connection
@@ -225,7 +235,12 @@ fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
     assert_eq!(
         sqlite.consume(
             grant.token_digest(),
-            grant.context(),
+            &HandoffOpenExpectationV1::from_request(
+                &open_context,
+                HandoffOpenKindV1::Task,
+                id::<HandoffSessionId>("lsp-session.handoff.runtime-store"),
+            )
+            .unwrap(),
             open_context.request_id(),
             &digest('d'),
             UtcMicros(2_200_000),

@@ -21,6 +21,10 @@ fn descriptor_matches_the_typed_handoff_registry_routes() {
             .collect::<Vec<_>>(),
         vec![
             (
+                "operation.handoff.issue_task_handoff",
+                "/application/handoff/issue-task",
+            ),
+            (
                 "operation.handoff.open_investigation_handoff",
                 "/application/handoff/open-investigation",
             ),

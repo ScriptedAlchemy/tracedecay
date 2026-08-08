@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
-    HandoffOpenBindingV1, HandoffOpenConsumeOutcomeV1, HandoffOpenContextV1, HandoffOpenError,
+    HandoffOpenBindingV1, HandoffOpenConsumeOutcomeV1, HandoffOpenError, HandoffOpenExpectationV1,
     HandoffOpenGrantV1, HandoffOpenService, HandoffOpenTargetError, HandoffOpenTargetPort,
-    HandoffOpenToken, HandoffSessionId, OpenInvestigationHandoffRequestV1,
-    OpenTaskHandoffRequestV1, RequestContext, RequestId, ResolvedScope,
+    HandoffOpenToken, HandoffSessionId, IssueTaskHandoffRequestV1,
+    OpenInvestigationHandoffRequestV1, OpenTaskHandoffRequestV1, RequestContext, RequestId,
+    ResolvedScope,
 };
 use tracedecay_domain::feedback::FeedbackFindingId;
 use tracedecay_domain::{
@@ -32,36 +33,41 @@ struct MemoryAuthorityState {
 }
 
 impl HandoffOpenAuthorityPort for MemoryAuthority {
-    fn issue(&self, grant: &HandoffOpenGrantV1) -> Result<(), HandoffOpenAuthorityError> {
+    fn issue(
+        &self,
+        grant: &HandoffOpenGrantV1,
+    ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError> {
         let mut state = self.state.lock().unwrap();
-        if state
-            .grants
-            .insert(grant.token_digest().clone(), grant.clone())
-            .is_some()
-        {
+        if let Some(existing) = state.grants.get(grant.token_digest()) {
+            if existing.same_issue_identity(grant) {
+                return Ok(existing.clone());
+            }
             return Err(HandoffOpenAuthorityError::Conflict);
         }
-        Ok(())
+        state
+            .grants
+            .insert(grant.token_digest().clone(), grant.clone());
+        Ok(grant.clone())
     }
 
     fn resolve(
         &self,
         token_digest: &ManifestDigest,
-        expected: &HandoffOpenContextV1,
+        expected: &HandoffOpenExpectationV1,
         observed_at: UtcMicros,
     ) -> Result<Option<HandoffOpenGrantV1>, HandoffOpenAuthorityError> {
         let state = self.state.lock().unwrap();
         Ok(state
             .grants
             .get(token_digest)
-            .filter(|grant| grant.context() == expected && observed_at < *grant.expires_at())
+            .filter(|grant| expected.matches(grant.context()) && observed_at < *grant.expires_at())
             .cloned())
     }
 
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected: &HandoffOpenContextV1,
+        expected: &HandoffOpenExpectationV1,
         request_id: &RequestId,
         input_digest: &ManifestDigest,
         consumed_at: UtcMicros,
@@ -81,7 +87,7 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
         let Some(grant) = state
             .grants
             .get(token_digest)
-            .filter(|grant| grant.context() == expected && consumed_at < *grant.expires_at())
+            .filter(|grant| expected.matches(grant.context()) && consumed_at < *grant.expires_at())
             .cloned()
         else {
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
@@ -150,14 +156,18 @@ fn scope() -> ResolvedScope {
 }
 
 fn context(request_id: &str) -> RequestContext {
+    context_for_actor(request_id, "actor.handoff")
+}
+
+fn context_for_actor(request_id: &str, actor_id: &str) -> RequestContext {
     let scope = scope();
     let capability_ids = [
-        "capability.handoff.issue",
+        "capability.handoff.issue_task_handoff",
         "capability.handoff.open_investigation_handoff",
         "capability.handoff.open_task_handoff",
     ];
     let use_case_ids = [
-        "use-case.handoff.issue",
+        "use-case.handoff.issue_task_handoff",
         "use-case.handoff.open_investigation_handoff",
         "use-case.handoff.open_task_handoff",
     ];
@@ -181,7 +191,7 @@ fn context(request_id: &str) -> RequestContext {
     )
     .unwrap();
     RequestContext::new(
-        ActorId::new("actor.handoff").unwrap(),
+        ActorId::new(actor_id).unwrap(),
         scope,
         grant,
         RequestId::new(request_id).unwrap(),
@@ -212,6 +222,7 @@ fn task_binding(context: &RequestContext) -> HandoffOpenBindingV1 {
         HandoffSessionId::new("lsp-session.task").unwrap(),
         TaskId::new("task.handoff").unwrap(),
         WorkVersion::new(9).unwrap(),
+        context.actor().clone(),
         authority(),
     )
     .unwrap()
@@ -219,6 +230,37 @@ fn task_binding(context: &RequestContext) -> HandoffOpenBindingV1 {
 
 fn token(fill: char) -> HandoffOpenToken {
     HandoffOpenToken::new(fill.to_string().repeat(48)).unwrap()
+}
+
+#[tokio::test]
+async fn public_task_issue_derives_request_identity_and_fixed_expiry() {
+    let issue_context = context("request.issue-task");
+    let binding = task_binding(&issue_context);
+    let service = HandoffOpenService::new(
+        MemoryAuthority::default(),
+        CurrentTargets::all_current(std::slice::from_ref(&binding)),
+    );
+
+    let grant = service
+        .issue_task(
+            &issue_context,
+            IssueTaskHandoffRequestV1 {
+                token: "p".repeat(48),
+                session_id: HandoffSessionId::new("lsp-session.task").unwrap(),
+                task_id: TaskId::new("task.handoff").unwrap(),
+                version: WorkVersion::new(9).unwrap(),
+                recipient_actor_id: issue_context.actor().clone(),
+            },
+            authority(),
+            ISSUED_AT,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(grant.binding(), &binding);
+    assert_eq!(grant.issued_request_id(), issue_context.request_id());
+    assert_eq!(*grant.issued_at(), ISSUED_AT);
+    assert_eq!(*grant.expires_at(), EXPIRES_AT);
 }
 
 #[tokio::test]
@@ -296,6 +338,57 @@ async fn issue_then_open_returns_only_the_bound_surface_and_atomic_receipt() {
     assert!(encoded.get("token").is_none());
     assert!(encoded.get("task_body").is_none());
     assert!(encoded.get("edit").is_none());
+}
+
+#[tokio::test]
+async fn independently_authenticated_recipient_opens_without_reproducing_issuer_identity() {
+    let issue_context = context_for_actor("request.issue-a-to-b", "actor.handoff.a");
+    let recipient = ActorId::new("actor.handoff.b").unwrap();
+    let binding = HandoffOpenBindingV1::task(
+        &issue_context,
+        HandoffSessionId::new("lsp-session.a-to-b").unwrap(),
+        TaskId::new("task.handoff").unwrap(),
+        WorkVersion::new(9).unwrap(),
+        recipient.clone(),
+        authority(),
+    )
+    .unwrap();
+    let service = HandoffOpenService::new(
+        MemoryAuthority::default(),
+        CurrentTargets::all_current(std::slice::from_ref(&binding)),
+    );
+    service
+        .issue(&issue_context, binding, &token('b'), ISSUED_AT, EXPIRES_AT)
+        .await
+        .unwrap();
+
+    let wrong_recipient = service
+        .open_task(
+            &context_for_actor("request.open-as-c", "actor.handoff.c"),
+            OpenTaskHandoffRequestV1 {
+                token: "b".repeat(48),
+                session_id: HandoffSessionId::new("lsp-session.a-to-b").unwrap(),
+            },
+            authority(),
+            UtcMicros(2_000_000),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_recipient, HandoffOpenError::NotFoundOrNotAuthorized);
+
+    let opened = service
+        .open_task(
+            &context_for_actor("request.open-as-b", recipient.as_str()),
+            OpenTaskHandoffRequestV1 {
+                token: "b".repeat(48),
+                session_id: HandoffSessionId::new("lsp-session.a-to-b").unwrap(),
+            },
+            authority(),
+            UtcMicros(2_100_000),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.surface.task_id.as_str(), "task.handoff");
 }
 
 #[tokio::test]
