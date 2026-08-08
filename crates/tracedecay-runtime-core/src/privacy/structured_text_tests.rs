@@ -25,6 +25,8 @@ use super::structured_text::{
     sanitize_structured_text,
 };
 
+mod code_shape;
+
 /// Ordinary words: no credential prefix, no digits, shorter than the entropy
 /// floor, and containing no substring the credential patterns know.
 const PLACEHOLDER: &str = "unit-test-placeholder-value";

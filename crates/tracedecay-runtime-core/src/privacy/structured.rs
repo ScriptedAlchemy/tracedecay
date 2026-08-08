@@ -12,6 +12,10 @@ use url::Url;
 use super::detect::{SanitizationFindingV1, redact_sensitive_values};
 use tracedecay_capture::ParseLimits;
 
+mod code_shape;
+
+use code_shape::has_code_shape_context;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StructuredSanitizationLimits {
     raw_bytes: usize,
@@ -285,33 +289,6 @@ fn is_yaml_preamble_line(line: &str) -> bool {
 
 fn has_yaml_preamble(text: &str) -> bool {
     text.lines().map(str::trim).any(is_yaml_preamble_line)
-}
-
-fn has_code_shape_context(text: &str) -> bool {
-    text.lines()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .is_some_and(|line| {
-            (line.starts_with("fn ") || line.starts_with("function ")) && line.contains('(')
-                || (line.starts_with("let ") || line.starts_with("const ")) && line.contains('=')
-                || (line.starts_with("class ")
-                    || line.starts_with("impl ")
-                    || line.starts_with("struct ")
-                    || line.starts_with("enum "))
-                    && line.contains('{')
-                || (line.starts_with("if ")
-                    || line.starts_with("for ")
-                    || line.starts_with("while ")
-                    || line.starts_with("match "))
-                    && line.contains(['{', '('])
-                || line.ends_with(';')
-                    && line
-                        .split_once('=')
-                        .is_some_and(|(key, _)| key.ends_with(char::is_whitespace))
-                || line.starts_with("return ") && line.ends_with(';')
-                || (line.starts_with("import ") || line.starts_with("export "))
-                    && line.ends_with(';')
-        })
 }
 
 fn looks_like_yaml_mapping(line: &str) -> bool {
