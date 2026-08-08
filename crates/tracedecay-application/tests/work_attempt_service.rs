@@ -576,6 +576,56 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
     );
 }
 
+/// Excluding the server-derived binding generation and sequence from the
+/// replay comparison must not weaken conflict detection: the same attempt
+/// identity carrying different caller-supplied admission content is still
+/// refused as a conflict — including after the projection has moved past the
+/// admission snapshot, so the refusal below can only come from the divergent
+/// content and never from binding drift.
+#[test]
+fn start_refuses_a_divergent_admission_after_the_projection_moves() {
+    let (attempts, work, context) = fixture("project.attempt.divergent");
+    admit_work(&work, &context, "task.attempt.divergent");
+    let command = start_command("task.attempt.divergent", "attempt.1");
+    let leased = attempts.start(&context, command.clone()).unwrap();
+
+    // Exactly the append the attempt's own terminal settle performs.
+    work.attach_runtime_evidence(
+        &context,
+        AttachRuntimeEvidenceCommand {
+            task_id: id("task.attempt.divergent"),
+            evidence: RuntimeEvidenceRef::new(id("run.task.attempt.divergent"), digest('e'), true)
+                .unwrap(),
+            expected_version: WorkVersion::new(3).unwrap(),
+            command_id: id("command.attempt.divergent.evidence"),
+            occurred_at: UtcMicros(50),
+        },
+    )
+    .unwrap();
+
+    let mut divergent = command;
+    divergent.instructions = "Execute a different provider step.".to_owned();
+    let refused = attempts.start(&context, divergent).unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        ApplicationProblemKind::Conflict,
+        "a divergent admission under a used identity is a conflict, never a refresh"
+    );
+
+    // The refusal left the durable attempt untouched.
+    let status = attempts
+        .status(
+            &context,
+            &WorkAttemptStatusRequestV1 {
+                task_id: id("task.attempt.divergent"),
+                run_id: id("run.task.attempt.divergent"),
+                attempt_id: id("attempt.1"),
+            },
+        )
+        .unwrap();
+    assert_eq!(status, leased);
+}
+
 #[test]
 fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
     let (attempts, work, context) = fixture("project.attempt.cancel");
