@@ -127,9 +127,7 @@ pub(crate) type CodeIndexHookSink =
 pub(crate) type DashboardGraphInteractiveFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = Option<
-                    Arc<crate::code_index::graph_projection::CodeGraphProjectionStore>,
-                >,
+                Output = Option<Arc<crate::code_index::graph_projection::CodeGraphProjectionStore>>,
             > + Send
             + 'static,
     >,

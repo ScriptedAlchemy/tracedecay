@@ -160,9 +160,9 @@ impl DashboardGraphReadAdapter {
         let resolver = self.interactive_graph.as_ref().ok_or_else(|| {
             unavailable("interactive code graph reads require the daemon-owned scheduler bridge")
         })?;
-        let store = resolver(self.project_root.clone()).await.ok_or_else(|| {
-            unavailable("code graph projection has not completed activation")
-        })?;
+        let store = resolver(self.project_root.clone())
+            .await
+            .ok_or_else(|| unavailable("code graph projection has not completed activation"))?;
         let generation = store.generation().clone();
         store
             .interactive_reader_with_cancellation(&generation, Arc::new(UnsignalledRead))
@@ -435,7 +435,9 @@ impl DashboardGraphReadAdapter {
         })
         .await
         .map_err(|error| {
-            unavailable(format!("interactive adjacency read did not complete: {error}"))
+            unavailable(format!(
+                "interactive adjacency read did not complete: {error}"
+            ))
         })??;
 
         // Neighbor hydration: map projection occurrences back onto relational
@@ -512,8 +514,7 @@ impl DashboardGraphReadAdapter {
         };
         let callers = hydrate(&neighborhood.callers)?;
         let callees = hydrate(&neighborhood.callees)?;
-        let mut edges =
-            Vec::with_capacity(neighborhood.callers.len() + neighborhood.callees.len());
+        let mut edges = Vec::with_capacity(neighborhood.callers.len() + neighborhood.callees.len());
         for edge in &neighborhood.callers {
             let node = nodes_by_occurrence
                 .get(&edge.neighbor.occurrence)

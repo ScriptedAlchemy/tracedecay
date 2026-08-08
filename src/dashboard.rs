@@ -253,8 +253,7 @@ pub fn dashboard_graph_read_authority_for_test(
         .map(|adapter| {
             std::sync::Arc::new(adapter)
                 as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
-        },
-    )
+        })
 }
 
 /// Composes the daemon-owned git-correlation read authority over the
