@@ -59,7 +59,7 @@ impl CodeQueryScope {
 /// Generation-bound page returned by every callable code query. Coverage,
 /// omissions, scoring, and terminal state remain in the enclosing
 /// [`crate::result::RetrievalEvidence`].
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeQueryPage<T> {
     pub generation: CodeGenerationId,
@@ -698,5 +698,190 @@ impl CallableCodeOperations {
         CallableCodeOperationKind::ALL
             .into_iter()
             .map(|kind| (kind, self.get(kind)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use super::*;
+    use crate::retrieval::{SymbolPrimitiveRecord, SymbolRelationRecord};
+
+    fn assert_typed_json_roundtrip<T>(json: &str)
+    where
+        T: DeserializeOwned + Serialize + PartialEq + Debug,
+    {
+        let decoded: T = serde_json::from_str(json).expect("fixture deserializes into its DTO");
+        let rendered = serde_json::to_string(&decoded).expect("DTO serializes to JSON");
+        let reparsed: T =
+            serde_json::from_str(&rendered).expect("serialized DTO deserializes without a Value");
+
+        assert_eq!(reparsed, decoded);
+    }
+
+    #[test]
+    fn code_query_result_dtos_round_trip_through_typed_json() {
+        assert_typed_json_roundtrip::<SymbolPrimitiveRecord>(
+            r#"{
+                "node_id": "node.fixture",
+                "name": "work",
+                "qualified_name": "crate::worker::work",
+                "kind": "function",
+                "file": "src/worker.rs",
+                "start_line_zero_based": 4,
+                "end_line_zero_based": 8,
+                "line": 5,
+                "end_line": 9,
+                "signature": "fn work()",
+                "is_async": false,
+                "score": 875000
+            }"#,
+        );
+        assert_typed_json_roundtrip::<SymbolRelationRecord>(
+            r#"{
+                "symbol": {
+                    "node_id": "node.fixture",
+                    "name": "work",
+                    "qualified_name": "crate::worker::work",
+                    "kind": "function",
+                    "file": "src/worker.rs",
+                    "start_line_zero_based": 4,
+                    "end_line_zero_based": 8,
+                    "line": 5,
+                    "end_line": 9,
+                    "signature": null,
+                    "is_async": false,
+                    "score": null
+                },
+                "edge_kind": "calls",
+                "dispatch_via_trait": false,
+                "dispatch_from": null,
+                "depth": 1
+            }"#,
+        );
+        assert_typed_json_roundtrip::<ExactOccurrenceRecord>(
+            r#"{
+                "occurrence": {
+                    "file": "file.fixture",
+                    "symbol": "symbol.fixture",
+                    "chunk": "chunk.fixture",
+                    "path": "src/worker.rs",
+                    "span": { "start_byte": 12, "end_byte": 16 }
+                },
+                "matched_kind": "whole_symbol",
+                "matched_literal": "work"
+            }"#,
+        );
+        assert_typed_json_roundtrip::<CodeFacetRecord>(
+            r#"{ "dimension": "language", "value": "rust", "count": 3 }"#,
+        );
+        assert_typed_json_roundtrip::<LexicalOccurrenceRecord>(
+            r#"{
+                "occurrence": {
+                    "file": "file.fixture",
+                    "symbol": null,
+                    "chunk": "chunk.fixture",
+                    "path": "src/worker.rs",
+                    "span": { "start_byte": 12, "end_byte": 16 }
+                },
+                "score_micros": 875000,
+                "matched_phrases": ["worker"],
+                "matched_terms": ["work"]
+            }"#,
+        );
+        assert_typed_json_roundtrip::<CodeTimelineRecord>(
+            r#"{
+                "generation": "generation.fixture",
+                "indexed_at": 1720000000000000,
+                "file_count": 3,
+                "symbol_count": 7
+            }"#,
+        );
+        assert_typed_json_roundtrip::<CodeQueryPage<SymbolRelationRecord>>(
+            r#"{
+                "generation": "generation.fixture",
+                "items": [{
+                    "symbol": {
+                        "node_id": "node.fixture",
+                        "name": "work",
+                        "qualified_name": "crate::worker::work",
+                        "kind": "function",
+                        "file": "src/worker.rs",
+                        "start_line_zero_based": 4,
+                        "end_line_zero_based": 8,
+                        "line": 5,
+                        "end_line": 9,
+                        "signature": null,
+                        "is_async": false,
+                        "score": null
+                    },
+                    "edge_kind": "calls",
+                    "dispatch_via_trait": false,
+                    "dispatch_from": null,
+                    "depth": 1
+                }],
+                "total": 1,
+                "next_cursor": "cursor.fixture.page-2",
+                "query_fallback": null
+            }"#,
+        );
+    }
+
+    #[test]
+    fn code_query_result_dtos_reject_unknown_json_fields() {
+        assert!(
+            serde_json::from_str::<CodeQueryPage<SymbolRelationRecord>>(
+                r#"{
+                "generation": "generation.fixture",
+                "items": [],
+                "total": 0,
+                "next_cursor": null,
+                "query_fallback": null,
+                "unexpected": true
+            }"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ExactOccurrenceRecord>(
+                r#"{
+                "occurrence": {
+                    "file": "file.fixture",
+                    "symbol": null,
+                    "chunk": null,
+                    "path": "src/worker.rs",
+                    "span": { "start_byte": 12, "end_byte": 16 }
+                },
+                "matched_kind": "whole_symbol",
+                "matched_literal": "work",
+                "unexpected": true
+            }"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SymbolPrimitiveRecord>(
+                r#"{
+                "node_id": "node.fixture",
+                "name": "work",
+                "qualified_name": "crate::worker::work",
+                "kind": "function",
+                "file": "src/worker.rs",
+                "start_line_zero_based": 4,
+                "end_line_zero_based": 8,
+                "line": 5,
+                "end_line": 9,
+                "signature": null,
+                "is_async": false,
+                "score": null,
+                "unexpected": true
+            }"#,
+            )
+            .is_err()
+        );
     }
 }
