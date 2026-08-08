@@ -4,15 +4,20 @@
 
 mod work_registered_store;
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    num::NonZeroU16,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use tracedecay_application::{
     WorkAttemptAdmissionKind, WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1,
     WorkAttemptInsertOutcome, WorkAttemptProviderOutcomeV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort,
-    WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1, WorkSynthesisInsertOutcome,
-    WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
-    WorkflowSynthesisDraft,
+    WorkAttemptStoragePort, WorkRunControlStoragePort, WorkSynthesisAdmissionRecordV1,
+    WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1,
+    WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
+    WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
@@ -23,8 +28,9 @@ use tracedecay_domain::{
     WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
     WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy,
-    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorkflowOutputName, WorktreeId,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRunControlReasonV1,
+    WorkRunControlV1, WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef,
+    WorkflowOutputName, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -42,14 +48,172 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn authority(actor: &str) -> WorkAuthority {
+    authority_in_worktree(actor, "worktree.attempt.storage")
+}
+
+fn authority_in_worktree(actor: &str, worktree: &str) -> WorkAuthority {
     WorkAuthority::new(
         id::<ProjectId>("project.attempt.storage"),
         id::<RepositoryId>("repository.attempt.storage"),
-        id::<WorktreeId>("worktree.attempt.storage"),
+        id::<WorktreeId>(worktree),
         id::<ActorId>(actor),
         digest('a'),
     )
     .unwrap()
+}
+
+#[test]
+fn bounded_insert_counts_open_attempts_across_repository_worktrees() {
+    let store = RegisteredWorkStore::start("attempt-bounded-insert");
+    let root = authority_in_worktree("actor.attempt.bounded", "worktree.attempt.root");
+    let linked = authority_in_worktree("actor.attempt.bounded.peer", "worktree.attempt.linked");
+    let one = NonZeroU16::new(1).unwrap();
+    let two = NonZeroU16::new(2).unwrap();
+    let first = attempt_at(
+        "task.attempt.bounded.shared",
+        "run.attempt.bounded.1",
+        "attempt.bounded.1",
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&root, &first, two, one)
+            .unwrap(),
+        WorkAttemptInsertOutcome::Inserted
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&root, &first, two, one)
+            .unwrap(),
+        WorkAttemptInsertOutcome::Replayed(Box::new(first.clone()))
+    );
+
+    let same_task = attempt_at(
+        "task.attempt.bounded.shared",
+        "run.attempt.bounded.2",
+        "attempt.bounded.2",
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&linked, &same_task, two, one)
+            .unwrap_err(),
+        WorkAttemptStorageError::CapacityExceeded
+    );
+
+    let second = attempt_at(
+        "task.attempt.bounded.second",
+        "run.attempt.bounded.3",
+        "attempt.bounded.3",
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&linked, &second, two, one)
+            .unwrap(),
+        WorkAttemptInsertOutcome::Inserted
+    );
+    let repository_full = attempt_at(
+        "task.attempt.bounded.third",
+        "run.attempt.bounded.4",
+        "attempt.bounded.4",
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&linked, &repository_full, two, one)
+            .unwrap_err(),
+        WorkAttemptStorageError::CapacityExceeded
+    );
+    assert_eq!(store.count("work_attempts_v1"), 2);
+}
+
+#[test]
+fn concurrent_bounded_inserts_cannot_overbook_repository_capacity() {
+    let store = RegisteredWorkStore::start("attempt-concurrent-capacity");
+    let authority = authority("actor.attempt.concurrent-capacity");
+    let one = NonZeroU16::new(1).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for ordinal in 1..=2 {
+        let storage = store.storage().clone();
+        let authority = authority.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            let candidate = attempt_at(
+                &format!("task.attempt.concurrent.{ordinal}"),
+                &format!("run.attempt.concurrent.{ordinal}"),
+                &format!("attempt.concurrent.{ordinal}"),
+            );
+            barrier.wait();
+            storage.insert_bounded(&authority, &candidate, one, one)
+        }));
+    }
+
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Ok(WorkAttemptInsertOutcome::Inserted)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(WorkAttemptStorageError::CapacityExceeded)))
+            .count(),
+        1
+    );
+    assert_eq!(store.count("work_attempts_v1"), 1);
+}
+
+#[test]
+fn paused_run_fences_new_attempt_inside_the_insert_transaction() {
+    let store = RegisteredWorkStore::start("attempt-paused-reservation");
+    let authority = authority("actor.attempt.paused-reservation");
+    let first = attempt_at(
+        "task.attempt.paused-reservation",
+        "run.attempt.paused-reservation",
+        "attempt.paused-reservation.1",
+    );
+    store.storage().insert(&authority, &first).unwrap();
+    let paused = WorkRunControlV1::admitted(
+        first.identity().task_id().clone(),
+        first.identity().run_id().clone(),
+        first.execution().deadline(),
+        UtcMicros(10),
+    )
+    .unwrap()
+    .pause(
+        WorkRunControlReasonV1::OperatorRequest,
+        UtcMicros(20),
+        vec![first.identity().attempt_id().clone()],
+    )
+    .unwrap();
+    store
+        .storage()
+        .publish_run_control(&authority, None, &paused)
+        .unwrap();
+
+    let next = attempt_at(
+        "task.attempt.paused-reservation",
+        "run.attempt.paused-reservation",
+        "attempt.paused-reservation.2",
+    );
+    let limit = NonZeroU16::new(3).unwrap();
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&authority, &next, limit, limit)
+            .unwrap_err(),
+        WorkAttemptStorageError::ReservationFenced
+    );
+    assert_eq!(store.count("work_attempts_v1"), 1);
 }
 
 fn identity(attempt: &str) -> WorkAttemptIdentityV1 {
@@ -294,14 +458,24 @@ fn synthesis_admission_replays_one_durable_result_and_refuses_changed_requests()
     assert_eq!(
         store
             .storage()
-            .insert_synthesis(&authority, &record)
+            .insert_synthesis_bounded(
+                &authority,
+                &record,
+                NonZeroU16::new(1).unwrap(),
+                NonZeroU16::new(1).unwrap(),
+            )
             .unwrap(),
         WorkSynthesisInsertOutcome::Inserted
     );
     assert_eq!(
         store
             .storage()
-            .insert_synthesis(&authority, &record)
+            .insert_synthesis_bounded(
+                &authority,
+                &record,
+                NonZeroU16::new(1).unwrap(),
+                NonZeroU16::new(1).unwrap(),
+            )
             .unwrap(),
         WorkSynthesisInsertOutcome::Replayed(Box::new(admission.clone()))
     );
@@ -314,7 +488,12 @@ fn synthesis_admission_replays_one_durable_result_and_refuses_changed_requests()
     assert_eq!(
         store
             .storage()
-            .insert_synthesis(&authority, &changed)
+            .insert_synthesis_bounded(
+                &authority,
+                &changed,
+                NonZeroU16::new(1).unwrap(),
+                NonZeroU16::new(1).unwrap(),
+            )
             .unwrap_err(),
         WorkAttemptStorageError::AttemptConflict
     );
