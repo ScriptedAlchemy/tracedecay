@@ -18,12 +18,32 @@ use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 use tracedecay_usecases::edit::{
-    SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
+    SourceEditSurfaceResultV1, execute_source_edit, preview_source_edit_expected_state,
 };
 
 // ---------------------------------------------------------------------------
 // Shared setup
 // ---------------------------------------------------------------------------
+
+/// Hermetic open options for this suite's fixtures: pins the profile inside
+/// the fixture's own ephemeral `TempDir` so `TraceDecay::init_with_options`
+/// never falls back to resolving the durable `TRACEDECAY_DATA_DIR` profile
+/// that `.cargo/config.toml` points cargo-launched processes at. Pairing an
+/// ephemeral `TempDir` project root with that durable profile is exactly the
+/// combination `project_registry::ephemeral_root_rejection` refuses ("project
+/// root '/tmp/.tmpXXXX' is under the OS temporary directory and cannot be
+/// registered as a durable authority in profile '...'"). The shard lives
+/// under the fixture's own root so it is ephemeral too (satisfying the
+/// guard) and unique per fixture (no cross-test lease contention) — the same
+/// shape `tests/automation_runner_test/support.rs::fixture_open_options`
+/// already uses for the same trap.
+pub(crate) fn hermetic_open_options(project_root: &std::path::Path) -> TraceDecayOpenOptions {
+    let profile_root = project_root.join(".tracedecay-test-profile");
+    TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root),
+    }
+}
 
 /// Creates a temporary Rust project with cross-file calls, then initializes
 /// and indexes a `TraceDecay`.
@@ -51,7 +71,9 @@ pub fn helper() { foo(); }
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     (dir, cg)
 }
@@ -121,7 +143,7 @@ async fn run_authorized_source_edit(
     graph: &TraceDecay,
     edit: SourceEditRequest,
     idempotency_key: &str,
-) -> SourceEditApplicationResult {
+) -> SourceEditSurfaceResultV1 {
     let operation = source_edit_operation(edit.kind()).unwrap();
     let scope = ResolvedScope::new(
         ProjectId::new("project.core-cli-source-edit").unwrap(),
@@ -430,7 +452,9 @@ async fn test_check_file_staleness_new_file_not_in_db() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     // Now add a new file but DON'T sync. b.rs is on disk but not in the DB.
@@ -450,7 +474,9 @@ async fn test_check_file_staleness_deleted_indexed_file() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     // Delete the file. It's indexed but no longer on disk.
@@ -477,7 +503,9 @@ async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
     run_git(project, &["add", "."]);
     run_git(project, &["commit", "-m", "initial"]);
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     // The user-sessions graph is single-writer: the init handle must be
     // released before `open` acquires the project again, or the second open
@@ -498,7 +526,9 @@ async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
     // `branch add` no branch metadata exists, so the open reports the live
     // git branch but serves the single project store without a branch
     // provenance scope.
-    let untracked_cg = TraceDecay::open(project).await.unwrap();
+    let untracked_cg = TraceDecay::open_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     assert_eq!(untracked_cg.active_branch(), Some("feature/sync-safety"));
     assert_eq!(
         untracked_cg.serving_branch(),
@@ -508,16 +538,22 @@ async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
     assert!(!untracked_cg.is_fallback());
     drop(untracked_cg);
 
-    let outcome = TraceDecay::add_branch_tracking(project, "feature/sync-safety")
-        .await
-        .unwrap();
+    let outcome = TraceDecay::add_branch_tracking_with_options(
+        project,
+        "feature/sync-safety",
+        hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         outcome,
         BranchAddOutcome::Added,
         "explicit registration must track the branch"
     );
 
-    let feature_cg = TraceDecay::open(project).await.unwrap();
+    let feature_cg = TraceDecay::open_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
     assert_eq!(feature_cg.serving_branch(), Some("feature/sync-safety"));
     assert!(!feature_cg.is_fallback());
@@ -532,7 +568,10 @@ async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
     }
     drop(feature_cg);
 
-    let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
+    let main_cg =
+        TraceDecay::open_branch_with_options(project, "main", hermetic_open_options(project))
+            .await
+            .unwrap();
     let main_files = main_cg.get_all_files().await.unwrap();
     assert!(
         !main_files.iter().any(|file| file.path == "src/feature.rs"),
@@ -561,7 +600,9 @@ async fn check_file_staleness_normalizes_backslash_paths() {
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     // The DB row is stored under `src/a.rs`. A caller handing us the
@@ -581,7 +622,9 @@ async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path()
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     // Push the mtime past the indexed_at second boundary so the mtime check
@@ -746,7 +789,9 @@ async fn test_is_initialized() {
     );
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "fn main() {}\n").unwrap();
-    let _cg = TraceDecay::init(project).await.unwrap();
+    let _cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     assert!(
         TraceDecay::is_initialized(project),
         "should be initialized after init"
@@ -822,7 +867,9 @@ async fn sync_if_stale_removes_deleted_indexed_file() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
     fs::remove_file(project.join("src/remove_me.rs")).unwrap();
 
@@ -857,7 +904,9 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
     fs::write(project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
     fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     let result = run_authorized_source_edit(
@@ -872,7 +921,7 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
         "source-edit.core-cli.reindex",
     )
     .await;
-    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
         panic!("str_replace returned the wrong outcome");
     };
     assert!(edit.success, "edit should succeed: {edit:?}");
@@ -913,7 +962,9 @@ async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
     let original = "pub fn caller() {}\n";
     fs::write(project.join("src/caller.rs"), original).unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     let result = run_authorized_source_edit(
@@ -928,7 +979,7 @@ async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
         "source-edit.core-cli.dry-run",
     )
     .await;
-    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
         panic!("str_replace returned the wrong outcome");
     };
 
@@ -979,7 +1030,9 @@ async fn rename_preview_lists_declaration_and_call_sites() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     let nodes = cg.get_all_nodes().await.unwrap();
@@ -1119,7 +1172,9 @@ async fn replace_symbol_dry_run_previews_without_writing() {
     let original = "pub fn greet() -> u32 { 1 }\n";
     fs::write(project.join("src/lib.rs"), original).unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.sync().await.unwrap();
 
     let result = run_authorized_source_edit(
@@ -1133,7 +1188,7 @@ async fn replace_symbol_dry_run_previews_without_writing() {
         "source-edit.core-cli.replace-preview",
     )
     .await;
-    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
         panic!("replace_symbol returned the wrong outcome");
     };
 
@@ -1158,9 +1213,12 @@ async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
     let project = tmp.path().to_path_buf();
     std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
 
-    let cg = tracedecay::tracedecay::TraceDecay::init(&project)
-        .await
-        .unwrap();
+    let cg = tracedecay::tracedecay::TraceDecay::init_with_options(
+        &project,
+        hermetic_open_options(&project),
+    )
+    .await
+    .unwrap();
     cg.sync().await.unwrap();
 
     // Hold the sync lock to simulate a peer MCP syncing, then release it
@@ -1257,7 +1315,9 @@ async fn setup_first_in_file_doc() -> (TempDir, TraceDecay) {
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "/// doc\nfn foo() {}\n").unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
+        .await
+        .unwrap();
     cg.index_all().await.unwrap();
     (dir, cg)
 }
@@ -1305,7 +1365,8 @@ async fn replace_symbol_preserves_first_in_file_doc_comment() {
         "source-edit.core-cli.preserve-doc",
     )
     .await;
-    let tracedecay_usecases::edit::SourceEditOutcome::Edit(result) = application_result.outcome
+    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(result) =
+        application_result.outcome
     else {
         panic!("replace_symbol returned the wrong outcome");
     };
@@ -1337,7 +1398,8 @@ async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
         "source-edit.core-cli.insert-before-doc",
     )
     .await;
-    let tracedecay_usecases::edit::SourceEditOutcome::Insert(result) = application_result.outcome
+    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Insert(result) =
+        application_result.outcome
     else {
         panic!("insert_at_symbol returned the wrong outcome");
     };

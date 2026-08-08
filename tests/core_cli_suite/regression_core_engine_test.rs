@@ -58,7 +58,12 @@ async fn sync_keeps_caller_edge_after_editing_target_indexed_by_index_all() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     // Baseline: the caller edge exists right after the full index.
@@ -110,7 +115,12 @@ async fn sync_keeps_all_caller_edges_after_editing_shared_target() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     assert!(caller_present(&cg, "shared", "a").await);
@@ -157,7 +167,12 @@ async fn sync_keeps_caller_edge_when_caller_indexed_by_sync() {
         "pub fn target_fn() -> u32 { 1 }\n",
     )
     .unwrap();
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     // Add the caller file and index it via incremental sync.
@@ -205,7 +220,12 @@ async fn sync_only_workflow_keeps_caller_edge_after_editing_target() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     // No index_all: the first sync builds the entire index.
     cg.sync().await.unwrap();
     assert!(caller_present(&cg, "target_fn", "caller_fn").await);
@@ -245,7 +265,12 @@ async fn noop_sync_eagerly_heals_unstamped_index() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     // Simulate a pre-fix index: marker absent and ref set empty.
@@ -301,7 +326,12 @@ async fn add_branch_tracking_refuses_empty_sanitized_name() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     // ".." sanitizes to "" — must be refused, never mapped to branches/.db.
@@ -353,7 +383,12 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(project).await.unwrap();
+    let cg = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
 
     // Edit the target body repeatedly; capture the ref count after the first
@@ -388,7 +423,12 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
 async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    let initialized = TraceDecay::init(project).await.unwrap();
+    let initialized = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     let lock_path = initialized.store_layout().sync_lock_path.clone();
     drop(initialized);
     // A dead legacy owner does not require unlinking the canonical path.
@@ -429,12 +469,22 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
 async fn writable_open_does_not_claim_the_sync_lock_without_an_operation() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    let initialized = TraceDecay::init(project).await.unwrap();
+    let initialized = TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     let lock_path = initialized.store_layout().sync_lock_path.clone();
     drop(initialized);
     fs::write(&lock_path, "4294967294").unwrap();
 
-    let reopened = TraceDecay::open(project).await.unwrap();
+    let reopened = TraceDecay::open_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     assert_eq!(fs::read_to_string(&lock_path).unwrap(), "4294967294");
     drop(reopened);
 }
@@ -443,7 +493,12 @@ async fn writable_open_does_not_claim_the_sync_lock_without_an_operation() {
 async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    TraceDecay::init(project).await.unwrap();
+    TraceDecay::init_with_options(
+        project,
+        crate::tracedecay_test::hermetic_open_options(project),
+    )
+    .await
+    .unwrap();
     let guard =
         tracedecay::tracedecay::try_acquire_sync_lock(project).expect("hold live sync lease");
 

@@ -60,7 +60,10 @@ fn test_serve() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(root).await.unwrap();
+    let cg =
+        TraceDecay::init_with_options(root, crate::tracedecay_test::hermetic_open_options(root))
+            .await
+            .unwrap();
     cg.index_all().await.unwrap();
     (cg, dir)
 }
