@@ -290,6 +290,20 @@ pub fn work_executable_binding_registry()
     ExecutableBindingRegistryV1::new(bindings)
 }
 
+/// Resolve one executable Work operation from the canonical registry.
+///
+/// Transport adapters use this lookup for lifecycle metadata instead of
+/// reproducing the registry's effect, deadline, cancellation, or idempotency
+/// contract beside their own name normalization.
+pub fn work_executable_binding(
+    operation_id: &OperationId,
+) -> Result<Option<ExecutableBindingV1>, CatalogValidationError> {
+    Ok(work_executable_binding_registry()?
+        .get(operation_id)
+        .and_then(|availability| availability.binding())
+        .cloned())
+}
+
 pub fn work_executable_catalog_digest() -> Result<ManifestDigest, CatalogValidationError> {
     let registry = work_executable_binding_registry()?;
     canonical_sha256(&(
@@ -452,7 +466,7 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 mod tests {
     use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
 
-    use super::work_executable_binding_registry;
+    use super::{work_executable_binding, work_executable_binding_registry};
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {
@@ -461,7 +475,14 @@ mod tests {
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert!(!advertised.is_empty());
+        assert_eq!(advertised.len(), 26);
+        assert_eq!(
+            advertised
+                .iter()
+                .filter(|binding| binding.effect().is_read_only())
+                .count(),
+            11
+        );
         for binding in advertised {
             let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
                 panic!("available Work binding must have a public route");
@@ -495,6 +516,17 @@ mod tests {
             delta.result_schema().body()["title"],
             "WorkProjectionDeltaV1"
         );
+    }
+
+    #[test]
+    fn operation_lookup_is_backed_by_the_executable_registry() {
+        let operation =
+            tracedecay_tool_catalog::OperationId::new("operation.work.topology").unwrap();
+        let binding = work_executable_binding(&operation)
+            .unwrap()
+            .expect("topology is an executable Work operation");
+        assert!(binding.effect().is_read_only());
+        assert_eq!(binding.deadline().maximum_millis(), 30_000);
     }
 
     #[test]

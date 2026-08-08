@@ -167,9 +167,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
         )
     };
     match group {
-        McpToolDispatchGroup::ApplicationSurface | McpToolDispatchGroup::RetainedApplication => {
-            false
-        }
+        McpToolDispatchGroup::ApplicationSurface
+        | McpToolDispatchGroup::RetainedApplication
+        | McpToolDispatchGroup::Work => false,
         McpToolDispatchGroup::MultiRoot => {
             owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
         }

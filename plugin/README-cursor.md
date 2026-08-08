@@ -231,6 +231,17 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_type_hierarchy",
     "tracedecay:tracedecay_unsafe_patterns",
     "tracedecay:tracedecay_unused_imports",
+    "tracedecay:tracedecay_work_attempt_status",
+    "tracedecay:tracedecay_work_delta",
+    "tracedecay:tracedecay_work_generate_proposal",
+    "tracedecay:tracedecay_work_hydrate_artifacts",
+    "tracedecay:tracedecay_work_list_attempts",
+    "tracedecay:tracedecay_work_placement_preflight",
+    "tracedecay:tracedecay_work_placement_status",
+    "tracedecay:tracedecay_work_run_control",
+    "tracedecay:tracedecay_work_snapshot",
+    "tracedecay:tracedecay_work_topology",
+    "tracedecay:tracedecay_work_views",
     "tracedecay:tracedecay_workflows"
   ]
 }
@@ -240,8 +251,10 @@ Notes:
 
 - The list is exactly the tools that declare `readOnlyHint: true` - the edit
   primitives (`str_replace`, `replace_symbol`, ...), test runner, session
-  baseline, memory writes, and LCM lifecycle tools are deliberately excluded
-  so they keep going through review.
+  baseline, memory writes, LCM lifecycle tools, and mutating Work transitions
+  are deliberately excluded so they keep going through review. The listed Work
+  reads include execution `topology`; use them to inspect Work before choosing
+  a mutation.
 - Two borderline entries: `tracedecay_diagnostics` runs your toolchain
   (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
   Both are non-destructive, but remove those lines if you want a prompt first.

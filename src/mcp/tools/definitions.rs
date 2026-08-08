@@ -31,6 +31,7 @@ mod native_integration;
 mod session;
 mod skills;
 mod testing;
+mod work;
 
 use admin::*;
 use analysis::*;
@@ -630,6 +631,7 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
+    definitions.extend(work::work_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);

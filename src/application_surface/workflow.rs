@@ -332,7 +332,12 @@ where
         controls.cancellation.context(),
     );
     invoke_registered_http::<T, _>(
-        executor, operation, request_id, controls, invocation, select,
+        executor.as_ref(),
+        operation,
+        request_id,
+        controls,
+        invocation,
+        select,
     )
     .await
 }

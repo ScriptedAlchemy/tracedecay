@@ -54,6 +54,7 @@ mod session_authorities;
 pub mod skills;
 mod support;
 mod tool_call_support;
+mod work;
 pub mod workflow;
 mod workflow_index;
 pub mod workflow_query;
@@ -172,6 +173,7 @@ use multi_root::handle_multi_root;
 use retained_catalog::dispatch_profile_retained_application_tool;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
+use work::handle_work;
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -490,6 +492,20 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             ))
             .await;
         }
+        if dispatch_group == Some(McpToolDispatchGroup::Work) {
+            // Work routes through the same canonical owner as HTTP rather than
+            // entering compatibility dispatch below.
+            ensure_mcp_dispatch_available(tool_name)?;
+            return boxed_send(handle_work(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            ))
+            .await;
+        }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
         // application-catalog contract remain under the explicit root MCP
@@ -606,7 +622,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.
                 Some(
-                    McpToolDispatchGroup::ApplicationSurface | McpToolDispatchGroup::MultiRoot,
+                    McpToolDispatchGroup::ApplicationSurface
+                    | McpToolDispatchGroup::MultiRoot
+                    | McpToolDispatchGroup::Work,
                 )
                 | None => Err(unknown_tool_error(tool_name)),
             }

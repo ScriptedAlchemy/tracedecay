@@ -957,12 +957,18 @@ impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
         &self,
         request: tracedecay_api::WorkHttpRequest,
     ) -> tracedecay_api::WorkInvocationFuture {
-        Box::pin(invoke_work_operation(Arc::clone(&self.executor), request))
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move { invoke_work_operation(executor.as_ref(), request).await })
     }
 }
 
-async fn invoke_work_operation(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+/// Invoke the Work owner shared by the HTTP router and the MCP adapter.
+///
+/// The caller supplies transport-normalized controls; typed Work decoding,
+/// registry binding resolution, cancellation policy, and canonical result
+/// encoding remain here so transports cannot grow their own Work dispatcher.
+pub(crate) async fn invoke_work_operation(
+    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
 ) -> Response {
     let tracedecay_api::WorkHttpRequest {
@@ -1236,7 +1242,7 @@ impl RegisteredHttpOperation for HandoffOperation {
 }
 
 async fn invoke_registered_http<T, O>(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     operation: O,
     request_id: RequestId,
     controls: HttpApplicationControls,

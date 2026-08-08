@@ -234,6 +234,11 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     "{} has no multi-root daemon handler entry",
                     definition.name
                 ),
+                McpToolDispatchGroup::Work => assert!(
+                    super::work::work_operation_for_tool(&definition.name).is_some(),
+                    "{} has no canonical Work operation entry",
+                    definition.name
+                ),
                 McpToolDispatchGroup::RetainedApplication => {
                     let operation = RetainedSurfaceOperation::from_name(&definition.name)
                         .unwrap_or_else(|| {

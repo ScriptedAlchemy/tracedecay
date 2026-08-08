@@ -128,7 +128,7 @@ async fn invoke_operation(
                 controls.cancellation.context(),
             );
             invoke_registered_http::<Option<AuthorizedScopeSet>, _>(
-                executor,
+                executor.as_ref(),
                 operation,
                 request_id,
                 controls,
@@ -154,7 +154,7 @@ async fn invoke_operation(
                 controls.cancellation.context(),
             );
             invoke_registered_http::<MultiRootScopeSetCasResultV1, _>(
-                executor,
+                executor.as_ref(),
                 operation,
                 request_id,
                 controls,
@@ -180,7 +180,7 @@ async fn invoke_operation(
                 controls.cancellation.context(),
             );
             invoke_registered_http::<MultiRootQueryPageV1<serde_json::Value>, _>(
-                executor,
+                executor.as_ref(),
                 operation,
                 request_id,
                 controls,

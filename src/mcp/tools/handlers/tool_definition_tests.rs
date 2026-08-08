@@ -151,6 +151,52 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
 
+/// Removing a canonical Work operation from MCP discovery would leave the
+/// HTTP owner callable while making the same supported application journey
+/// undiscoverable to MCP clients.
+#[test]
+fn work_definitions_cover_the_canonical_operation_registry() {
+    let work_definitions = get_tool_definitions()
+        .into_iter()
+        .filter(|definition| definition.name.starts_with("tracedecay_work_"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        work_definitions.len(),
+        tracedecay_api::WorkOperation::ALL.len()
+    );
+    assert_eq!(
+        work_definitions
+            .iter()
+            .filter(
+                |definition| definition.annotations.as_ref().and_then(|annotations| {
+                    annotations
+                        .get("readOnlyHint")
+                        .and_then(serde_json::Value::as_bool)
+                }) == Some(true)
+            )
+            .count(),
+        11,
+        "all and only canonical Work reads must carry readOnlyHint",
+    );
+    for operation in tracedecay_api::WorkOperation::ALL {
+        let tool_name = format!("tracedecay_work_{}", operation.operation_key());
+        let definition = work_definitions
+            .iter()
+            .find(|definition| definition.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} is missing from MCP discovery"));
+        assert_eq!(
+            definition
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get("readOnlyHint"))
+                .and_then(serde_json::Value::as_bool),
+            Some(operation.is_read_only()),
+            "{tool_name} read-only annotation must match the canonical Work operation",
+        );
+    }
+}
+
 #[test]
 fn test_tool_definitions_have_schemas() {
     let tools = get_tool_definitions();
