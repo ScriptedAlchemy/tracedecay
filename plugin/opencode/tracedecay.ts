@@ -98,3 +98,5 @@ export const TraceDecayPlugin: Plugin = async ({ client }) => {
     },
   }
 }
+
+export default TraceDecayPlugin

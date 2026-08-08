@@ -11,3 +11,5 @@ export const TraceDecayMcpPlugin: Plugin = async () => ({
     }
   },
 })
+
+export default TraceDecayMcpPlugin
