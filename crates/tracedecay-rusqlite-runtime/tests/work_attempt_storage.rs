@@ -9,6 +9,9 @@ use std::collections::BTreeSet;
 use tracedecay_application::{
     WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
     WorkAttemptProviderOutcomeV1, WorkAttemptStorageError, WorkAttemptStoragePort,
+    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1,
+    WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
+    WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
@@ -20,7 +23,7 @@ use tracedecay_domain::{
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
     WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
     WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy,
-    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorkflowOutputName, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -97,7 +100,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000_000),
         fallback: WorkFallbackTopology::Disabled,
-        topology_policy_digest: digest('f'),
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
     .unwrap()
 }
@@ -238,6 +241,104 @@ fn insert_replays_identical_admissions_and_refuses_divergent_ones() {
         WorkAttemptStorageError::AttemptConflict
     );
     assert_eq!(store.count("work_attempts_v1"), 1);
+}
+
+#[test]
+fn synthesis_admission_replays_one_durable_result_and_refuses_changed_requests() {
+    let store = RegisteredWorkStore::start("attempt-synthesis-insert");
+    let authority = authority("actor.attempt.synthesis");
+    let admitted_attempt = attempt("attempt.storage.synthesis", 1);
+    let source = identity("attempt.storage.source");
+    let source_digest = digest('7');
+    let source_set = WorkSynthesisSourceSetV1::seal(vec![WorkSynthesisSourceEnvelopeV1 {
+        source: source.clone(),
+        outcome: WorkSynthesisSourceOutcomeV1::Succeeded {
+            artifacts: vec![source_digest.clone()],
+        },
+    }])
+    .unwrap();
+    let admission = WorkSynthesisAdmissionV1 {
+        attempt: admitted_attempt.clone(),
+        source_set,
+        groups: vec![WorkSynthesisEvidenceGroupV1 {
+            artifacts: vec![source_digest.clone()],
+            sources: vec![source],
+        }],
+        draft: WorkflowSynthesisDraft {
+            output_name: id::<WorkflowOutputName>("output.storage.synthesis"),
+            synthesis_attempt: admitted_attempt.identity().clone(),
+            cited_source_digests: BTreeSet::from([source_digest]),
+        },
+        uncited: Vec::new(),
+    };
+    let record = WorkSynthesisAdmissionRecordV1 {
+        request_digest: digest('8'),
+        result: admission.clone(),
+    };
+
+    assert_eq!(
+        store
+            .storage()
+            .insert_synthesis(&authority, &record)
+            .unwrap(),
+        WorkSynthesisInsertOutcome::Inserted
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_synthesis(&authority, &record)
+            .unwrap(),
+        WorkSynthesisInsertOutcome::Replayed(Box::new(admission.clone()))
+    );
+    assert_eq!(store.count("work_attempts_v1"), 1);
+
+    let changed = WorkSynthesisAdmissionRecordV1 {
+        request_digest: digest('9'),
+        result: admission,
+    };
+    assert_eq!(
+        store
+            .storage()
+            .insert_synthesis(&authority, &changed)
+            .unwrap_err(),
+        WorkAttemptStorageError::AttemptConflict
+    );
+    assert_eq!(store.count("work_attempts_v1"), 1);
+
+    let running_attempt = running(&admitted_attempt);
+    store
+        .storage()
+        .update(
+            &authority,
+            admitted_attempt.lease(),
+            WorkAttemptStateV1::Leased,
+            &running_attempt,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .storage()
+            .load_synthesis(&authority, admitted_attempt.identity())
+            .unwrap(),
+        record
+    );
+
+    let store = store.restart("attempt-synthesis-insert");
+    assert_eq!(
+        store
+            .storage()
+            .load_synthesis(&authority, admitted_attempt.identity())
+            .unwrap(),
+        record
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load(&authority, admitted_attempt.identity())
+            .unwrap(),
+        running_attempt
+    );
 }
 
 #[test]

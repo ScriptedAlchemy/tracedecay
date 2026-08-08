@@ -37,6 +37,7 @@ use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, Saf
 
 const WORK_SYNTHESIS_SOURCE_SET_DOMAIN: &str =
     "tracedecay.application.work-synthesis-source-set.v1";
+const WORK_SYNTHESIS_REQUEST_DOMAIN: &str = "tracedecay.application.work-synthesis-request.v1";
 
 /// One sibling attempt's terminal contribution, captured verbatim from the
 /// Work authority at admission time.
@@ -164,6 +165,15 @@ pub struct WorkSynthesisAdmissionV1 {
     pub uncited: Vec<WorkAttemptIdentityV1>,
 }
 
+/// The immutable request identity and complete admitted result persisted in
+/// the same durable record as the synthesis attempt.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSynthesisAdmissionRecordV1 {
+    pub request_digest: ManifestDigest,
+    pub result: WorkSynthesisAdmissionV1,
+}
+
 /// The typed outcome of a synthesis request: an admitted attempt, or the
 /// sealed unsynthesized set when synthesis could not truthfully begin.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -214,6 +224,11 @@ where
             ));
         }
     }
+    let request_digest = canonical_sha256(&(WORK_SYNTHESIS_REQUEST_DOMAIN, &command))
+        .map_err(|_| request_identity_problem())?;
+    if let Some(replay) = attempts.synthesis_replay(context, &command.start, &request_digest)? {
+        return Ok(WorkSynthesisAttemptV1::Admitted(Box::new(replay)));
+    }
     let mut envelopes = Vec::with_capacity(command.sources.len());
     for source in &command.sources {
         let attempt = attempts.status(
@@ -257,21 +272,21 @@ where
         })
         .map(|envelope| envelope.source.clone())
         .collect();
-    let attempt = attempts.start(context, command.start)?;
-    let draft = WorkflowSynthesisDraft {
-        output_name: command.output_name,
-        synthesis_attempt: attempt.identity().clone(),
-        cited_source_digests,
-    };
-    Ok(WorkSynthesisAttemptV1::Admitted(Box::new(
-        WorkSynthesisAdmissionV1 {
-            attempt,
-            source_set,
-            groups,
-            draft,
-            uncited,
-        },
-    )))
+    let admission =
+        attempts.start_synthesis(context, command.start, request_digest, move |attempt| {
+            WorkSynthesisAdmissionV1 {
+                draft: WorkflowSynthesisDraft {
+                    output_name: command.output_name,
+                    synthesis_attempt: attempt.identity().clone(),
+                    cited_source_digests,
+                },
+                attempt,
+                source_set,
+                groups,
+                uncited,
+            }
+        })?;
+    Ok(WorkSynthesisAttemptV1::Admitted(Box::new(admission)))
 }
 
 /// Captures one source attempt's contribution exactly as the authority
@@ -372,5 +387,12 @@ fn contract_problem() -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-synthesis.evidence-inconsistent".to_owned(),
         message: "A terminal source attempt is missing its sealed evidence.".to_owned(),
+    })
+}
+
+fn request_identity_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "application.work-synthesis.request-identity-unavailable".to_owned(),
+        message: "The synthesis request identity could not be canonicalized.".to_owned(),
     })
 }
