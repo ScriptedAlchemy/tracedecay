@@ -213,6 +213,24 @@ Every product surface can run the same bounded query use case and receive determ
   every other adapter. Dashboard binding and dashboard parity remain owned by
   the dashboard delivery; the surface delivery does not ship dashboard adapters.
 - **Export/live:** stream bounded frozen exports with manifests and ordered snapshot/delta/gap contracts. Filesystem publication and SSE framing remain adapter responsibilities.
+
+  **Owner decision (2026-08-08, Zack): NOT NEEDED — descoped without
+  replacement.** The kernel-level frozen-export mechanism has no remaining
+  consumer on either half. The live-view half is satisfied by deviation:
+  the dashboard — the only live consumer that ever existed — gets its
+  streaming consistency from the Plan 11 revision-monotone HTTP/SSE state
+  path (envelope watermarks + the events stream) at the adapter layer,
+  not from kernel export contracts. The export half's only intended
+  reader, the ResearchBundle family, was deleted by an earlier recorded
+  owner decision. CLI, MCP, and hook surfaces are request/response
+  consumers whose consistency is already guaranteed by the landed bounded
+  snapshot + watermark envelopes and restart-stable cursor pagination
+  (cursors pin generation/watermark across pages); none of them holds a
+  long-lived subscription to changing results. Revisit clause: if
+  subscription-style consumers materialize post-V2 (for example MCP
+  resource subscriptions letting agents watch a query), the
+  snapshot/delta/gap contract described above is the design to implement
+  then — nothing in this decision forecloses it.
 - **Task/work reuse:** accept Plan 24-owned typed request and projection
   descriptors through narrow consumer-owned ports, then provide only shared
   scope resolution inputs, budgets, cancellation, pagination, watermarks,
