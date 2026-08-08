@@ -837,6 +837,15 @@ fn consolidation_input_session_databases_inherit_profile_maintenance_scope() {
         assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
     }
 
+    let arbitrary = temp
+        .path()
+        .join("projects/p1/.consolidation-input/arbitrary.db");
+    let arbitrary_identity = DatabaseIdentity::for_path(&arbitrary).unwrap();
+    assert_ne!(arbitrary_identity.profile_root, expected_profile);
+    let arbitrary_authority =
+        DatabaseAuthority::for_runtime(&arbitrary, "unowned consolidation input").unwrap();
+    assert_eq!(arbitrary_authority.role(), DatabaseAuthorityRole::Test);
+
     let unrelated = temp
         .path()
         .join("projects/p1/other-input/source-sessions.db");

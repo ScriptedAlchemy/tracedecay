@@ -51,6 +51,9 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
     } else if parent
         .file_name()
         .is_some_and(|name| name == ".consolidation-input")
+        && database_path
+            .file_name()
+            .is_some_and(|name| name == "source-sessions.db" || name == "target-sessions.db")
     {
         parent.parent()?
     } else {
