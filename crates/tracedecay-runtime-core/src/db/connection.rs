@@ -17,6 +17,7 @@ use crate::store_runtime::registry::StoreRuntimeHandle;
 use super::{DatabaseAuthority, DatabaseAuthorityRole};
 
 mod facade;
+mod graph_binding;
 mod integrity;
 mod pragmas;
 mod query_write;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::errors::TraceDecayError;
@@ -29,6 +29,9 @@ pub(super) struct DatabaseInner {
     /// published writable. Read-only facades never retain write authority.
     pub(super) _authority: Option<DatabaseAuthority>,
     pub(super) _slot: Option<DatabaseSlot>,
+    /// Rebuildable memory topology mounted from the same registered shard as
+    /// this relational fact authority. Content never enters this graph.
+    pub(super) memory_relation_graph: OnceLock<Arc<tracedecay_graph_db::GraphDb>>,
 }
 
 impl DatabaseInner {
@@ -98,6 +101,7 @@ impl DatabaseInner {
             writer: tokio::sync::Mutex::new(()),
             _authority: authority,
             _slot: slot,
+            memory_relation_graph: OnceLock::new(),
         })
     }
 }

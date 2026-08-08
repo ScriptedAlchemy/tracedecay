@@ -5,6 +5,7 @@ use tracedecay_domain::{
 };
 
 mod error;
+mod graph;
 mod project_memory;
 mod queries;
 mod telemetry;
@@ -14,6 +15,11 @@ mod write;
 pub use error::{
     FactProposalStoreError, FactStoreError, FactStoreResult, ProjectMemoryResult,
     ProjectMemoryStoreError,
+};
+pub use graph::{
+    MAX_PROJECT_MEMORY_GRAPH_RELATIONS, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphRelationKindV1, ProjectMemoryGraphRelationV1, ProjectMemoryGraphStore,
+    ProjectMemoryGraphTargetV1,
 };
 pub use project_memory::{
     FactProposalPromotionStateV1, ProjectMemoryDashboardEntityV1,

@@ -30,10 +30,10 @@ use tracedecay_store::{
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, ProjectMemoryResult, PromoteFactProposal,
-    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryGraphPageV1,
+    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryResult,
+    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
@@ -73,6 +73,7 @@ mod crud;
 mod curation;
 mod dashboard;
 mod envelope;
+mod graph;
 mod primitives;
 mod projection;
 mod proposals;
@@ -728,6 +729,15 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     }
 }
 
+impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
+    async fn project_memory_graph(
+        &self,
+        query: ProjectMemoryGraphQueryV1,
+    ) -> ProjectMemoryResult<ProjectMemoryGraphPageV1> {
+        graph::project_memory_graph(self.db, query).await
+    }
+}
+
 /// The single owned-or-borrowed handle shape for the shared project-memory
 /// database. Every project-memory route — the core fact-store accessors in
 /// [`crate::tracedecay::facts`] and the MCP memory handlers alike — resolves
@@ -938,6 +948,14 @@ impl ProjectMemoryFactStore for ProjectFactStore<'_> {
         fn promote_project_memory_fact_proposal_with_disposition(
             request: ProjectMemoryFactProposalPromotionV1,
         ) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1>;
+    }
+}
+
+impl ProjectMemoryGraphStore for ProjectFactStore<'_> {
+    delegate_fact_store_methods! {
+        fn project_memory_graph(
+            query: ProjectMemoryGraphQueryV1,
+        ) -> ProjectMemoryResult<ProjectMemoryGraphPageV1>;
     }
 }
 

@@ -279,6 +279,7 @@ fn validate_graph_scope(key: &StoreRuntimeKey) -> Result<(), StoreRuntimeRegistr
         key.shard_id().scope,
         StoreShardScopeV1::Project { .. }
             | StoreShardScopeV1::ProjectSessions { .. }
+            | StoreShardScopeV1::ProfileMemory
             | StoreShardScopeV1::ProfileSessions
     ) {
         Ok(())

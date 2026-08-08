@@ -22,10 +22,15 @@ use crate::{
     GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest,
     GraphPublicationReceipt, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch, ProjectionReplacement,
-    TraversalRequest, TraversalResult, VectorSearchRequest, VectorSearchResult, mutation,
-    traversal, vector,
+    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, GraphWriteBatch,
+    ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
+    VectorSearchResult, mutation, traversal, vector,
 };
+
+enum ReplacementPrecondition<'a> {
+    Unchecked,
+    Expected(Option<&'a GraphWatermark>),
+}
 
 pub struct GraphDb {
     pub(crate) inner: Arc<Inner>,
@@ -162,6 +167,29 @@ impl GraphDb {
         &self,
         replacement: ProjectionReplacement,
     ) -> Result<GraphCommit, GraphDbError> {
+        self.replace_projection_unverified_inner(replacement, ReplacementPrecondition::Unchecked)
+    }
+
+    /// Rebuilds a disposable projection only when its current watermark still
+    /// matches the caller's observation. Producers that derive a complete
+    /// replacement outside the graph write lock use this to prevent an older
+    /// source snapshot from overwriting a newer publication.
+    pub fn replace_projection_unverified_if_current(
+        &self,
+        replacement: ProjectionReplacement,
+        expected_watermark: Option<&GraphWatermark>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        self.replace_projection_unverified_inner(
+            replacement,
+            ReplacementPrecondition::Expected(expected_watermark),
+        )
+    }
+
+    fn replace_projection_unverified_inner(
+        &self,
+        replacement: ProjectionReplacement,
+        precondition: ReplacementPrecondition<'_>,
+    ) -> Result<GraphCommit, GraphDbError> {
         if replacement.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -174,6 +202,14 @@ impl GraphDb {
         let _snapshot_gate = self.inner.snapshot_gate.write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        if let ReplacementPrecondition::Expected(expected) = precondition {
+            let current =
+                latest_projection(database, &replacement.namespace, &replacement.projection)?
+                    .map(|state| state.commit.watermark);
+            if current.as_ref() != expected {
+                return Err(GraphDbError::Conflict);
+            }
+        }
         let retained: BTreeSet<_> = replacement
             .entities
             .iter()

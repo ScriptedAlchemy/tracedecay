@@ -248,6 +248,15 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             graph_nodes.iter().any(|node| node["kind"] == "entity"),
             "graph should include entity nodes"
         );
+        let graph_edges = overview["holographic"]["graph"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected graph edges array"));
+        assert!(
+            graph_edges
+                .iter()
+                .any(|edge| edge["kind"] == "active_assertion"),
+            "the mounted memory relation graph should expose canonical assertion topology"
+        );
         let growth = overview["holographic"]["overview"]["growth"]
             .as_array()
             .unwrap_or_else(|| panic!("expected growth series array"));

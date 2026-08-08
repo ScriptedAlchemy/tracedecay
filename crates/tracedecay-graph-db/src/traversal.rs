@@ -74,6 +74,26 @@ impl GraphSnapshot {
         self.database.traverse(request)
     }
 
+    /// Reads bounded outgoing relations while retaining this snapshot's
+    /// projection lease, so a complete traversal cannot mix two replacement
+    /// generations.
+    pub fn outgoing_relations(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.database.outgoing_relations(
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation,
+        )
+    }
+
     pub fn vector_search(
         &self,
         request: VectorSearchRequest,

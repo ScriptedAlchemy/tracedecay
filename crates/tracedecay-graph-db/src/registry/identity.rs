@@ -111,11 +111,12 @@ pub(super) fn validate_registration(
         binding.shard_id.scope,
         StoreShardScopeV1::Project { .. }
             | StoreShardScopeV1::ProjectSessions { .. }
+            | StoreShardScopeV1::ProfileMemory
             | StoreShardScopeV1::ProfileSessions
             | StoreShardScopeV1::Code { .. }
     ) {
         return Err(GraphDbError::invalid(
-            "graph registry requires a canonical project, session, or code runtime binding",
+            "graph registry requires a canonical project, memory, session, or code runtime binding",
         ));
     }
     if verified_locator.shard_id != binding.shard_id

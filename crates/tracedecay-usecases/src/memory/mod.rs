@@ -12,6 +12,7 @@ mod context;
 mod converge;
 mod dashboard;
 mod error;
+mod graph;
 mod project_memory;
 mod sanitize;
 mod v1;

@@ -3,13 +3,17 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
+use tracedecay_domain::FactId;
 
 use super::super::DashboardState;
 use super::facts::{
     dashboard_overview, fact_matches_query, fact_summary_json, target_legacy_fact_id,
 };
+use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
-    ProjectMemoryDashboardEntityV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    MAX_PROJECT_MEMORY_GRAPH_RELATIONS, ProjectMemoryDashboardEntityV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphRelationKindV1, ProjectMemoryGraphTargetV1,
 };
 
 /// Resolves a fact target to its legacy numeric id, accepting either a legacy
@@ -109,6 +113,30 @@ pub async fn graph_payload(
         })
         .collect();
     let fact_ids: HashSet<i64> = fact_ids.into_iter().collect();
+    let graph_roots = canonical_to_legacy
+        .iter()
+        .filter(|(_, legacy)| fact_ids.contains(legacy))
+        .map(|(canonical, _)| FactId::new(canonical.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let memory_graph = if graph_roots.is_empty() {
+        None
+    } else {
+        Some(
+            memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+                .map_err(|error| error.to_string())?
+                .project_memory_graph(
+                    ProjectMemoryGraphQueryV1::new(
+                        state.memory_owner.clone(),
+                        graph_roots,
+                        MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+    };
     for link in &overview.fact_entity_links {
         let Some(fact_id) = link_legacy_fact_id(&link.fact, &canonical_to_legacy) else {
             continue;
@@ -132,6 +160,67 @@ pub async fn graph_payload(
             })
         });
         edges.push(json!({ "source": fact_node, "target": entity_node, "kind": "mentions" }));
+    }
+
+    for relation in memory_graph
+        .as_ref()
+        .into_iter()
+        .flat_map(|page| page.relations())
+    {
+        if relation.kind() == ProjectMemoryGraphRelationKindV1::Mentions {
+            continue;
+        }
+        let target_id = |target: &ProjectMemoryGraphTargetV1| -> Option<(String, Value)> {
+            match target {
+                ProjectMemoryGraphTargetV1::Fact(fact) => {
+                    let legacy = canonical_to_legacy.get(fact.fact_id().as_str())?;
+                    fact_ids.contains(legacy).then(|| {
+                        let id = format!("fact:{legacy}");
+                        (id.clone(), json!({ "id": id, "kind": "fact", "label": format!("#{legacy}"), "fact_id": legacy }))
+                    })
+                }
+                ProjectMemoryGraphTargetV1::Entity(entity) => {
+                    let legacy = entity.legacy_entity_id();
+                    let id = format!("entity:{legacy}");
+                    Some((
+                        id.clone(),
+                        json!({ "id": id, "kind": "entity", "label": format!("Entity #{legacy}"), "entity_id": legacy }),
+                    ))
+                }
+                ProjectMemoryGraphTargetV1::Assertion { assertion_id, .. } => {
+                    let id = format!("assertion:{}", assertion_id.as_str());
+                    Some((
+                        id.clone(),
+                        json!({ "id": id, "kind": "assertion", "label": "Assertion", "assertion_id": assertion_id.as_str() }),
+                    ))
+                }
+                ProjectMemoryGraphTargetV1::RetrievalAnchor { anchor_id, .. } => {
+                    let id = format!("anchor:{}", anchor_id.as_str());
+                    Some((
+                        id.clone(),
+                        json!({ "id": id, "kind": "retrieval_anchor", "label": "Evidence anchor", "anchor_id": anchor_id.as_str() }),
+                    ))
+                }
+            }
+        };
+        let Some((source, source_node)) = target_id(relation.source()) else {
+            continue;
+        };
+        let Some((target, target_node)) = target_id(relation.target()) else {
+            continue;
+        };
+        nodes.entry(source.clone()).or_insert(source_node);
+        nodes.entry(target.clone()).or_insert(target_node);
+        let kind = match relation.kind() {
+            ProjectMemoryGraphRelationKindV1::Supports => "supports",
+            ProjectMemoryGraphRelationKindV1::Contradicts => "contradicts",
+            ProjectMemoryGraphRelationKindV1::Supersedes => "supersedes",
+            ProjectMemoryGraphRelationKindV1::DerivedFrom => "derived_from",
+            ProjectMemoryGraphRelationKindV1::ActiveAssertion => "active_assertion",
+            ProjectMemoryGraphRelationKindV1::EvidenceAnchor => "evidence_anchor",
+            ProjectMemoryGraphRelationKindV1::Mentions => continue,
+        };
+        edges.push(json!({ "source": source, "target": target, "kind": kind }));
     }
 
     for bank in &overview.memory_banks {

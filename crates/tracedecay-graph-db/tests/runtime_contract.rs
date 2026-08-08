@@ -405,6 +405,16 @@ fn snapshot_is_immutable_after_live_write() {
     });
     assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
     assert_eq!(snapshot.traverse(traversal("a")).unwrap().visits.len(), 2);
+    let outgoing = snapshot
+        .outgoing_relations(
+            &namespace(),
+            &[entity_id("a")],
+            &BTreeSet::from([GraphRelationKind::new("calls").unwrap()]),
+            1,
+            live(),
+        )
+        .unwrap();
+    assert_eq!(outgoing[0][0].identity.as_str(), "ab");
     drop(snapshot);
     received
         .recv_timeout(Duration::from_secs(1))
@@ -1126,6 +1136,75 @@ fn projection_replacement_preserves_cross_projection_target() {
     );
     assert!(matches!(
         db.traverse(traversal("source")),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+}
+
+#[test]
+fn conditional_projection_replacement_rejects_a_stale_source_snapshot() {
+    let db = memory_db();
+    db.replace_projection_unverified(ProjectionReplacement {
+        namespace: namespace(),
+        projection: projection("memory"),
+        source_generation: generation("g1"),
+        next_watermark: watermark("w1"),
+        entities: vec![entity("current")],
+        relations: Vec::new(),
+        cancellation: live(),
+    })
+    .unwrap();
+
+    let stale = db
+        .replace_projection_unverified_if_current(
+            ProjectionReplacement {
+                namespace: namespace(),
+                projection: projection("memory"),
+                source_generation: generation("g2"),
+                next_watermark: watermark("w2"),
+                entities: vec![entity("stale")],
+                relations: Vec::new(),
+                cancellation: live(),
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(stale, GraphDbError::Conflict);
+    assert!(db.traverse(traversal("current")).is_ok());
+    assert!(matches!(
+        db.traverse(traversal("stale")),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+
+    db.replace_projection_unverified_if_current(
+        ProjectionReplacement {
+            namespace: namespace(),
+            projection: projection("memory"),
+            source_generation: generation("g2"),
+            next_watermark: watermark("w2"),
+            entities: vec![entity("next")],
+            relations: Vec::new(),
+            cancellation: live(),
+        },
+        Some(&watermark("w1")),
+    )
+    .unwrap();
+    assert!(db.traverse(traversal("next")).is_ok());
+
+    db.replace_projection_unverified_if_current(
+        ProjectionReplacement {
+            namespace: namespace(),
+            projection: projection("memory"),
+            source_generation: generation("g3"),
+            next_watermark: watermark("w3"),
+            entities: Vec::new(),
+            relations: Vec::new(),
+            cancellation: live(),
+        },
+        Some(&watermark("w2")),
+    )
+    .unwrap();
+    assert!(matches!(
+        db.traverse(traversal("next")),
         Err(GraphDbError::InvalidRequest { .. })
     ));
 }
