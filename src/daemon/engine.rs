@@ -397,6 +397,11 @@ impl DaemonEngine {
         initialize_request: Option<JsonRpcRequest>,
     ) -> Result<ProjectOpenTaskClaim> {
         let (project_path, route) = Self::project_route(&handshake)?;
+        // Admission before warm-up: an ambient, unenrolled directory must be
+        // rejected here, before any project-open task is minted, so no graph
+        // or index work ever starts for a path without durable enrollment.
+        self.ensure_registered_project_route(&project_path, handshake.allow_init)
+            .await?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
         let open_handshake = handshake.clone();
