@@ -233,7 +233,22 @@ fn attempt_with_admission(
 
 fn succeeded(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
     let terminal = WorkTerminalEvidenceV1::succeeded(digest('9'), UtcMicros(500)).unwrap();
+    // An attempt is admitted `Leased` and the domain transition graph only
+    // reaches a terminal state through `Running`, so the durable terminal row
+    // is produced exactly the way the runtime produces it. Going straight from
+    // `Leased` to `Succeeded` is an `InvalidAttemptTransition`.
     attempt
+        .transition(
+            WorkAttemptStateV1::Running,
+            None,
+            Vec::new(),
+            WorkCancellationStateV1::None,
+            WorkRecoveryStateV1::Fresh,
+            Some(route()),
+            None,
+            attempt.lease().clone(),
+        )
+        .unwrap()
         .transition(
             WorkAttemptStateV1::Succeeded,
             None,
