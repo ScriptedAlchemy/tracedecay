@@ -106,12 +106,10 @@ Expose only mounted capabilities:
   failover operations through their promised CLI/MCP/SDK/dashboard surfaces;
 - make LSP advisory registrations, snapshots, and denied outcomes derive from
   real daemon authority;
-- apply one declarative install/update/uninstall/isolation contract across all
-  supported hosts; Kiro uses the shared JSON merge/backup/rollback authority
-  for both global and workspace `mcp.json` registration rather than a separate
-  `kiro-cli` lifecycle; its RC integration is MCP-only across Kiro IDE and CLI,
-  with no TraceDecay-owned Kiro Power, OpenVSX extension, managed agent,
-  steering block, or hook artifact;
+- finish Claude's existing Kiro CLI lifecycle lane without redesigning the
+  integration: isolate the child environment and working directory, preserve
+  peer configuration, prove rollback, and reconcile its docs; do not add a
+  Kiro Power, OpenVSX extension, or new bundle architecture;
 - parse and sanitize structured provider metadata before any GitHub, fact, or
   session sink sees it.
 

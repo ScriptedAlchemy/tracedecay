@@ -23,6 +23,7 @@
 - Audit all supported host integrations whenever shared host lifecycle behavior changes.
 - Workers share one dirty checkout: re-read before editing, own only named files, never revert peer edits, stage explicit paths, and create coherent conventional commits.
 - npm OIDC, live operator-host runs, Plan 15 semantic evaluation, Plan 25 cadence re-observation, and Plan 38 large-store observation are external evidence gates, not permission to fabricate repository evidence.
+- Kiro scope is limited to completing and verifying Claude's current CLI-lifecycle changes; do not redesign it as a Power, OpenVSX extension, MCP-only adapter, or new shared bundle system.
 - Manual screen-reader polish is not an RC blocker; functional keyboard/DOM behavior and existing automated accessibility checks remain in scope.
 
 ---
@@ -318,11 +319,11 @@ Run application/API parity, MCP, CLI, SDK generation/conformance, retained, Scou
 
 **Interfaces:**
 - Consumes: shared declarative host bundle install/update/uninstall contract, structured sanitizer, and daemon projection authority.
-- Produces: operator-state isolation and rollback for every host, MCP-only Kiro IDE/CLI registration without a separate CLI or plugin lifecycle, structured metadata privacy, real advisory registrations, and distinct absent/unsupported/denied/scope-denied states.
+- Produces: operator-state isolation and rollback for every host, a safe completion of Claude's current Kiro CLI lifecycle, structured metadata privacy, real advisory registrations, and distinct absent/unsupported/denied/scope-denied states.
 
 - [ ] **Step 1: Write failing host tests**
 
-Use an isolated HOME plus an ambient operator `KIRO_HOME`; assert the operator sentinel is unchanged, peer MCP entries survive install/update/uninstall, and failure rolls back byte-for-byte. Assert Kiro global and workspace registrations are rendered by the same shared `mcpServers` merge authority, install/update/uninstall require no `kiro-cli` binary, and no Kiro Power, OpenVSX extension, managed agent, steering, or hook artifact is installed. Apply the shared preservation assertions to Claude, Codex, Cursor, Kimi, OpenCode, and every supported host target.
+Use an isolated HOME plus an ambient operator `KIRO_HOME`; assert the operator sentinel is unchanged, peer MCP entries survive install/update/uninstall, CLI failure rolls back byte-for-byte, and the child runs in the admitted working directory/environment. Apply the shared preservation assertions to Claude, Codex, Cursor, Kimi, OpenCode, and every supported host target.
 
 - [ ] **Step 2: Write failing privacy and LSP tests**
 
@@ -334,7 +335,7 @@ Run focused host, privacy, and LSP tests and confirm the expected isolation, lea
 
 - [ ] **Step 4: Implement shared boundaries**
 
-Replace Kiro's dirty `kiro-cli mcp add/remove` path with the shared declarative JSON bundle merge, backup, rollback, registration-state, and uninstall helpers already used by file-managed hosts. Resolve global and workspace Kiro roots only from the admitted install context, preserve peer configuration, and delete TraceDecay's Kiro Power/extension/managed-agent/steering/hook lifecycle so Kiro-specific code is limited to MCP paths and schema selection. Parse before sanitizing provider metadata, and derive LSP registrations/snapshots from production daemon sources. Extract cohesive privacy/Kiro/LSP responsibilities rather than growing files already above 1,000 lines.
+Complete Claude's dirty `kiro-cli mcp add/remove` path without changing the integration model: clear the child environment, restore only admitted variables, set the admitted working directory, preserve peer configuration, and use the existing host transaction/rollback authority. Do not add a Kiro Power, OpenVSX extension, MCP-only rewrite, or new bundle layer. Parse before sanitizing provider metadata, and derive LSP registrations/snapshots from production daemon sources. Extract cohesive privacy/Kiro/LSP responsibilities rather than growing files already above 1,000 lines.
 
 - [ ] **Step 5: Verify GREEN and commit**
 
