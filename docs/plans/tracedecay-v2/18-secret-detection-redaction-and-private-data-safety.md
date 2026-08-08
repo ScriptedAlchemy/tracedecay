@@ -105,6 +105,25 @@ detector upgrade, and detector evaluation corpora remain absent (see the
 4. Detect realistically
    - Combine exact credential formats, entropy and context signals, configured private patterns,
      structured sensitive keys, and known-value fingerprints.
+
+   **Owner decision (2026-08-08, Zack): the exact credential-format
+   pattern set is VENDORED community rule data, not hand-curated.** The
+   detector kernel consumes a vendored copy of a community-maintained
+   secret ruleset (gitleaks' MIT-licensed rules, or an equivalent chosen
+   with citations) carrying license attribution, upstream provenance
+   (source URL, upstream version, retrieval date), and a documented
+   manual refresh procedure. TraceDecay-specific patterns with no
+   community equivalent live in a small, clearly separated local
+   supplement file. Everything else in this section is unchanged and
+   remains TraceDecay's: the inline-at-ingest engine, the
+   parse-before-scan structured layer, entropy/context scoring, typed
+   assessments, and the no-network/no-external-binary constraints (the
+   rules are data; no scanner binary such as gitleaks or trufflehog is
+   executed or shipped). Rule-file parse failure is a typed startup
+   error, never a silent empty rule set. Rationale: provider token
+   formats rotate faster than any hand-curated list is maintained;
+   pattern coverage is community-scale work, engine truthfulness is
+   ours.
    - Bound scanning cost and payload size without silently accepting an unscanned remainder.
    - Findings include detector origin/revision, location, remediation class,
      evidence anchors, scanned coverage, and an optional typed assessment:
