@@ -187,6 +187,16 @@ pub trait NativeIntegrationStore: Send + Sync {
         confirmation_digest: &ManifestDigest,
     ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>>;
 
+    /// Bounded startup recovery census for unfinished cleanup journals in one
+    /// exact repository. Implementations must fail rather than truncate.
+    fn pending_worktree_cleanups(
+        &self,
+        _repository_id: &RepositoryId,
+        _limit: u32,
+    ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
+        Err(NativeIntegrationStoreError::Unavailable)
+    }
+
     fn compare_and_swap_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,

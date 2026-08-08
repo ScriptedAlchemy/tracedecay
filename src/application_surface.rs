@@ -134,7 +134,8 @@ pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
 /// Compatibility export for existing callers. The array is the canonical
 /// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 72] =
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation;
+    tracedecay_api::HttpApplicationOperation::ALL.len()] =
     tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
@@ -3061,7 +3062,12 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::NativeIntegrationApprove
         | ApplicationSurfaceOperation::NativeIntegrationApply
         | ApplicationSurfaceOperation::NativeIntegrationStatus
-        | ApplicationSurfaceOperation::NativeIntegrationCancel => {
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
             parse_native_integration_surface_request(operation, value)
                 .map(ApplicationSurfaceRequest::NativeIntegration)
         }
@@ -3864,6 +3870,11 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::NativeIntegrationApply
         | ApplicationSurfaceOperation::NativeIntegrationStatus
         | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
         | ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch
         | ApplicationSurfaceOperation::CodeSymbolSearch

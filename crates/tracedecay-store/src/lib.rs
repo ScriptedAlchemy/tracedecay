@@ -136,7 +136,7 @@ pub use memory::{
 };
 pub use native_integration::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStore,
-    NativeIntegrationStoreError, NativeIntegrationStoreResult,
+    NativeIntegrationStoreError, NativeIntegrationStoreResult, NativeWorktreeCleanupBeginResultV1,
 };
 pub use observation::{
     AnchoredObservationWrite, CursorAdvanceOutcome, ObservationAdmissionPort,

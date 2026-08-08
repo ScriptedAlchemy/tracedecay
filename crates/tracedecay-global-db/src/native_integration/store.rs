@@ -363,11 +363,13 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    async fn begin_write(&self) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
+    pub(super) async fn begin_write(
+        &self,
+    ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
-    async fn read_snapshot(
+    pub(super) async fn read_snapshot(
         &self,
     ) -> NativeIntegrationStoreResult<tracedecay_runtime_core::db::engine::ReadSnapshot> {
         self.db.read_snapshot().await.map_err(unavailable)
@@ -384,7 +386,7 @@ const RECORD_SELECT: &str = "SELECT preview.preview_json, txn.approval_json, txn
      LEFT JOIN native_integration_receipts AS receipt
        ON receipt.transaction_id = txn.transaction_id";
 
-async fn commit_outcome<T>(
+pub(super) async fn commit_outcome<T>(
     transaction: GitMutationWriteTransaction<'_>,
     outcome: NativeIntegrationStoreResult<T>,
 ) -> NativeIntegrationStoreResult<T> {
@@ -810,15 +812,21 @@ fn terminal_outcome_code(outcome: NativeIntegrationTerminalOutcomeV1) -> &'stati
     }
 }
 
-fn encode<T: serde::Serialize>(value: &T) -> NativeIntegrationStoreResult<String> {
+pub(super) fn encode<T: serde::Serialize>(value: &T) -> NativeIntegrationStoreResult<String> {
     serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
 }
 
-fn decode<T: serde::de::DeserializeOwned>(value: &str) -> NativeIntegrationStoreResult<T> {
+pub(super) fn decode<T: serde::de::DeserializeOwned>(
+    value: &str,
+) -> NativeIntegrationStoreResult<T> {
     serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
 }
 
-fn text(row: &Row, column: i32, field: &'static str) -> NativeIntegrationStoreResult<String> {
+pub(super) fn text(
+    row: &Row,
+    column: i32,
+    field: &'static str,
+) -> NativeIntegrationStoreResult<String> {
     row.get::<String>(column)
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
@@ -832,15 +840,15 @@ fn optional_text(
         .map_err(|error| invalid(format!("read {field}: {error}")))
 }
 
-fn invalid(message: impl Into<String>) -> NativeIntegrationStoreError {
+pub(super) fn invalid(message: impl Into<String>) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::InvalidData(message.into())
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn invalid_domain(error: tracedecay_domain::DomainError) -> NativeIntegrationStoreError {
+pub(super) fn invalid_domain(error: tracedecay_domain::DomainError) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::InvalidData(error.to_string())
 }
 
-fn unavailable<T>(_error: T) -> NativeIntegrationStoreError {
+pub(super) fn unavailable<T>(_error: T) -> NativeIntegrationStoreError {
     NativeIntegrationStoreError::Unavailable
 }

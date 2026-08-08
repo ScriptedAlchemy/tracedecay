@@ -13,13 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPreviewId,
-    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, RepositoryId,
+    ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
+    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1,
+    NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, RepositoryId,
 };
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStore,
-    NativeIntegrationStoreError, NativeIntegrationStoreResult,
+    NativeIntegrationStoreError, NativeIntegrationStoreResult, NativeWorktreeCleanupBeginResultV1,
 };
 
 #[cfg(test)]
@@ -78,6 +79,31 @@ enum StoreCommand {
     PendingTransactions(Option<RepositoryId>, Reply<Vec<NativeIntegrationRecordV1>>),
     ApprovalConsumed(NativeIntegrationApprovalId, Reply<bool>),
     QuarantineRepository(RepositoryId, NativeIntegrationTransactionId, Reply<()>),
+    BeginWorktreeCleanup(
+        Box<NativeWorktreeCleanupTransactionV1>,
+        Reply<NativeWorktreeCleanupBeginResultV1>,
+    ),
+    ReadWorktreeCleanup(
+        ManifestDigest,
+        Reply<Option<NativeWorktreeCleanupTransactionV1>>,
+    ),
+    PendingWorktreeCleanups(
+        RepositoryId,
+        u32,
+        Reply<Vec<NativeWorktreeCleanupTransactionV1>>,
+    ),
+    CompareAndSwapWorktreeCleanup(
+        ManifestDigest,
+        u64,
+        Box<NativeWorktreeCleanupTransactionV1>,
+        Reply<NativeWorktreeCleanupTransactionV1>,
+    ),
+    WriteWorktreeCleanupTerminal(
+        ManifestDigest,
+        u64,
+        Box<NativeWorktreeCleanupReceiptV1>,
+        Reply<NativeWorktreeCleanupReceiptV1>,
+    ),
 }
 
 enum ActorDatabase {
@@ -345,6 +371,76 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         ))?;
         Self::await_reply(&receiver)
     }
+
+    fn begin_worktree_cleanup(
+        &self,
+        transaction: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::BeginWorktreeCleanup(
+            Box::new(transaction),
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn read_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadWorktreeCleanup(
+            confirmation_digest.clone(),
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn pending_worktree_cleanups(
+        &self,
+        repository_id: &RepositoryId,
+        limit: u32,
+    ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::PendingWorktreeCleanups(
+            repository_id.clone(),
+            limit,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn compare_and_swap_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        replacement: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::CompareAndSwapWorktreeCleanup(
+            confirmation_digest.clone(),
+            expected_phase_revision,
+            Box::new(replacement),
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn write_worktree_cleanup_terminal(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        receipt: NativeWorktreeCleanupReceiptV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::WriteWorktreeCleanupTerminal(
+            confirmation_digest.clone(),
+            expected_phase_revision,
+            Box::new(receipt),
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
 }
 
 fn run_store_actor(
@@ -416,6 +512,41 @@ fn run_store_actor(
                         .send(runtime.block_on(
                             store.quarantine_repository(&repository_id, &transaction_id),
                         ));
+            }
+            StoreCommand::BeginWorktreeCleanup(transaction, reply) => {
+                let _ = reply.send(runtime.block_on(store.begin_worktree_cleanup(*transaction)));
+            }
+            StoreCommand::ReadWorktreeCleanup(confirmation_digest, reply) => {
+                let _ =
+                    reply.send(runtime.block_on(store.read_worktree_cleanup(&confirmation_digest)));
+            }
+            StoreCommand::PendingWorktreeCleanups(repository_id, limit, reply) => {
+                let _ = reply
+                    .send(runtime.block_on(store.pending_worktree_cleanups(&repository_id, limit)));
+            }
+            StoreCommand::CompareAndSwapWorktreeCleanup(
+                confirmation_digest,
+                expected_phase_revision,
+                replacement,
+                reply,
+            ) => {
+                let _ = reply.send(runtime.block_on(store.compare_and_swap_worktree_cleanup(
+                    &confirmation_digest,
+                    expected_phase_revision,
+                    *replacement,
+                )));
+            }
+            StoreCommand::WriteWorktreeCleanupTerminal(
+                confirmation_digest,
+                expected_phase_revision,
+                receipt,
+                reply,
+            ) => {
+                let _ = reply.send(runtime.block_on(store.write_worktree_cleanup_terminal(
+                    &confirmation_digest,
+                    expected_phase_revision,
+                    *receipt,
+                )));
             }
         }
     }
@@ -535,5 +666,53 @@ impl NativeIntegrationStore for SharedDaemonNativeIntegrationStore {
     ) -> NativeIntegrationStoreResult<()> {
         self.inner
             .quarantine_repository(repository_id, transaction_id)
+    }
+
+    fn begin_worktree_cleanup(
+        &self,
+        transaction: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1> {
+        self.inner.begin_worktree_cleanup(transaction)
+    }
+
+    fn read_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>> {
+        self.inner.read_worktree_cleanup(confirmation_digest)
+    }
+
+    fn pending_worktree_cleanups(
+        &self,
+        repository_id: &RepositoryId,
+        limit: u32,
+    ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
+        self.inner.pending_worktree_cleanups(repository_id, limit)
+    }
+
+    fn compare_and_swap_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        replacement: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1> {
+        self.inner.compare_and_swap_worktree_cleanup(
+            confirmation_digest,
+            expected_phase_revision,
+            replacement,
+        )
+    }
+
+    fn write_worktree_cleanup_terminal(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        receipt: NativeWorktreeCleanupReceiptV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1> {
+        self.inner.write_worktree_cleanup_terminal(
+            confirmation_digest,
+            expected_phase_revision,
+            receipt,
+        )
     }
 }

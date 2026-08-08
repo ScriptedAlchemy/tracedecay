@@ -67,6 +67,7 @@ pub struct NativeWorktreeCleanupTransactionV1 {
     pub scope_set_revision: ScopeSetRevision,
     pub scope_set_digest: ManifestDigest,
     pub inspection_digest: ManifestDigest,
+    pub confirmed_at: UtcMicros,
     pub confirmation_digest: ManifestDigest,
     pub command: NativeWorktreeCleanupCommandV1,
     pub phase: NativeWorktreeCleanupPhaseV1,
@@ -87,6 +88,7 @@ impl NativeWorktreeCleanupTransactionV1 {
         self.command.validate()?;
         self.transaction_digest.validate()?;
         if self.phase_revision == 0
+            || self.confirmed_at.0 > self.prepared_at.0
             || self.updated_at.0 < self.prepared_at.0
             || (self.phase == NativeWorktreeCleanupPhaseV1::Terminal)
                 != self.terminal_outcome.is_some()
@@ -115,6 +117,7 @@ impl NativeWorktreeCleanupTransactionV1 {
             && self.scope_set_revision == other.scope_set_revision
             && self.scope_set_digest == other.scope_set_digest
             && self.inspection_digest == other.inspection_digest
+            && self.confirmed_at == other.confirmed_at
             && self.confirmation_digest == other.confirmation_digest
             && self.command == other.command
     }

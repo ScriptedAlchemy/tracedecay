@@ -74,6 +74,33 @@ pub async fn ensure_native_integration_schema(
                     REFERENCES native_integration_transactions(transaction_id)
                     ON DELETE RESTRICT
             );
+            CREATE TABLE IF NOT EXISTS native_worktree_cleanup_transactions (
+                confirmation_digest TEXT PRIMARY KEY,
+                inspection_digest TEXT NOT NULL,
+                confirmed_at INTEGER NOT NULL,
+                scope_set_id TEXT NOT NULL,
+                scope_set_revision INTEGER NOT NULL,
+                scope_set_digest TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                repository_id TEXT NOT NULL,
+                worktree_id TEXT NOT NULL,
+                repository_root_json TEXT NOT NULL,
+                worktree_root_json TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                phase_revision INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                transaction_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS native_worktree_cleanup_receipts (
+                confirmation_digest TEXT PRIMARY KEY,
+                receipt_digest TEXT NOT NULL UNIQUE,
+                outcome TEXT NOT NULL,
+                completed_at INTEGER NOT NULL,
+                receipt_json TEXT NOT NULL,
+                FOREIGN KEY(confirmation_digest)
+                    REFERENCES native_worktree_cleanup_transactions(confirmation_digest)
+                    ON DELETE RESTRICT
+            );
 
             CREATE INDEX IF NOT EXISTS idx_native_integration_previews_repository
                 ON native_integration_previews(repository_id, created_at, preview_id);
@@ -84,6 +111,10 @@ pub async fn ensure_native_integration_schema(
             CREATE INDEX IF NOT EXISTS idx_native_integration_quarantines_active
                 ON native_integration_repository_quarantines(repository_id, transaction_id)
                 WHERE active = 1;
+            CREATE INDEX IF NOT EXISTS idx_native_worktree_cleanup_recovery
+                ON native_worktree_cleanup_transactions(
+                    repository_id, phase, updated_at, confirmation_digest
+                );
 
             CREATE TRIGGER IF NOT EXISTS native_integration_previews_immutable_update
             BEFORE UPDATE ON native_integration_previews
@@ -145,6 +176,37 @@ pub async fn ensure_native_integration_schema(
               OR OLD.created_at != NEW.created_at
             BEGIN
                 SELECT RAISE(ABORT, 'native integration repository quarantine identity is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS native_worktree_cleanup_identity_immutable
+            BEFORE UPDATE ON native_worktree_cleanup_transactions
+            WHEN OLD.confirmation_digest != NEW.confirmation_digest
+              OR OLD.inspection_digest != NEW.inspection_digest
+              OR OLD.confirmed_at != NEW.confirmed_at
+              OR OLD.scope_set_id != NEW.scope_set_id
+              OR OLD.scope_set_revision != NEW.scope_set_revision
+              OR OLD.scope_set_digest != NEW.scope_set_digest
+              OR OLD.project_id != NEW.project_id
+              OR OLD.repository_id != NEW.repository_id
+              OR OLD.worktree_id != NEW.worktree_id
+              OR OLD.repository_root_json != NEW.repository_root_json
+              OR OLD.worktree_root_json != NEW.worktree_root_json
+            BEGIN
+                SELECT RAISE(ABORT, 'native worktree cleanup transaction identity is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS native_worktree_cleanup_immutable_delete
+            BEFORE DELETE ON native_worktree_cleanup_transactions
+            BEGIN
+                SELECT RAISE(ABORT, 'native worktree cleanup transactions are retained');
+            END;
+            CREATE TRIGGER IF NOT EXISTS native_worktree_cleanup_receipts_immutable_update
+            BEFORE UPDATE ON native_worktree_cleanup_receipts
+            BEGIN
+                SELECT RAISE(ABORT, 'native worktree cleanup receipts are immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS native_worktree_cleanup_receipts_immutable_delete
+            BEFORE DELETE ON native_worktree_cleanup_receipts
+            BEGIN
+                SELECT RAISE(ABORT, 'native worktree cleanup receipts are retained');
             END;",
         )
         .await

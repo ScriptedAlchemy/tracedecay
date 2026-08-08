@@ -843,7 +843,12 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus
-            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
                 unreachable!("native-integration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ConfigurationList

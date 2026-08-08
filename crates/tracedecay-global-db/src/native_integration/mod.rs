@@ -6,6 +6,7 @@
 
 mod schema;
 mod store;
+mod worktree_cleanup;
 
 pub use schema::ensure_native_integration_schema;
 pub use store::GlobalDbNativeIntegrationStore;
