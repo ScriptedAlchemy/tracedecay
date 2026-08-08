@@ -12,9 +12,8 @@ use tracedecay_application::retrieval::grep_analysis::{
     AstGrepAuthorityV1, AstGrepHitV1, AstGrepRequestV1, AstGrepResultV1, ComplexityAuthorityV1,
     ComplexityItemV1, ComplexityRequestV1, ComplexityResultV1, DependencyDepthAuthorityV1,
     DependencyDepthChainV1, DependencyDepthRequestV1, DependencyDepthResultV1,
-    GrepAnalysisOperationsV1, GrepAnalysisProblemV1, LexicalGrepAuthorityV1, PrimitiveCoverageV1,
-    PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
-    RedundancyAuthorityV1,
+    GrepAnalysisProblemV1, PrimitiveCoverageV1, PrimitiveFutureV1, PrimitiveOutcomeV1,
+    PrimitivePageV1, PrimitivePortContextV1,
 };
 
 use crate::graph::health::{dependency_depth, depth_score};
@@ -35,36 +34,6 @@ macro_rules! graph_authority {
             }
         }
     };
-}
-
-pub type ProductionGrepAnalysisOperationsV1<L, R> = GrepAnalysisOperationsV1<
-    L,
-    TraceDecayAstGrepAuthorityV1,
-    TraceDecayComplexityAuthorityV1,
-    R,
-    TraceDecayDependencyDepthAuthorityV1,
->;
-
-/// Compose the canonical application owner with the current production
-/// authorities. The caller supplies the lexical and redundancy authorities;
-/// their production adapters retain the canonical search and fingerprint
-/// boundaries.
-pub fn production_grep_analysis_operations<L, R>(
-    graph: Arc<TraceDecay>,
-    lexical: L,
-    redundancy: R,
-) -> ProductionGrepAnalysisOperationsV1<L, R>
-where
-    L: LexicalGrepAuthorityV1,
-    R: RedundancyAuthorityV1,
-{
-    GrepAnalysisOperationsV1::new(
-        lexical,
-        TraceDecayAstGrepAuthorityV1::new(Arc::clone(&graph)),
-        TraceDecayComplexityAuthorityV1::new(Arc::clone(&graph)),
-        redundancy,
-        TraceDecayDependencyDepthAuthorityV1::new(graph),
-    )
 }
 
 graph_authority!(TraceDecayAstGrepAuthorityV1);

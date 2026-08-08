@@ -12,9 +12,8 @@ pub use concrete::{
     SymbolGraphCursorSnapshotFuture,
 };
 pub use grep_analysis::{
-    ProductionGrepAnalysisOperationsV1, TraceDecayAstGrepAuthorityV1,
-    TraceDecayComplexityAuthorityV1, TraceDecayDependencyDepthAuthorityV1,
-    production_grep_analysis_operations,
+    TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,
+    TraceDecayDependencyDepthAuthorityV1,
 };
 pub use production::{
     ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project,

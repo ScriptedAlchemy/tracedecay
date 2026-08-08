@@ -4,7 +4,7 @@ use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
-use crate::context::{RequestAdmission, RequestContext};
+use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{CoverageCompleteness, OpaqueCursor};
@@ -396,114 +396,6 @@ pub trait DependencyDepthAuthorityV1 {
         context: &'a PrimitivePortContextV1<'a>,
         request: &'a DependencyDepthRequestV1,
     ) -> PrimitiveFutureV1<'a, DependencyDepthResultV1>;
-}
-
-pub struct GrepAnalysisOperationsV1<L, A, C, R, D> {
-    lexical: L,
-    ast: A,
-    complexity: C,
-    redundancy: R,
-    dependency_depth: D,
-}
-
-impl<L, A, C, R, D> GrepAnalysisOperationsV1<L, A, C, R, D> {
-    pub fn new(lexical: L, ast: A, complexity: C, redundancy: R, dependency_depth: D) -> Self {
-        Self {
-            lexical,
-            ast,
-            complexity,
-            redundancy,
-            dependency_depth,
-        }
-    }
-}
-
-impl<L, A, C, R, D> GrepAnalysisOperationsV1<L, A, C, R, D>
-where
-    L: LexicalGrepAuthorityV1,
-    A: AstGrepAuthorityV1,
-    C: ComplexityAuthorityV1,
-    R: RedundancyAuthorityV1,
-    D: DependencyDepthAuthorityV1,
-{
-    pub async fn grep(
-        &self,
-        context: &PrimitivePortContextV1<'_>,
-        request: &GrepRequestV1,
-    ) -> PrimitiveOutcomeV1<GrepResultV1> {
-        if let Err(problem) = admit(context, || request.validate()) {
-            return problem;
-        }
-        self.lexical.grep(context, request).await
-    }
-
-    pub async fn ast_grep(
-        &self,
-        context: &PrimitivePortContextV1<'_>,
-        request: &AstGrepRequestV1,
-    ) -> PrimitiveOutcomeV1<AstGrepResultV1> {
-        if let Err(problem) = admit(context, || request.validate()) {
-            return problem;
-        }
-        self.ast.ast_grep(context, request).await
-    }
-
-    pub async fn complexity(
-        &self,
-        context: &PrimitivePortContextV1<'_>,
-        request: &ComplexityRequestV1,
-    ) -> PrimitiveOutcomeV1<ComplexityResultV1> {
-        if let Err(problem) = admit(context, || request.validate()) {
-            return problem;
-        }
-        self.complexity.complexity(context, request).await
-    }
-
-    pub async fn redundancy(
-        &self,
-        context: &PrimitivePortContextV1<'_>,
-        request: &RedundancyRequestV1,
-    ) -> PrimitiveOutcomeV1<RedundancyResultV1> {
-        if let Err(problem) = admit(context, || request.validate()) {
-            return problem;
-        }
-        self.redundancy.redundancy(context, request).await
-    }
-
-    pub async fn dependency_depth(
-        &self,
-        context: &PrimitivePortContextV1<'_>,
-        request: &DependencyDepthRequestV1,
-    ) -> PrimitiveOutcomeV1<DependencyDepthResultV1> {
-        if let Err(problem) = admit(context, || request.validate()) {
-            return problem;
-        }
-        self.dependency_depth
-            .dependency_depth(context, request)
-            .await
-    }
-}
-
-fn admit<T>(
-    context: &PrimitivePortContextV1<'_>,
-    validate: impl FnOnce() -> Result<(), ApplicationContractError>,
-) -> Result<(), PrimitiveOutcomeV1<T>> {
-    if context.request.validate().is_err()
-        || !context.request.allows(
-            context.operation.capability_id(),
-            context.operation.use_case_id(),
-        )
-    {
-        return Err(PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::Denied));
-    }
-    match context.request.admission_at(context.observed_at) {
-        RequestAdmission::Cancelled => return Err(PrimitiveOutcomeV1::Cancelled),
-        RequestAdmission::TimedOut => return Err(PrimitiveOutcomeV1::TimedOut),
-        RequestAdmission::Admitted => {}
-    }
-    validate().map_err(|error| {
-        PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::InvalidRequest(error.to_string()))
-    })
 }
 
 fn validate_nonempty_pattern(
