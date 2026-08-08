@@ -65,8 +65,13 @@ impl AgentIntegration for CopilotIntegration {
         "copilot"
     }
 
+    /// Copilot's registration surfaces are all user-scope: the CLI-owned
+    /// `~/.copilot/mcp-config.json` (written by `copilot mcp add`) and the
+    /// VS Code user `settings.json`. There is no project-local surface the
+    /// host reads, so offering a local install would mean hand-writing files
+    /// the adopted CLI lifecycle exists to eliminate — same ruling as Gemini.
     fn supports_local_install(&self) -> bool {
-        true
+        false
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -302,7 +307,11 @@ fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -
 /// falling back to editing the host-owned registry. Should a capture show a
 /// different verb, change this one call site.
 fn copilot_mcp_remove_with(copilot_cli: &Path, home: &Path) -> Result<()> {
-    run_copilot_mcp_step(copilot_cli, &["mcp", "remove", COPILOT_MCP_SERVER_NAME], home)
+    run_copilot_mcp_step(
+        copilot_cli,
+        &["mcp", "remove", COPILOT_MCP_SERVER_NAME],
+        home,
+    )
 }
 
 /// Run one `copilot mcp …` step, converting a failed invocation into the
