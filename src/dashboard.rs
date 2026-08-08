@@ -249,8 +249,8 @@ pub fn dashboard_graph_read_authority_for_test(
     cg: &crate::tracedecay::TraceDecay,
     project_database: &crate::global_db::RegisteredGlobalDb,
 ) -> Option<std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>> {
-    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(cg, project_database).map(
-        |adapter| {
+    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(cg, project_database, None)
+        .map(|adapter| {
             std::sync::Arc::new(adapter)
                 as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
         },

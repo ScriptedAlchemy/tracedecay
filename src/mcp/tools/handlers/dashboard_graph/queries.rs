@@ -335,81 +335,26 @@ pub(super) async fn node_row(
     .next())
 }
 
-pub(super) async fn caller_rows(
+/// Node rows for neighbor hydration, keyed by qualified name. Adjacency for
+/// the neighborhood read comes from the verified code graph projection; this
+/// lookup only maps projection symbols back onto the relational id-space the
+/// other read operations still serve.
+pub(super) async fn node_rows_by_qualified_names(
     conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    limit: i64,
+    qualified_names: &[String],
 ) -> GraphReadResult<Vec<Value>> {
-    query_rows(
-        conn,
-        &format!(
-            "SELECT {NODE_COLUMNS_N}, e.kind AS edge_kind, e.line AS edge_line
-             FROM edges e
-             JOIN nodes n ON n.id = e.source
-             WHERE e.target = ?1 AND e.kind = 'calls'
-             ORDER BY n.qualified_name ASC
-             LIMIT ?2"
-        ),
-        params![node_id, limit],
-    )
-    .await
-}
-
-pub(super) async fn callee_rows(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    limit: i64,
-) -> GraphReadResult<Vec<Value>> {
-    query_rows(
-        conn,
-        &format!(
-            "SELECT {NODE_COLUMNS_N}, e.kind AS edge_kind, e.line AS edge_line
-             FROM edges e
-             JOIN nodes n ON n.id = e.target
-             WHERE e.source = ?1 AND e.kind = 'calls'
-             ORDER BY n.qualified_name ASC
-             LIMIT ?2"
-        ),
-        params![node_id, limit],
-    )
-    .await
-}
-
-pub(super) async fn neighborhood_edge_rows(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    limit: i64,
-) -> GraphReadResult<Vec<Value>> {
-    query_rows(
-        conn,
-        "SELECT e.source, e.target, e.kind, e.line,
-                source_node.name AS source_name,
-                target_node.name AS target_name
-         FROM edges e
-         JOIN nodes source_node ON source_node.id = e.source
-         JOIN nodes target_node ON target_node.id = e.target
-         WHERE e.source = ?1 OR e.target = ?1
-         ORDER BY e.kind ASC, source_node.qualified_name ASC, target_node.qualified_name ASC
-         LIMIT ?2",
-        params![node_id, limit],
-    )
-    .await
-}
-
-pub(super) async fn neighborhood_edge_counts(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> GraphReadResult<Vec<Value>> {
-    query_rows(
-        conn,
-        "SELECT kind, COUNT(*) AS count
-         FROM edges
-         WHERE source = ?1 OR target = ?1
-         GROUP BY kind
-         ORDER BY count DESC, kind ASC",
-        params![node_id],
-    )
-    .await
+    if qualified_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = build_qmark_placeholders(qualified_names.len());
+    let sql = format!(
+        "SELECT {NODE_COLUMNS}
+         FROM nodes
+         WHERE qualified_name IN ({placeholders})
+         ORDER BY qualified_name ASC, id ASC"
+    );
+    let params = qualified_names.iter().cloned().map(DbValue::Text);
+    query_rows(conn, &sql, params_from_iter(params)).await
 }
 
 pub(super) async fn subgraph_candidate_rows(

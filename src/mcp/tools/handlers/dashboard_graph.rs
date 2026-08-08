@@ -28,12 +28,18 @@ use tracedecay_application::{
     DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1, DashboardGraphTotalsV1,
     ResolvedScope, VerifiedDashboardGraphGenerationV1,
 };
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+};
 use tracedecay_domain::code_intelligence::{FileRecord, GraphStats};
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, ProjectId, RelationEdgeKindV1, SymbolOccurrenceId,
+    canonical_sha256,
+};
 use tracedecay_graph_db::{
-    GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId, GraphGenerationManifest,
-    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
-    GraphPropertyName, GraphWatermark, SourceGeneration,
+    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphWatermark, SourceGeneration,
 };
 
 use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
@@ -100,6 +106,14 @@ pub struct DashboardGraphReadAdapter {
     scope: ResolvedScope,
     profile_id: tracedecay_domain::UserProfileId,
     degree_cache: tokio::sync::Mutex<Option<Arc<DegreeSummary>>>,
+    /// Root the daemon's scheduler registry keys the retained interactive
+    /// code graph store by.
+    project_root: std::path::PathBuf,
+    /// Daemon-owned per-request resolver of the retained interactive code
+    /// graph store. `None` (direct servers, fixtures without an activation)
+    /// is the typed unavailable interactive graph: adjacency reads answer
+    /// their unavailable envelope instead of falling back to relational rows.
+    interactive_graph: Option<crate::mcp::server::DashboardGraphInteractiveResolver>,
 }
 
 impl DashboardGraphReadAdapter {
@@ -110,7 +124,11 @@ impl DashboardGraphReadAdapter {
     /// bound project graph runtime cannot serve verified dashboard graph
     /// reads, and the composition keeps `graph_read_authority` empty so every
     /// route answers its typed unavailable envelope.
-    pub fn for_project(cg: &TraceDecay, project_database: &RegisteredGlobalDb) -> Option<Self> {
+    pub fn for_project(
+        cg: &TraceDecay,
+        project_database: &RegisteredGlobalDb,
+        interactive_graph: Option<crate::mcp::server::DashboardGraphInteractiveResolver>,
+    ) -> Option<Self> {
         let project_id = ProjectId::new(cg.store_layout().identity.project_id.clone()?).ok()?;
         let scope = crate::application::context::RegisteredScopeResolver::resolve(
             cg.project_root(),
@@ -126,7 +144,29 @@ impl DashboardGraphReadAdapter {
             scope,
             profile_id,
             degree_cache: tokio::sync::Mutex::new(None),
+            project_root: cg.project_root().to_path_buf(),
+            interactive_graph,
         })
+    }
+
+    /// Opens a generation-pinned interactive reader over the retained code
+    /// graph projection store. Every absence is the typed unavailable
+    /// envelope: an unmounted resolver, an incomplete activation, and a
+    /// stale or mismatched generation each refuse rather than falling back
+    /// to relational adjacency.
+    async fn interactive_reader(
+        &self,
+    ) -> Result<CodeGraphInteractiveReader, DashboardGraphReadErrorV1> {
+        let resolver = self.interactive_graph.as_ref().ok_or_else(|| {
+            unavailable("interactive code graph reads require the daemon-owned scheduler bridge")
+        })?;
+        let store = resolver(self.project_root.clone()).await.ok_or_else(|| {
+            unavailable("code graph projection has not completed activation")
+        })?;
+        let generation = store.generation().clone();
+        store
+            .interactive_reader_with_cancellation(&generation, Arc::new(UnsignalledRead))
+            .map_err(|error| unavailable(error.to_string()))
     }
 
     async fn read_inner(
@@ -353,42 +393,157 @@ impl DashboardGraphReadAdapter {
         Ok(self.hydrate_nodes(vec![row]).await?.into_iter().next())
     }
 
+    /// Serves the neighborhood of one node from the verified code graph
+    /// projection. Node identity (the focus row and neighbor hydration) stays
+    /// on the relational node index until the cutover's identity value swap;
+    /// adjacency — callers, callees, incident edges, per-kind counts, and
+    /// neighbor degrees — is read exclusively from the generation-pinned
+    /// interactive reader.
     async fn neighbors(
         &self,
         node_id: &str,
         limit: i64,
     ) -> Result<Option<DashboardGraphNeighborsV1>, DashboardGraphReadErrorV1> {
         let conn = self.graph_database.engine_conn();
-        if queries::node_row(&conn, node_id)
+        let Some(focus_row) = queries::node_row(&conn, node_id)
             .await
             .map_err(unavailable)?
-            .is_none()
-        {
+        else {
             return Ok(None);
+        };
+        let qualified_name = match str_field(&focus_row, "qualified_name") {
+            "" => str_field(&focus_row, "name"),
+            name => name,
         }
-        let callers = queries::caller_rows(&conn, node_id, limit)
-            .await
-            .map_err(unavailable)?;
-        let callees = queries::callee_rows(&conn, node_id, limit)
-            .await
-            .map_err(unavailable)?;
-        let edges = queries::neighborhood_edge_rows(&conn, node_id, limit)
+        .to_owned();
+        if qualified_name.is_empty() {
+            return Err(unavailable(
+                "dashboard graph node row carries no qualified name to resolve \
+                 against the published code graph generation",
+            ));
+        }
+        let focus_kind = str_field(&focus_row, "kind").to_owned();
+        let max_relations = usize::try_from(limit)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| DashboardGraphReadErrorV1::InvalidRequest {
+                detail: format!("neighbor limit must be positive, got {limit}"),
+            })?;
+        let reader = self.interactive_reader().await?;
+        let neighborhood = tokio::task::spawn_blocking(move || {
+            interactive_neighborhood(&reader, &qualified_name, &focus_kind, max_relations)
+        })
+        .await
+        .map_err(|error| {
+            unavailable(format!("interactive adjacency read did not complete: {error}"))
+        })??;
+
+        // Neighbor hydration: map projection occurrences back onto relational
+        // node rows by qualified name so the served id-space stays coherent
+        // with the not-yet-cut Search/Node operations. A neighbor the node
+        // index does not know is still served, keyed by its occurrence — the
+        // projection is the adjacency authority, not the relational rows.
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for edge in neighborhood
+            .callers
+            .iter()
+            .chain(neighborhood.callees.iter())
+        {
+            if let Some(metadata) = edge.neighbor.metadata.as_ref() {
+                names.insert(metadata.qualified_name.clone());
+            }
+        }
+        let name_list: Vec<String> = names.into_iter().collect();
+        let mut rows_by_name: BTreeMap<String, Value> = BTreeMap::new();
+        for row in queries::node_rows_by_qualified_names(&conn, &name_list)
             .await
             .map_err(unavailable)?
-            .into_iter()
-            .map(decode_edge)
-            .collect::<Result<Vec<_>, _>>()?;
-        let edges_by_kind = queries::neighborhood_edge_counts(&conn, node_id)
-            .await
-            .map_err(unavailable)?
-            .into_iter()
-            .map(|row| DashboardGraphKindCountV1 {
-                kind: str_field(&row, "kind").to_owned(),
-                count: i64_field(&row, "count"),
+        {
+            rows_by_name
+                .entry(str_field(&row, "qualified_name").to_owned())
+                .or_insert(row);
+        }
+        let mut nodes_by_occurrence: BTreeMap<SymbolOccurrenceId, DashboardGraphNodeV1> =
+            BTreeMap::new();
+        for edge in neighborhood
+            .callers
+            .iter()
+            .chain(neighborhood.callees.iter())
+        {
+            if nodes_by_occurrence.contains_key(&edge.neighbor.occurrence) {
+                continue;
+            }
+            let mut node = neighbor_node(&edge.neighbor, &rows_by_name)?;
+            node.degree = Some(
+                neighborhood
+                    .degrees
+                    .get(&edge.neighbor.occurrence)
+                    .copied()
+                    .unwrap_or(0),
+            );
+            nodes_by_occurrence.insert(edge.neighbor.occurrence.clone(), node);
+        }
+        // The caller/callee node lists keep their pre-cutover semantics:
+        // call edges only. The incident-edge list spans every semantic kind.
+        let hydrate = |edges: &[CodeGraphSemanticEdgeV1]| {
+            edges
+                .iter()
+                .filter(|edge| edge.edge.kind == RelationEdgeKindV1::Calls)
+                .map(|edge| {
+                    let mut node = nodes_by_occurrence
+                        .get(&edge.neighbor.occurrence)
+                        .cloned()
+                        .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
+                            detail: "hydrated neighborhood lost a neighbor node".to_owned(),
+                        })?;
+                    node.edge_kind = Some(relation_kind_str(edge.edge.kind).to_owned());
+                    node.edge_line = None;
+                    Ok(node)
+                })
+                .collect::<Result<Vec<_>, DashboardGraphReadErrorV1>>()
+        };
+        let callers = hydrate(&neighborhood.callers)?;
+        let callees = hydrate(&neighborhood.callees)?;
+        let mut edges =
+            Vec::with_capacity(neighborhood.callers.len() + neighborhood.callees.len());
+        for edge in &neighborhood.callers {
+            let node = nodes_by_occurrence
+                .get(&edge.neighbor.occurrence)
+                .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
+                    detail: "hydrated neighborhood lost a caller node".to_owned(),
+                })?;
+            edges.push(DashboardGraphEdgeV1 {
+                source: node.id.clone(),
+                target: node_id.to_owned(),
+                kind: relation_kind_str(edge.edge.kind).to_owned(),
+                line: None,
+                source_name: node.name.clone(),
+                target_name: None,
+            });
+        }
+        for edge in &neighborhood.callees {
+            let node = nodes_by_occurrence
+                .get(&edge.neighbor.occurrence)
+                .ok_or_else(|| DashboardGraphReadErrorV1::Corrupt {
+                    detail: "hydrated neighborhood lost a callee node".to_owned(),
+                })?;
+            edges.push(DashboardGraphEdgeV1 {
+                source: node_id.to_owned(),
+                target: node.id.clone(),
+                kind: relation_kind_str(edge.edge.kind).to_owned(),
+                line: None,
+                source_name: None,
+                target_name: node.name.clone(),
+            });
+        }
+        let edges_by_kind = neighborhood
+            .edges_by_kind
+            .iter()
+            .map(|(kind, count)| DashboardGraphKindCountV1 {
+                kind: relation_kind_str(*kind).to_owned(),
+                count: i64::try_from(*count).unwrap_or(i64::MAX),
             })
             .collect();
-        let callers = self.hydrate_nodes(callers).await?;
-        let callees = self.hydrate_nodes(callees).await?;
         Ok(Some(DashboardGraphNeighborsV1 {
             node_id: node_id.to_owned(),
             callers,
@@ -745,6 +900,184 @@ fn verify_scope(
         Ok(())
     } else {
         Err(DashboardGraphReadErrorV1::Denied)
+    }
+}
+
+/// Candidate cap when resolving a focus row's qualified name against the
+/// projection catalog; more same-name overloads than this means the name is
+/// not a usable interactive key.
+const NEIGHBOR_RESOLVE_CANDIDATES: usize = 16;
+
+/// The HTTP read path carries no per-request cancellation signal; the store
+/// lifecycle cancellation the reader was assembled with still applies.
+struct UnsignalledRead;
+
+impl GraphCancellation for UnsignalledRead {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// Adjacency bundle for one focus symbol, read entirely from the verified
+/// code graph projection.
+struct InteractiveNeighborhoodV1 {
+    callers: Vec<CodeGraphSemanticEdgeV1>,
+    callees: Vec<CodeGraphSemanticEdgeV1>,
+    edges_by_kind: Vec<(RelationEdgeKindV1, u64)>,
+    degrees: BTreeMap<SymbolOccurrenceId, i64>,
+}
+
+fn interactive_neighborhood(
+    reader: &CodeGraphInteractiveReader,
+    qualified_name: &str,
+    kind: &str,
+    max_relations: usize,
+) -> Result<InteractiveNeighborhoodV1, DashboardGraphReadErrorV1> {
+    let cancellation: Arc<dyn GraphCancellation> = Arc::new(UnsignalledRead);
+    let candidates = reader
+        .resolve_qualified_name(
+            qualified_name,
+            None,
+            NEIGHBOR_RESOLVE_CANDIDATES,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|error| unavailable(error.to_string()))?;
+    let focus = candidates
+        .iter()
+        .find(|candidate| {
+            candidate
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.kind == kind)
+        })
+        .or_else(|| candidates.first())
+        .map(|candidate| candidate.occurrence.clone())
+        .ok_or_else(|| {
+            unavailable(format!(
+                "symbol {qualified_name:?} is not present in the published code graph generation"
+            ))
+        })?;
+    let seeds = [focus.clone()];
+    let callers = single_seed_batch(
+        reader
+            .callers(&seeds, &[], max_relations, Arc::clone(&cancellation))
+            .map_err(|error| unavailable(error.to_string()))?,
+    )?;
+    let callees = single_seed_batch(
+        reader
+            .callees(&seeds, &[], max_relations, Arc::clone(&cancellation))
+            .map_err(|error| unavailable(error.to_string()))?,
+    )?;
+    let counts = reader
+        .edge_kind_counts(&focus, Arc::clone(&cancellation))
+        .map_err(|error| unavailable(error.to_string()))?;
+    let mut merged: BTreeMap<RelationEdgeKindV1, u64> = counts.outgoing;
+    for (kind, count) in counts.incoming {
+        *merged.entry(kind).or_default() += count;
+    }
+    let mut occurrences: BTreeSet<SymbolOccurrenceId> = BTreeSet::new();
+    for edge in callers.iter().chain(callees.iter()) {
+        occurrences.insert(edge.neighbor.occurrence.clone());
+    }
+    let occurrence_list: Vec<SymbolOccurrenceId> = occurrences.into_iter().collect();
+    let mut degrees: BTreeMap<SymbolOccurrenceId, i64> = BTreeMap::new();
+    if !occurrence_list.is_empty() {
+        for entry in reader
+            .degrees(&occurrence_list, cancellation)
+            .map_err(|error| unavailable(error.to_string()))?
+        {
+            let total = entry.outgoing.saturating_add(entry.incoming);
+            degrees.insert(entry.occurrence, i64::try_from(total).unwrap_or(i64::MAX));
+        }
+    }
+    Ok(InteractiveNeighborhoodV1 {
+        callers,
+        callees,
+        edges_by_kind: merged.into_iter().collect(),
+        degrees,
+    })
+}
+
+/// One-seed adjacency batches must come back with exactly one batch.
+fn single_seed_batch(
+    mut batches: Vec<Vec<CodeGraphSemanticEdgeV1>>,
+) -> Result<Vec<CodeGraphSemanticEdgeV1>, DashboardGraphReadErrorV1> {
+    if batches.len() != 1 {
+        return Err(DashboardGraphReadErrorV1::Corrupt {
+            detail: format!(
+                "interactive adjacency returned {} batches for one seed",
+                batches.len()
+            ),
+        });
+    }
+    Ok(batches.remove(0))
+}
+
+/// Hydrates one projection neighbor. Prefers the relational node row (same
+/// id-space as the not-yet-cut Search/Node operations); a symbol the node
+/// index does not know is served as projection truth keyed by its
+/// occurrence, never dropped.
+fn neighbor_node(
+    summary: &CodeGraphSymbolSummaryV1,
+    rows_by_name: &BTreeMap<String, Value>,
+) -> Result<DashboardGraphNodeV1, DashboardGraphReadErrorV1> {
+    if let Some(row) = summary
+        .metadata
+        .as_ref()
+        .and_then(|metadata| rows_by_name.get(&metadata.qualified_name))
+    {
+        return decode_node(row.clone());
+    }
+    let metadata = summary.metadata.as_ref();
+    Ok(DashboardGraphNodeV1 {
+        id: summary.occurrence.as_str().to_owned(),
+        kind: metadata.map(|m| m.kind.clone()).unwrap_or_default(),
+        name: metadata.map(|m| {
+            m.qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(m.qualified_name.as_str())
+                .to_owned()
+        }),
+        qualified_name: metadata.map(|m| m.qualified_name.clone()),
+        file_path: None,
+        start_line: None,
+        end_line: None,
+        start_column: None,
+        end_column: None,
+        attrs_start_line: None,
+        doc: None,
+        signature: None,
+        visibility: None,
+        is_async: None,
+        branches: None,
+        loops: None,
+        returns: None,
+        max_nesting: None,
+        unsafe_blocks: None,
+        unchecked_calls: None,
+        assertions: None,
+        updated_at: None,
+        parent_id: None,
+        degree: None,
+        span: None,
+        edge_kind: None,
+        edge_line: None,
+    })
+}
+
+/// Canonical relation kinds share the relational edge-kind vocabulary for
+/// the kinds both sides define, so the served wire strings are stable across
+/// the adjacency cutover.
+fn relation_kind_str(kind: RelationEdgeKindV1) -> &'static str {
+    match kind {
+        RelationEdgeKindV1::Calls => "calls",
+        RelationEdgeKindV1::Uses => "uses",
+        RelationEdgeKindV1::TypeOf => "type_of",
+        RelationEdgeKindV1::Contains => "contains",
+        RelationEdgeKindV1::Implements => "implements",
+        RelationEdgeKindV1::Extends => "extends",
+        RelationEdgeKindV1::Annotates => "annotates",
     }
 }
 

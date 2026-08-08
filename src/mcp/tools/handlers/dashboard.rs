@@ -313,6 +313,9 @@ pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    dashboard_graph_interactive_resolver: Option<
+        crate::mcp::server::DashboardGraphInteractiveResolver,
+    >,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     daemon_user_profile_id: Option<UserProfileId>,
     lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
@@ -431,6 +434,7 @@ pub(super) async fn handle_dashboard(
                     super::dashboard_graph::DashboardGraphReadAdapter::for_project(
                         retained_cg.as_ref(),
                         database,
+                        dashboard_graph_interactive_resolver.clone(),
                     )
                 })
                 .map(|adapter| {

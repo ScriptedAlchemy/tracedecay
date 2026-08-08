@@ -274,6 +274,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    /// Daemon-owned per-request resolver of the retained interactive code
+    /// graph store; absence is the typed unavailable interactive graph.
+    pub(crate) dashboard_graph_interactive_resolver:
+        Option<crate::mcp::server::DashboardGraphInteractiveResolver>,
     /// Daemon-owned bounded native transcript and session/Git convergence.
     /// Absence is a typed unavailable authority, never a local store fallback.
     pub(crate) session_sync_service:
@@ -316,6 +320,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_rollback_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            dashboard_graph_interactive_resolver: None,
             session_sync_service: None,
             preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),

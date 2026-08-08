@@ -69,6 +69,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) dashboard_graph_interactive_resolver:
+        Option<super::DashboardGraphInteractiveResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
@@ -167,6 +169,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            dashboard_graph_interactive_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             project_server_live: None,
@@ -244,6 +247,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            dashboard_graph_interactive_resolver: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -299,6 +303,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            dashboard_graph_interactive_resolver: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -366,6 +371,17 @@ impl McpServerConstructionContext {
         resolver: super::RetainedProjectGraphResolver,
     ) -> Self {
         self.retained_project_graph_resolver = Some(resolver);
+        self
+    }
+
+    /// Inject the daemon-owned resolver of the retained interactive code
+    /// graph store, so dashboard graph adjacency reads serve from the
+    /// verified projection instead of relational adjacency.
+    pub(crate) fn with_dashboard_graph_interactive_resolver(
+        mut self,
+        resolver: super::DashboardGraphInteractiveResolver,
+    ) -> Self {
+        self.dashboard_graph_interactive_resolver = Some(resolver);
         self
     }
 

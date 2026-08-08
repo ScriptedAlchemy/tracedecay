@@ -927,6 +927,9 @@ impl McpServer {
                 source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
+                dashboard_graph_interactive_resolver: self
+                    .dashboard_graph_interactive_resolver
+                    .clone(),
                 session_sync_service: session_sync_service.as_deref(),
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
