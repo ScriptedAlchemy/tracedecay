@@ -2059,7 +2059,13 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                             };
                         }
                     };
-                    let omitted_count = projected_item_count.saturating_sub(items.len());
+                    // Cycle omissions are aggregate and carry no producer
+                    // attribution. Surface that uncertainty through status,
+                    // but count only the bounded items attributable to this
+                    // projection so every advisory lane cannot claim the
+                    // same omitted finding.
+                    let omitted_count =
+                        bounded_advisory_item_omissions(projected_item_count, items.len());
                     let coverage = match (
                         advisory_projection_status(&cycle, producer).0,
                         omitted_count,
@@ -2125,11 +2131,20 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                     };
                 }
             };
-            let producer_state = advisory_projection_producer(&kind)
+            let mut producer_state = advisory_projection_producer(&kind)
                 .map(|producer| advisory_projection_status(&cycle, producer).1)
                 .unwrap_or_else(|| producer_state_for_cycle(&cycle));
-            let omission_reasons =
+            if coverage == ContextCoverage::Partial
+                && producer_state == ContextProducerState::Complete
+            {
+                producer_state = ContextProducerState::Partial;
+            }
+            let mut omission_reasons =
                 projection_omission_reasons(coverage, omitted_count, producer_state);
+            if advisory_projection_producer(&kind).is_some() && cycle.omitted_findings > 0 {
+                omission_reasons.retain(|reason| reason != "producer-partial");
+                omission_reasons.push("cycle-omissions-unattributed".to_owned());
+            }
             ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
                 root_uri: root.uri().to_owned(),
                 document_uri: request.document_uri,
@@ -2688,23 +2703,14 @@ fn cycle_coverage(cycle: &FeedbackCycleResultV1) -> ContextCoverage {
     }
 }
 
-/// The production feedback cycle appends the three advisory provider states
-/// in canonical GitHub, CI, proximity order. Keep that authority intact when
-/// projecting a single advisory lane; the aggregate cycle state describes a
-/// different product surface.
 fn advisory_provider_state(
-    provider_states: &[ProviderEvaluationStateV1],
+    providers: &[tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1],
     producer: FeedbackDiagnosticProducerV1,
 ) -> Option<ProviderEvaluationStateV1> {
-    let advisory_offset = provider_states.len().checked_sub(3)?;
-    let producer_offset = match producer {
-        FeedbackDiagnosticProducerV1::GitHubReview => 0,
-        FeedbackDiagnosticProducerV1::CiLocalization => 1,
-        FeedbackDiagnosticProducerV1::Proximity => 2,
-    };
-    provider_states
-        .get(advisory_offset.saturating_add(producer_offset))
-        .copied()
+    providers
+        .iter()
+        .find(|provider| provider.producer == producer)
+        .map(|provider| provider.state)
 }
 
 /// Translate one canonical provider evaluation, without allowing an unrelated
@@ -2713,7 +2719,33 @@ fn advisory_projection_status(
     cycle: &FeedbackCycleResultV1,
     producer: FeedbackDiagnosticProducerV1,
 ) -> (ContextCoverage, ContextProducerState) {
-    advisory_provider_status(advisory_provider_state(&cycle.provider_states, producer))
+    let (coverage, state) = advisory_provider_status(advisory_provider_state(
+        &cycle.advisory_provider_states,
+        producer,
+    ));
+    advisory_coverage(coverage, state, cycle.omitted_findings)
+}
+
+fn advisory_coverage(
+    coverage: ContextCoverage,
+    producer_state: ContextProducerState,
+    omitted_findings: u64,
+) -> (ContextCoverage, ContextProducerState) {
+    if omitted_findings > 0
+        && coverage == ContextCoverage::Complete
+        && producer_state == ContextProducerState::Complete
+    {
+        // The aggregate result does not identify which advisory producer lost
+        // the finding. It is therefore partiality of the cycle, not a
+        // producer-specific omitted count.
+        (ContextCoverage::Partial, ContextProducerState::Partial)
+    } else {
+        (coverage, producer_state)
+    }
+}
+
+fn bounded_advisory_item_omissions(projected_item_count: usize, returned_items: usize) -> usize {
+    projected_item_count.saturating_sub(returned_items)
 }
 
 fn advisory_provider_status(
@@ -3249,17 +3281,19 @@ mod projection_tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        LspFeedbackProjectionScope, ProjectionChangeQueue, advisory_finding_matches,
-        advisory_projection_producer, advisory_provider_state, advisory_provider_status,
-        bind_test_run_document_content, feedback_content_is_current, finding_item,
-        finding_matches_document, ordered_context_changes, test_run_projection,
+        LspFeedbackProjectionScope, ProjectionChangeQueue, advisory_coverage,
+        advisory_finding_matches, advisory_projection_producer, advisory_provider_state,
+        advisory_provider_status, bind_test_run_document_content, bounded_advisory_item_omissions,
+        feedback_content_is_current, finding_item, finding_matches_document,
+        ordered_context_changes, test_run_projection,
     };
     use crate::operation_stream::{ManagedTestRunResult, ManagedTestRunSnapshot, OperationId};
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
-        FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1,
-        FeedbackDiagnosticProducerV1, FeedbackDiagnosticProjectionV1, FeedbackFindingId,
-        FeedbackFindingLifecycleV1, FeedbackFindingV1, ProviderEvaluationStateV1,
+        FeedbackAdvisoryProviderStateV1, FeedbackContentIdentityV1,
+        FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
+        FeedbackDiagnosticProjectionV1, FeedbackFindingId, FeedbackFindingLifecycleV1,
+        FeedbackFindingV1, ProviderEvaluationStateV1,
     };
     use tracedecay_domain::{
         CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, FileOccurrenceId,
@@ -3513,10 +3547,18 @@ mod projection_tests {
             "a finding for another document must not receive this document's handle"
         );
         let states = [
-            ProviderEvaluationStateV1::Partial,
-            ProviderEvaluationStateV1::SupportedCompletedComplete,
-            ProviderEvaluationStateV1::Unavailable,
-            ProviderEvaluationStateV1::Failed,
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                state: ProviderEvaluationStateV1::Unavailable,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::Proximity,
+                state: ProviderEvaluationStateV1::Failed,
+            },
         ];
         assert_eq!(
             advisory_provider_state(&states, FeedbackDiagnosticProducerV1::GitHubReview),
@@ -3529,6 +3571,17 @@ mod projection_tests {
         assert_eq!(
             advisory_provider_state(&states, FeedbackDiagnosticProducerV1::Proximity),
             Some(ProviderEvaluationStateV1::Failed)
+        );
+        assert_eq!(
+            advisory_provider_state(
+                &[FeedbackAdvisoryProviderStateV1 {
+                    producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                    state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+                }],
+                FeedbackDiagnosticProducerV1::GitHubReview,
+            ),
+            None,
+            "an untyped aggregate provider vector must not be relabelled as GitHub"
         );
         assert_eq!(
             advisory_provider_status(advisory_provider_state(
@@ -3553,6 +3606,33 @@ mod projection_tests {
                 FeedbackDiagnosticProducerV1::Proximity,
             )),
             (ContextCoverage::Failed, ContextProducerState::Failed)
+        );
+    }
+
+    #[test]
+    fn aggregate_advisory_omissions_are_unattributed_and_do_not_inflate_lanes() {
+        assert_eq!(
+            advisory_coverage(
+                ContextCoverage::Complete,
+                ContextProducerState::Complete,
+                u64::MAX,
+            ),
+            (ContextCoverage::Partial, ContextProducerState::Partial),
+            "cycle-wide omissions must be unattributed partiality, not a complete producer projection"
+        );
+        assert_eq!(
+            bounded_advisory_item_omissions(7, 3),
+            4,
+            "only the lane's bounded items belong in its omitted count"
+        );
+        assert_eq!(
+            bounded_advisory_item_omissions(3, 7),
+            0,
+            "an unattributed aggregate omission never inflates an individual lane"
+        );
+        assert_eq!(
+            advisory_coverage(ContextCoverage::Complete, ContextProducerState::Complete, 0),
+            (ContextCoverage::Complete, ContextProducerState::Complete)
         );
     }
 
