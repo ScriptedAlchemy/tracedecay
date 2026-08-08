@@ -922,14 +922,28 @@ fn validate_absolute_no_symlink_components(path: &Path) -> LocalStoreLocatorResu
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            // A path prefix never names a filesystem object on its own, so it
+            // is never probed: a bare drive (`C:`) resolves against that
+            // drive's current directory, and a verbatim drive (`\\?\C:`) names
+            // the volume *device* rather than the volume's root directory.
+            // Both must wait for the root component that follows.
+            //
+            // `Path::is_absolute` cannot express that. `std` grants every
+            // prefix except `Prefix::Disk` an implicit root, so `\\?\C:`
+            // already reports absolute with no root component pushed, and the
+            // probe below would open the volume device and get back an error
+            // that is not `NotFound`. `fs::canonicalize` returns exactly this
+            // verbatim form for every Windows path, so every canonical locator
+            // root hit that device open and was reported as unavailable.
+            Component::Prefix(prefix) => {
+                current.push(prefix.as_os_str());
+                continue;
+            }
             Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
             Component::CurDir | Component::ParentDir => {
                 return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
             }
         }
-        // A Windows drive prefix by itself is not an absolute path and can be
-        // resolved relative to that drive's CWD. Wait for its root component.
         if !current.is_absolute() {
             continue;
         }
@@ -2232,5 +2246,30 @@ mod tests {
                 panic!("expected a resolved locator on this platform, got {unavailable:?}")
             }
         }
+    }
+
+    /// Every locator root reaches the component walk in the exact form
+    /// `fs::canonicalize` produced. On Windows that form carries the `\\?\`
+    /// verbatim prefix, whose leading component `std` reports as already
+    /// absolute even though it names the volume device rather than the
+    /// volume's root directory. Probing it returned a non-`NotFound` error and
+    /// every canonical root on that host resolved as
+    /// `FilesystemMetadataUnavailable`.
+    #[test]
+    fn the_canonical_form_of_an_existing_directory_passes_the_component_walk() {
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let canonical = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let nested = canonical.join("profile").join("store");
+        fs::create_dir_all(&nested).expect("nested store root");
+
+        assert_eq!(validate_absolute_no_symlink_components(&canonical), Ok(()));
+        assert_eq!(validate_absolute_no_symlink_components(&nested), Ok(()));
+        assert_eq!(
+            canonical_existing_directory(&nested),
+            Ok(nested.canonicalize().expect("canonical nested store root"))
+        );
     }
 }
