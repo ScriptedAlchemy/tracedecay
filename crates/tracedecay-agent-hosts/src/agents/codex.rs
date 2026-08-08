@@ -3,6 +3,29 @@
 //!
 //! Stages the TraceDecay plugin source for Codex. Codex itself owns cache,
 //! activation, and hook-trust mutations through its native plugin commands.
+//!
+//! # Ruling: what is driven, what stays manual
+//!
+//! Codex's plugin lifecycle is **interactive-only** (`/plugin marketplace add`,
+//! `/plugin install`, `/reload-plugins` all run inside a session), so plugin
+//! install and activation stay **manual**. TraceDecay stages the plugin source
+//! tree and the personal marketplace entry and stops; it never drives a plugin
+//! install, and it never writes `~/.codex/config.toml` — Codex owns the
+//! `tracedecay@<marketplace>` activation keys and the `[hooks.state]` trust
+//! hashes recorded there. `install_codex_plugin`,
+//! `activate_deployed_host_registration`, and `update_plugin` all reflect that:
+//! they stage and then report host-native guidance rather than acting.
+//!
+//! Codex's **MCP registry** is the one part that *is* documented as
+//! non-interactive (`codex mcp add`/`remove`/`list`/`get`). That is a host
+//! capability TraceDecay drives rather than emulates, but only for the MCP-only
+//! (non-plugin) component set, where nothing else would register the server.
+//! See [`mcp_registry`] for the whole of that adoption and its reasoning.
+//!
+//! Note on rollback ownership: `CodexIntegration::host_registration_paths`
+//! already lists `~/.codex/config.toml` and its backup, so the component-set
+//! transaction stages that file before the registry command runs and can
+//! restore the pre-command document if the effect is rejected.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,6 +46,7 @@ use super::{
 /// reads this host-native state but never writes it.
 const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
+mod mcp_registry;
 mod retired_entrypoints;
 
 /// `OpenAI` Codex CLI agent.
@@ -353,6 +377,54 @@ impl AgentIntegration for CodexIntegration {
         })
     }
 
+    /// Split by component: the MCP-only set is driven through Codex's own
+    /// non-interactive MCP registry; anything carrying `Core` keeps the
+    /// host-native (manual) plugin path.
+    ///
+    /// Codex publishes `codex mcp add`/`remove` as non-interactive commands, so
+    /// the MCP route is a host capability TraceDecay drives rather than
+    /// emulates. Codex's *plugin* lifecycle has no such command — install and
+    /// activation happen inside a session — so it stays manual, and this method
+    /// still forwards a `Core`-bearing set to
+    /// `activate_deployed_host_registration`, which reports the
+    /// host-native guidance instead of acting. That split is deliberate: a
+    /// plugin install already carries the MCP route inside its bundled
+    /// `.mcp.json`, and adding a standalone server beside it would give the
+    /// operator two identical tracedecay servers, one of them outside
+    /// `codex plugin` management. See [`mcp_registry`] for the full ruling.
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if mcp_registry::is_mcp_only_component_set(components) {
+            let codex_cli = mcp_registry::require_codex_cli()?;
+            return mcp_registry::codex_mcp_add_with(&codex_cli, &ctx.home, &ctx.tracedecay_bin);
+        }
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+            return self.activate_deployed_host_registration(ctx);
+        }
+        Ok(())
+    }
+
+    /// Mirrors `activate_deployed_host_component_registration`: the
+    /// MCP-only set is removed through Codex's own `codex mcp remove`, and a
+    /// `Core`-bearing set keeps the manual plugin-removal guidance.
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if mcp_registry::is_mcp_only_component_set(components) {
+            let codex_cli = mcp_registry::require_codex_cli()?;
+            return mcp_registry::codex_mcp_remove_with(&codex_cli, &ctx.home);
+        }
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+            return self.deactivate_deployed_host_registration(ctx);
+        }
+        Ok(())
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         !codex_plugin_cached_install_dirs(home).is_empty()
             || codex_plugin_manifest_path(home).exists()
@@ -601,17 +673,28 @@ impl CodexBundlePolicy {
     }
 
     /// The `serve` args baked into the bundle's `.mcp.json`.
+    ///
+    /// Both arms build on [`CODEX_MCP_SERVER_ARGS`] so this writer and the
+    /// CLI-driven registration in [`mcp_registry`] launch the same server.
     fn mcp_args(self) -> serde_json::Value {
-        match self.scope {
-            InstallScope::Global => json!(["serve"]),
-            InstallScope::ProjectLocal => json!(["serve", "--path", "."]),
-        }
+        // Scope adds to the shared base; it never restates `serve`.
+        let scoped: &[&str] = match self.scope {
+            InstallScope::Global => &[],
+            InstallScope::ProjectLocal => &["--path", "."],
+        };
+        serde_json::Value::Array(
+            CODEX_MCP_SERVER_ARGS
+                .iter()
+                .chain(scoped.iter())
+                .map(|arg| serde_json::Value::String((*arg).to_string()))
+                .collect(),
+        )
     }
 
     /// The `env` baked into the bundle's `.mcp.json`; `None` strips the key.
     fn mcp_env(self) -> Option<serde_json::Value> {
         match self.scope {
-            InstallScope::Global => Some(json!({ "TRACEDECAY_ENABLE_GLOBAL_DB": "1" })),
+            InstallScope::Global => Some(codex_mcp_server_env_object()),
             InstallScope::ProjectLocal => None,
         }
     }
@@ -824,6 +907,35 @@ const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
 const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
 const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
+
+/// Arguments the tracedecay MCP server is launched with under Codex's global
+/// scope.
+///
+/// Shared by the plugin bundle's `.mcp.json` writer
+/// ([`CodexBundlePolicy::mcp_args`]) and the CLI-driven MCP-only registration
+/// ([`mcp_registry::codex_mcp_add_with`], which passes them after `--`), so the
+/// two spellings of the same server cannot drift apart. The project-local
+/// bundle appends its own `--path .` on top of this base rather than restating
+/// `serve`.
+const CODEX_MCP_SERVER_ARGS: &[&str] = &["serve"];
+
+/// Environment the global-scope server is launched with, in the same shared
+/// role as [`CODEX_MCP_SERVER_ARGS`]: the bundle writer renders it as the
+/// `.mcp.json` `env` object and the registry driver renders one `--env
+/// KEY=VALUE` flag per entry.
+const CODEX_MCP_SERVER_ENV: &[(&str, &str)] = &[("TRACEDECAY_ENABLE_GLOBAL_DB", "1")];
+
+/// [`CODEX_MCP_SERVER_ENV`] as the JSON object the plugin bundle embeds.
+fn codex_mcp_server_env_object() -> serde_json::Value {
+    let mut env = serde_json::Map::new();
+    for (key, value) in CODEX_MCP_SERVER_ENV {
+        env.insert(
+            (*key).to_string(),
+            serde_json::Value::String((*value).to_string()),
+        );
+    }
+    serde_json::Value::Object(env)
+}
 
 fn codex_mcp_timeouts_current(mcp: &serde_json::Value) -> bool {
     let Some(server) = mcp.pointer("/mcpServers/graph") else {

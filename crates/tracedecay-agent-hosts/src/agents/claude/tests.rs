@@ -618,7 +618,11 @@ fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
     let bin_dir = tempfile::tempdir().unwrap();
     let log = bin_dir.path().join("invocations.log");
     let claude = bin_dir.path().join("claude");
-    fake_claude_cli(&claude, &log, "echo 'plugin tracedecay is not installed' >&2\nexit 4");
+    fake_claude_cli(
+        &claude,
+        &log,
+        "echo 'plugin tracedecay is not installed' >&2\nexit 4",
+    );
 
     let error = claude_plugin_deactivate_with(&claude, home.path())
         .expect_err("a non-zero host CLI exit must fail the lifecycle");
@@ -638,11 +642,9 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
     deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
     let before = std::fs::read(known_marketplaces_path(home.path())).ok();
 
-    let error = crate::agents::host_cli::require_host_cli(
-        "claude-definitely-absent",
-        CLAUDE_CLI_LIFECYCLE,
-    )
-    .expect_err("an absent host binary is a hard requirement failure");
+    let error =
+        crate::agents::host_cli::require_host_cli("claude-definitely-absent", CLAUDE_CLI_LIFECYCLE)
+            .expect_err("an absent host binary is a hard requirement failure");
 
     let TraceDecayError::Config { message } = error else {
         panic!("host CLI absence must surface as a config error");

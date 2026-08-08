@@ -473,7 +473,11 @@ fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
 /// install side addresses `<plugin>@<marketplace>`; that asymmetry is Claude
 /// Code's own CLI contract, not a TraceDecay convention.
 fn claude_plugin_deactivate_with(claude: &Path, home: &Path) -> Result<()> {
-    run_claude_plugin_step(claude, &["plugin", "uninstall", PLUGIN_SELECTION_NAME], home)?;
+    run_claude_plugin_step(
+        claude,
+        &["plugin", "uninstall", PLUGIN_SELECTION_NAME],
+        home,
+    )?;
     run_claude_plugin_step(
         claude,
         &["plugin", "marketplace", "remove", MARKETPLACE_NAME],

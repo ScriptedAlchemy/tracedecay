@@ -18,6 +18,7 @@
 //!   Output is drained on separate threads so a chatty command cannot deadlock
 //!   against a full pipe buffer while we wait.
 
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -167,30 +168,47 @@ fn is_executable_file(path: &Path) -> bool {
 /// Run one host CLI invocation under [`HOST_CLI_TIMEOUT`], capturing its typed
 /// outcome.
 ///
-/// `home` is exported as `HOME` so the host CLI operates on the same profile
-/// TraceDecay is acting for; this is what lets an isolated-HOME test drive a
-/// real lifecycle without touching the operator's own configuration.
+/// `home` is admitted as both `HOME` and the child working directory, and the
+/// rest of the environment is cleared. This lets an isolated-HOME test drive a
+/// real lifecycle without touching the operator's own configuration or
+/// workspace.
 pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result<HostCliOutcomeV1> {
-    let rendered_program = program
+    // Resolve the executable before admitting the child working directory.
+    // A relative PATH entry is relative to the operator's current directory;
+    // once `current_dir(home)` is applied below, asking the OS to resolve it
+    // again could launch a different file (or fail despite a successful
+    // preflight resolution).
+    let resolved_program =
+        std::fs::canonicalize(program).map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve `{}`: {error}", program.display()),
+        })?;
+    let rendered_program = resolved_program
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("host cli")
         .to_string();
     let rendered_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
-    let mut child = Command::new(program)
+    let (launch_program, launch_args) = resolve_launch_command(&resolved_program)?;
+    let mut command = Command::new(&launch_program);
+    command
+        .args(&launch_args)
         .args(args)
+        // Host lifecycle commands must observe the profile and directory the
+        // transaction admitted, not the operator's ambient process state.
+        .current_dir(home)
+        .env_clear()
         .env("HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "could not run `{}`: {error}",
-                program.display()
-            ),
-        })?;
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    admit_windows_profile_environment(&mut command, home);
+
+    let mut child = command.spawn().map_err(|error| TraceDecayError::Config {
+        message: format!("could not run `{}`: {error}", resolved_program.display()),
+    })?;
 
     // Drain both pipes concurrently: a command that writes more than one pipe
     // buffer would otherwise block on write while we block on wait.
@@ -213,7 +231,7 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
             }
             Err(error) => {
                 return Err(TraceDecayError::Config {
-                    message: format!("could not await `{}`: {error}", program.display()),
+                    message: format!("could not await `{}`: {error}", resolved_program.display()),
                 });
             }
         }
@@ -232,6 +250,86 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
     })
 }
 
+/// Resolve a common `#!/usr/bin/env <interpreter>` launcher before clearing
+/// the child environment.  `env` needs `PATH` to find its interpreter, but
+/// passing the operator's ambient `PATH` through would let the host command
+/// select a different executable after admission.  Resolve the interpreter
+/// once, then invoke that absolute path with no `PATH` at all.
+fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
+    #[cfg(not(unix))]
+    {
+        let _ = program;
+        return Ok((program.to_path_buf(), Vec::new()));
+    }
+
+    #[cfg(unix)]
+    {
+        let Ok(bytes) = std::fs::read(program) else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        let Some(first_line) = bytes.split(|byte| *byte == b'\n').next() else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        let Ok(first_line) = std::str::from_utf8(first_line) else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        let Some(shebang) = first_line.strip_prefix("#!") else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        let mut tokens = shebang.split_whitespace();
+        let Some(interpreter_launcher) = tokens.next() else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        if !matches!(interpreter_launcher, "/usr/bin/env" | "/bin/env") {
+            return Ok((program.to_path_buf(), Vec::new()));
+        }
+
+        // `/usr/bin/env -S node --experimental` is the other spelling emitted
+        // by common JavaScript launchers. The bounded parser accepts that
+        // interpreter-plus-arguments form, while unsupported env flags and
+        // assignments fall back to the kernel's normal shebang error instead
+        // of guessing at their semantics.
+        let mut interpreter_tokens = tokens.collect::<Vec<_>>();
+        let split_mode = interpreter_tokens.first() == Some(&"-S");
+        if split_mode {
+            interpreter_tokens.remove(0);
+        }
+        if !split_mode
+            && interpreter_tokens
+                .iter()
+                .any(|token| token.starts_with('-') || token.contains('='))
+        {
+            return Ok((program.to_path_buf(), Vec::new()));
+        }
+        let Some(interpreter) = interpreter_tokens.first().copied() else {
+            return Ok((program.to_path_buf(), Vec::new()));
+        };
+        if interpreter.starts_with('-') || interpreter.contains('=') {
+            return Ok((program.to_path_buf(), Vec::new()));
+        }
+        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
+                    program.display()
+                ),
+            })?;
+        let interpreter_path =
+            std::fs::canonicalize(&interpreter_path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "could not resolve env-shebang interpreter `{interpreter}` for `{}`: {error}",
+                    program.display()
+                ),
+            })?;
+        let mut launch_args = interpreter_tokens[1..]
+            .iter()
+            .map(|token| OsString::from(token))
+            .collect::<Vec<_>>();
+        launch_args.push(program.as_os_str().to_os_string());
+        Ok((interpreter_path, launch_args))
+    }
+}
+
 fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut buffer = String::new();
@@ -244,6 +342,21 @@ fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> std::thread::JoinHan
 
 fn join_reader(handle: std::thread::JoinHandle<String>) -> String {
     handle.join().unwrap_or_default()
+}
+
+/// Windows process launchers and host CLIs use `USERPROFILE` as the profile
+/// authority. `SystemRoot`/`ComSpec`/`PATHEXT` are platform launch metadata,
+/// not operator configuration; preserve them when present so an absolute host
+/// executable can still load the normal Windows runtime under the cleared
+/// environment. No `PATH` or host-specific profile variable is inherited.
+#[cfg(windows)]
+fn admit_windows_profile_environment(command: &mut Command, home: &Path) {
+    command.env("USERPROFILE", home);
+    for key in ["SystemRoot", "ComSpec", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -346,5 +459,172 @@ mod tests {
             message.contains("exit code 3") && message.contains("no such plugin"),
             "the host's own diagnosis must reach the operator: {message}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_receives_only_the_admitted_profile_and_working_directory() {
+        struct AmbientKiroHomeGuard {
+            previous: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl AmbientKiroHomeGuard {
+            fn set(value: &Path) -> Self {
+                let lock = crate::config::lock_user_data_dir_test_env();
+                let previous = std::env::var_os("KIRO_HOME");
+                // SAFETY: the shared profile-discovery lock is held for the
+                // guard's lifetime, so no sibling profile test observes this
+                // temporary ambient value.
+                unsafe {
+                    std::env::set_var("KIRO_HOME", value);
+                }
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for AmbientKiroHomeGuard {
+            fn drop(&mut self) {
+                // SAFETY: see `AmbientKiroHomeGuard::set`.
+                unsafe {
+                    match self.previous.take() {
+                        Some(previous) => std::env::set_var("KIRO_HOME", previous),
+                        None => std::env::remove_var("KIRO_HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("faux");
+        let ambient = tempfile::tempdir().unwrap();
+        let _ambient = AmbientKiroHomeGuard::set(ambient.path());
+        write_fake_cli(
+            &bin,
+            r#"
+printf '%s' "${KIRO_HOME-<unset>}" > "$HOME/kiro-home"
+printf '%s' "${PATH-<unset>}" > "$HOME/path"
+pwd > "$HOME/cwd"
+printf '%s' "$HOME" > "$HOME/home"
+"#,
+        );
+
+        let outcome = run_host_cli(&bin, &["mcp", "add"], home.path())
+            .expect("the isolated fake host command must launch");
+        assert!(outcome.succeeded());
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("kiro-home")).unwrap(),
+            "<unset>"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("path")).unwrap(),
+            "<unset>"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("home")).unwrap(),
+            home.path().to_string_lossy().to_string()
+        );
+        assert_eq!(
+            std::fs::canonicalize(home.path()).unwrap(),
+            std::fs::canonicalize(
+                std::fs::read_to_string(home.path().join("cwd"))
+                    .unwrap()
+                    .trim()
+            )
+            .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_shebang_interpreter_is_resolved_before_ambient_path_is_cleared() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct PathGuard {
+            previous: Option<std::ffi::OsString>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+
+        impl PathGuard {
+            fn set(path: &std::ffi::OsStr) -> Self {
+                let lock = crate::config::lock_user_data_dir_test_env();
+                let previous = std::env::var_os("PATH");
+                // SAFETY: the shared profile-discovery lock serializes this
+                // process-global test environment mutation.
+                unsafe { std::env::set_var("PATH", path) };
+                Self {
+                    previous,
+                    _lock: lock,
+                }
+            }
+        }
+
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                // SAFETY: see `PathGuard::set`.
+                unsafe {
+                    match self.previous.take() {
+                        Some(previous) => std::env::set_var("PATH", previous),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let node_dir = tempfile::tempdir().unwrap();
+        let attacker_dir = tempfile::tempdir().unwrap();
+        let node = node_dir.path().join("node");
+        std::fs::write(
+            &node,
+            r#"#!/bin/sh
+printf '%s' "$*" > "$HOME/node-args"
+printf '%s' "${PATH-<unset>}" > "$HOME/node-path"
+exit 0
+"#,
+        )
+        .unwrap();
+        let mut node_permissions = std::fs::metadata(&node).unwrap().permissions();
+        node_permissions.set_mode(0o755);
+        std::fs::set_permissions(&node, node_permissions).unwrap();
+
+        let attacker = attacker_dir.path().join("attacker");
+        std::fs::write(
+            &attacker,
+            "#!/bin/sh\nprintf '%s' invoked > \"$HOME/attacker-ran\"\n",
+        )
+        .unwrap();
+        let mut attacker_permissions = std::fs::metadata(&attacker).unwrap().permissions();
+        attacker_permissions.set_mode(0o755);
+        std::fs::set_permissions(&attacker, attacker_permissions).unwrap();
+
+        let launcher = home.path().join("kiro-cli");
+        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
+        let mut launcher_permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        launcher_permissions.set_mode(0o755);
+        std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
+
+        let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
+        let _path = PathGuard::set(&path);
+        let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
+            .expect("env-shebang launchers must run after interpreter admission");
+
+        assert!(
+            outcome.succeeded(),
+            "resolved interpreter must exit cleanly"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("node-args")).unwrap(),
+            format!("{} mcp add", launcher.display())
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("node-path")).unwrap(),
+            "<unset>",
+            "ambient PATH (including the attacker directory) must not reach the child"
+        );
+        assert!(!home.path().join("attacker-ran").exists());
     }
 }

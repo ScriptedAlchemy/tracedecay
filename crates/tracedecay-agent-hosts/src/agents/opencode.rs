@@ -5,6 +5,15 @@
 //! native TypeScript plugin deployment, and prompt/managed-skill rules.
 //! `OpenCode` uses interactive runtime approval rather than declarative tool
 //! permissions.
+//!
+//! Unlike the Claude and Kiro integrations, no half of this lifecycle is driven
+//! through the host's own CLI: the plugin deployment already *is* `OpenCode`'s
+//! own discovery contract, `opencode mcp add` is interactive, and the LSP and
+//! prompt registrations have no host command at all. [`plugin_cli`] is the
+//! decision record — including why driving `opencode plugin <module>` would
+//! double-load the plugin and could not be undone.
+
+mod plugin_cli;
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +35,12 @@ pub struct OpenCodeIntegration;
 const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../../../plugin/opencode/tracedecay.ts");
 const OPENCODE_PLUGIN_MARKER: &str = "TraceDecayPlugin";
 /// Deployed path of the managed plugin relative to the `OpenCode` config dir.
+///
+/// Load-bearing, not cosmetic: `OpenCode` scans `{plugin,plugins}/*.{ts,js}`
+/// one level deep in each config directory, so a file here is loaded with no
+/// registration step, while a sub-directory or another extension would leave a
+/// configuration that still validates and a plugin that never loads. Guarded
+/// by [`plugin_cli::is_host_discovered_plugin_path`].
 pub(crate) const OPENCODE_PLUGIN_RELATIVE: &str = "plugins/tracedecay.ts";
 pub(crate) const TRACEDECAY_LSP_EXTENSIONS: &[&str] = &[
     ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".c", ".h", ".cc", ".cpp", ".cxx", ".hh",
@@ -564,7 +579,24 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
     )])
 }
 
+/// Deploy the managed plugin to a path `OpenCode`'s own loader discovers.
+///
+/// The write is the whole registration; `opencode plugin <module>` is
+/// deliberately not driven afterwards, because it would add a *second* plugin
+/// origin beside this file rather than replace it (see [`plugin_cli`]). The
+/// destination is checked rather than assumed so a future refactor cannot
+/// quietly deploy where the host never scans.
 fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
+    if !plugin_cli::is_host_discovered_plugin_path(path) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to deploy the OpenCode plugin to {}: OpenCode only loads \
+                 `{{plugin,plugins}}/*.{{ts,js}}` from a config directory, so the plugin \
+                 would never be loaded there",
+                path.display()
+            ),
+        });
+    }
     for (_, rendered) in rendered_plugin_files(tracedecay_bin)? {
         safe_write_text_file(path, &rendered, None)?;
     }
@@ -605,6 +637,19 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
     install_registration_entries(config_path, tracedecay_bin, true, true, true)
 }
 
+/// Merge TraceDecay's `mcp` and `lsp` registrations into `opencode.json`.
+///
+/// Both stay TraceDecay-written. `opencode mcp add [name]` exists but is an
+/// interactive wizard with no non-interactive flags for the server type,
+/// command, or arguments, so an unattended lifecycle cannot drive it; custom
+/// LSP servers have no command at all. Both keys are documented,
+/// operator-editable configuration rather than host-private state, so writing
+/// them is not the emulation the host-capability doctrine forbids.
+///
+/// `plugin` is the one key here that *is* owned by a host command TraceDecay
+/// declines to drive, so forging its effect is refused on both the install and
+/// uninstall paths — see
+/// [`plugin_cli::ensure_host_owned_plugin_registration_untouched`].
 fn install_registration_entries(
     config_path: &Path,
     tracedecay_bin: &str,
@@ -628,6 +673,10 @@ fn install_registration_entries(
             return Err(e);
         }
     };
+    // Snapshot the host-recorded plugin registration before touching anything,
+    // so the write below can be proven not to have created, altered, or
+    // dropped the key `opencode plugin` owns.
+    let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
     let original_path = opencode_original_config_path(config_path);
     let has_tracedecay =
         config.pointer("/mcp/tracedecay").is_some() || config.pointer("/lsp/tracedecay").is_some();
@@ -727,6 +776,11 @@ fn install_registration_entries(
         }
     }
 
+    plugin_cli::ensure_host_owned_plugin_registration_untouched(
+        host_plugin_before.as_ref(),
+        &config,
+        config_path,
+    )?;
     safe_write_json_file(config_path, &config, backup.as_deref())?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
@@ -736,6 +790,11 @@ fn install_registration_entries(
 }
 
 /// Install-or-refresh prompt rules in AGENTS.md.
+///
+/// Stays TraceDecay-written: `OpenCode` has no command that edits instruction
+/// files, and `AGENTS.md` is operator-editable Markdown discovered by
+/// convention — no host-owned state to emulate. The block is marker-delimited
+/// so a refresh replaces exactly what TraceDecay wrote.
 fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
         PROMPT_RULE_MARKER,
@@ -767,6 +826,11 @@ fn remove_registration_entries(
         return Ok(());
     }
     let mut config = load_json_file_strict(config_path)?;
+    // Uninstall drops only what TraceDecay wrote. A plugin registration the
+    // host recorded through `opencode plugin` is not ours to remove — and
+    // OpenCode ships no removal command we could drive instead, which is one
+    // of the reasons that command is not adopted for install either.
+    let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
     let removed_mcp = remove_mcp
         && config
             .get_mut("mcp")
@@ -810,6 +874,11 @@ fn remove_registration_entries(
         })?;
         return Ok(());
     }
+    plugin_cli::ensure_host_owned_plugin_registration_untouched(
+        host_plugin_before.as_ref(),
+        &config,
+        config_path,
+    )?;
     let backup = preserve_backup
         .then(|| backup_config_file(config_path))
         .transpose()?

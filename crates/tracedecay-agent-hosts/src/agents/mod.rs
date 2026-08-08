@@ -1125,6 +1125,33 @@ pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf
     )))
 }
 
+/// Persist an already-read native-host observation without reading the file a
+/// second time. A host CLI runs outside this process, so the caller snapshots
+/// its bytes first, checks peer ownership, and then records exactly those
+/// bytes. If a foreign writer races after the snapshot, rollback compares the
+/// recorded digest to the live state and refuses instead of restoring over it.
+pub(crate) fn record_host_config_observation_bytes(
+    path: &Path,
+    contents: Option<&[u8]>,
+) -> Result<()> {
+    if HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().is_none()) {
+        return Ok(());
+    }
+    match contents {
+        Some(contents) => {
+            let metadata =
+                capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to capture metadata for {} after host CLI: {error}",
+                        path.display()
+                    ),
+                })?;
+            persist_host_config_write_intent(path, contents, Some(&metadata))
+        }
+        None => persist_host_config_remove_intent(path),
+    }
+}
+
 pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
     persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
     std::fs::remove_file(path)?;
