@@ -227,7 +227,9 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
         }
         WorkAttemptStorageError::AttemptConflict
         | WorkAttemptStorageError::RunAdmissionConflict
-        | WorkAttemptStorageError::FenceConflict => {
+        | WorkAttemptStorageError::ReservationFenced
+        | WorkAttemptStorageError::FenceConflict
+        | WorkAttemptStorageError::CapacityExceeded => {
             // Hydration never writes, so a conflict from the storage port is
             // a contract violation of the read path, not a caller race.
             page_contract_problem()

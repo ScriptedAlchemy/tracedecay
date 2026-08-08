@@ -1,5 +1,7 @@
 //! Atomic ordinary/synthesis attempt admission over one durable row authority.
 
+use std::num::NonZeroU16;
+
 use tracedecay_domain::{
     ManifestDigest, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
     WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkExecutionEnvelopeV1,
@@ -41,6 +43,14 @@ pub trait WorkSynthesisAdmissionStoragePort: WorkAttemptStoragePort {
         record: &WorkSynthesisAdmissionRecordV1,
     ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError>;
 
+    fn insert_synthesis_bounded(
+        &self,
+        authority: &WorkAuthority,
+        record: &WorkSynthesisAdmissionRecordV1,
+        maximum_active_per_repository: NonZeroU16,
+        maximum_parallel_per_task: NonZeroU16,
+    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError>;
+
     /// Loads the immutable synthesis admission. An ordinary row is a typed
     /// attempt conflict, while a missing row remains a typed not-found result.
     fn load_synthesis(
@@ -68,6 +78,24 @@ where
         &self,
         context: &RequestContext,
         command: StartWorkAttemptCommand,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.start_attempt_with_topology(context, command, None)
+    }
+
+    pub(super) fn start_attempt_bounded(
+        &self,
+        context: &RequestContext,
+        command: StartWorkAttemptCommand,
+        registered_topology: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.start_attempt_with_topology(context, command, Some(registered_topology))
+    }
+
+    fn start_attempt_with_topology(
+        &self,
+        context: &RequestContext,
+        command: StartWorkAttemptCommand,
+        registered_topology: Option<&tracedecay_domain::configuration::WorkTopologyPolicyV1>,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
         let prepared = self.prepare_start(context, command)?;
         // Replay before minting a lease. Ordinary replay is allowed only for
@@ -101,7 +129,16 @@ where
         }
         let authority = prepared.authority.clone();
         let attempt = self.lease_prepared(prepared)?;
-        match self.attempts.insert(&authority, &attempt) {
+        let inserted = match registered_topology {
+            Some(topology) => self.attempts.insert_bounded(
+                &authority,
+                &attempt,
+                topology.concurrency.maximum_active_per_repository,
+                topology.concurrency.maximum_parallel_per_task,
+            ),
+            None => self.attempts.insert(&authority, &attempt),
+        };
+        match inserted {
             Ok(WorkAttemptInsertOutcome::Inserted) => Ok(attempt),
             Ok(WorkAttemptInsertOutcome::Replayed(existing)) => Ok(*existing),
             Err(error) => Err(storage_problem(error)),
@@ -228,6 +265,7 @@ where
         context: &RequestContext,
         command: StartWorkAttemptCommand,
         request_digest: ManifestDigest,
+        registered_topology: Option<&tracedecay_domain::configuration::WorkTopologyPolicyV1>,
         build_result: F,
     ) -> Result<WorkSynthesisAdmissionV1, ApplicationProblem>
     where
@@ -250,7 +288,16 @@ where
             request_digest,
             result,
         };
-        match self.attempts.insert_synthesis(&authority, &record) {
+        let inserted = match registered_topology {
+            Some(topology) => self.attempts.insert_synthesis_bounded(
+                &authority,
+                &record,
+                topology.concurrency.maximum_active_per_repository,
+                topology.concurrency.maximum_parallel_per_task,
+            ),
+            None => self.attempts.insert_synthesis(&authority, &record),
+        };
+        match inserted {
             Ok(WorkSynthesisInsertOutcome::Inserted) => Ok(record.result),
             Ok(WorkSynthesisInsertOutcome::Replayed(result)) => Ok(*result),
             Err(error) => Err(storage_problem(error)),

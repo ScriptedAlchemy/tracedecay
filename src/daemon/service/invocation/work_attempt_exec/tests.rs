@@ -267,6 +267,16 @@ impl WorkAttemptStoragePort for AttemptStore {
         Ok(WorkAttemptInsertOutcome::Inserted)
     }
 
+    fn insert_bounded(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptV1,
+        _maximum_active_per_repository: std::num::NonZeroU16,
+        _maximum_parallel_per_task: std::num::NonZeroU16,
+    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
+        self.insert(authority, attempt)
+    }
+
     fn load(
         &self,
         authority: &WorkAuthority,

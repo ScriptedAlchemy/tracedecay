@@ -201,6 +201,38 @@ where
     P: WorkProjectionReadPort,
     W: WorkStoragePort,
 {
+    admit_work_synthesis_with_topology(attempts, context, command, None)
+}
+
+pub fn admit_work_synthesis_against_registered_topology<S, P, W>(
+    attempts: &WorkAttemptService<S, P, W>,
+    context: &RequestContext,
+    registered_topology: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
+    command: AdmitWorkSynthesisCommand,
+) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
+where
+    S: WorkSynthesisAdmissionStoragePort,
+    P: WorkProjectionReadPort,
+    W: WorkStoragePort,
+{
+    crate::require_registered_work_topology(
+        &command.start.execution_snapshot,
+        registered_topology,
+    )?;
+    admit_work_synthesis_with_topology(attempts, context, command, Some(registered_topology))
+}
+
+fn admit_work_synthesis_with_topology<S, P, W>(
+    attempts: &WorkAttemptService<S, P, W>,
+    context: &RequestContext,
+    command: AdmitWorkSynthesisCommand,
+    registered_topology: Option<&tracedecay_domain::configuration::WorkTopologyPolicyV1>,
+) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
+where
+    S: WorkSynthesisAdmissionStoragePort,
+    P: WorkProjectionReadPort,
+    W: WorkStoragePort,
+{
     if command.sources.is_empty() {
         return Err(invalid_problem(
             "application.work-synthesis.no-sources",
@@ -273,20 +305,23 @@ where
         })
         .map(|envelope| envelope.source.clone())
         .collect();
-    let admission =
-        attempts.start_synthesis(context, command.start, request_digest, move |attempt| {
-            WorkSynthesisAdmissionV1 {
-                draft: WorkflowSynthesisDraft {
-                    output_name: command.output_name,
-                    synthesis_attempt: attempt.identity().clone(),
-                    cited_source_digests,
-                },
-                attempt,
-                source_set,
-                groups,
-                uncited,
-            }
-        })?;
+    let admission = attempts.start_synthesis(
+        context,
+        command.start,
+        request_digest,
+        registered_topology,
+        move |attempt| WorkSynthesisAdmissionV1 {
+            draft: WorkflowSynthesisDraft {
+                output_name: command.output_name,
+                synthesis_attempt: attempt.identity().clone(),
+                cited_source_digests,
+            },
+            attempt,
+            source_set,
+            groups,
+            uncited,
+        },
+    )?;
     Ok(WorkSynthesisAttemptV1::Admitted(Box::new(admission)))
 }
 

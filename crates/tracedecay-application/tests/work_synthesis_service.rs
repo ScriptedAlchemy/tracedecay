@@ -291,6 +291,16 @@ impl WorkAttemptStoragePort for AttemptStore {
         Ok(WorkAttemptInsertOutcome::Inserted)
     }
 
+    fn insert_bounded(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptV1,
+        _maximum_active_per_repository: std::num::NonZeroU16,
+        _maximum_parallel_per_task: std::num::NonZeroU16,
+    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
+        self.insert(authority, attempt)
+    }
+
     fn load(
         &self,
         authority: &WorkAuthority,
@@ -437,6 +447,16 @@ impl WorkSynthesisAdmissionStoragePort for AttemptStore {
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         inner.rows.insert(key, payload);
         Ok(WorkSynthesisInsertOutcome::Inserted)
+    }
+
+    fn insert_synthesis_bounded(
+        &self,
+        authority: &WorkAuthority,
+        record: &WorkSynthesisAdmissionRecordV1,
+        _maximum_active_per_repository: std::num::NonZeroU16,
+        _maximum_parallel_per_task: std::num::NonZeroU16,
+    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
+        self.insert_synthesis(authority, record)
     }
 
     fn load_synthesis(

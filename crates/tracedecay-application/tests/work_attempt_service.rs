@@ -250,6 +250,53 @@ impl WorkAttemptStoragePort for AttemptStore {
         Ok(WorkAttemptInsertOutcome::Inserted)
     }
 
+    fn insert_bounded(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptV1,
+        maximum_active_per_repository: std::num::NonZeroU16,
+        maximum_parallel_per_task: std::num::NonZeroU16,
+    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
+        let payload =
+            serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let mut inner = self.inner.lock().unwrap();
+        let key = attempt_key(authority, attempt.identity());
+        if let Some(existing) = inner.rows.get(&key) {
+            return if *existing == payload {
+                serde_json::from_str(existing)
+                    .map(WorkAttemptInsertOutcome::Replayed)
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)
+            } else {
+                Err(WorkAttemptStorageError::AttemptConflict)
+            };
+        }
+        let mut repository_active = 0usize;
+        let mut task_active = 0usize;
+        for ((row_authority, _), payload) in &inner.rows {
+            if row_authority.project_id() != authority.project_id()
+                || row_authority.repository_id() != authority.repository_id()
+            {
+                continue;
+            }
+            let existing: WorkAttemptV1 =
+                serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            if existing.is_terminal() {
+                continue;
+            }
+            repository_active += 1;
+            if existing.identity().task_id() == attempt.identity().task_id() {
+                task_active += 1;
+            }
+        }
+        if repository_active >= usize::from(maximum_active_per_repository.get())
+            || task_active >= usize::from(maximum_parallel_per_task.get())
+        {
+            return Err(WorkAttemptStorageError::CapacityExceeded);
+        }
+        inner.rows.insert(key, payload);
+        Ok(WorkAttemptInsertOutcome::Inserted)
+    }
+
     fn load(
         &self,
         authority: &WorkAuthority,
@@ -538,6 +585,27 @@ fn start_refuses_a_caller_topology_that_differs_from_registered_authority() {
             .kind(),
         ApplicationProblemKind::NotFoundOrNotAuthorized
     );
+}
+
+#[test]
+fn registered_topology_saturates_parallel_attempt_admission() {
+    let (attempts, work, context) = fixture("project.attempt.topology-capacity");
+    let task = "task.attempt.topology-capacity";
+    admit_work(&work, &context, task);
+    let topology = tracedecay_domain::safe_work_topology_policy_v1();
+    let first = attempts
+        .start_against_registered_topology(&context, &topology, start_command(task, "attempt.1"))
+        .unwrap();
+
+    let saturated = attempts
+        .start_against_registered_topology(&context, &topology, start_command(task, "attempt.2"))
+        .expect_err("the registered one-attempt topology must fence a second child");
+    assert_eq!(saturated.kind(), ApplicationProblemKind::Saturated);
+
+    let replay = attempts
+        .start_against_registered_topology(&context, &topology, start_command(task, "attempt.1"))
+        .expect("an identical attempt must replay even while capacity is full");
+    assert_eq!(replay, first);
 }
 
 #[test]
