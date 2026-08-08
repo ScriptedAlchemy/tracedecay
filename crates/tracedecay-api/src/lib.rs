@@ -11,6 +11,7 @@
 //!
 #![forbid(unsafe_code)]
 
+pub mod assets;
 pub mod configuration;
 pub mod doctor;
 pub mod feedback;
@@ -32,6 +33,9 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::BindingId;
 
+pub use assets::{
+    DashboardAssetSource, StaticDashboardAsset, StaticDashboardAssets, static_dashboard_router,
+};
 pub use handoff::{
     HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,
     handoff_application_router, handoff_invalid_request_response,

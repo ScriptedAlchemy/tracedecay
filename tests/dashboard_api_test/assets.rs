@@ -75,6 +75,20 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
                 .expect("SPA fallback should be readable"),
             index
         );
+
+        let mut api_miss = agent
+            .get(&format!("{}/api/not-a-real-route", fixture.base_url))
+            .call()
+            .expect("unknown API request should receive a response");
+        assert_eq!(api_miss.status().as_u16(), 404);
+        assert!(
+            !api_miss
+                .body_mut()
+                .read_to_string()
+                .expect("API miss body should be readable")
+                .contains("<title>TraceDecay</title>"),
+            "an unknown API route must not fall through to the dashboard shell"
+        );
     });
 }
 
