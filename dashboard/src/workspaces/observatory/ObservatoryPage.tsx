@@ -25,6 +25,9 @@ import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
 import { HookHints } from './HookHints.tsx';
+import { PerformanceBudgets } from './PerformanceBudgets.tsx';
+import { PerformanceComparisons } from './PerformanceComparisons.tsx';
+import { AnalyticsControls } from './AnalyticsControls.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
@@ -77,6 +80,12 @@ export function ObservatoryPage() {
       <CanonicalObservations />
 
       <HookHints />
+
+      <PerformanceBudgets />
+
+      <PerformanceComparisons />
+
+      <AnalyticsControls />
 
       <EnvelopeSection
         title="Store telemetry"
