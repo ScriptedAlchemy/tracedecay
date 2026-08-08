@@ -7,9 +7,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    DomainError, ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, RepositoryId,
+    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1,
+    NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, RepositoryId,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -24,6 +25,10 @@ pub enum NativeIntegrationStoreError {
     StatusConflict,
     #[error("native integration terminal receipt conflicts")]
     ReceiptConflict,
+    #[error("native worktree cleanup transaction conflicts with durable intent")]
+    CleanupTransactionConflict,
+    #[error("native worktree cleanup terminal receipt conflicts")]
+    CleanupReceiptConflict,
     #[error("native integration repository is quarantined")]
     RepositoryQuarantined,
     #[error("native integration store is unavailable")]
@@ -99,6 +104,13 @@ pub enum NativeIntegrationBeginResultV1 {
     RecoveryRequired(Box<NativeIntegrationRecordV1>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeWorktreeCleanupBeginResultV1 {
+    Started(Box<NativeWorktreeCleanupTransactionV1>),
+    Replay(Box<NativeWorktreeCleanupReceiptV1>),
+    RecoveryRequired(Box<NativeWorktreeCleanupTransactionV1>),
+}
+
 /// Durable transaction authority.
 pub trait NativeIntegrationStore: Send + Sync {
     fn save_preview(&self, preview: NativeIntegrationPreviewV1)
@@ -160,4 +172,32 @@ pub trait NativeIntegrationStore: Send + Sync {
         repository_id: &RepositoryId,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<()>;
+
+    /// Durably records exact cleanup intent before native Git may mutate the
+    /// registered worktree. Exact replay returns the terminal receipt or the
+    /// in-flight record; a different intent under the confirmation digest is
+    /// a conflict.
+    fn begin_worktree_cleanup(
+        &self,
+        transaction: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1>;
+
+    fn read_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>>;
+
+    fn compare_and_swap_worktree_cleanup(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        replacement: NativeWorktreeCleanupTransactionV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1>;
+
+    fn write_worktree_cleanup_terminal(
+        &self,
+        confirmation_digest: &ManifestDigest,
+        expected_phase_revision: u64,
+        receipt: NativeWorktreeCleanupReceiptV1,
+    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1>;
 }

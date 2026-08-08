@@ -72,7 +72,17 @@ pub enum NativeIntegrationProbeV1 {
         index_digest: ManifestDigest,
         worktree_digest: ManifestDigest,
     },
-    Diverged,
+    /// The live repository still admits an exact read, but no longer matches
+    /// the snapshot bound into the transaction. Keeping the observed state
+    /// lets a pre-commit revalidation conclude truthfully that *this*
+    /// transaction made no change, without treating a known foreign update
+    /// as an uncertain post-commit outcome.
+    Diverged {
+        tip: GitOidV1,
+        tree: GitOidV1,
+        index_digest: ManifestDigest,
+        worktree_digest: ManifestDigest,
+    },
     Unavailable,
 }
 
@@ -323,6 +333,41 @@ where
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
+        // Re-read the exact native state before crossing the durable ref
+        // commit boundary. A changed ref, index, or worktree is an ordinary
+        // stale preview: no native write has started, so record the actual
+        // foreign state as this transaction's no-change terminal receipt
+        // rather than quarantining the repository as an uncertain outcome.
+        match self.native.probe(&record)? {
+            NativeIntegrationProbeV1::OldState { .. } => {}
+            NativeIntegrationProbeV1::Diverged {
+                tip,
+                tree,
+                index_digest,
+                worktree_digest,
+            } => {
+                let receipt = self.write_terminal(
+                    &record,
+                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    request.observed_at,
+                );
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+            // A candidate-looking ref or unavailable native state before the
+            // first write cannot be attributed to this transaction. Preserve
+            // the existing fail-closed inspection path for that ambiguity.
+            NativeIntegrationProbeV1::CommittedState { .. }
+            | NativeIntegrationProbeV1::Unavailable => {
+                let receipt = self.needs_inspection(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+        }
         let commit_started = advance_status(
             self.store.as_ref(),
             &candidate_verified,
@@ -357,7 +402,7 @@ where
             }
             Ok(NativeApplyEffectV1::UnknownAfterCommitPoint { candidate_tip }) => {
                 let probe = self.native.probe(&record)?;
-                if matches!(probe, NativeIntegrationProbeV1::Diverged)
+                if matches!(probe, NativeIntegrationProbeV1::Diverged { .. })
                     && let Some(candidate_tip) = candidate_tip
                 {
                     let rolled_back = self.native.rollback(&record, &candidate_tip)?;
@@ -514,7 +559,7 @@ where
                 worktree_digest,
                 observed_at,
             ),
-            NativeIntegrationProbeV1::Diverged | NativeIntegrationProbeV1::Unavailable => {
+            NativeIntegrationProbeV1::Diverged { .. } | NativeIntegrationProbeV1::Unavailable => {
                 self.needs_inspection(record, observed_at)
             }
         }
