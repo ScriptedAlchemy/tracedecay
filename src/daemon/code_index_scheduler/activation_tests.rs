@@ -502,13 +502,26 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     fs::write(&sealed_path, &corrupted).expect("write corrupted generation");
 
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut pointer: serde_json::Value =
+    let mut pointer: crate::retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&fs::read(&pointer_path).expect("read pointer"))
             .expect("parse pointer");
-    pointer["state_digest"] = serde_json::Value::String(format!(
-        "sha256:{}",
-        super::sha256_hex(corrupted.as_bytes())
-    ));
+    let restamped_digest = format!("sha256:{}", super::sha256_hex(corrupted.as_bytes()));
+    pointer.state_digest = restamped_digest.clone();
+    // Restamp every durable digest that fronts the sealed bytes so the
+    // tampering is only detectable by the generation's own canonical state
+    // digest inside the real decode.
+    for entry in &mut pointer.generation_index {
+        if entry.generation_id == pointer.generation_id {
+            entry.state_digest = restamped_digest.clone();
+        }
+    }
+    pointer.generation_index_digest = Some(
+        crate::retention::code_index_generations::durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest restamped publication index"),
+    );
     fs::write(
         &pointer_path,
         serde_json::to_vec(&pointer).expect("encode pointer"),

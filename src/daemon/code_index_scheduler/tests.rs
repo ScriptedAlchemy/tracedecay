@@ -886,7 +886,6 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     retention_generations(&fixture, store.path(), 4);
-    remove_historical_pointer_entries(store.path());
     // Sparse growth: the manifest prefix each generation is read through is
     // untouched, only the on-disk size a byte budget would have measured.
     for entry in std::fs::read_dir(store.path().join("code-generations-v1"))
@@ -903,7 +902,12 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let mut pointer: crate::retention::code_index_generations::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
             .expect("decode publication pointer");
-    pointer.generation_index[0].size_bytes = ONE_GIB;
+    // Every generation stays pointer-addressable — this test is about census
+    // cost at scale, not about a collectable backlog — so each index entry's
+    // recorded size must match its sparsely grown file.
+    for entry in &mut pointer.generation_index {
+        entry.size_bytes = ONE_GIB;
+    }
     pointer.generation_index_digest = Some(
         crate::retention::code_index_generations::durable_generation_index_digest(
             &pointer.generation_index,
