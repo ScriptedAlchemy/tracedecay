@@ -1,0 +1,119 @@
+# TraceDecay-local secret-detection supplement.
+#
+# The provider token catalogue lives in `vendor/gitleaks/gitleaks.toml` and is
+# community-maintained. This file holds only the rules that catalogue has no
+# equivalent for. Every rule here needs a stated reason for existing; if
+# upstream grows a rule that covers one, delete it from here rather than
+# carrying both.
+#
+# Schema (a superset of the vendored gitleaks schema, parsed by the same loader
+# in `../rules.rs`):
+#
+#   id                  required, unique across this file
+#   description         required, human-facing rationale
+#   regex               required
+#   kind                required here, absent upstream: which detector the match
+#                       is attributed to — "private_key" | "bearer_token" |
+#                       "known_credential" | "credential_assignment"
+#   profiles            required here: which scan profiles load the rule —
+#                       "observation" (inline record capture) and/or "memory"
+#                       (durable memory-fact writes, a stricter profile)
+#   assignment_min_len  optional: opts the rule into the bounded key=value scan,
+#                       where the match is extended past the delimiter across a
+#                       quoted or unquoted value and dropped when the value is
+#                       shorter than this many bytes
+#   entropy             optional, same meaning as upstream (bits per character,
+#                       exclusive lower bound on the extracted secret)
+#   secretGroup         optional, same meaning as upstream
+#
+# `kind` and `profiles` are mandatory here precisely because they are not
+# upstream concepts: a vendored rule gets its kind inferred and runs in both
+# profiles, whereas a local rule has to say what it is.
+
+[[rules]]
+id = "tracedecay-private-key-block"
+description = """
+Whole PEM private-key block, including a block that the record truncated before
+its END armour. Upstream `private-key` requires at least 64 bytes of body *and*
+a closing `KEY-----`, so it does not fire on a transcript that was cut mid-key —
+which is exactly the case a capture-time sanitizer has to survive.
+"""
+kind = "private_key"
+profiles = ["observation"]
+regex = '''(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)'''
+
+[[rules]]
+id = "tracedecay-private-key-header"
+description = """
+Private-key armour header alone. The memory profile only ever answers "is this
+content secret-like", never "which bytes do I replace", so the header is
+sufficient evidence and matching it does not require scanning a whole key.
+"""
+kind = "private_key"
+profiles = ["memory"]
+regex = '''-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----'''
+
+[[rules]]
+id = "tracedecay-bearer-token-observation"
+description = """
+`Authorization: Bearer <token>` in free text. Upstream has no bearer rule: it
+scans repository content, where a bearer header is rare, while TraceDecay scans
+agent transcripts and tool traffic, where it is the common shape.
+"""
+kind = "bearer_token"
+profiles = ["observation"]
+regex = '''(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}'''
+
+[[rules]]
+id = "tracedecay-bearer-token-memory"
+description = """
+Bearer token, memory profile. Same shape as the observation rule with a longer
+minimum, because a durable memory fact discussing bearer auth in prose should
+not be rejected over a short word following "bearer".
+"""
+kind = "bearer_token"
+profiles = ["memory"]
+regex = '''(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}'''
+
+[[rules]]
+id = "tracedecay-credential-assignment-observation"
+description = """
+Credential-shaped `key = value` assignment with a bounded value scan. Upstream
+`generic-api-key` covers the same ground with a capture group, an entropy floor
+and a large stopword list, tuned for source files. This rule is kept because its
+value scan is structural rather than character-class based: it walks a quoted or
+unquoted value to its real terminator, so it still redacts a value containing
+punctuation, and it still redacts a value whose quote the record truncated.
+"""
+kind = "credential_assignment"
+profiles = ["observation"]
+regex = '''(?i)\b(?:api[_ -]?(?:key|token)|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?(?:key|token)|client[_ -]?secret)\b[ \t]*[:=][ \t]*'''
+assignment_min_len = 6
+
+[[rules]]
+id = "tracedecay-credential-assignment-memory"
+description = """
+Credential assignment, memory profile. Separator class is tighter (no spaces
+inside the key name) and the value minimum is far higher, so ordinary prose of
+the form "token: short" is durable while a real assignment is rejected.
+"""
+kind = "credential_assignment"
+profiles = ["memory"]
+regex = '''(?i)\b(?:api[_-]?(?:key|token)|secret|token|passwd|password|credential|private[_-]?key|access[_-]?(?:key|token)|client[_-]?secret)\b[ \t]*[:=][ \t]*'''
+assignment_min_len = 16
+
+[[rules]]
+id = "tracedecay-openai-family-key"
+description = """
+OpenAI-family `sk-` keys by prefix and length alone, plus the `sk-test-NNNNNN`
+shape TraceDecay's own fixtures use. Upstream `openai-api-key` requires the
+`T3BlbkFJ` infix or an `sk-proj`/`sk-svcacct`/`sk-admin` prefix, and upstream
+`stripe-access-token` only covers `sk_`/`rk_` with an underscore. Neither fires
+on a key that a transcript truncated past its prefix, and a sanitizer that waits
+for the infix leaks the head of every partial key it sees. Prefix-and-length is
+the deliberately broader reading, and the one the rest of the workspace's
+canary fixtures are written against.
+"""
+kind = "known_credential"
+profiles = ["observation", "memory"]
+regex = '''\b(?:sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,})\b'''
