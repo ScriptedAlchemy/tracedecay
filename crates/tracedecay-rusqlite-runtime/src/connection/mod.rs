@@ -33,18 +33,36 @@ pub(crate) struct OpenedDatabaseFile {
 impl OpenedDatabaseFile {
     pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
-        let metadata = file
-            .metadata()
-            .map_err(|_| OpenedDatabaseFileError::Inspect)?;
-        if !metadata.is_file() {
-            return Err(OpenedDatabaseFileError::NotFile);
-        }
-        let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        Self::adopt(file)
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = create_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Create)?;
+        Self::adopt(file)
+    }
+
+    /// Creates and pins `path`, reporting a name collision as `Ok(None)` so a
+    /// staging allocator can retry under a fresh name instead of reading a
+    /// typed failure as a real filesystem fault.
+    ///
+    /// The pin keeps the creator's read/write handle. [`Self::pin`] reopens
+    /// read-only, which is all an identity fence needs, but a staging file is
+    /// also *flushed* through its pin, and Windows `FlushFileBuffers` requires
+    /// the handle to carry write access: it answers a read-only handle with
+    /// `ERROR_ACCESS_DENIED` on every call, where Unix `fsync` accepts a
+    /// read-only descriptor.
+    pub(crate) fn create_new_or_conflict(
+        path: &Path,
+    ) -> Result<Option<Self>, OpenedDatabaseFileError> {
+        match create_pinned_database(path) {
+            Ok(file) => Self::adopt(file).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+            Err(_) => Err(OpenedDatabaseFileError::Create),
+        }
+    }
+
+    /// Takes ownership of an already-open handle and records its identity.
+    fn adopt(file: File) -> Result<Self, OpenedDatabaseFileError> {
         let metadata = file
             .metadata()
             .map_err(|_| OpenedDatabaseFileError::Inspect)?;
@@ -165,6 +183,12 @@ impl OpenedDatabaseFile {
             .map_err(|_| OpenedDatabaseFileError::Open)
     }
 
+    /// Flushes the pinned file through the pinned handle.
+    ///
+    /// Only a handle that carries write access can answer this on Windows, so
+    /// callers that need durability must pin through
+    /// [`Self::create_new`] or [`Self::create_new_or_conflict`] rather than
+    /// [`Self::pin`], whose handle is read-only.
     pub(crate) fn sync_all(&self) -> Result<(), OpenedDatabaseFileError> {
         self.file
             .sync_all()

@@ -1,8 +1,7 @@
 use std::{
     cell::Cell,
     error::Error,
-    fmt,
-    fs::{self, OpenOptions},
+    fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::{
@@ -424,15 +423,14 @@ impl SqliteBackupFilesystem for StagedBackupDestination {
                 ".{file_name}.tracedecay-backup-{}-{nonce}.tmp",
                 std::process::id()
             ));
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => {
-                    drop(file);
-                    let pinned = OpenedDatabaseFile::pin(&path).map_err(file_identity_error)?;
+            // The staging file is pinned through the handle that created it.
+            // Re-pinning by pathname would hand back a read-only handle, and
+            // `close_and_sync_destination` flushes the staging file through
+            // that pin: Windows `FlushFileBuffers` refuses a read-only handle
+            // with `ERROR_ACCESS_DENIED`, so every online backup failed there
+            // while Unix `fsync` accepted the same read-only descriptor.
+            match OpenedDatabaseFile::create_new_or_conflict(&path) {
+                Ok(Some(pinned)) => {
                     let connection = match Connection::open_with_flags(
                         &path,
                         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -452,8 +450,8 @@ impl SqliteBackupFilesystem for StagedBackupDestination {
                     }
                     return Ok((StagedFile { path, pinned }, connection));
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(WriterOnlineBackupError::Io(error.to_string())),
+                Ok(None) => continue,
+                Err(error) => return Err(file_identity_error(error)),
             }
         }
         Err(WriterOnlineBackupError::Io(
@@ -605,6 +603,27 @@ fn interruption_error(interruption: RuntimeInterruptionV1) -> WriterActorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A staging file must be pinned through a handle that can flush it. The
+    /// pin is the same handle the durability step calls `sync_all` on, and
+    /// only a handle carrying write access can answer that on Windows -- a
+    /// read-only pin failed every online backup there with
+    /// `ERROR_ACCESS_DENIED` while passing on Unix, where `fsync` accepts a
+    /// read-only descriptor. Asserting the flush directly states the
+    /// requirement on every host instead of leaving it to one of them.
+    #[test]
+    fn a_staged_destination_is_pinned_through_a_flushable_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let mut filesystem = StagedBackupDestination::new(root.path().join("backup.sqlite3"));
+        let (staged, connection) = filesystem.create_new_private_destination().unwrap();
+
+        staged
+            .pinned
+            .sync_all()
+            .expect("the staging pin must flush the file it created");
+
+        filesystem.abandon_destination(staged, connection);
+    }
 
     #[test]
     fn private_destination_replacement_is_detected_and_not_deleted() {
