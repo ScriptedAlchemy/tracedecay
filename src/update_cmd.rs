@@ -949,14 +949,14 @@ mod tests {
     #[test]
     fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
         for agent_id in [
-            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
+            "claude", "codex", "cursor", "gemini", "hermes", "kimi", "kiro", "opencode",
         ] {
             assert!(
                 host_owns_canonical_component_set(agent_id),
                 "{agent_id} owns a canonical component set"
             );
         }
-        for agent_id in ["gemini", "copilot", "zed", "cline", "roo-code", "kilo"] {
+        for agent_id in ["copilot", "zed", "cline", "roo-code", "kilo"] {
             assert!(
                 !host_owns_canonical_component_set(agent_id),
                 "{agent_id} has no canonical component set and keeps the generated refresh"

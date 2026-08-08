@@ -3434,7 +3434,7 @@ pub(crate) async fn handle_uninstall_command(
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -3894,6 +3894,55 @@ mod tests {
         }
     }
 
+    /// Keep Kiro lifecycle tests on the native `kiro-cli` route.  The child
+    /// receives a cleared environment, so the script only uses absolute
+    /// utility paths and derives its profile from the admitted `HOME`.
+    #[cfg(unix)]
+    fn write_fake_kiro_cli(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let body = r#"#!/bin/sh
+set -eu
+config="$HOME/.kiro/settings/mcp.json"
+/bin/mkdir -p "$HOME/.kiro/settings"
+case "${1-}:${2-}" in
+  mcp:add)
+    if [ "${7-}" != "--args" ] || [ "${8-}" != "serve" ] || [ "${9-}" != "--scope" ] || [ "${10-}" != "global" ] || [ "${11-}" != "--force" ]; then
+      echo "unexpected kiro-cli mcp add arguments: $*" >&2
+      exit 64
+    fi
+    command="$6"
+    if [ -f "$config" ] && /bin/grep -q '"other"' "$config"; then
+      printf '{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
+    else
+      printf '{"mcpServers":{"tracedecay":{"command":"%s","args":["serve"]}}}\n' "$command" > "$config"
+    fi
+    ;;
+  mcp:remove)
+    if [ "${3-}" != "--name" ] || [ "${4-}" != "tracedecay" ] || [ "${5-}" != "--scope" ] || [ "${6-}" != "global" ]; then
+      echo "unexpected kiro-cli mcp remove arguments: $*" >&2
+      exit 64
+    fi
+    if [ -f "$config" ] && /bin/grep -q '"other"' "$config"; then
+      printf '{"mcpServers":{"other":{"command":"other","args":[]}}}\n' > "$config"
+    else
+      /bin/rm -f "$config"
+    fi
+    ;;
+  *)
+    echo "unexpected kiro-cli invocation: $*" >&2
+    exit 64
+    ;;
+esac
+"#;
+        std::fs::write(path, body).expect("write fake kiro-cli");
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake kiro-cli metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake kiro-cli");
+    }
+
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
         let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
@@ -4020,14 +4069,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp]
         );
+        // Gemini's extension carries the MCP server and declares no hook, so
+        // its default set is the separable MCP route and Core is a typed
+        // refusal rather than a silently skipped agent.
+        let gemini = canonical_host_component_set("gemini", None, 0)
+            .unwrap()
+            .expect("Gemini's extension registration is a supported first-party route");
+        assert_eq!(
+            gemini
+                .component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>(),
+            vec![tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp]
+        );
         assert!(
             canonical_host_component_set(
                 "gemini",
                 Some(crate::cli::HostBundleComponentArg::Core),
                 0,
             )
-            .expect("native-only agents are skipped by aggregate component lifecycle")
-            .is_none()
+            .is_err(),
+            "a component the host cannot carry is refused, not reported unavailable"
         );
     }
 
@@ -4176,14 +4240,21 @@ mod tests {
         assert_opencode_non_context_state(&preserved);
     }
 
-    /// Kiro's `context_mcp` registration surface *is* its managed artifact
-    /// (`~/.kiro/settings/mcp.json`), so the transaction's own artifact write
-    /// necessarily changes the registration revision the apply step is about
-    /// to recheck. Rechecking the full revision against the confirmed base
-    /// therefore makes the transaction invalidate itself on every run.
+    /// Kiro's global MCP registry is owned by `kiro-cli`; the component
+    /// transaction must drive that native command while retaining peer
+    /// servers instead of editing the registry behind Kiro's back.
+    #[cfg(unix)]
     #[test]
     fn kiro_context_mcp_component_set_applies_non_interactively_and_repeats() {
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4231,9 +4302,18 @@ mod tests {
     /// behind. The non-interactive path must recover that journal itself, or a
     /// single transient fault wedges every later run behind a manual
     /// `host-bundle recover`.
+    #[cfg(unix)]
     #[test]
     fn interrupted_component_set_journal_recovers_on_next_non_interactive_apply() {
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4908,13 +4988,22 @@ mod tests {
         }
     }
 
-    /// Kiro's canonical component set owns `~/.kiro/settings/mcp.json` as a
-    /// managed artifact, and the same path is Kiro's native MCP registration
-    /// surface. The non-interactive apply must still converge: the transaction's
-    /// own artifact write is not third-party registration drift.
+    /// Kiro's canonical component set drives the global registry through the
+    /// native CLI and keeps its own descriptor under `.kiro/tracedecay`. The
+    /// non-interactive apply must still converge while preserving a peer MCP
+    /// server in Kiro's shared registry.
+    #[cfg(unix)]
     #[tokio::test]
     async fn kiro_context_mcp_apply_converges_without_rollback() {
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
@@ -5017,12 +5106,10 @@ mod tests {
     /// are two writers. The transaction writes its artifacts *after* the
     /// adapter confirms a registration revision and *before* it applies, so an
     /// artifact write that moves that revision makes the adapter's recheck read
-    /// TraceDecay's own bytes as third-party drift: every apply then rolls back
-    /// with `StalePreview`. Kiro's set owned `settings/mcp.json` through both
-    /// paths; OpenCode resolved its prompt path from a directory its own
-    /// artifacts create. Both were self-invalidating exactly that way, so the
-    /// invariant is checked for every host that ships a canonical set rather
-    /// than for the host that happened to break last.
+    /// TraceDecay's own bytes as third-party drift. This invariant is checked
+    /// for every host that ships a canonical set, including hosts whose native
+    /// CLI owns the registration document separately from the managed
+    /// descriptor.
     #[test]
     fn host_artifact_writes_never_invalidate_the_confirmed_revision() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
@@ -5079,10 +5166,18 @@ mod tests {
     /// explicit reconciliation boundary. The non-interactive refresh must
     /// recover it before its next attempt instead of wedging until an operator
     /// runs `tracedecay host-bundle recover` by hand.
-    #[cfg(feature = "test-transport")]
+    #[cfg(all(unix, feature = "test-transport"))]
     #[tokio::test]
     async fn a_wedged_kiro_journal_is_recovered_by_the_next_apply() {
         let _profile = pinned_host_profile();
+        #[cfg(unix)]
+        let kiro_cli_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let kiro_cli_path = kiro_cli_dir.path().join("kiro-cli");
+        #[cfg(unix)]
+        write_fake_kiro_cli(&kiro_cli_path);
+        #[cfg(unix)]
+        let _kiro_path = EnvVarGuard::set("PATH", kiro_cli_dir.path());
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
