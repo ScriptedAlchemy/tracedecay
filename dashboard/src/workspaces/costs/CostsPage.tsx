@@ -17,6 +17,7 @@ import {
   type TokenMix,
 } from './spend.ts';
 import { CanonicalCosts } from './CanonicalCosts.tsx';
+import { TopologyMetricsCosts } from './TopologyMetricsCosts.tsx';
 
 const BASE = '/api/plugins/savings';
 
@@ -51,6 +52,7 @@ export function CostsPage() {
         * happened while the whole page sat inside a single boundary. */}
       <SavingsLedger />
       <CanonicalCosts />
+      <TopologyMetricsCosts />
     </div>
   );
 }

@@ -128,6 +128,37 @@ describe('CostsPage truth claims', () => {
 
     expect(await screen.findByText(/top 25 of 57 projects/i)).toBeTruthy();
   });
+
+  it('renders topology accounting from the canonical descriptor read without inventing a zero', async () => {
+    const payload = savingsOverviewPayload();
+    const topology = topologyMetricsPayload();
+
+    const fetch = renderCosts(payload, topology);
+
+    expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
+    expect(await screen.findByText('work execution concurrency width')).toBeTruthy();
+    expect(screen.getByText('27')).toBeTruthy();
+    expect(screen.getByText('concurrency phase · active')).toBeTruthy();
+    expect(screen.getByText('support_floor_unmet')).toBeTruthy();
+    expect(screen.queryByText('0 effects')).toBeNull();
+    expect(screen.getByText(/9 emitted · 2 delayed · 1 dropped · 4 sampled envelopes/i)).toBeTruthy();
+    expect(
+      fetch.mock.calls.some(
+        ([input]) => new URL(String(input), 'http://localhost').pathname === '/api/work/topology-metrics',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps cost observations visible when the topology authority is unavailable', async () => {
+    const payload = savingsOverviewPayload();
+
+    renderCosts(payload, topologyMetricsPayload(), 503);
+
+    expect(await screen.findByText('Execution topology accounting')).toBeTruthy();
+    expect(await screen.findByText('Source unavailable')).toBeTruthy();
+    expect(screen.getByText('provider tokens')).toBeTruthy();
+    expect(screen.queryByText('0 effects')).toBeNull();
+  });
 });
 
 /**
@@ -137,17 +168,26 @@ describe('CostsPage truth claims', () => {
  * the savings body would make the canonical panel report a schema error and
  * hide whichever failure the case is actually about.
  */
-function renderCosts(savingsOverview: unknown) {
+function renderCosts(
+  savingsOverview: unknown,
+  topology = topologyMetricsPayload(),
+  topologyStatus = 200,
+) {
+  const fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const pathname = new URL(String(input), 'http://localhost').pathname;
+    const body =
+      pathname === '/api/plugins/savings/overview'
+        ? fixtureEnvelope(savingsOverview)
+        : pathname === '/api/work/topology-metrics'
+          ? workEnvelope(topology)
+          : resolveFixture(pathname, '');
+    return new Response(JSON.stringify(body), {
+      status: pathname === '/api/work/topology-metrics' ? topologyStatus : 200,
+    });
+  });
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
-      const pathname = new URL(String(input), 'http://localhost').pathname;
-      const body =
-        pathname === '/api/plugins/savings/overview'
-          ? fixtureEnvelope(savingsOverview)
-          : resolveFixture(pathname, '');
-      return new Response(JSON.stringify(body), { status: 200 });
-    }),
+    fetch,
   );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -157,6 +197,7 @@ function renderCosts(savingsOverview: unknown) {
       <CostsPage />
     </QueryClientProvider>,
   );
+  return fetch;
 }
 
 function savingsOverviewPayload(): Record<string, unknown> {
@@ -164,4 +205,116 @@ function savingsOverviewPayload(): Record<string, unknown> {
     payload: Record<string, unknown>;
   };
   return fixture.payload;
+}
+
+function workEnvelope(payload: unknown) {
+  return {
+    kind: 'success',
+    value: { outcome: { outcome: 'evidence', value: { payload } } },
+  };
+}
+
+function topologyMetricsPayload() {
+  return {
+    authorized_scope_ref: 'project.tracedecay',
+    horizon: { since_micros: 1_753_000_000_000_000, until_micros: 1_753_003_600_000_000 },
+    watermark: 'observability:topology:41',
+    observed_at_micros: 1_753_003_600_000_000,
+    current: false,
+    coverage: coverage(12, 9, 7, 2, 1, 'partial'),
+    emission_coverage: { emitted: 9, delayed: 2, dropped: 1, sampled_events: 4 },
+    github_stack_capability: {
+      capability: null,
+      standard_git_fallback_available: null,
+      other_forge_fallback_available: null,
+      coverage: coverage(null, 0, 0, 0, 1, 'unknown'),
+      unavailable: 'no_eligible_evidence',
+    },
+    drill_anchors: [{ cursor: 'topology-observation-41' }],
+    measurements: [
+      topologyMeasurement({
+        metric: 'work_execution_concurrency_width',
+        value: 27_000,
+        unit: 'microseconds',
+        denominator: 'duration_weighted_topology_samples',
+        denominatorValue: 12,
+        dimensions: [{ dimension: 'concurrency_phase', value: 'active' }],
+      }),
+      topologyMeasurement({
+        metric: 'work_duplicate_effects_total',
+        value: null,
+        unit: 'effects',
+        denominator: 'observed_duplicate_effects',
+        denominatorValue: null,
+        unavailable: 'support_floor_unmet',
+        dimensions: [{ dimension: 'duplicate_outcome', value: 'committed' }],
+      }),
+    ],
+  };
+}
+
+function coverage(
+  eligible: number | null,
+  observed: number,
+  completed: number,
+  censored: number,
+  unknown: number,
+  state: string,
+) {
+  return { eligible, observed, completed, censored, unknown, excluded: 0, state };
+}
+
+function topologyMeasurement(spec: {
+  metric: string;
+  value: number | null;
+  unit: string;
+  denominator: string;
+  denominatorValue: number | null;
+  dimensions: unknown[];
+  unavailable?: string;
+}) {
+  const unavailable = spec.unavailable ?? null;
+  return {
+    dimensions: spec.dimensions,
+    unavailable,
+    value: {
+      descriptor_revision: 'execution-topology-metrics.v1',
+      metric: spec.metric,
+      value: spec.value,
+      unit: spec.unit,
+      denominator: spec.denominator,
+      denominator_value: spec.denominatorValue,
+      coverage: coverage(
+        spec.denominatorValue,
+        spec.value == null ? 0 : spec.denominatorValue ?? 0,
+        spec.value == null ? 0 : spec.denominatorValue ?? 0,
+        0,
+        spec.value == null ? 1 : 0,
+        spec.value == null ? 'unknown' : 'known',
+      ),
+      evidence_class: 'measurement',
+      provenance: {
+        source: 'observability_envelope',
+        source_revision: 'observability-envelope.v1',
+        projector_revision: 'execution-topology-projector.v1',
+        watermark: 'observability:topology:41',
+      },
+      cohort: {
+        descriptor_revision: `${spec.denominator}.v1`,
+        eligible_population: spec.denominator,
+      },
+      temporal: {
+        horizon: { since_micros: 1_753_000_000_000_000, until_micros: 1_753_003_600_000_000 },
+        baseline_watermark: null,
+        delta: null,
+      },
+      uncertainty: {
+        lower: spec.value,
+        upper: spec.value,
+        reason: unavailable,
+      },
+      calibration: null,
+      unavailable_reason: unavailable,
+    },
+  };
 }

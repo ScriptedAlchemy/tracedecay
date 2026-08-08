@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { MetricValueV1 } from '../contracts/generated.ts';
 import { cn } from './cn';
 import { EvidencePattern } from './EvidencePattern.tsx';
@@ -20,7 +21,14 @@ import {
  * unavailable metric occupies the same visual weight as an available one and
  * cannot be mistaken for an absent row.
  */
-export function MetricPlate({ metric }: { metric: MetricValueV1 }) {
+export function MetricPlate({
+  metric,
+  annotation,
+}: {
+  metric: MetricValueV1;
+  /** Descriptor context supplied by the canonical read that owns this cell. */
+  annotation?: ReactNode;
+}) {
   const presentation = metricPresentation(metric);
   return (
     <li
@@ -54,6 +62,8 @@ export function MetricPlate({ metric }: { metric: MetricValueV1 }) {
           ) : null}
         </span>
       </div>
+
+      {annotation ? <div className="text-3xs text-text-muted">{annotation}</div> : null}
 
       {/* The reason is the reading when there is no figure, so it sits where a
         * value would and carries the state chip rather than hiding in a
