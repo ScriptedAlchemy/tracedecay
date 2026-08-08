@@ -4,6 +4,8 @@ import {
   AdmitExecutionCommandSchema,
   AttachRuntimeEvidenceCommandSchema,
   CreateWorkCommandSchema,
+  ExecutionTopologyMetricsRequestV1Schema,
+  ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
   ReplanDependenciesCommandSchema,
   ReviewProposalRequestV1Schema,
@@ -88,6 +90,18 @@ export const WORK_TOPOLOGY_ROUTE = {
   path: "/api/work/topology",
   request: WorkTopologyViewRequestV1Schema,
   response: ExecutionTopologyViewV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/**
+ * The bounded execution accounting read behind the Work, Observatory, and
+ * Costs descriptor cells; this read describes retained observations under
+ * the requested horizon.
+ */
+export const WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE = {
+  operation: "operation.work.topology_metrics",
+  path: "/api/work/topology-metrics",
+  request: ExecutionTopologyMetricsRequestV1Schema,
+  response: ExecutionTopologyMetricsV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**

@@ -1,5 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type {
+  ExecutionTopologyMetricsRequestV1,
+  ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
   WorkAttemptListV1,
   WorkGraphReadV1,
@@ -9,6 +11,7 @@ import { workQueryKey } from '../../data/query/work.ts';
 import { callWork, type WorkResult } from './workApi.ts';
 import {
   WORK_LIST_ATTEMPTS_ROUTE,
+  WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
   WORK_TOPOLOGY_ROUTE,
   WORK_VIEWS_ROUTE,
 } from './workRoutes.ts';
@@ -41,6 +44,28 @@ import {
 /** How many attempts a page asks for. The contract admits 1..=1000; the daemon
  * decides what it can actually return and says so in `coverage`. */
 export const WORK_ATTEMPT_PAGE_SIZE = 250;
+
+/** The product-visible accounting window. It is finite so the backend can
+ * prove the horizon, while still long enough to cover the normal RC operator
+ * review. A capped result stays a typed capped result; this request never
+ * chases it into an invented total. */
+export const WORK_TOPOLOGY_METRICS_WINDOW_MICROS = 30 * 24 * 60 * 60 * 1_000_000;
+export const WORK_TOPOLOGY_METRICS_MAX_EVENTS = 10_000;
+
+/** Build the one canonical accounting request shared by Work, Observatory,
+ * and Costs consumers. `untilMicros` is injectable for a stable test, but a
+ * real read mints its upper bound at fetch time. */
+export function workTopologyMetricsRequest(
+  untilMicros: number = Date.now() * 1_000,
+): ExecutionTopologyMetricsRequestV1 {
+  return {
+    horizon: {
+      since_micros: untilMicros - WORK_TOPOLOGY_METRICS_WINDOW_MICROS,
+      until_micros: untilMicros,
+    },
+    max_events: WORK_TOPOLOGY_METRICS_MAX_EVENTS,
+  };
+}
 
 /**
  * @param enabled the execution record is drawn by one projection, so the read
@@ -80,6 +105,26 @@ export function useWorkTopology(enabled: boolean, pageSize: number = WORK_ATTEMP
         WORK_TOPOLOGY_ROUTE,
         { cursor: null, page_size: pageSize },
         scopedUrl(scope, WORK_TOPOLOGY_ROUTE.path),
+      ),
+  });
+}
+
+/**
+ * The canonical bounded accounting read. It is scoped exactly like the Work
+ * topology page, including the selected-project gateway; no dashboard surface
+ * reconstructs descriptor cells from attempts, graph rows, or policy lanes.
+ */
+export function useWorkTopologyMetrics(enabled: boolean) {
+  const scope = useScope((state) => state.scope);
+  const key = scopeKey(scope);
+  return useQuery<WorkResult<ExecutionTopologyMetricsV1>>({
+    queryKey: workQueryKey(key, 'topology-metrics', WORK_TOPOLOGY_METRICS_WINDOW_MICROS, WORK_TOPOLOGY_METRICS_MAX_EVENTS),
+    enabled,
+    queryFn: () =>
+      callWork(
+        WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE,
+        workTopologyMetricsRequest(),
+        scopedUrl(scope, WORK_EXECUTION_TOPOLOGY_METRICS_ROUTE.path),
       ),
   });
 }

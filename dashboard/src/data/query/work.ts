@@ -1,6 +1,16 @@
 const WORK_QUERY_ROOT = 'work';
 
-export type WorkReadPart = 'snapshot' | 'delta' | 'list-attempts' | 'topology' | 'views';
+export type WorkReadPart =
+  | 'snapshot'
+  | 'delta'
+  | 'list-attempts'
+  | 'topology'
+  | 'topology-metrics'
+  | 'views'
+  | 'attempt-status'
+  | 'hydrate-artifacts'
+  | 'run-control'
+  | 'placement-status';
 
 export function workQueryKey(
   scope: string,
@@ -24,7 +34,12 @@ export function workScopeInvalidationKeys(
     [WORK_QUERY_ROOT, 'delta', scope],
     [WORK_QUERY_ROOT, 'list-attempts', scope],
     [WORK_QUERY_ROOT, 'topology', scope],
+    [WORK_QUERY_ROOT, 'topology-metrics', scope],
     [WORK_QUERY_ROOT, 'views', scope],
+    [WORK_QUERY_ROOT, 'attempt-status', scope],
+    [WORK_QUERY_ROOT, 'hydrate-artifacts', scope],
+    [WORK_QUERY_ROOT, 'run-control', scope],
+    [WORK_QUERY_ROOT, 'placement-status', scope],
   ];
 }
 
