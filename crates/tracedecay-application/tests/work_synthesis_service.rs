@@ -150,6 +150,18 @@ impl WorkStoragePort for TestStore {
         history.push(request.event.clone());
         Ok(WorkAppendOutcome::Appended(rebuild(history)?))
     }
+
+    /// This double holds Work history only and declares no routing state, so
+    /// the honest answer for a task it holds is the empty snapshot, and a task
+    /// it does not hold is refused exactly the way `load` refuses it.
+    fn routing_snapshot(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<tracedecay_application::WorkRoutingSnapshotV1, WorkStorageError> {
+        self.load(authority, task_id)?;
+        Ok(tracedecay_application::WorkRoutingSnapshotV1::default())
+    }
 }
 
 fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {

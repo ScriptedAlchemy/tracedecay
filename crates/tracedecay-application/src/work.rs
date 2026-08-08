@@ -142,17 +142,22 @@ pub trait WorkStoragePort: Send + Sync {
     /// check as every other method here; it is not a provider-discovery path
     /// and it must never enumerate providers the authority has not declared.
     ///
-    /// The default answer is the empty snapshot. An adapter that holds no
-    /// routing state reports exactly that and the planner answers
-    /// `NoEligibleRoutes`; supplying a fabricated route or budget instead would
-    /// put evidence into a decision record that no authority ever declared.
+    /// An adapter that holds no routing state answers with the empty snapshot
+    /// and the planner records `NoEligibleRoutes`; supplying a fabricated route
+    /// or budget instead would put evidence into a decision record that no
+    /// authority ever declared.
+    ///
+    /// This method is REQUIRED and deliberately carries no default body. A
+    /// default here answered "no routing state" on behalf of adapters that had
+    /// never considered the question, so a storage adapter could silently route
+    /// every production proposal against a snapshot it did not author. Every
+    /// implementation must now state its own answer, and one that forgets is a
+    /// compile error rather than a silent wrong answer.
     fn routing_snapshot(
         &self,
-        _authority: &WorkAuthority,
-        _task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkStorageError> {
-        Ok(WorkRoutingSnapshotV1::default())
-    }
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkStorageError>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
