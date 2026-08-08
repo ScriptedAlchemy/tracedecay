@@ -27,11 +27,11 @@ use tracedecay_domain::{
     SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
     WorktreeId, canonical_sha256,
 };
+use tracedecay_usecases::code_index::{
+    DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
+};
 
 use crate::{
-    application::code_index::{
-        DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
-    },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
         graph_projection::{
@@ -1649,7 +1649,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     query_owners: Mutex<Option<GenerationServingCachesV1>>,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
-        Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
+        Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
@@ -1757,7 +1757,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// exact/lexical/graph search. `None` retires a stale runtime.
     pub fn replace_semantic_schedule_hook(
         &mut self,
-        hook: Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
+        hook: Option<tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
     ) {
         self.semantic_schedule = hook;
     }
@@ -2538,14 +2538,31 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
-        for outcome in outcomes {
-            let Some(candidate) = outcome? else {
-                continue;
+        // A privacy refusal is evidence about one file. Withholding it keeps
+        // the rest of the worktree indexable; only a genuine capture fault
+        // still terminates the pass.
+        let mut withheld_sources = Vec::new();
+        for (logical_path, outcome) in candidates.iter().zip(outcomes) {
+            let candidate = match outcome {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => continue,
+                Err(error) => {
+                    let withheld = git_tree_capture::classify_capture_failure(logical_path, error)?;
+                    withheld_sources.push(withheld);
+                    continue;
+                }
             };
             sanitization_receipts.insert(candidate.receipt_id);
             retained_bytes.push(candidate.retained);
             files.push(candidate.file);
             captured_files.push(candidate.captured);
+        }
+        git_tree_capture::report_withheld_sources(&withheld_sources);
+        if files.is_empty() && !withheld_sources.is_empty() {
+            return Err(CodeIndexSchedulerErrorV1::Privacy(
+                "every indexable source in this worktree was withheld by the privacy boundary"
+                    .to_owned(),
+            ));
         }
         files.sort_by(|left, right| {
             (&left.logical_path, &left.file_occurrence_id)
