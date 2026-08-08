@@ -273,23 +273,25 @@ impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
             let mut work_future = (work)(request, work_cancellation.clone());
             // Only completed or superseded work emits terminals. Owner-level
             // cancellation reports nothing: silence is a normal result, and an
-            // adapter must never invent a termination reason.
-            let emit_terminal = tokio::select! {
+            // adapter must never invent a termination reason. Cancellation
+            // drops the work future instead of awaiting it: pending work must
+            // stop when its owner retires, not run to completion.
+            let completed = tokio::select! {
                 biased;
-                () = work_cancellation.cancelled() => {
-                    (&mut work_future).await;
-                    operation
-                        .superseded
-                        .load(std::sync::atomic::Ordering::Acquire)
-                },
+                () = work_cancellation.cancelled() => false,
                 () = cancellation.cancelled() => {
                     work_cancellation.cancel();
-                    (&mut work_future).await;
-                    operation
-                        .superseded
-                        .load(std::sync::atomic::Ordering::Acquire)
+                    false
                 },
                 () = &mut work_future => true,
+            };
+            let emit_terminal = if completed {
+                true
+            } else {
+                drop(work_future);
+                operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire)
             };
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);
