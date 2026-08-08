@@ -317,12 +317,12 @@ Run application/API parity, MCP, CLI, SDK generation/conformance, retained, Scou
 - Test: all-host lifecycle, privacy ingress, and LSP saved-edit journeys
 
 **Interfaces:**
-- Consumes: shared host install/update/uninstall contract, structured sanitizer, and daemon projection authority.
-- Produces: operator-state isolation and rollback for every host, safe Kiro CLI delegation, structured metadata privacy, real advisory registrations, and distinct absent/unsupported/denied/scope-denied states.
+- Consumes: shared declarative host bundle install/update/uninstall contract, structured sanitizer, and daemon projection authority.
+- Produces: operator-state isolation and rollback for every host, Kiro registration without a separate CLI lifecycle, structured metadata privacy, real advisory registrations, and distinct absent/unsupported/denied/scope-denied states.
 
 - [ ] **Step 1: Write failing host tests**
 
-Use an isolated HOME plus an ambient operator `KIRO_HOME`; assert the operator sentinel is unchanged, peer MCP entries survive install/update/uninstall, failure rolls back byte-for-byte, and the child runs in the admitted directory/environment. Apply the shared preservation assertions to Claude, Codex, Cursor, Kimi, OpenCode, and every supported host target.
+Use an isolated HOME plus an ambient operator `KIRO_HOME`; assert the operator sentinel is unchanged, peer MCP entries survive install/update/uninstall, and failure rolls back byte-for-byte. Assert Kiro global and workspace registrations are rendered by the same shared `mcpServers` merge authority and that install/update/uninstall require no `kiro-cli` binary. Apply the shared preservation assertions to Claude, Codex, Cursor, Kimi, OpenCode, and every supported host target.
 
 - [ ] **Step 2: Write failing privacy and LSP tests**
 
@@ -334,7 +334,7 @@ Run focused host, privacy, and LSP tests and confirm the expected isolation, lea
 
 - [ ] **Step 4: Implement shared boundaries**
 
-Clear host child environments, explicitly restore admitted variables and working directory, preserve peer configuration, add transaction/rollback semantics around CLI-owned changes, parse before sanitizing provider metadata, and derive LSP registrations/snapshots from production daemon sources. Extract cohesive privacy/Kiro/LSP responsibilities rather than growing files already above 1,000 lines.
+Replace Kiro's dirty `kiro-cli mcp add/remove` path with the shared declarative JSON bundle merge, backup, rollback, registration-state, and uninstall helpers already used by file-managed hosts. Resolve global and workspace Kiro roots only from the admitted install context, preserve peer configuration, and keep Kiro-specific code limited to its paths plus steering/agent/hook shapes. Parse before sanitizing provider metadata, and derive LSP registrations/snapshots from production daemon sources. Extract cohesive privacy/Kiro/LSP responsibilities rather than growing files already above 1,000 lines.
 
 - [ ] **Step 5: Verify GREEN and commit**
 

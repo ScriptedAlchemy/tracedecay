@@ -106,9 +106,11 @@ Expose only mounted capabilities:
   failover operations through their promised CLI/MCP/SDK/dashboard surfaces;
 - make LSP advisory registrations, snapshots, and denied outcomes derive from
   real daemon authority;
-- apply one install/update/uninstall/isolation contract across all supported
-  hosts, with a Kiro CLI adapter that clears ambient `KIRO_HOME`, controls its
-  working directory, preserves peer MCP entries, and rolls back failures;
+- apply one declarative install/update/uninstall/isolation contract across all
+  supported hosts; Kiro uses the shared JSON merge/backup/rollback authority
+  for both global and workspace `mcp.json` registration rather than a separate
+  `kiro-cli` lifecycle, while retaining only its host-specific steering, agent,
+  and hook artifact shapes;
 - parse and sanitize structured provider metadata before any GitHub, fact, or
   session sink sees it.
 
