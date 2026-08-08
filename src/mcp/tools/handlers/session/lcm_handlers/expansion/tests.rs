@@ -19,6 +19,7 @@ async fn describe_maps_summary_target_to_typed_service_and_adds_temporal_metadat
             target: "summary_node".to_string(),
             provider: "claude".to_string(),
             session_id: "session-exact".to_string(),
+            session_token_estimate: None,
             raw_message_count: 2,
             summary_node_count: 1,
             external_payload_count: 0,

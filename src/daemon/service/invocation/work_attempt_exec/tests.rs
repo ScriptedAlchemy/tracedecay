@@ -430,6 +430,7 @@ struct SnapshotShape {
     max_stdout_bytes: u64,
     max_stderr_bytes: u64,
     deadline: UtcMicros,
+    environment_allowlist: BTreeSet<String>,
     /// The pinned executable identity the preferred backend resolves through.
     executable: WorkExecutableReference,
     /// The snapshot's own fallback topology. Only this may name a successor
@@ -444,6 +445,7 @@ impl Default for SnapshotShape {
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,
             deadline: deadline_in(120),
+            environment_allowlist: BTreeSet::new(),
             executable: WorkExecutableReference::new(
                 "executable.work-attempt-exec".to_owned(),
                 digest('e'),
@@ -479,7 +481,7 @@ fn crossed_execution_snapshot(
         approval: WorkApprovalPolicy::Never,
         filesystem: WorkFilesystemPolicy::WorkspaceWrite,
         egress: WorkEgressPolicy::Deny,
-        environment_allowlist: BTreeSet::new(),
+        environment_allowlist: shape.environment_allowlist.clone(),
         credential_references: BTreeSet::new(),
         limits: WorkExecutionLimits::new(
             128_000,
@@ -840,6 +842,76 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
             WorkAttemptStateV1::Succeeded,
         ]
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_child_restores_only_the_admitted_environment_snapshot() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let environment_marker = root.join("environment");
+    let sentinel = format!("TRACEDECAY_WORK_ADMITTED_SENTINEL_{}", std::process::id());
+    let ambient_secret = format!("TRACEDECAY_WORK_AMBIENT_SECRET_{}", std::process::id());
+    let prior_sentinel = std::env::var_os(&sentinel);
+    let prior_secret = std::env::var_os(&ambient_secret);
+    // SAFETY: these unique test keys are restored before the test returns.
+    unsafe {
+        std::env::set_var(&sentinel, "admitted-sentinel");
+        std::env::remove_var(&ambient_secret);
+    }
+    let executable = fake_executable(
+        root,
+        "environment-provider",
+        &format!(
+            "#!/bin/sh\nprintf '%s|%s' \"${{{sentinel}:-missing}}\" \"${{{ambient_secret}:-missing}}\" > {marker}\ncat > /dev/null\nexit 0\n",
+            marker = environment_marker.display(),
+        ),
+    );
+    let fixture = leased_attempt(
+        root,
+        "Observe the admitted provider environment.",
+        &SnapshotShape {
+            environment_allowlist: BTreeSet::from([sentinel.to_owned()]),
+            ..SnapshotShape::default()
+        },
+    );
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    // A later ambient mutation cannot alter the child that this attempt was
+    // admitted to run, and an unadmitted secret must never cross the boundary.
+    // SAFETY: these unique test keys are restored below.
+    unsafe {
+        std::env::set_var(&sentinel, "ambient-replacement");
+        std::env::set_var(&ambient_secret, "ambient-secret");
+    }
+    execute_provider_with_environment(
+        &fixture.attempts,
+        &fixture.context,
+        &fixture.attempt,
+        &preferred(
+            executable,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+        ),
+        &admitted_environment,
+        Arc::new(Notify::new()),
+    )
+    .await;
+    let observed = std::fs::read_to_string(&environment_marker).unwrap();
+    // SAFETY: return the process environment to the state this test found.
+    unsafe {
+        match prior_sentinel {
+            Some(value) => std::env::set_var(&sentinel, value),
+            None => std::env::remove_var(&sentinel),
+        }
+        match prior_secret {
+            Some(value) => std::env::set_var(&ambient_secret, value),
+            None => std::env::remove_var(&ambient_secret),
+        }
+    }
+    assert_eq!(observed, "admitted-sentinel|missing");
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
 }
 
 // ---------------------------------------------------------------------------

@@ -225,7 +225,9 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkAttemptStorageError::AttemptConflict | WorkAttemptStorageError::FenceConflict => {
+        WorkAttemptStorageError::AttemptConflict
+        | WorkAttemptStorageError::RunAdmissionConflict
+        | WorkAttemptStorageError::FenceConflict => {
             // Hydration never writes, so a conflict from the storage port is
             // a contract violation of the read path, not a caller race.
             page_contract_problem()

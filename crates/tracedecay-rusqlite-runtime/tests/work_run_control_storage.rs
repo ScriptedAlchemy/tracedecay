@@ -16,7 +16,8 @@ mod work_registered_store;
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
-    WorkAttemptStoragePort, WorkRunControlStorageError, WorkRunControlStoragePort,
+    WorkAttemptStorageError, WorkAttemptStoragePort, WorkRunControlStorageError,
+    WorkRunControlStoragePort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
@@ -154,6 +155,82 @@ fn attempt(attempt_id: &str) -> WorkAttemptV1 {
     attempt_for(task(), run(), attempt_id)
 }
 
+fn attempt_with_admission(
+    attempt_id: &str,
+    deadline: UtcMicros,
+    topology: tracedecay_domain::WorkTopologyPolicyV1,
+) -> WorkAttemptV1 {
+    let identity = WorkAttemptIdentityV1::new(task(), run(), id::<AttemptId>(attempt_id)).unwrap();
+    let binding = WorkAttemptProjectionBindingV1::new(
+        id::<ProjectionGenerationId>("generation.run-control.storage"),
+        tracedecay_domain::WorkProjectionSequenceV1::new(7),
+        WorkVersion::new(3).unwrap(),
+        id::<ProposalId>("proposal.run-control.storage"),
+    )
+    .unwrap();
+    let execution = WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.rc.1"),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.rc.1"),
+        effective_behavior_digest: digest('c'),
+        resolution_provenance_digest: digest('d'),
+        route: route(),
+        backend: WorkProviderBackendV1::ClaudeCodeCli,
+        protocol: WorkProviderProtocol::ClaudeStreamJson,
+        model: "claude-test".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.claude.code-cli".to_owned(),
+            digest('e'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline,
+        fallback: WorkFallbackTopology::Disabled,
+        topology,
+    })
+    .unwrap();
+    let envelope = WorkExecutionEnvelopeV1::new(
+        identity.clone(),
+        binding.clone(),
+        id::<WorkflowOperationRef>("operation.run-control.execute-provider"),
+        execution,
+        id::<ProjectId>("project.run-control.storage"),
+        id::<RepositoryId>("repository.run-control.storage"),
+        id::<WorktreeId>("worktree.run-control.storage"),
+        "/tmp/run-control-storage".to_owned(),
+        Some(id::<RefId>("refs/heads/run-control-storage")),
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        "Execute the admitted provider step.".to_owned(),
+        1,
+        WorkEffectStateV1::Observational,
+    )
+    .unwrap();
+    WorkAttemptV1::new(
+        identity,
+        binding,
+        envelope,
+        WorkLeaseFenceV1::new(
+            id::<WorkLeaseId>("lease.run-control.storage"),
+            WorkFenceEpochV1::new(1).unwrap(),
+        )
+        .unwrap(),
+        WorkAttemptStateV1::Leased,
+        None,
+        Vec::new(),
+        WorkCancellationStateV1::None,
+        WorkRecoveryStateV1::Fresh,
+        route(),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
 fn succeeded(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
     let terminal = WorkTerminalEvidenceV1::succeeded(digest('9'), UtcMicros(500)).unwrap();
     attempt
@@ -243,6 +320,49 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
             .expect("this run")
             .total_attempts,
         2
+    );
+}
+
+#[test]
+fn a_later_lexical_attempt_cannot_replace_the_run_admission() {
+    let store = RegisteredWorkStore::start("run-control-first-admission");
+    let authority = authority("actor.run-control.first-admission");
+    let d1 = UtcMicros(1_000_000);
+    let d2 = UtcMicros(2_000_000);
+    let first_topology = tracedecay_domain::safe_work_topology_policy_v1();
+    let mut conflicting_topology = first_topology.clone();
+    conflicting_topology.notifications = tracedecay_domain::TopologyNotificationLevelV1::Verbose;
+
+    let first = attempt_with_admission("attempt-2", d1, first_topology);
+    store.storage().insert(&authority, &first).unwrap();
+    assert_eq!(
+        store
+            .storage()
+            .run_admission(&authority, &task(), &run())
+            .unwrap()
+            .expect("the first attempt admits the run")
+            .deadline,
+        d1
+    );
+
+    let conflicting = attempt_with_admission("attempt-10", d2, conflicting_topology);
+    assert_eq!(
+        store
+            .storage()
+            .insert(&authority, &conflicting)
+            .expect_err("a later attempt with a different admission must conflict"),
+        WorkAttemptStorageError::RunAdmissionConflict
+    );
+    // The first durable attempt remains unchanged after the rejected later
+    // admission, so the caller cannot buy additional deadline or topology.
+    assert_eq!(
+        store
+            .storage()
+            .run_admission(&authority, &task(), &run())
+            .unwrap()
+            .expect("the first admission remains durable")
+            .deadline,
+        d1
     );
 }
 

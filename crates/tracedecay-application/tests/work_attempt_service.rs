@@ -513,6 +513,34 @@ fn start_is_denied_without_admitted_execution() {
 }
 
 #[test]
+fn start_refuses_a_caller_topology_that_differs_from_registered_authority() {
+    let (attempts, work, context) = fixture("project.attempt.registered-topology");
+    let task = "task.attempt.registered-topology";
+    admit_work(&work, &context, task);
+    let mut registered = tracedecay_domain::safe_work_topology_policy_v1();
+    registered.notifications = tracedecay_domain::TopologyNotificationLevelV1::Verbose;
+
+    let refusal = attempts
+        .start_against_registered_topology(&context, &registered, start_command(task, "attempt.1"))
+        .expect_err("the caller cannot self-attest a topology that the runtime did not register");
+    assert_eq!(refusal.kind(), ApplicationProblemKind::Conflict);
+    assert_eq!(
+        attempts
+            .status(
+                &context,
+                &WorkAttemptStatusRequestV1 {
+                    task_id: id(task),
+                    run_id: id(&format!("run.{task}")),
+                    attempt_id: id("attempt.1"),
+                },
+            )
+            .expect_err("topology refusal must happen before the provider attempt is leased")
+            .kind(),
+        ApplicationProblemKind::NotFoundOrNotAuthorized
+    );
+}
+
+#[test]
 fn start_leases_once_and_replays_identical_admissions() {
     let (attempts, work, context) = fixture("project.attempt.start");
     admit_work(&work, &context, "task.attempt.start");

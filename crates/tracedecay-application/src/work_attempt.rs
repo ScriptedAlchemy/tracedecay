@@ -17,7 +17,7 @@ use tracedecay_domain::{
     WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1,
     WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
     WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError,
-    WorkTerminalEvidenceV1, WorkflowOperationRef, canonical_sha256,
+    WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef, canonical_sha256,
 };
 
 use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
@@ -42,6 +42,8 @@ pub enum WorkAttemptStorageError {
     NotFoundOrNotAuthorized,
     #[error("work attempt identity was reused with different content")]
     AttemptConflict,
+    #[error("work attempt conflicts with the run's first admitted deadline or topology")]
+    RunAdmissionConflict,
     #[error("work attempt lease fence changed")]
     FenceConflict,
     #[error("work attempt storage is unavailable")]
@@ -403,6 +405,19 @@ where
         context: &RequestContext,
         command: StartWorkAttemptCommand,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.start_attempt(context, command)
+    }
+
+    /// Starts an attempt only when its caller-supplied snapshot agrees with
+    /// the topology authority pinned by the daemon registration. The command
+    /// cannot self-attest a different topology and gain a provider lease.
+    pub fn start_against_registered_topology(
+        &self,
+        context: &RequestContext,
+        registered_topology: &WorkTopologyPolicyV1,
+        command: StartWorkAttemptCommand,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        require_registered_work_topology(&command.execution_snapshot, registered_topology)?;
         self.start_attempt(context, command)
     }
 
@@ -997,6 +1012,22 @@ where
     }
 }
 
+/// Refuses a caller-provided execution snapshot that does not agree with the
+/// registered topology authority. Both ordinary and synthesis admission call
+/// this before a provider lease can be observed by the daemon.
+pub fn require_registered_work_topology(
+    snapshot: &WorkExecutionSnapshot,
+    registered_topology: &WorkTopologyPolicyV1,
+) -> Result<(), ApplicationProblem> {
+    if snapshot.topology() == registered_topology {
+        return Ok(());
+    }
+    Err(conflict_problem(
+        "application.work-attempt.topology-conflict",
+        "The Work attempt topology differs from the registered runtime authority.",
+    ))
+}
+
 fn terminal_for_outcome(
     outcome: &WorkAttemptProviderOutcomeV1,
     digest: ManifestDigest,
@@ -1088,6 +1119,10 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
         WorkAttemptStorageError::AttemptConflict => conflict_problem(
             "application.work-attempt.identity-conflict",
             "The Work attempt identity was already used with different content.",
+        ),
+        WorkAttemptStorageError::RunAdmissionConflict => conflict_problem(
+            "application.work-attempt.run-admission-conflict",
+            "The Work attempt differs from this run's first admitted deadline or topology.",
         ),
         WorkAttemptStorageError::FenceConflict => conflict_problem(
             "application.work-attempt.fence-conflict",

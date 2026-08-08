@@ -429,12 +429,18 @@ fn dispatch_work_application(
             // the run-control service; this dispatch only composes the two
             // application authorities in the order the fence requires, exactly
             // as the attempt list composes the topology authority below.
-            let started = match services.run_control().admit_reservation(
-                &context,
-                &command.task_id,
-                &command.run_id,
+            let started = match tracedecay_application::require_registered_work_topology(
+                &command.execution_snapshot,
+                &registered.work_topology_policy,
             ) {
-                Ok(()) => services.attempts().start(&context, command),
+                Ok(()) => match services.run_control().admit_reservation(
+                    &context,
+                    &command.task_id,
+                    &command.run_id,
+                ) {
+                    Ok(()) => services.attempts().start(&context, command),
+                    Err(problem) => Err(problem),
+                },
                 Err(problem) => Err(problem),
             };
             if let (Ok(attempt), Some(project_root)) = (&started, project_root.as_ref())
@@ -466,16 +472,22 @@ fn dispatch_work_application(
             // fence every other attempt admission honors; the synthesis
             // service then reads each source outcome from the authority and
             // starts the attempt through the standard admission.
-            let admitted = match services.run_control().admit_reservation(
-                &context,
-                &command.start.task_id,
-                &command.start.run_id,
+            let admitted = match tracedecay_application::require_registered_work_topology(
+                &command.start.execution_snapshot,
+                &registered.work_topology_policy,
             ) {
-                Ok(()) => tracedecay_application::admit_work_synthesis(
-                    services.attempts(),
+                Ok(()) => match services.run_control().admit_reservation(
                     &context,
-                    command,
-                ),
+                    &command.start.task_id,
+                    &command.start.run_id,
+                ) {
+                    Ok(()) => tracedecay_application::admit_work_synthesis(
+                        services.attempts(),
+                        &context,
+                        command,
+                    ),
+                    Err(problem) => Err(problem),
+                },
                 Err(problem) => Err(problem),
             };
             if let (

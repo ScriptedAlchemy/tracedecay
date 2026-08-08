@@ -160,6 +160,8 @@ pub(super) fn spawn_attempt_execution(
     let Some(cancel) = registry.register(attempt.identity()) else {
         return;
     };
+    let admitted_environment =
+        admitted_provider_environment(attempt.execution().execution_snapshot());
     tokio::spawn(async move {
         let identity = attempt.identity().clone();
         run_attempt(
@@ -167,6 +169,7 @@ pub(super) fn spawn_attempt_execution(
             Arc::clone(&registry),
             project_root,
             attempt,
+            admitted_environment,
             cancel,
         )
         .await;
@@ -179,6 +182,7 @@ async fn run_attempt(
     _registry: Arc<WorkAttemptProcessRegistryV1>,
     project_root: PathBuf,
     attempt: WorkAttemptV1,
+    admitted_environment: BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
 ) {
     let Ok(context) = work_background_context(&registered, attempt.identity()) else {
@@ -208,7 +212,15 @@ async fn run_attempt(
                 execute_app_server(attempts, &context, &attempt, &selection, cancel).await;
             }
             _ => {
-                execute_provider(attempts, &context, &attempt, &selection, cancel).await;
+                execute_provider_with_environment(
+                    attempts,
+                    &context,
+                    &attempt,
+                    &selection,
+                    &admitted_environment,
+                    cancel,
+                )
+                .await;
             }
         },
         Err(denial) => {
@@ -443,6 +455,44 @@ async fn execute_provider<S, P, W>(
     P: tracedecay_application::WorkProjectionReadPort,
     W: tracedecay_application::WorkStoragePort,
 {
+    let admitted_environment =
+        admitted_provider_environment(attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
+        attempts,
+        context,
+        attempt,
+        selection,
+        &admitted_environment,
+        cancel,
+    )
+    .await;
+}
+
+/// Captures the exact variables the admitted snapshot permits. A missing
+/// allowlisted value stays absent; no empty replacement or ambient fallback is
+/// invented for the provider child.
+fn admitted_provider_environment(
+    snapshot: &tracedecay_domain::WorkExecutionSnapshot,
+) -> BTreeMap<String, std::ffi::OsString> {
+    snapshot
+        .environment_allowlist()
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(|value| (key.clone(), value)))
+        .collect()
+}
+
+async fn execute_provider_with_environment<S, P, W>(
+    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    selection: &ProviderSelection,
+    admitted_environment: &BTreeMap<String, std::ffi::OsString>,
+    cancel: Arc<Notify>,
+) where
+    S: tracedecay_application::WorkAttemptStoragePort,
+    P: tracedecay_application::WorkProjectionReadPort,
+    W: tracedecay_application::WorkStoragePort,
+{
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let resolved = &selection.provider;
@@ -457,10 +507,8 @@ async fn execute_provider<S, P, W>(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    for key in envelope.execution_snapshot().environment_allowlist() {
-        if let Ok(value) = std::env::var(key) {
-            command.env(key, value);
-        }
+    for (key, value) in admitted_environment {
+        command.env(key, value);
     }
 
     let mut child = match command.spawn() {

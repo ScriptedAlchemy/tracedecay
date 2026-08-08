@@ -36,7 +36,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5
                AND task_id = ?6 AND run_id = ?7
-             ORDER BY attempt_id",
+             ORDER BY rowid",
             authority_params_owned(authority)
                 .into_iter()
                 .chain(run_params(task_id, run_id))
@@ -47,21 +47,30 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
             return Ok(None);
         }
         let mut deadline: Option<UtcMicros> = None;
+        let mut topology = None;
         let mut live_attempts = Vec::new();
         let mut total_attempts = 0u32;
         for row in &rows.rows {
             let payload =
                 exact_sql_text(&row.values, 0).ok_or(WorkRunControlStorageError::Unavailable)?;
-            let attempt: WorkAttemptV1 = serde_json::from_str(payload)
-                .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+            let attempt = attempt_from_payload(payload)?;
             let terminal =
                 exact_sql_integer(&row.values, 1).ok_or(WorkRunControlStorageError::Unavailable)?;
-            // The earliest attempt in stable order carries the admitted
-            // deadline: later attempts of the same run were admitted under the
-            // same snapshot, and taking the first one keeps the answer stable
-            // as the run grows.
-            if deadline.is_none() {
-                deadline = Some(attempt.execution().deadline());
+            match (&deadline, &topology) {
+                (None, None) => {
+                    // `rowid` is assigned by the same SQLite insert that
+                    // persists the admitted attempt, so the first row is the
+                    // first durable admission. Attempt IDs are caller text
+                    // and have no authority ordering.
+                    deadline = Some(attempt.execution().deadline());
+                    topology = Some(attempt.execution().execution_snapshot().topology().clone());
+                }
+                (Some(admitted_deadline), Some(admitted_topology))
+                    if admitted_deadline == &attempt.execution().deadline()
+                        && admitted_topology
+                            == attempt.execution().execution_snapshot().topology() => {}
+                (Some(_), Some(_)) => return Err(WorkRunControlStorageError::AuthorityConflict),
+                _ => return Err(WorkRunControlStorageError::Unavailable),
             }
             if terminal == 0 {
                 live_attempts.push(attempt.identity().attempt_id().clone());
@@ -183,6 +192,24 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
             .map_err(|_| WorkRunControlStorageError::Unavailable)?;
         Ok(())
     }
+}
+
+/// The composite attempt payload is the canonical Task 1 persistence shape:
+/// the live attempt is stored with an optional immutable synthesis admission.
+/// Run control deliberately reads only the live attempt, because synthesis
+/// replay material cannot change a run's deadline or topology authority.
+fn attempt_from_payload(payload: &str) -> Result<WorkAttemptV1, WorkRunControlStorageError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredAttempt {
+        attempt: WorkAttemptV1,
+        #[serde(rename = "synthesis")]
+        _synthesis: Option<serde_json::Value>,
+    }
+
+    serde_json::from_str::<StoredAttempt>(payload)
+        .map(|record| record.attempt)
+        .map_err(|_| WorkRunControlStorageError::Unavailable)
 }
 
 fn run_params(task_id: &TaskId, run_id: &RunId) -> [ExactSqlValue; 2] {

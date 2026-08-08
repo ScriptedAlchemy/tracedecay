@@ -90,6 +90,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                 Err(WorkAttemptStorageError::AttemptConflict)
             };
         }
+        require_first_run_admission(&transaction, authority, attempt)?;
         transaction
             .execute(
                 exact_sql_statement(
@@ -359,6 +360,7 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteStorage {
                 _ => Err(WorkAttemptStorageError::AttemptConflict),
             };
         }
+        require_first_run_admission(&transaction, authority, attempt)?;
         transaction
             .execute(
                 exact_sql_statement(
@@ -531,6 +533,50 @@ fn load_payload(
         .first()
         .and_then(|row| exact_sql_text(&row.values, 0))
         .map(str::to_owned))
+}
+
+/// A run is admitted by its first durable attempt. Every later attempt is
+/// inserted in the same immediate transaction only when it carries the first
+/// attempt's immutable deadline and topology, so a caller cannot replace the
+/// run authority through a lexically earlier attempt ID.
+fn require_first_run_admission(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptV1,
+) -> Result<(), WorkAttemptStorageError> {
+    let rows = registered_work_query(
+        transaction,
+        "SELECT attempt_payload FROM work_attempts_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5
+           AND task_id = ?6 AND run_id = ?7
+         ORDER BY rowid
+         LIMIT 1",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([
+                ExactSqlValue::Text(attempt.identity().task_id().as_str().to_owned()),
+                ExactSqlValue::Text(attempt.identity().run_id().as_str().to_owned()),
+            ])
+            .collect(),
+    )
+    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    let Some(payload) = rows
+        .rows
+        .first()
+        .and_then(|row| exact_sql_text(&row.values, 0))
+    else {
+        return Ok(());
+    };
+    let first: StoredWorkAttemptV1 =
+        serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    if first.attempt.execution().deadline() == attempt.execution().deadline()
+        && first.attempt.execution().execution_snapshot().topology()
+            == attempt.execution().execution_snapshot().topology()
+    {
+        return Ok(());
+    }
+    Err(WorkAttemptStorageError::RunAdmissionConflict)
 }
 
 fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {
