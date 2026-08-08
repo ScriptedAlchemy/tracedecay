@@ -2158,8 +2158,20 @@ mod tests {
         }
     }
 
+    // Model-assisted selection is only reachable in a `token-counting` build.
+    // Without the BPE tokenizer `serialized_token_count` yields no measurement,
+    // and an unmeasurable request can never be *proven* within the input
+    // budget — so `validate_input` refuses it as `TokenBudgetExceeded` before
+    // any assistant is consulted. That refusal is the correct production
+    // behaviour (a build that cannot count tokens must not ship unbounded
+    // input to a model), which means the *typed model outcome* these tests
+    // grade simply does not exist without the feature. They are gated for the
+    // same reason `context_scout_model.rs` gates its backend tests, rather
+    // than relaxing the budget to keep a default-feature build green.
+    #[cfg(feature = "token-counting")]
     struct MismatchedReceiptModel;
 
+    #[cfg(feature = "token-counting")]
     impl ContextScoutModelAssistantV1 for MismatchedReceiptModel {
         fn backend(&self) -> ContextScoutModelBackendV1 {
             ContextScoutModelBackendV1::CodexAppServer
@@ -2190,8 +2202,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     struct CancellationIgnoringModel;
 
+    #[cfg(feature = "token-counting")]
     impl ContextScoutModelAssistantV1 for CancellationIgnoringModel {
         fn backend(&self) -> ContextScoutModelBackendV1 {
             ContextScoutModelBackendV1::CodexAppServer
@@ -2248,8 +2262,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     struct FailingModel(ContextScoutModelErrorV1);
 
+    #[cfg(feature = "token-counting")]
     impl ContextScoutModelAssistantV1 for FailingModel {
         fn backend(&self) -> ContextScoutModelBackendV1 {
             ContextScoutModelBackendV1::CodexAppServer
@@ -2265,6 +2281,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn malformed_model_output_falls_back_to_evidence_bound_determinism() {
         let selection = select_model_assisted_context_scout(
@@ -2286,6 +2303,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn model_failures_are_typed_while_deterministic_fallback_survives() {
         for (error, expected) in [
@@ -2324,6 +2342,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn mismatched_model_receipt_is_typed_invalid_output() {
         let selection = select_model_assisted_context_scout(
@@ -2343,6 +2362,7 @@ mod tests {
         assert!(selection.model_receipt.is_none());
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn model_adapter_cannot_ignore_cancellation_before_durable_selection() {
         let selection = select_model_assisted_context_scout(
@@ -2666,6 +2686,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn durable_runtime_replays_exact_entry_and_cancellation_is_generation_bound() {
         let store = DurableStore::default();
@@ -2832,6 +2853,7 @@ mod tests {
         assert!(store.0.lock().unwrap().entries.is_empty());
     }
 
+    #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn cancelled_model_run_never_reaches_the_durable_queue() {
         let store = DurableStore::default();
