@@ -302,7 +302,7 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
     let catalog = tracedecay::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
-    let definitions = get_tool_definitions();
+    let definitions = get_tool_definitions().expect("tool definitions");
 
     for operation in CURSOR_CARRYING_CODE_OPERATIONS {
         let expected = &fixture["operations"][operation.as_str()];
@@ -398,7 +398,7 @@ fn extended_primitive_reads_bind_cli_mcp_and_http() {
 
 #[test]
 fn mcp_primitive_definitions_use_application_contracts() {
-    let definitions = get_tool_definitions();
+    let definitions = get_tool_definitions().expect("tool definitions");
     for (operation, request, expected_properties, expected_required) in [
         (
             ApplicationSurfaceOperation::CallChain,
@@ -468,7 +468,7 @@ fn mcp_primitive_definitions_use_application_contracts() {
 
 #[test]
 fn handle_gated_feedback_tools_are_advertised_over_mcp() {
-    let definitions = get_tool_definitions();
+    let definitions = get_tool_definitions().expect("tool definitions");
     for tool_name in [
         "tracedecay_feedback_diagnostics",
         "tracedecay_feedback_get",

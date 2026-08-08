@@ -93,6 +93,7 @@ fn assert_closed_objects(schema: &Value) {
 #[test]
 fn session_refresh_definition_is_mutating_typed_and_closed() {
     let definition = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .find(|definition| definition.name == "tracedecay_session_refresh")
         .expect("session refresh definition");

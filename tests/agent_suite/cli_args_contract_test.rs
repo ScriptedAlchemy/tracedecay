@@ -51,7 +51,7 @@ fn arg_catalog_does_not_teach_per_key_replacements() {
 #[test]
 fn arg_catalog_table_flags_exist_in_tool_schemas() {
     let catalog = read_repo_file("plugin/skills/using-the-cli/references/tool-arg-catalog.md");
-    let defs = tracedecay::mcp::tools::get_tool_definitions();
+    let defs = tracedecay::mcp::tools::get_tool_definitions().expect("tool definitions");
     let mut violations = Vec::new();
 
     for line in catalog.lines() {

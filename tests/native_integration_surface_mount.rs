@@ -117,6 +117,7 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
 #[test]
 fn every_journey_operation_is_an_advertised_mcp_tool() {
     let advertised = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();

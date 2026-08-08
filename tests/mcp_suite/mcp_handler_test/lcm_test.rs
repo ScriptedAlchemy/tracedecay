@@ -22,6 +22,7 @@ use tracedecay_domain::PayloadAccessState;
 #[test]
 fn lcm_mutation_tools_remain_daemon_internal() {
     let names = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|tool| tool.name)
         .collect::<std::collections::BTreeSet<_>>();

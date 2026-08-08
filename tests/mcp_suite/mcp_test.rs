@@ -18,7 +18,7 @@ fn test_parse_jsonrpc_request() {
 
 #[test]
 fn test_tool_definitions() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     assert!(!tools.is_empty());
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -95,7 +95,7 @@ fn test_all_error_codes() {
 
 #[test]
 fn test_tool_definition_scope_properties_match_handlers() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool in &tools {
         assert!(
             tool.input_schema["properties"].get("hermes_home").is_none(),
@@ -117,7 +117,7 @@ fn test_tool_definition_scope_properties_match_handlers() {
 
 #[test]
 fn test_ast_grep_tools_follow_capability_gates() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
     assert_eq!(
@@ -150,7 +150,7 @@ fn test_write_and_exec_tools_are_not_read_only() {
     // ast-grep is on PATH. Skipping any other name would let a renamed or
     // dropped mutating tool pass this gate without ever being checked.
     const PATH_CONDITIONAL: &str = "tracedecay_ast_grep_rewrite";
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for name in write_or_exec {
         let Some(tool) = tools.iter().find(|t| t.name == name) else {
             assert_eq!(
@@ -175,7 +175,7 @@ fn test_write_and_exec_tools_are_not_read_only() {
 
 #[test]
 fn test_tool_definitions_have_input_schemas() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool in &tools {
         assert!(
             tool.input_schema.is_object(),
@@ -192,7 +192,7 @@ fn test_tool_definitions_have_input_schemas() {
 
 #[test]
 fn test_tool_definitions_serialization_roundtrip() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let json = serde_json::to_string(&tools).unwrap();
     let deserialized: Vec<ToolDefinition> = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.len(), tools.len());

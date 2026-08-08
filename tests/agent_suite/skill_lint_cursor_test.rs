@@ -335,6 +335,7 @@ fn cursor_commands_are_hygienic_and_reference_resolve() {
 
 fn mcp_tool_names() -> BTreeSet<String> {
     let mut names = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();

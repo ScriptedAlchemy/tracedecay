@@ -7,7 +7,7 @@ use tracedecay_application::{
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 fn defs() -> Vec<ToolDefinition> {
-    get_tool_definitions()
+    get_tool_definitions().expect("tool definitions")
 }
 
 fn def(name: &str) -> ToolDefinition {

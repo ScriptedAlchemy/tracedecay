@@ -37,7 +37,7 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
         String::from_utf8_lossy(&output.stderr)
     );
     let listing = String::from_utf8_lossy(&output.stdout);
-    let definitions = get_tool_definitions();
+    let definitions = get_tool_definitions().expect("tool definitions");
     assert!(
         listing.starts_with(&format!(
             "Available tools ({}; TraceDecay {})",
@@ -68,7 +68,7 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
 
 #[test]
 fn every_mcp_tool_renders_its_own_cli_help() {
-    for def in get_tool_definitions() {
+    for def in get_tool_definitions().expect("tool definitions") {
         let short = short_name(&def.name);
         let stdout = render_tool_cli_help(&def);
         assert!(
@@ -86,6 +86,7 @@ fn every_mcp_tool_renders_its_own_cli_help() {
 fn tool_cli_help_matches_rendered_help_end_to_end() {
     let home = TempDir::new().expect("create isolated TraceDecay home");
     let def = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .next()
         .expect("at least one MCP tool definition");
@@ -189,7 +190,7 @@ fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
     ];
     for (view, bodies) in host_views {
         let mut uncovered: Vec<String> = Vec::new();
-        for def in get_tool_definitions() {
+        for def in get_tool_definitions().expect("tool definitions") {
             if SKILL_COVERAGE_EXCEPTIONS.contains(&def.name.as_str()) {
                 continue;
             }
@@ -211,6 +212,7 @@ fn every_mcp_tool_is_taught_by_at_least_one_bundled_skill() {
 #[test]
 fn skill_coverage_exceptions_reference_real_tools() {
     let known: Vec<String> = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|def| def.name)
         .collect();

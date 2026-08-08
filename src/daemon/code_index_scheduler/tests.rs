@@ -5686,6 +5686,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         configuration_digest: projection_identity.invalidation_digest.clone(),
         termination: FeedbackCycleTerminationV1::Clean,
         provider_states: vec![ProviderEvaluationStateV1::SupportedCompletedComplete],
+        advisory_provider_states: Vec::new(),
         baseline_states: Vec::new(),
         impact: Some(FeedbackImpactV1 {
             target: FeedbackTargetV1 {
@@ -5710,6 +5711,12 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         advisory_only: false,
     };
     let advisory_cycle = FeedbackCycleResultV1 {
+        advisory_provider_states: vec![
+            tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+            },
+        ],
         findings: vec![FeedbackFindingV1 {
             finding_id: id("finding.github.direct-projection"),
             classification: FeedbackDiagnosticClassificationV1::Unknown,
@@ -5765,6 +5772,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 invalidation_digest: projection_identity.invalidation_digest.clone(),
                 snapshot_content_digest: projection_identity.snapshot_content_digest.clone(),
                 document_content_digest: Some(document_content_digest.clone()),
+                document_relative_path: Some("src/lib.rs".to_owned()),
                 generation: 1,
             },
             cycle,
@@ -5799,6 +5807,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 invalidation_digest: projection_identity.invalidation_digest,
                 snapshot_content_digest: projection_identity.snapshot_content_digest,
                 document_content_digest: Some(document_content_digest),
+                document_relative_path: Some("src/lib.rs".to_owned()),
                 generation: 2,
             },
             advisory_cycle,

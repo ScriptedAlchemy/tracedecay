@@ -4,7 +4,7 @@ use tracedecay::mcp::get_tool_definitions;
 use tracedecay::tracedecay::TraceDecay;
 #[test]
 fn outline_schema_requires_file_without_provider_property() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let schema = tool_schema(&tools, "tracedecay_outline");
 
     assert_eq!(required_args_at(schema, &[]), vec!["file"]);
@@ -19,7 +19,7 @@ fn outline_schema_requires_file_without_provider_property() {
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
 
     // Direct `args.get(...).ok_or(...)` parser style.
     assert_schema_requires(&tools, "tracedecay_search", &["query"]);
@@ -123,7 +123,7 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 
 #[test]
 fn lcm_tool_schemas_are_registered_with_stable_names() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let names = tools
         .iter()
         .map(|tool| tool.name.as_str())
@@ -311,7 +311,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 
 #[test]
 fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let retrieve = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_retrieve")
@@ -343,7 +343,7 @@ fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
 
 #[test]
 fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let selector_keys = ["project_selector", "project_id", "project_path"];
 
     // Registered-project readers dispatch to other mounted projects, so the
@@ -371,7 +371,7 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let tool_names: std::collections::HashSet<_> =
         tools.iter().map(|tool| tool.name.as_str()).collect();
     let fact_store = tools
@@ -447,7 +447,7 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
 
 #[test]
 fn managed_skill_tool_definitions_are_read_only() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let artifact = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_automation_run_artifact_view")
@@ -487,7 +487,7 @@ fn managed_skill_tool_definitions_are_read_only() {
 
 #[test]
 fn message_search_provider_schema_matches_ingested_providers() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let message_search = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_message_search")

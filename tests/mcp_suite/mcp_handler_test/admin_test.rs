@@ -594,7 +594,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
 
 #[test]
 fn active_project_and_storage_status_tools_are_advertised_readonly() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for name in ["tracedecay_active_project", "tracedecay_storage_status"] {
         let tool = tools
             .iter()

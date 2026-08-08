@@ -133,7 +133,9 @@ fn render_install(home: &Path) -> std::io::Result<()> {
     // root MCP catalog ports, which `main` wires at process startup; a test
     // process must wire them itself or the bundle renders empty tool sets.
     static PORTS: std::sync::Once = std::sync::Once::new();
-    PORTS.call_once(tracedecay::register_runtime_ports);
+    PORTS.call_once(|| {
+        tracedecay::register_runtime_ports().expect("runtime port registration");
+    });
     let component_set = verified_embedded_host_component_set_with_tracedecay_bin(
         HostKindV1::Hermes,
         &[HostBundleComponentV1::Core],

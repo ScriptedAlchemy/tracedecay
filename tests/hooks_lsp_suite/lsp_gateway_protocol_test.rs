@@ -805,6 +805,7 @@ impl ContextProjectionPort for EqualGenerationChangeContext {
         &self,
         root: &AdmittedRoot,
         _subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
+        _maximum: usize,
     ) -> Vec<ContextProjectionChange> {
         if self.emitted.fetch_add(1, Ordering::SeqCst) != 0 {
             return Vec::new();
@@ -898,6 +899,7 @@ impl ContextProjectionPort for SameGenerationFeedbackChangeContext {
         &self,
         root: &AdmittedRoot,
         _subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
+        _maximum: usize,
     ) -> Vec<ContextProjectionChange> {
         if self.emitted.fetch_add(1, Ordering::SeqCst) != 0 {
             return Vec::new();
