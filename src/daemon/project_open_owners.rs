@@ -67,39 +67,6 @@ use crate::agents::context_scout_v2::{
     ContextScoutTriggerV1,
 };
 use crate::agents::host_bundle_v2::HostKindV1;
-use crate::application::advisory::github_runtime::{
-    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
-    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1, discover_exact_commit_pull_request_v1,
-    resolve_registered_github_read_only_credential_v1,
-};
-use crate::application::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookLookupNoticeV1,
-    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiSourceAccessAuthorityV1,
-    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
-    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRuntimeOwnerConfigV1, ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1,
-    ProjectCiRetainedObservationStoreV1, discover_production_ci_failure_request_v1,
-    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
-};
-use crate::application::context::{CancellationToken, MonotonicDeadline};
-use crate::application::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackSourceEventV1,
-};
-use crate::application::feedback::{
-    FeedbackCycleInvocation, FeedbackCycleLspInput, ProductionFeedbackCycleAuthorizationFuture,
-    ProductionFeedbackCycleAuthorizationPort, ProductionFeedbackCycleOpenV1,
-    ProductionFeedbackRuntimeStateV1, resolve_production_feedback_cycle_parts,
-};
-use crate::application::lsp_runtime::DaemonLspSessionFactory;
-use crate::application::operation_stream::OperationKind;
-use crate::application::primitives::{
-    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project, locator_digest_for_project,
-    open_production_primitive_runtime,
-};
-use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
@@ -112,6 +79,40 @@ use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_usecases::advisory::github_runtime::{
+    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
+    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, discover_exact_commit_pull_request_v1,
+    resolve_registered_github_read_only_credential_v1,
+};
+use tracedecay_usecases::advisory::{
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookLookupNoticeV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRuntimeOwnerConfigV1, ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1,
+    ProjectCiRetainedObservationStoreV1, discover_production_ci_failure_request_v1,
+    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
+};
+use tracedecay_usecases::feedback::observations::{
+    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
+    FeedbackSourceEventV1,
+};
+use tracedecay_usecases::feedback::{
+    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
+    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
+    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
+    resolve_production_feedback_cycle_parts,
+};
+use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_usecases::operation_stream::OperationKind;
+use tracedecay_usecases::primitives::{
+    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project, locator_digest_for_project,
+    open_production_primitive_runtime,
+};
+use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 mod advisory_upgrade;
 mod lsp_registration;
@@ -228,7 +229,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 .await
             }
             None => {
-                crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+                tracedecay_usecases::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
             }
         };
         let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
@@ -372,14 +373,14 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
     project_root: std::path::PathBuf,
     scope: ResolvedScope,
-    configuration: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
 }
 
 #[derive(Clone)]
 struct ProjectOpenSourceEditAuthorizationV1 {
     project_root: std::path::PathBuf,
     scope: ResolvedScope,
-    configuration: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
 }
 
 struct CurrentSourceEditAuthorityV1 {
@@ -549,7 +550,7 @@ async fn invoke_project_open_source_edit(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditInvocationV1,
-) -> Result<crate::application::edit::SourceEditApplicationResult> {
+) -> Result<tracedecay_usecases::edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
     let operation = tracedecay_application::source_edit_operation(invocation.edit.kind())
         .map_err(source_edit_contract_error)?;
@@ -565,7 +566,7 @@ async fn invoke_project_open_source_edit(
         invocation.deadline.clone(),
         invocation.cancellation.context(),
     )?;
-    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
         context.deadline().clone(),
         invocation.cancellation.clone(),
     );
@@ -619,7 +620,7 @@ async fn invoke_project_open_source_edit(
         proof: current.proof,
         observed_at,
     };
-    crate::application::edit::execute_source_edit_with_control(
+    tracedecay_usecases::edit::execute_source_edit_with_control(
         &*graph,
         &operation,
         request,
@@ -633,9 +634,9 @@ async fn invoke_project_open_source_edit_reconciliation(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditReconciliationInvocationV1,
-) -> Result<crate::application::edit::SourceEditApplicationResult> {
+) -> Result<tracedecay_usecases::edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
-    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
@@ -669,7 +670,7 @@ async fn invoke_project_open_source_edit_reconciliation(
         proof: current.proof,
         observed_at,
     };
-    crate::application::edit::reconcile_source_edit_effect_unknown_with_control(
+    tracedecay_usecases::edit::reconcile_source_edit_effect_unknown_with_control(
         &*graph,
         request,
         &authorization,
@@ -937,7 +938,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     mounted_providers: Vec<MountedLspProvider>,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
+    scout_configuration: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
     admitted_root_uri: String,
     indexed_files: Vec<String>,
 }
@@ -1003,7 +1004,7 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    let scout_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
+    let scout_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id.clone(),
         snapshot: configuration.snapshot.clone(),
     };
@@ -1059,15 +1060,15 @@ pub(super) async fn register_project_open_production_owners(
     // A later failure in this function retires the whole server, and project
     // open marks the lane failed as it does so, so the lane never stays warming.
     source_edit_mutation.mark_ready();
-    let configuration_policy_digest = canonical_sha256(&(
-        "tracedecay.daemon.configuration-policy.v1",
-        &scope.scope_digest,
-        &access.configuration_digest,
-        &access.configuration_provenance_digest,
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open configuration policy digest failed: {error}"),
-    })?;
+    let configuration_policy_digest =
+        super::project_delivery_mount::ensure_project_delivery_settlement(
+            invocation,
+            project_root,
+            Arc::clone(&session_db),
+            &scope,
+            &access,
+        )
+        .await?;
     invocation
         .configuration_runtime_registrar()
         .register(
@@ -1091,13 +1092,40 @@ pub(super) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
+    let retained_observed_at = now_micros();
+    let retained_grant =
+        project_open_retained_grant(&access, retained_observed_at).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("project-open retained grant is invalid: {error}"),
+            }
+        })?;
+    let retained_port = server
+        .retained_surface_port(project_root, access.configuration_digest.clone())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open retained authority mount failed: {error}"),
+        })?;
+    invocation
+        .retained_runtime_registrar()
+        .register(
+            project_root.to_path_buf(),
+            scope.clone(),
+            requester.clone(),
+            retained_grant,
+            retained_port,
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open retained runtime registration failed: {error}"),
+        })?;
     // Mount the native-integration authority under the same pinned policy
     // digest the configuration runtime just registered, so the coordinator's
     // stale/denied predicates and the handler's minted grants agree on one
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
-    if let Some(repository_root) = crate::worktree::git_worktree_root(project_root) {
-        native_integration
+    let native_git_fallback_mounted = if let Some(repository_root) =
+        crate::worktree::git_worktree_root(project_root)
+    {
+        let native_owner = native_integration
             .ensure(
                 Arc::clone(&session_db),
                 repository_root,
@@ -1112,7 +1140,17 @@ pub(super) async fn register_project_open_production_owners(
                     "project-open native integration authority registration failed: {error}"
                 ),
             })?;
-    }
+        invocation
+            .service
+            .install_worktree_cleanup_recovery_fences(&native_owner)
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open worktree cleanup recovery fencing failed: {error}"),
+            })?;
+        true
+    } else {
+        false
+    };
     let work_grant = project_open_work_grant(&access, now_micros()).map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open Work grant is invalid: {error}"),
@@ -1134,6 +1172,61 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open work topology policy is unavailable: {error}"),
             })?
             .clone();
+    // A disabled GitHub stacked-PR private preview is a policy fact, not a
+    // credential inference. It is therefore mounted for an exact GitHub
+    // remote even when no review credential exists. Conversely, a requested
+    // private-preview read has no installed provider stack endpoint and the
+    // owner returns its typed unavailable state without emitting a guess.
+    if let Some((github_owner, github_repository)) = crate::tracedecay::git_remote_url(project_root)
+        .as_deref()
+        .and_then(github_repository_from_remote)
+    {
+        let observability_producer = invocation
+            .service
+            .observability_producer(Some(project_root))
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open GitHub stack capability producer is unavailable".to_owned(),
+            })?;
+        let stack_probe = tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
+            scope.clone(),
+            work_topology_policy.clone(),
+            &github_owner,
+            &github_repository,
+            native_git_fallback_mounted,
+            now_micros(),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open GitHub stack capability owner failed: {error:?}"),
+        })?;
+        let capability_observation =
+            tracedecay_usecases::observability::record_github_stack_capability(
+                session_db.as_ref(),
+                Some(observability_producer.as_ref()),
+                &stack_probe,
+            );
+        match capability_observation {
+            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::Unavailable {
+                reason,
+                ..
+            } => {
+                tracing::info!(
+                    event = "project_open_github_stack_capability",
+                    state = "unavailable",
+                    reason = ?reason,
+                    "GitHub stacked-PR capability remains unavailable"
+                );
+            }
+            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::DroppedAtCapacity => {
+                tracing::info!(
+                    event = "project_open_github_stack_capability",
+                    state = "dropped_at_capacity",
+                    "GitHub stacked-PR capability receipt was dropped at producer capacity"
+                );
+            }
+            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::Enqueued => {}
+        }
+    }
     invocation
         .work_runtime_registrar()
         .register(
@@ -1297,7 +1390,20 @@ pub(super) async fn register_project_open_production_owners(
     // Hook V2 envelopes that missed their synchronous budget are durable in
     // the per-host transport spool. Replay is project-scoped, not Git-scoped:
     // non-Git and unborn projects must drain their admitted envelopes too.
-    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
+    let delivery_settlements = invocation
+        .service
+        .delivery_settlement_authority(Some(project_root))
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("hook delivery settlement authority is invalid: {error}"),
+        })?
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "hook delivery settlement authority is unavailable".to_owned(),
+        })?;
+    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(
+        Arc::clone(&graph),
+        delivery_settlements,
+    );
 
     // Semantic restore can decode a large durable generation. Keep that
     // capability-specific warm-up behind every independent production owner
@@ -1419,17 +1525,17 @@ async fn register_semantic_activation_owner(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     scope: ResolvedScope,
-    configuration: &crate::application::configuration::ConfigurationCurrentStateV1,
+    configuration: &tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
 ) -> Result<()> {
     let configuration_pin =
-        crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+        tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
             configuration,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval configuration pin failed: {error}"),
         })?;
     let configuration_store =
-        crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
+        tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1::open(
             graph.configuration_runtime().registered_database(),
             scope.clone(),
         )
@@ -1437,7 +1543,7 @@ async fn register_semantic_activation_owner(
             message: format!("semantic retrieval configuration store unavailable: {error}"),
         })?;
     let accepted_profiles = Arc::new(
-        crate::application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
+        tracedecay_usecases::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
             graph.configuration_runtime().registered_database(),
         ),
     );
@@ -1580,13 +1686,13 @@ async fn register_semantic_activation_owner(
         );
     }
     let Some(inspector) =
-        crate::application::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
     else {
         return Ok(());
     };
     let lifecycle_events = inspector.verified_ready_events();
     let owner = Arc::new(
-        crate::application::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
+        tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1::new(
             configuration_store,
             graph.configuration_runtime().configuration_store(),
             inspector,
@@ -1607,7 +1713,7 @@ async fn register_semantic_activation_owner(
         .install_semantic_activation_reconciler(project_root, reconciler)
         .await?;
     let operation = Arc::new(
-        crate::application::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
+        tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::new(
             Arc::clone(graph.configuration_runtime()),
             accepted_profiles,
         ),
@@ -1626,9 +1732,9 @@ async fn register_semantic_activation_owner(
 /// a project without git scope stays skipped for the whole session.
 enum ProductionFeedbackCycleRegistrationV1 {
     Registered {
-        runtime: Arc<crate::application::feedback::FeedbackCycleRuntime>,
+        runtime: Arc<FeedbackCycleRuntime>,
         feedback_scope: FeedbackScopeV1,
-        lsp_input: crate::application::feedback::FeedbackCycleLspInput,
+        lsp_input: FeedbackCycleLspInput,
     },
     /// The provider code-index identity has no complete generation yet.
     SkippedUnindexed,
@@ -1672,7 +1778,7 @@ async fn register_production_feedback_cycle(
         project_root: project_root.to_path_buf(),
         project_runtime_db,
         scope,
-        access_configuration: crate::application::configuration::ConfigurationCurrentStateV1 {
+        access_configuration: tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
             revision_id: configuration.revision_id,
             snapshot: configuration.snapshot,
         },
@@ -1778,11 +1884,11 @@ async fn register_production_advisory_owner(
     resolved_scope: ResolvedScope,
     source_access: ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-    feedback_cycle: Arc<crate::application::feedback::FeedbackCycleRuntime>,
+    feedback_cycle: Arc<FeedbackCycleRuntime>,
     feedback_lsp_input: FeedbackCycleLspInput,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
+    scout_configuration: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
     indexed_files: Vec<String>,
     setup_cancellation: CancellationToken,
@@ -2092,7 +2198,7 @@ async fn run_production_hook_cycle(
     graph: Arc<crate::tracedecay::TraceDecay>,
     scout_owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    feedback_runtime: Arc<crate::application::feedback::concrete::FeedbackRuntime>,
+    feedback_runtime: Arc<tracedecay_usecases::feedback::concrete::FeedbackRuntime>,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
     feedback_scope: FeedbackScopeV1,
@@ -2177,7 +2283,7 @@ async fn run_production_hook_cycle(
             discover_production_ci_failure_request_v1(&invocation.context, config, &feedback_scope)
                 .await
         }
-        None => crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+        None => tracedecay_usecases::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
     };
     if work_cancellation.is_cancelled() {
         return;
@@ -2239,7 +2345,7 @@ async fn run_production_hook_cycle(
     let Ok(pinned_configuration) = graph.configuration_runtime().client().current().await else {
         return;
     };
-    let current_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id,
         snapshot: pinned_configuration.snapshot,
     };
@@ -2515,11 +2621,11 @@ async fn resolve_production_github_provider_config(
         | ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => return None,
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
             match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
-                crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
+                tracedecay_usecases::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
                     credential,
                 ) => credential,
-                crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing
-                | crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+                tracedecay_usecases::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing
+                | tracedecay_usecases::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
                     return None;
                 }
             }
@@ -2791,7 +2897,7 @@ fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,
     target: &GitHubRepositoryTargetV1,
-    pull: crate::application::advisory::github_runtime::GitHubExactCommitPullRequestV1,
+    pull: tracedecay_usecases::advisory::github_runtime::GitHubExactCommitPullRequestV1,
 ) -> Option<GitHubReviewProviderIdentityV1> {
     let base = pull.base_commit_id;
     let head = pull.head_commit_id;
@@ -2973,9 +3079,6 @@ fn project_open_work_grant(
         .iter()
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
-        .chain(std::iter::once(
-            &tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
-        ))
         .map(|(_, capability, _)| CapabilityId::new(*capability))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -2994,9 +3097,6 @@ fn project_open_work_grant(
         .iter()
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
-        .chain(std::iter::once(
-            &tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
-        ))
         .map(|(_, _, use_case)| tracedecay_tool_catalog::UseCaseId::new(*use_case))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
         .map_err(|_| ApplicationContractError::Inconsistent {
@@ -3017,6 +3117,61 @@ fn project_open_work_grant(
     tracedecay_application::CapabilityGrantSnapshot::new(
         tracedecay_application::CapabilityGrantId::new(format!(
             "grant.tracedecay-daemon.project-open.work.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))?,
+        POLICY_REVISION_V1,
+        grant_digest,
+        access.requester.clone(),
+        observed_at,
+        access.grant_expires_at,
+        access.scope.clone(),
+        capabilities,
+        use_cases,
+        tracedecay_application::DisclosureClass::Sensitive,
+    )
+}
+
+fn project_open_retained_grant(
+    access: &ProjectSourceAccessSnapshot,
+    observed_at: UtcMicros,
+) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
+{
+    let operations = tracedecay_application::RetainedSurfaceOperation::CALLABLE
+        .into_iter()
+        .map(tracedecay_application::retained_surface_application_operation)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let capabilities = operations
+        .iter()
+        .map(|operation| operation.capability_id().clone())
+        .collect::<BTreeSet<_>>();
+    if observed_at >= access.grant_expires_at
+        || !capabilities
+            .iter()
+            .all(|capability| access.effective_capabilities.contains(capability))
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "project-open retained capability grant",
+        });
+    }
+    let use_cases = operations
+        .iter()
+        .map(|operation| operation.use_case_id().clone())
+        .collect::<BTreeSet<_>>();
+    let grant_digest = canonical_sha256(&(
+        "tracedecay.project-open.retained-grant.v1",
+        &access.scope,
+        &access.requester,
+        &access.configuration_digest,
+        &access.configuration_provenance_digest,
+        &capabilities,
+        &use_cases,
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open retained grant digest",
+    })?;
+    tracedecay_application::CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!(
+            "grant.tracedecay-daemon.project-open.retained.{}",
             grant_digest.as_str().trim_start_matches("sha256:")
         ))?,
         POLICY_REVISION_V1,
@@ -3105,7 +3260,7 @@ fn production_owner_capabilities()
         "capability.application.code-query.definition",
         "capability.application.code-query.type-definition",
         "capability.application.code-query.references",
-        "capability.retrieval.symbol-search",
+        "capability.application.symbol-search",
         "capability.application.primitive.code-signature-search",
         "capability.application.primitive.code-implementations",
         "capability.application.primitive.code-type-hierarchy",
@@ -3156,15 +3311,16 @@ fn production_owner_capabilities()
         .into_iter()
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
-        .chain(std::iter::once(
-            tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
-        ))
     {
         capabilities.insert(CapabilityId::new(capability).map_err(|_| {
             ApplicationContractError::Inconsistent {
                 field: "project-open Work capability",
             }
         })?);
+    }
+    for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
+        let operation = tracedecay_application::retained_surface_application_operation(operation)?;
+        capabilities.insert(operation.capability_id().clone());
     }
     Ok(capabilities)
 }
@@ -3228,15 +3384,28 @@ mod tests {
             .into_iter()
             .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
             .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
-            .chain(std::iter::once(
-                tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,
-            ))
         {
             let capability = CapabilityId::new(capability).expect("Work attempt capability");
             assert!(
                 capabilities.contains(&capability),
                 "{} must be granted to the daemon-owned Work route",
                 capability.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn production_project_owner_grants_every_retained_operation() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
+            let operation =
+                tracedecay_application::retained_surface_application_operation(operation)
+                    .expect("retained application operation");
+            assert!(
+                capabilities.contains(operation.capability_id()),
+                "{} must be granted to the daemon-owned retained route",
+                operation.capability_id().as_str()
             );
         }
     }
@@ -3354,7 +3523,7 @@ mod tests {
         )
         .expect("configuration snapshot");
         ContextScoutConfigurationPinV1::from_current(
-            &crate::application::configuration::ConfigurationCurrentStateV1 {
+            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
                 revision_id: revision,
                 snapshot,
             },
@@ -3733,7 +3902,7 @@ mod tests {
         )
         .expect("configuration snapshot");
         let pin = ContextScoutConfigurationPinV1::from_current(
-            &crate::application::configuration::ConfigurationCurrentStateV1 {
+            &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
                 revision_id: revision,
                 snapshot,
             },
@@ -3811,9 +3980,9 @@ mod tests {
                 _scope: &'a FeedbackScopeV1,
             ) -> tracedecay_application::feedback::FeedbackPortFuture<
                 'a,
-                crate::application::advisory::CiSourceAccessOutcomeV1,
+                tracedecay_usecases::advisory::CiSourceAccessOutcomeV1,
             > {
-                Box::pin(async { crate::application::advisory::CiSourceAccessOutcomeV1::Ready })
+                Box::pin(async { tracedecay_usecases::advisory::CiSourceAccessOutcomeV1::Ready })
             }
         }
 

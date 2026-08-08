@@ -9,9 +9,10 @@ use super::post_tool_use::is_post_tool_use_failure_event;
 use super::steering::{cursor_index_signals_for_root, index_status_line};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_project_root, event_project_root_with_identity, event_session_id,
-    process_cwd_project_root, prompt_like_text, read_hook_event, record_hook_analytics,
-    record_hook_invoked_parsed, research_block_reason,
+    event_project_root, event_project_root_with_identity,
+    event_project_root_with_identity_from_json, event_session_id, process_cwd_project_root,
+    prompt_like_text, read_hook_event, record_hook_analytics, record_hook_invoked_parsed,
+    research_block_reason,
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -134,7 +135,19 @@ pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
 /// Claude Code `SessionStart` hook handler.
 pub async fn hook_claude_session_start() -> i32 {
     let event = read_hook_event!();
-    println!("{}", claude_session_start_response(&event).await);
+    let output = claude_session_start_response(&event).await;
+    let root = event_project_root_with_identity_from_json(&event).await;
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        &output,
+        None,
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -192,13 +205,21 @@ pub async fn hook_claude_subagent_start() -> i32 {
         &event,
         &parsed,
     );
-    if let Some(context) = claude_subagent_start_context(&parsed).await {
-        println!(
-            "{}",
-            codex_additional_context_json("SubagentStart", &context)
-        );
+    let output = if let Some(context) = claude_subagent_start_context(&parsed).await {
+        codex_additional_context_json("SubagentStart", &context)
     } else {
-        println!("{}", serde_json::json!({}));
+        serde_json::json!({}).to_string()
+    };
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        &output,
+        Some(&_hook_telemetry),
+    )
+    .await
+    {
+        return 1;
     }
     0
 }
@@ -231,7 +252,17 @@ pub async fn hook_claude_post_compact() -> i32 {
     {
         eprintln!("[tracedecay] Claude PostCompact daemon call failed: {error}");
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -251,7 +282,18 @@ async fn claude_subagent_start_context(parsed: &Value) -> Option<String> {
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
     if let Some(response) = claude_post_tool_use_response(&event).await {
-        println!("{response}");
+        let root = event_project_root_with_identity_from_json(&event).await;
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+            &event,
+            &response,
+            None,
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -285,19 +327,19 @@ async fn claude_post_tool_use_response(event: &str) -> Option<String> {
 
 /// `UserPromptSubmit` hook handler: resets the project counter and injects
 /// scope-correct memory recall.
-pub async fn hook_prompt_submit() {
+pub async fn hook_prompt_submit() -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
         Ok(super::HookStdinRead::Oversized) => {
             eprintln!(
                 "tracedecay hook: stdin exceeds wire message bound ({})",
-                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                crate::host_admission::WIRE_RECORD_TOO_LARGE
             );
-            return;
+            return 1;
         }
         Err(error) => {
             eprintln!("tracedecay hook: failed to read stdin: {error}");
-            return;
+            return 1;
         }
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -326,23 +368,47 @@ pub async fn hook_prompt_submit() {
     {
         eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
+    0
 }
 
 /// `Stop` hook handler: submits the native turn boundary to the daemon.
-pub async fn hook_stop() {
+pub async fn hook_stop() -> i32 {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
         Ok(super::HookStdinRead::Oversized) => {
             eprintln!(
                 "tracedecay hook: stdin exceeds wire message bound ({})",
-                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                crate::host_admission::WIRE_RECORD_TOO_LARGE
             );
-            return;
+            return 1;
         }
         Err(_) => String::new(),
     };
-    println!("{}", claude_stop_response_for_event(&event).await);
+    let output = claude_stop_response_for_event(&event).await;
+    let root = event_project_root_with_identity_from_json(&event).await;
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        &event,
+        &output,
+        None,
+    )
+    .await
+    {
+        return 1;
+    }
+    0
 }
 
 async fn claude_stop_response_for_event(event: &str) -> String {
@@ -753,7 +819,7 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_claude_identity";
-        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
             &project_root,
             tracedecay_domain::ProjectId::new(project_id).unwrap(),

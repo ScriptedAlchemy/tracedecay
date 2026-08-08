@@ -12,6 +12,7 @@ pub mod admission_ledger;
 pub mod capture;
 pub mod config;
 pub mod core_events;
+pub mod delivery_spool;
 pub mod native;
 pub mod runtime;
 pub mod spool;
@@ -35,6 +36,10 @@ pub use config::{
 pub use core_events::{
     DaemonHookEvent, HOOK_EVENT_METHOD, HookAgent, HookEventNotifyOutcomeV1, HookRouteMetadata,
     HookTerminalReceipt,
+};
+pub use delivery_spool::{
+    HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, HookDeliverySpoolError,
+    hook_delivery_receipt_spool_root,
 };
 pub use native::{
     DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,

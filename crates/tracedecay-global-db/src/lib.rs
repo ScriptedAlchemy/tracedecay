@@ -11,9 +11,12 @@ use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 mod api_types;
 pub mod configuration;
+#[cfg(test)]
+mod delivery_settlement_tests;
 mod discovery_queue;
 mod git_index_transactions;
 mod native_integration;
+mod observability_rollup;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
@@ -21,8 +24,18 @@ mod registered_maintenance;
 mod registered_provider_usage;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
+pub use observability_rollup::{
+    ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
+    ObservabilityRollupCompactionV1, ObservabilityRollupDirtyDayClaimV1,
+    ObservabilityRollupEmptyDayClaimOutcomeV1, ObservabilityRollupEmptyDayClaimV1,
+    ObservabilityRollupFragmentPageV1, ObservabilityRollupFragmentQueryV1,
+    ObservabilityRollupFragmentRecordV1, ObservabilityRollupFrontierV1,
+    ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
+    ObservabilityRollupRetentionReceiptV1, ensure_observability_rollup_schema,
+};
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
+pub use tracedecay_domain::CoverageStateV1;
 mod observation_store;
 mod project_registry;
 mod registered;
@@ -78,8 +91,11 @@ pub use project_registry::{
     ephemeral_root_rejection, is_ephemeral_path,
 };
 pub use registered::{
-    ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
-    RegisteredWorkflowApplicationServicesV1,
+    DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
+    MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
+    PendingDeliverySourceReceiptV1, ProjectGraphRuntimePortV1, RegisteredGlobalDb,
+    RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
+    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use remote_deletion::{
@@ -96,7 +112,8 @@ const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
-    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
+    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
+    ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1, ProjectAliasRecord,
     ProjectRegistryContext, ProjectStoreContext, ProjectStoreResolution,
     RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal, SessionActivityRow,
     SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
@@ -124,6 +141,10 @@ mod checkpoint_tests;
 // The root crate's test suite drives this store through `tests::harness`, so
 // the harness must survive being compiled as a dependency. `test-helpers` is
 // the explicit opt-in dependent test builds enable.
+#[cfg(test)]
+mod observability_outbox_tests;
+#[cfg(test)]
+mod observability_rollup_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod tests;

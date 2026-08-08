@@ -187,6 +187,9 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         Ok(payload) => payload,
         Err(()) => return 1,
     };
+    let mut delivery_writer = None;
+    let mut delivery_open_error = None;
+    let mut delivery_material = None;
     let outcome = match std::env::current_dir() {
         Ok(project_root) => {
             match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
@@ -195,13 +198,28 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
                 Ok(Some(layout)) => match current_time() {
                     Some(now) => {
                         match tracedecay::hooks::native_capture_material(source, &payload, now) {
-                            Ok(material) => tracedecay_hooks::capture_native_event_for_replay(
-                                &layout.data_root,
-                                source,
-                                &payload,
-                                material,
-                                now,
-                            ),
+                            Ok(material) => {
+                                let outcome = tracedecay_hooks::capture_native_event_for_replay(
+                                    &layout.data_root,
+                                    source,
+                                    &payload,
+                                    material,
+                                    now,
+                                );
+                                if outcome == NativeHookCaptureOutcomeV1::Captured {
+                                    match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                                        tracedecay_hooks::hook_delivery_receipt_spool_root(
+                                            &layout.data_root,
+                                            source.host(),
+                                        ),
+                                    ) {
+                                        Ok(writer) => delivery_writer = Some(writer),
+                                        Err(error) => delivery_open_error = Some(error),
+                                    }
+                                    delivery_material = Some(material);
+                                }
+                                outcome
+                            }
                             Err(
                                 tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
                                 | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
@@ -218,8 +236,38 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
     };
 
-    if std::io::stdout().lock().write_all(b"{}\n").is_err() {
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    if stdout
+        .write_all(b"{}\n")
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
         return 1;
+    }
+    drop(stdout);
+    if outcome == NativeHookCaptureOutcomeV1::Captured {
+        let Some(writer) = delivery_writer else {
+            if let Some(error) = delivery_open_error {
+                eprintln!("tracedecay hook: delivery receipt spool unavailable: {error}");
+            } else {
+                eprintln!("tracedecay hook: delivery receipt writer unavailable");
+            }
+            return 1;
+        };
+        let (Some(material), Some(delivered_at)) = (delivery_material, current_time()) else {
+            return 1;
+        };
+        let Some(settlement) = native_hook_delivery_settlement(source, material, delivered_at)
+        else {
+            return 1;
+        };
+        let Ok(receipt) = tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) else {
+            return 1;
+        };
+        if writer.append(&receipt).is_err() {
+            return 1;
+        }
     }
     match outcome {
         NativeHookCaptureOutcomeV1::Captured
@@ -230,6 +278,51 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         | NativeHookCaptureOutcomeV1::ResetRequired
         | NativeHookCaptureOutcomeV1::Unavailable => 1,
     }
+}
+
+fn native_hook_delivery_settlement(
+    source: NativeHookCaptureSourceV1,
+    material: tracedecay_hooks::NativeEnvelopeMaterialV1,
+    delivered_at: UtcMicros,
+) -> Option<tracedecay_domain::DeliverySettlementV1> {
+    let host = source.host();
+    let owner = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.native-hook-output-delivery.v1",
+        host.hook_key(),
+        material.event_id,
+    ))
+    .ok()?;
+    let channel = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.native-hook-output-channel.v1",
+        host.hook_key(),
+        material.protected_session_id,
+    ))
+    .ok()?;
+    let attempted_at = std::cmp::max(material.observed_at, delivered_at);
+    Some(tracedecay_domain::DeliverySettlementV1 {
+        attempt: tracedecay_domain::DeliverySettlementAttemptV1 {
+            owner_event_id: format!(
+                "hook:native:{}",
+                owner.as_str().trim_start_matches("sha256:")
+            ),
+            event_class: tracedecay_domain::DeliveryEventClassV1::Activity,
+            channel: tracedecay_domain::DeliveryChannelIdentityV1 {
+                surface: tracedecay_domain::DeliverySurfaceFamilyV1::Hook,
+                channel_ref: format!(
+                    "hook:{}:{}",
+                    host.hook_key(),
+                    channel.as_str().trim_start_matches("sha256:")
+                ),
+            },
+            work_attempt: None,
+            eligible: 1,
+            valid_at: material.observed_at,
+            attempted_at,
+        },
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+        settled_at: attempted_at,
+        drop_reason: None,
+    })
 }
 
 fn read_bounded_stdin() -> Result<Vec<u8>, ()> {

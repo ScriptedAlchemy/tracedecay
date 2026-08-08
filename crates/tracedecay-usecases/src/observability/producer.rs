@@ -3,23 +3,38 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
-use tracedecay_application::{ApplicationContractError, now_micros};
+use tokio::time::{Instant, sleep_until, timeout};
+use tracedecay_application::{
+    ApplicationContractError, EXECUTION_TOPOLOGY_EVENT_KINDS_V1, now_micros,
+};
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, TelemetryDropObservedV1,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::{
+    AnalyticsEventInsert, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
+    RegisteredGlobalDb,
+};
 
 use crate::event_lane::record_observability;
+
+mod outbox;
+mod rollup_rebuild;
+use outbox::{
+    claim_and_settle_durable, mark_delivery_delayed, recover_pending, settle_claimed_durable,
+};
+use rollup_rebuild::{RollupAdvanceOutcome, run_one_rollup_maintenance};
 
 const PRODUCER_RUNNING: u8 = 0;
 const PRODUCER_STOPPING: u8 = 1;
 const PRODUCER_STOPPED: u8 = 2;
 const MAX_PRODUCER_CAPACITY: usize = 1_024;
 const MAX_PRODUCER_DEADLINE: Duration = Duration::from_secs(60);
+const ROLLUP_BACKLOG_REBUILD_INTERVAL: Duration = Duration::from_secs(1);
+const ROLLUP_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const TELEMETRY_DROP_EVENT_KIND: &str = "telemetry.drop.observed.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservabilityProducerIdentityV1 {
@@ -51,6 +66,13 @@ impl ObservabilityProducerIdentityV1 {
 pub enum ObservabilityEmissionOutcomeV1 {
     Enqueued,
     DroppedAtCapacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservabilityOwnerEmissionOutcomeV1 {
+    Enqueued,
+    Replayed,
+    DeferredDurable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +137,12 @@ impl DropRange {
 struct QueuedObservation {
     envelope: ObservabilityEnvelopeV1,
     carried_drop: Option<DropRange>,
+    owner_fact: Option<QueuedOwnerFact>,
+}
+
+struct QueuedOwnerFact {
+    json: String,
+    durable_claimed: bool,
 }
 
 struct ProducerWorkerState {
@@ -122,16 +150,20 @@ struct ProducerWorkerState {
     total_dropped: Arc<AtomicU64>,
     first_missing_sequence: Arc<AtomicU64>,
     last_missing_sequence: Arc<AtomicU64>,
+    next_sequence: Arc<AtomicU64>,
     lifecycle: Arc<AtomicU8>,
+    durable_emission_lock: Arc<AsyncMutex<()>>,
     deadlines: ObservabilityProducerDeadlinesV1,
 }
 
 struct ProducerWorkerProgress {
     persisted: u64,
     first_error: Option<ApplicationContractError>,
+    rollup_frontier_initialized: bool,
 }
 
 pub struct BoundedObservabilityProducerV1 {
+    db: Arc<RegisteredGlobalDb>,
     identity: ObservabilityProducerIdentityV1,
     data: mpsc::Sender<QueuedObservation>,
     control: mpsc::Sender<ProducerControl>,
@@ -143,7 +175,8 @@ pub struct BoundedObservabilityProducerV1 {
     state: Arc<AtomicU8>,
     deadlines: ObservabilityProducerDeadlinesV1,
     emission_lock: Mutex<()>,
-    worker: Option<JoinHandle<()>>,
+    durable_emission_lock: Arc<AsyncMutex<()>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl BoundedObservabilityProducerV1 {
@@ -180,10 +213,11 @@ impl BoundedObservabilityProducerV1 {
         let last_missing_sequence = Arc::new(AtomicU64::new(0));
         let next_sequence = Arc::new(AtomicU64::new(1));
         let state = Arc::new(AtomicU8::new(PRODUCER_RUNNING));
+        let durable_emission_lock = Arc::new(AsyncMutex::new(()));
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| "observability_producer_runtime_unavailable")?;
         let worker = runtime.spawn(run_worker(
-            db,
+            Arc::clone(&db),
             identity.clone(),
             data_rx,
             control_rx,
@@ -192,11 +226,14 @@ impl BoundedObservabilityProducerV1 {
                 total_dropped: Arc::clone(&total_dropped),
                 first_missing_sequence: Arc::clone(&first_missing_sequence),
                 last_missing_sequence: Arc::clone(&last_missing_sequence),
+                next_sequence: Arc::clone(&next_sequence),
                 lifecycle: Arc::clone(&state),
+                durable_emission_lock: Arc::clone(&durable_emission_lock),
                 deadlines,
             },
         ));
         Ok(Self {
+            db,
             identity,
             data,
             control,
@@ -208,27 +245,29 @@ impl BoundedObservabilityProducerV1 {
             state,
             deadlines,
             emission_lock: Mutex::new(()),
-            worker: Some(worker),
+            durable_emission_lock,
+            worker: Mutex::new(Some(worker)),
         })
     }
 
-    pub fn try_emit(
-        &self,
-        mut envelope: ObservabilityEnvelopeV1,
-    ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
-        let _emission_guard = self
-            .emission_lock
-            .lock()
-            .map_err(|_| "observability_producer_lock_poisoned")?;
+    /// The authority this producer stamps on every accepted envelope.
+    ///
+    /// Callers use the scope to construct owner-derived payloads. Producer
+    /// identity, sequence, and watermark remain producer-owned and are
+    /// overwritten at admission rather than trusted from the caller.
+    pub const fn identity(&self) -> &ObservabilityProducerIdentityV1 {
+        &self.identity
+    }
+
+    pub const fn persistence_deadline(&self) -> Duration {
+        self.deadlines.persistence
+    }
+
+    fn validate_admission(&self, envelope: &ObservabilityEnvelopeV1) -> Result<(), &'static str> {
         if self.state.load(Ordering::Acquire) != PRODUCER_RUNNING {
             return Err("observability_producer_closed");
         }
-        if envelope.scope_ref != self.identity.authorized_scope_ref
-            || envelope.process_boot_id != self.identity.process_boot_id
-            || envelope.producer_revision != self.identity.producer_revision
-            || envelope.configuration_revision != self.identity.configuration_revision
-            || envelope.policy_revision != self.identity.policy_revision
-        {
+        if envelope.scope_ref != self.identity.authorized_scope_ref {
             return Err("observability_producer_binding");
         }
         if [
@@ -243,10 +282,38 @@ impl BoundedObservabilityProducerV1 {
         {
             return Err("observability_producer_redaction");
         }
-        envelope.validate()?;
+        Ok(())
+    }
+
+    fn prepare_delivery(
+        &self,
+        envelope: ObservabilityEnvelopeV1,
+        sequence: u64,
+        delayed: bool,
+    ) -> Result<ObservabilityEnvelopeV1, &'static str> {
+        prepare_delivery_with_identity(&self.identity, envelope, sequence, delayed)
+    }
+
+    pub fn try_emit(
+        &self,
+        envelope: ObservabilityEnvelopeV1,
+    ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
+        let _emission_guard = self
+            .emission_lock
+            .lock()
+            .map_err(|_| "observability_producer_lock_poisoned")?;
+        self.validate_admission(&envelope)?;
         let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
-        envelope.producer_sequence = sequence;
-        envelope.watermark = format!("{}:{sequence}", self.identity.process_boot_id);
+        let envelope = self.prepare_delivery(envelope, sequence, false)?;
+        self.offer_prepared(envelope, None)
+    }
+
+    fn offer_prepared(
+        &self,
+        mut envelope: ObservabilityEnvelopeV1,
+        owner_fact: Option<QueuedOwnerFact>,
+    ) -> Result<ObservabilityEmissionOutcomeV1, &'static str> {
+        let sequence = envelope.producer_sequence;
         match self.data.try_reserve() {
             Ok(permit) => {
                 let carried_drops = self.pending_dropped.swap(0, Ordering::AcqRel);
@@ -266,40 +333,43 @@ impl BoundedObservabilityProducerV1 {
                 permit.send(QueuedObservation {
                     envelope,
                     carried_drop,
+                    owner_fact,
                 });
                 Ok(ObservabilityEmissionOutcomeV1::Enqueued)
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.pending_dropped.fetch_add(1, Ordering::AcqRel);
-                self.total_dropped.fetch_add(1, Ordering::AcqRel);
-                let _ = self.first_missing_sequence.compare_exchange(
-                    0,
-                    sequence,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-                self.last_missing_sequence
-                    .store(sequence, Ordering::Release);
+                self.record_capacity_drop(sequence);
                 Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err("observability_producer_closed"),
         }
     }
 
+    fn record_capacity_drop(&self, sequence: u64) {
+        self.pending_dropped.fetch_add(1, Ordering::AcqRel);
+        self.total_dropped.fetch_add(1, Ordering::AcqRel);
+        let _ = self.first_missing_sequence.compare_exchange(
+            0,
+            sequence,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.last_missing_sequence
+            .store(sequence, Ordering::Release);
+    }
+
     pub async fn shutdown(
-        &mut self,
+        &self,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
         self.stop(false).await
     }
 
-    pub async fn cancel(
-        &mut self,
-    ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
+    pub async fn cancel(&self) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
         self.stop(true).await
     }
 
     async fn stop(
-        &mut self,
+        &self,
         cancelled: bool,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
         if self
@@ -322,12 +392,19 @@ impl BoundedObservabilityProducerV1 {
             .map_err(|_| {
                 ApplicationContractError::Domain("observability_control_lane_closed".to_owned())
             })?;
+        let worker = self
+            .worker
+            .lock()
+            .map_err(|_| {
+                ApplicationContractError::Domain("observability_producer_lock_poisoned".to_owned())
+            })?
+            .take();
         let outcome = match timeout(self.deadlines.shutdown, result).await {
             Ok(result) => result.map_err(|_| {
                 ApplicationContractError::Domain("observability_worker_stopped".to_owned())
             })?,
             Err(_) => {
-                if let Some(worker) = self.worker.take() {
+                if let Some(worker) = worker {
                     worker.abort();
                     let _ = worker.await;
                 }
@@ -337,7 +414,7 @@ impl BoundedObservabilityProducerV1 {
                 ));
             }
         };
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = worker {
             worker.await.map_err(|error| {
                 ApplicationContractError::Domain(format!(
                     "observability worker join failed: {error}"
@@ -358,7 +435,40 @@ async fn run_worker(
     let mut progress = ProducerWorkerProgress {
         persisted: 0,
         first_error: None,
+        rollup_frontier_initialized: false,
     };
+    let frontier_initialization = timeout(
+        state.deadlines.persistence,
+        db.initialize_observability_rollup_frontier(&identity.authorized_scope_ref),
+    )
+    .await;
+    match frontier_initialization {
+        Ok(Ok(_)) => progress.rollup_frontier_initialized = true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "observability rollup frontier initialization failed");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "observability rollup frontier initialization exceeded persistence deadline"
+            );
+        }
+    }
+    recover_pending(
+        &db,
+        &identity,
+        &state.durable_emission_lock,
+        &mut progress,
+        state.deadlines.persistence,
+    )
+    .await;
+    let first_rollup_at = if progress.rollup_frontier_initialized && data.is_empty() {
+        Instant::now()
+    } else {
+        Instant::now() + ROLLUP_IDLE_RETRY_INTERVAL
+    };
+    let rollup_tick = sleep_until(first_rollup_at);
+    tokio::pin!(rollup_tick);
+    let mut rollup_source_persisted = false;
     loop {
         tokio::select! {
             biased;
@@ -402,19 +512,65 @@ async fn run_worker(
                 let Some(observation) = observation else {
                     break;
                 };
+                let wakes_rollup = observation_dirties_rollup(&observation);
+                let persisted_before = progress.persisted;
                 record_queued(
                     &db,
                     &identity,
+                    &state.durable_emission_lock,
+                    &state.next_sequence,
                     observation,
                     &mut progress.persisted,
                     &mut progress.first_error,
                     state.deadlines.persistence,
                 )
                 .await;
+                recover_pending(
+                    &db,
+                    &identity,
+                    &state.durable_emission_lock,
+                    &mut progress,
+                    state.deadlines.persistence,
+                )
+                .await;
+                rollup_source_persisted |= wakes_rollup && progress.persisted > persisted_before;
+                if rollup_source_persisted && data.is_empty() {
+                    // Only a newly durable topology/drop source can revoke a
+                    // prior deferral and wake the slow no-work cadence.
+                    rollup_source_persisted = false;
+                    rollup_tick.as_mut().reset(Instant::now());
+                }
+            }
+            () = &mut rollup_tick => {
+                // Advance one dirty day at a bounded idle cadence. Control and
+                // ordinary observations remain prioritized above maintenance.
+                let outcome = run_one_rollup_maintenance(
+                    &db,
+                    &identity,
+                    state.deadlines.persistence,
+                    &mut progress.rollup_frontier_initialized,
+                )
+                .await;
+                rollup_tick
+                    .as_mut()
+                    .reset(Instant::now() + rollup_rebuild_delay(outcome));
             }
         }
     }
     state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
+}
+
+fn observation_dirties_rollup(observation: &QueuedObservation) -> bool {
+    observation.carried_drop.is_some()
+        || observation.envelope.event_kind == TELEMETRY_DROP_EVENT_KIND
+        || EXECUTION_TOPOLOGY_EVENT_KINDS_V1.contains(&observation.envelope.event_kind.as_str())
+}
+
+fn rollup_rebuild_delay(outcome: RollupAdvanceOutcome) -> Duration {
+    match outcome {
+        RollupAdvanceOutcome::Progressed => ROLLUP_BACKLOG_REBUILD_INTERVAL,
+        RollupAdvanceOutcome::None | RollupAdvanceOutcome::Deferred => ROLLUP_IDLE_RETRY_INTERVAL,
+    }
 }
 
 async fn settle_worker(
@@ -430,10 +586,23 @@ async fn settle_worker(
     if discard_pending {
         let mut ranges = Vec::new();
         while let Ok(observation) = data.try_recv() {
+            if observation
+                .owner_fact
+                .as_ref()
+                .is_some_and(|owner| owner.durable_claimed)
+            {
+                // Durable owner facts remain pending for the next mounted
+                // producer; cancellation never relabels them as loss.
+                continue;
+            }
             if let Some(carried_drop) = observation.carried_drop {
                 push_drop_range(&mut ranges, carried_drop);
             }
-            let sequence = observation.envelope.producer_sequence;
+            let sequence = if observation.owner_fact.is_some() {
+                state.next_sequence.fetch_add(1, Ordering::AcqRel)
+            } else {
+                observation.envelope.producer_sequence
+            };
             state.total_dropped.fetch_add(1, Ordering::AcqRel);
             push_drop_range(
                 &mut ranges,
@@ -463,6 +632,8 @@ async fn settle_worker(
             record_queued(
                 db,
                 identity,
+                &state.durable_emission_lock,
+                &state.next_sequence,
                 observation,
                 &mut progress.persisted,
                 &mut progress.first_error,
@@ -470,6 +641,14 @@ async fn settle_worker(
             )
             .await;
         }
+        recover_pending(
+            db,
+            identity,
+            &state.durable_emission_lock,
+            progress,
+            state.deadlines.persistence,
+        )
+        .await;
         if let Some(pending) = take_pending_drop(state) {
             let drop_envelope = telemetry_drop_envelope(identity, pending, clean_shutdown_observed);
             record(
@@ -481,6 +660,13 @@ async fn settle_worker(
             )
             .await;
         }
+        let _ = run_one_rollup_maintenance(
+            db,
+            identity,
+            state.deadlines.persistence,
+            &mut progress.rollup_frontier_initialized,
+        )
+        .await;
     }
     state.total_dropped.load(Ordering::Acquire)
 }
@@ -504,11 +690,40 @@ fn push_drop_range(ranges: &mut Vec<DropRange>, range: DropRange) {
 async fn record_queued(
     db: &RegisteredGlobalDb,
     identity: &ObservabilityProducerIdentityV1,
+    durable_emission_lock: &AsyncMutex<()>,
+    next_sequence: &AtomicU64,
     observation: QueuedObservation,
     persisted: &mut u64,
     first_error: &mut Option<ApplicationContractError>,
     persistence_deadline: Duration,
 ) {
+    if let Some(owner_fact) = observation.owner_fact {
+        let _durable_guard = durable_emission_lock.lock().await;
+        if owner_fact.durable_claimed {
+            settle_claimed_durable(
+                db,
+                observation.envelope,
+                owner_fact.json,
+                persisted,
+                first_error,
+                persistence_deadline,
+            )
+            .await;
+        } else {
+            claim_and_settle_durable(
+                db,
+                identity,
+                next_sequence,
+                observation.envelope,
+                owner_fact.json,
+                persisted,
+                first_error,
+                persistence_deadline,
+            )
+            .await;
+        }
+        return;
+    }
     if let Some(range) = observation.carried_drop {
         let drop_envelope = telemetry_drop_envelope(identity, range, false);
         record(
@@ -528,6 +743,25 @@ async fn record_queued(
         persistence_deadline,
     )
     .await;
+}
+
+fn prepare_delivery_with_identity(
+    identity: &ObservabilityProducerIdentityV1,
+    mut envelope: ObservabilityEnvelopeV1,
+    sequence: u64,
+    delayed: bool,
+) -> Result<ObservabilityEnvelopeV1, &'static str> {
+    envelope.process_boot_id = identity.process_boot_id.clone();
+    envelope.producer_revision = identity.producer_revision.clone();
+    envelope.configuration_revision = identity.configuration_revision.clone();
+    envelope.policy_revision = identity.policy_revision.clone();
+    envelope.producer_sequence = sequence;
+    envelope.watermark = format!("{}:{sequence}", identity.process_boot_id);
+    if delayed {
+        mark_delivery_delayed(&mut envelope);
+    }
+    envelope.validate()?;
+    Ok(envelope)
 }
 
 fn payload_safe_label(value: &str, max_bytes: usize) -> bool {

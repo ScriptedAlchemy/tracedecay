@@ -3,6 +3,7 @@
 mod activity;
 #[cfg(test)]
 mod activity_tests;
+mod delivery;
 mod execution;
 mod mcp_dispatch;
 mod retrieval;
@@ -10,6 +11,7 @@ mod review_labels;
 mod runtime;
 
 pub use activity::ActivityObservedV1;
+pub use delivery::*;
 pub use execution::*;
 pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
@@ -111,7 +113,6 @@ pub enum ObservabilityPayloadV1 {
     WorkConflictPrediction(WorkConflictPredictionObservedV1),
     WorkConflictOutcome(WorkConflictOutcomeLinkedV1),
     WorkIntegrationTransition(WorkIntegrationTransitionObservedV1),
-    WorkStackDrift(WorkStackDriftObservedV1),
     GitHubStackCapability(GitHubStackCapabilityObservedV1),
     WorkDuplicateEffort(WorkDuplicateEffortObservedV1),
     WorkBlockedInterval(WorkBlockedIntervalObservedV1),
@@ -147,7 +148,6 @@ impl ObservabilityPayloadV1 {
             Self::WorkConflictPrediction(_) => "work.conflict_prediction.observed.v1",
             Self::WorkConflictOutcome(_) => "work.conflict_outcome.linked.v1",
             Self::WorkIntegrationTransition(_) => "work.integration.transition.observed.v1",
-            Self::WorkStackDrift(_) => "work.stack_drift.observed.v1",
             Self::GitHubStackCapability(_) => "work.github_stack_capability.observed.v1",
             Self::WorkDuplicateEffort(_) => "work.duplicate_effort.observed.v1",
             Self::WorkBlockedInterval(_) => "work.blocked_interval.observed.v1",
@@ -185,7 +185,6 @@ impl ObservabilityPayloadV1 {
             Self::WorkConflictPrediction(value) => value.validate(),
             Self::WorkConflictOutcome(value) => value.validate(),
             Self::WorkIntegrationTransition(value) => value.validate(),
-            Self::WorkStackDrift(value) => value.validate(),
             Self::GitHubStackCapability(value) => value.validate(),
             Self::WorkDuplicateEffort(value) => value.validate(),
             Self::WorkBlockedInterval(value) => value.validate(),

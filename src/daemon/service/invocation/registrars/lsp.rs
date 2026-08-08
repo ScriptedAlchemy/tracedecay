@@ -62,6 +62,13 @@ impl DaemonLspOwnerRegistrar {
                     .to_owned(),
             })?;
         let scope_set_storage = registered_database.authorized_scope_set_storage()?;
+        let delivery_settlements = self
+            .service
+            .delivery_settlement_recorder(Some(&project_root))
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production LSP delivery settlement recorder is unavailable".to_owned(),
+            })?;
         let mut gateway_capabilities = gateway_capabilities;
         gateway_capabilities.supports_workspace_folders = true;
         let semantics = production_semantic_authorities(
@@ -84,7 +91,7 @@ impl DaemonLspOwnerRegistrar {
             project_root.clone(),
         ));
         let diagnostic_records = Arc::new(
-            crate::application::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
+            tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(database),
         );
         let factory = Arc::new(
             lsp_session_factory(
@@ -107,7 +114,12 @@ impl DaemonLspOwnerRegistrar {
         );
         self.register_lsp_owner(
             project_root,
-            DaemonLspInvocationOwner::authorized(factory.clone(), scope_grant, scope_set_storage),
+            DaemonLspInvocationOwner::authorized(
+                factory.clone(),
+                scope_grant,
+                scope_set_storage,
+                delivery_settlements,
+            ),
         )
         .await?;
         Ok(factory)

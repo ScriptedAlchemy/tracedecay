@@ -70,12 +70,20 @@ pub async fn hook_codex_session_start() -> i32 {
     } else {
         None
     };
-    match guidance {
-        Some(guidance) => println!(
-            "{}",
-            codex_additional_context_json("SessionStart", &guidance)
-        ),
-        None => println!("{}", serde_json::json!({})),
+    let output = guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| codex_additional_context_json("SessionStart", &guidance),
+    );
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &output,
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
     }
     0
 }
@@ -109,10 +117,17 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         let _ = ingest_user_codex_session(session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_for_event(&event)).await;
-    println!(
-        "{}",
-        codex_additional_context_json("UserPromptSubmit", &context)
-    );
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &codex_additional_context_json("UserPromptSubmit", &context),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -160,7 +175,17 @@ pub async fn hook_codex_subagent_start() -> i32 {
         codex_subagent_start_log_line(&event, count, output.is_some())
     );
     if let Some(output) = output {
-        println!("{output}");
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            &output,
+            Some(&_hook_telemetry),
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -198,15 +223,32 @@ pub async fn hook_codex_post_tool_use() -> i32 {
         .into_recorded_guidance(&hook_telemetry)
     {
         if let Some(guidance) = guidance {
-            println!(
-                "{}",
-                codex_additional_context_json("PostToolUse", &guidance)
-            );
+            if !super::write_hook_output(
+                Some(root),
+                tracedecay_hooks::HookHostV1::Codex,
+                &event,
+                &codex_additional_context_json("PostToolUse", &guidance),
+                Some(&hook_telemetry),
+            )
+            .await
+            {
+                return 1;
+            }
         }
         return 0;
     }
     if let Some(context) = codex_post_tool_use_hint(&parsed) {
-        println!("{}", codex_additional_context_json("PostToolUse", &context));
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            &codex_additional_context_json("PostToolUse", &context),
+            Some(&hook_telemetry),
+        )
+        .await
+        {
+            return 1;
+        }
     }
     notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &parsed).await;
     0
@@ -291,7 +333,17 @@ pub async fn hook_codex_post_compact() -> i32 {
     if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
         codex_post_compact(&event, Some(&hook_telemetry)).await;
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -326,17 +378,38 @@ pub async fn hook_codex_stop() -> i32 {
         // session to the daemon; the capture kernel correlates it back to
         // registered projects.
         retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
-        if let Some(guidance) = guidance {
-            println!("{}", codex_additional_context_json("Stop", &guidance));
+        let output = if let Some(guidance) = guidance {
+            codex_additional_context_json("Stop", &guidance)
         } else {
-            println!("{}", serde_json::json!({}));
+            serde_json::json!({}).to_string()
+        };
+        if !super::write_hook_output(
+            Some(root),
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            &output,
+            Some(&hook_telemetry),
+        )
+        .await
+        {
+            return 1;
         }
         return 0;
     }
     if root.is_none() {
         retain_codex_stop_in_daemon(session_id.as_deref(), Some(&hook_telemetry)).await;
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -1028,7 +1101,7 @@ mod tests {
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         let project_id = "proj_codex_identity";
-        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
             &project_root,
             tracedecay_domain::ProjectId::new(project_id).unwrap(),

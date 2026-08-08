@@ -1,8 +1,31 @@
 #[cfg(unix)]
 use super::{daemon_tool_json, run_with_test_env_lock};
 use super::{
-    hook_route_metadata_from_event, parse_daemon_tool_json_content, schedule_user_session_review,
+    hook_output_owner_event_id, hook_route_metadata_from_event, parse_daemon_tool_json_content,
+    schedule_user_session_review,
 };
+
+#[test]
+fn direct_hook_owner_identity_is_stable_across_retry_time() {
+    let host = tracedecay_hooks::HookHostV1::Codex;
+    let event = r#"{"session_id":"session-1","hook_event_name":"Stop"}"#;
+    let output = r#"{"hookSpecificOutput":{"hookEventName":"Stop"}}"#;
+    let first = hook_output_owner_event_id(host, event, output).expect("owner identity");
+    let retry = hook_output_owner_event_id(host, event, output).expect("owner identity");
+    let expected = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.hook-output-delivery.v1",
+        host.hook_key(),
+        event,
+        output,
+    ))
+    .expect("canonical owner digest");
+    let expected = format!(
+        "hook:output:{}",
+        expected.as_str().trim_start_matches("sha256:")
+    );
+    assert_eq!(first, retry);
+    assert_eq!(first, expected);
+}
 
 #[cfg(unix)]
 #[test]

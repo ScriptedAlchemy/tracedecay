@@ -167,7 +167,17 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
     }
     if let Some(guidance) = dispatch_guidance {
         if let Some(guidance) = guidance {
-            println!("{guidance}");
+            if !super::write_hook_output(
+                root.as_deref(),
+                tracedecay_hooks::HookHostV1::Kiro,
+                &event,
+                &guidance,
+                Some(&hook_telemetry),
+            )
+            .await
+            {
+                return 1;
+            }
         }
         return 0;
     }

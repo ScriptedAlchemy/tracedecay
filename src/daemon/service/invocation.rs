@@ -84,61 +84,11 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 
 use super::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
-    ProjectRuntimeRegistryV1,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
 };
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
-};
-use crate::application::ProjectSourceAccessSnapshot;
-use crate::application::advisory::{
-    AdvisoryCycleOutcome, AdvisoryDaemonStartupErrorV1, AdvisoryDaemonStartupRegistrationV1,
-    AdvisoryHookLookupNoticeV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenV1,
-    CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1,
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCurrentBranchRemapper,
-    open_advisory_production_authorities, register_advisory_daemon_startup,
-};
-use crate::application::configuration::{
-    AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
-    ConfigurationMutationAuthority, ConfigurationMutationGrantAuthority,
-    ConfigurationMutationGrantAuthorityError, ConfigurationMutationGrantAuthorityFuture,
-    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
-    PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
-    configuration_layer_scope_digest,
-};
-use crate::application::feedback::concrete::{
-    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
-};
-use crate::application::feedback::cycle_production::{
-    ProductionFeedbackCycleProximityPortV1, production_proximity_feedback_cycle_input,
-};
-use crate::application::feedback::observations::{
-    FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
-    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
-};
-use crate::application::feedback::owner::{
-    DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
-    FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
-};
-use crate::application::feedback::{
-    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
-    open_feedback_cycle_runtime,
-};
-use crate::application::lsp_runtime::{
-    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
-};
-use crate::application::operation_stream::{
-    OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
-};
-use crate::application::primitives::{
-    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime, PrimitiveRequest,
-};
-use crate::application::semantic_runtime::{
-    ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
-    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
@@ -150,6 +100,56 @@ use crate::daemon::git_transactions::{
     capture_exact_snapshot,
 };
 use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::advisory::{
+    AdvisoryCycleOutcome, AdvisoryDaemonStartupErrorV1, AdvisoryDaemonStartupRegistrationV1,
+    AdvisoryHookLookupNoticeV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenV1,
+    CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1,
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCurrentBranchRemapper,
+    open_advisory_production_authorities, register_advisory_daemon_startup,
+};
+use tracedecay_usecases::configuration::{
+    AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
+    ConfigurationMutationAuthority, ConfigurationMutationGrantAuthority,
+    ConfigurationMutationGrantAuthorityError, ConfigurationMutationGrantAuthorityFuture,
+    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
+    PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
+    ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    configuration_layer_scope_digest,
+};
+use tracedecay_usecases::feedback::concrete::{
+    FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
+};
+use tracedecay_usecases::feedback::cycle_production::{
+    ProductionFeedbackCycleProximityPortV1, production_proximity_feedback_cycle_input,
+};
+use tracedecay_usecases::feedback::observations::{
+    FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
+    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
+    FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
+};
+use tracedecay_usecases::feedback::owner::{
+    DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
+    FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
+};
+use tracedecay_usecases::feedback::{
+    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+    open_feedback_cycle_runtime,
+};
+use tracedecay_usecases::lsp_runtime::{
+    DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
+};
+use tracedecay_usecases::operation_stream::{
+    OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
+};
+use tracedecay_usecases::primitives::{
+    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime, PrimitiveRequest,
+};
+use tracedecay_usecases::semantic_runtime::{
+    ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
+    SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
+};
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
 // contract through `service::invocation::` while the split settles.
 #[cfg(test)]
@@ -190,15 +190,19 @@ mod git;
 mod handoff;
 mod invocation_observability;
 mod lsp;
+mod lsp_delivery;
 mod native_integration;
+mod observability_producer;
 mod primitive;
 mod registrars;
+mod retained;
 pub(in crate::daemon) mod semantic_evaluation;
 #[cfg(test)]
 mod tests;
 mod types;
 mod work;
 mod work_attempt_exec;
+mod work_blocked_interval_recovery;
 
 use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
@@ -214,9 +218,13 @@ use invocation_observability::{
 use lsp::PublishedCodeIndexWorkspaceDocuments;
 #[cfg(test)]
 use lsp::*;
+#[cfg(test)]
+use lsp_delivery::lsp_delivery_attempt;
+use lsp_delivery::retain_lsp_delivery_attempt;
 use native_integration::execute_native_integration;
 use primitive::*;
 use registrars::*;
+use retained::*;
 use types::*;
 use work::*;
 
@@ -249,12 +257,12 @@ pub(crate) use types::{
 pub(crate) use registrars::{
     DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
-    DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
+    DaemonLspOwnerRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    RegisteredHookOrchestrationRuntimeV1, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 #[derive(Clone)]
@@ -271,6 +279,9 @@ pub(crate) struct DaemonInvocationService {
     project_runtimes: ProjectRuntimeRegistryV1,
     operation_events: OperationEventAuthority,
     work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
+    worktree_holder_admission: crate::daemon::native_integration::WorktreeHolderAdmissionFenceV1,
+    session_holder_databases:
+        Arc<Mutex<BTreeMap<PathBuf, Arc<crate::global_db::RegisteredGlobalDb>>>>,
 }
 
 #[cfg(test)]
@@ -298,6 +309,34 @@ impl DaemonInvocationService {
             work_attempt_processes: Arc::new(
                 work_attempt_exec::WorkAttemptProcessRegistryV1::default(),
             ),
+            worktree_holder_admission:
+                crate::daemon::native_integration::daemon_worktree_holder_admission_fence(),
+            session_holder_databases: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Installs every durable worktree-cleanup recovery fence before project
+    /// open publishes holder-capable Work and LSP runtimes.
+    pub(crate) async fn install_worktree_cleanup_recovery_fences(
+        &self,
+        owner: &DaemonNativeIntegrationOwner,
+    ) -> Result<(), tracedecay_application::NativeIntegrationPortError> {
+        let roots = owner.cleanup_recovery_roots()?;
+        self.worktree_holder_admission
+            .mark_recovery_required(roots)
+            .await;
+        Ok(())
+    }
+
+    /// Retains canonical profile/user session stores whose active rows remain
+    /// cleanup holders even when no project-store mirror exists.
+    pub(crate) async fn mount_session_holder_databases(
+        &self,
+        databases: impl IntoIterator<Item = Arc<crate::global_db::RegisteredGlobalDb>>,
+    ) {
+        let mut mounted = self.session_holder_databases.lock().await;
+        for database in databases {
+            mounted.insert(database.db_path().to_path_buf(), database);
         }
     }
 }

@@ -537,25 +537,68 @@ pub(super) async fn dispatch_health_tools(
 pub(super) async fn dispatch_retained_application_tools(
     tool_name: &str,
     cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    active_lcm_context: session::LcmHandlerContext<'_>,
+    mut args: Value,
+    _scope_prefix: Option<&str>,
+    _active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    _active_lcm_context: session::LcmHandlerContext<'_>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) else {
-        return Err(unknown_tool_error(tool_name));
-    };
-    invoke_retained_mcp_request(
-        RetainedMcpExecutionContext::Project {
-            cg,
-            scope_prefix,
-            active_project_session_db,
-            active_lcm_context,
-            options: &options,
+    let operation = match tool_name {
+        "tracedecay_fact_store" => match args.get("action").and_then(Value::as_str) {
+            Some("add") => ApplicationSurfaceOperation::FactStoreAdd,
+            Some("search") => ApplicationSurfaceOperation::FactStoreSearch,
+            Some("probe") => ApplicationSurfaceOperation::FactStoreProbe,
+            Some("related") => ApplicationSurfaceOperation::FactStoreRelated,
+            Some("reason") => ApplicationSurfaceOperation::FactStoreReason,
+            Some("contradict") => ApplicationSurfaceOperation::FactStoreContradict,
+            Some("get") => ApplicationSurfaceOperation::FactStoreGet,
+            Some("update") => ApplicationSurfaceOperation::FactStoreUpdate,
+            Some("remove") => ApplicationSurfaceOperation::FactStoreRemove,
+            Some("list") => ApplicationSurfaceOperation::FactStoreList,
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: "tracedecay_fact_store requires a supported action".to_owned(),
+                });
+            }
         },
+        "tracedecay_session_refresh" => match args.get("action").and_then(Value::as_str) {
+            Some("status") => ApplicationSurfaceOperation::SessionRefreshStatus,
+            Some("start" | "join" | "resume" | "begin") => {
+                ApplicationSurfaceOperation::SessionRefreshBegin
+            }
+            Some("cancel") => ApplicationSurfaceOperation::SessionRefreshCancel,
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: "tracedecay_session_refresh requires a supported action".to_owned(),
+                });
+            }
+        },
+        _ => ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .filter(|operation| {
+                operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained
+            })
+            .ok_or_else(|| unknown_tool_error(tool_name))?,
+    };
+    if matches!(
+        tool_name,
+        "tracedecay_fact_store" | "tracedecay_session_refresh"
+    ) && let Some(arguments) = args.as_object_mut()
+    {
+        arguments.remove("action");
+    }
+    let normalized = crate::application_surface::normalize_application_tool_args(tool_name, args)
+        .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    application_surface::handle_application_surface(
+        cg,
         operation,
-        args,
+        normalized,
+        options.application_invocation_executor,
+        options.application_invocation_target,
+        options.application_request_id,
+        options.application_deadline,
+        options.application_cancellation,
     )
     .await
 }
@@ -632,6 +675,22 @@ pub(super) async fn execute_project_retained_application_tool(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match request.operation {
+        RetainedSurfaceOperation::FactStoreAdd
+        | RetainedSurfaceOperation::FactStoreSearch
+        | RetainedSurfaceOperation::FactStoreProbe
+        | RetainedSurfaceOperation::FactStoreRelated
+        | RetainedSurfaceOperation::FactStoreReason
+        | RetainedSurfaceOperation::FactStoreContradict
+        | RetainedSurfaceOperation::FactStoreGet
+        | RetainedSurfaceOperation::FactStoreUpdate
+        | RetainedSurfaceOperation::FactStoreRemove
+        | RetainedSurfaceOperation::FactStoreList
+        | RetainedSurfaceOperation::SessionRefreshStatus
+        | RetainedSurfaceOperation::SessionRefreshCancel
+        | RetainedSurfaceOperation::SessionRefreshBegin => Err(TraceDecayError::Config {
+            message: "semantic retained operations require the canonical application owner"
+                .to_owned(),
+        }),
         RetainedSurfaceOperation::FactStore
         | RetainedSurfaceOperation::FactFeedback
         | RetainedSurfaceOperation::MemoryStatus => {
@@ -761,6 +820,7 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),
                 options.dashboard_application_invocation_executor.clone(),
+                options.dashboard_delivery_settlement_authority.clone(),
             )
             .await
         }

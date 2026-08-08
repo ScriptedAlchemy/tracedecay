@@ -75,7 +75,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
     ) -> std::result::Result<DashboardApplicationRouters, String> {
         let http = crate::application_surface::http_application_router_with_executor(
             Arc::clone(&self.executor),
-            crate::application::operation_stream::OperationEventAuthority::default(),
+            tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
             active_project_id,
         )
         .map_err(|error| error.to_string())?;
@@ -333,6 +333,9 @@ pub(super) async fn handle_dashboard(
     application_invocation_executor: Option<
         Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     >,
+    delivery_settlement_authority: Option<
+        Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+    >,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -469,6 +472,7 @@ pub(super) async fn handle_dashboard(
                     feedback_status_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,
+                    delivery_settlement_authority,
                 },
             )
             .await?;

@@ -11,19 +11,22 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
-    ApplicationProblemEnvelope, ApplicationResult, AttachRuntimeEvidenceCommand,
-    CancelWorkAttemptCommand, CancellationSignal, CreateWorkCommand, Deadline,
-    GenerateProposalRequest, LegalAction, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
-    ReplanDependenciesCommand, ResultContractRef, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
+    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
+    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationSignal, CreateWorkCommand,
+    Deadline, ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, LegalAction,
+    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
+    ReviewProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
     WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1,
-    WorkTopologyViewRequestV1, work_executable_binding_registry,
+    WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkRetryTestBindingTokenRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
+    work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
 
 use crate::daemon::DaemonHandshake;
@@ -38,6 +41,61 @@ use crate::errors::{Result, TraceDecayError};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;
+
+/// A Work response plus the authenticated connection on which its terminal
+/// delivery acknowledgement must be sent. The handle is intentionally kept
+/// alive until the presentation layer has written and flushed stdout.
+pub struct WorkCliResponse {
+    pub outcome: ApplicationResult<Value>,
+    delivery: Option<WorkCliDelivery>,
+}
+
+impl WorkCliResponse {
+    fn without_delivery(outcome: ApplicationResult<Value>) -> Self {
+        Self {
+            outcome,
+            delivery: None,
+        }
+    }
+
+    pub fn take_delivery(&mut self) -> Option<WorkCliDelivery> {
+        self.delivery.take()
+    }
+}
+
+/// Authenticated terminal delivery handle for one daemon Work response.
+pub struct WorkCliDelivery {
+    client: DaemonInvocationClient,
+    target_request_id: String,
+}
+
+impl WorkCliDelivery {
+    /// Acknowledge only after the caller's output write and flush succeeded.
+    pub async fn acknowledge_delivered(&self) -> Result<()> {
+        self.client
+            .acknowledge_work_delivery(
+                &self.target_request_id,
+                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                None,
+            )
+            .await
+    }
+
+    /// Record a terminal disconnected/drop outcome when the caller's output
+    /// boundary fails. This must never be converted into Delivered.
+    pub async fn acknowledge_dropped(
+        &self,
+        reason: tracedecay_domain::DeliveryDropReasonV1,
+    ) -> Result<()> {
+        self.client
+            .acknowledge_work_delivery(
+                &self.target_request_id,
+                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                Some(reason),
+            )
+            .await
+    }
+}
 
 /// Every Work operation this build accepts by route segment, for typed
 /// rejection messages.
@@ -113,6 +171,11 @@ fn decode_work_invocation(
         }
         WorkOperation::ResumeAttempts => decode::<ResumeWorkAttemptsCommand>(body)
             .map(WorkApplicationInvocationV1::ResumeAttempts),
+        WorkOperation::RetryAttempt => {
+            decode::<RetryWorkAttemptCommandV1>(body).map(WorkApplicationInvocationV1::RetryAttempt)
+        }
+        WorkOperation::MintRetryTestBinding => decode::<WorkRetryTestBindingTokenRequestV1>(body)
+            .map(WorkApplicationInvocationV1::MintRetryTestBinding),
         WorkOperation::ListAttempts => {
             decode::<WorkAttemptListRequestV1>(body).map(WorkApplicationInvocationV1::ListAttempts)
         }
@@ -121,9 +184,17 @@ fn decode_work_invocation(
         WorkOperation::Views => {
             decode::<WorkGraphReadRequestV1>(body).map(WorkApplicationInvocationV1::Views)
         }
+        WorkOperation::MutateGraph => decode::<WorkProductMutationRequestV1>(body)
+            .map(WorkApplicationInvocationV1::MutateGraph),
         WorkOperation::Topology => {
             decode::<WorkTopologyViewRequestV1>(body).map(WorkApplicationInvocationV1::Topology)
         }
+        WorkOperation::TopologyMetrics => decode::<ExecutionTopologyMetricsRequestV1>(body)
+            .map(WorkApplicationInvocationV1::TopologyMetrics),
+        WorkOperation::AdjudicateDuplicate => decode::<WorkDuplicateAdjudicationCommandV1>(body)
+            .map(WorkApplicationInvocationV1::AdjudicateDuplicate),
+        WorkOperation::AdjudicateLeak => decode::<AdjudicateWorkLeakCommandV1>(body)
+            .map(WorkApplicationInvocationV1::AdjudicateLeak),
         WorkOperation::PauseRun => {
             decode::<PauseWorkRunCommand>(body).map(WorkApplicationInvocationV1::PauseRun)
         }
@@ -201,6 +272,14 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
                 WorkApplicationOutcomeV1::ResumeAttempts(_)
             )
             | (
+                WorkOperation::RetryAttempt,
+                WorkApplicationOutcomeV1::RetryAttempt(_)
+            )
+            | (
+                WorkOperation::MintRetryTestBinding,
+                WorkApplicationOutcomeV1::MintRetryTestBinding(_)
+            )
+            | (
                 WorkOperation::ListAttempts,
                 WorkApplicationOutcomeV1::ListAttempts(_)
             )
@@ -210,8 +289,24 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
             )
             | (WorkOperation::Views, WorkApplicationOutcomeV1::Views(_))
             | (
+                WorkOperation::MutateGraph,
+                WorkApplicationOutcomeV1::MutateGraph(_)
+            )
+            | (
                 WorkOperation::Topology,
                 WorkApplicationOutcomeV1::Topology(_)
+            )
+            | (
+                WorkOperation::TopologyMetrics,
+                WorkApplicationOutcomeV1::TopologyMetrics(_)
+            )
+            | (
+                WorkOperation::AdjudicateDuplicate,
+                WorkApplicationOutcomeV1::AdjudicateDuplicate(_)
+            )
+            | (
+                WorkOperation::AdjudicateLeak,
+                WorkApplicationOutcomeV1::AdjudicateLeak(_)
             )
             | (
                 WorkOperation::PauseRun,
@@ -249,6 +344,18 @@ pub async fn invoke_work_cli(
     operation: WorkOperation,
     body: Value,
 ) -> Result<ApplicationResult<Value>> {
+    Ok(invoke_work_cli_with_delivery(project_root, operation, body)
+        .await?
+        .outcome)
+}
+
+/// Invokes Work while retaining the daemon connection until the presentation
+/// layer explicitly acknowledges the terminal output boundary.
+pub async fn invoke_work_cli_with_delivery(
+    project_root: PathBuf,
+    operation: WorkOperation,
+    body: Value,
+) -> Result<WorkCliResponse> {
     let result_contract = work_result_contract(operation)?;
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
@@ -265,11 +372,11 @@ pub async fn invoke_work_cli(
     let invocation = match decode_work_invocation(operation, body) {
         Ok(invocation) => invocation,
         Err(_) => {
-            return Ok(Err(work_problem(
+            return Ok(WorkCliResponse::without_delivery(Err(work_problem(
                 result_contract,
                 request_id,
                 invalid_work_request(),
-            )));
+            ))));
         }
     };
     let request = DaemonInvocationRequest::work_application(
@@ -280,7 +387,8 @@ pub async fn invoke_work_cli(
         cancellation.context(),
     );
     let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
-    let response = match DaemonInvocationClient::for_current(handshake)?
+    let client = DaemonInvocationClient::for_current(handshake)?;
+    let response = match client
         .invoke_controlled(
             request,
             deadline,
@@ -291,40 +399,84 @@ pub async fn invoke_work_cli(
     {
         Ok(response) => response,
         Err(error) => {
-            return Ok(Err(work_problem(
+            return Ok(WorkCliResponse::without_delivery(Err(work_problem(
                 result_contract,
                 request_id,
                 error.into_application_problem(),
-            )));
+            ))));
         }
     };
-    match response.outcome {
+    let delivery_eligible = match &response.outcome {
+        DaemonInvocationOutcome::WorkApplication { outcome, .. }
+            if work_outcome_matches(operation, outcome) =>
+        {
+            work_delivery_is_eligible(operation, outcome)
+        }
+        _ => false,
+    };
+    let delivery_request_id = request_id.as_str().to_owned();
+    let outcome = match response.outcome {
         DaemonInvocationOutcome::WorkApplication { scope, outcome }
             if work_outcome_matches(operation, &outcome) =>
         {
-            Ok(Ok(ApplicationEnvelope {
+            Ok(ApplicationEnvelope {
                 contract: result_contract,
-                request_id,
+                request_id: request_id.clone(),
                 scope,
                 outcome: erase_work_outcome(outcome)?,
-            }))
+            })
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            Ok(Err(work_problem(result_contract, request_id, problem)))
+            Err(work_problem(result_contract, request_id.clone(), problem))
         }
-        DaemonInvocationOutcome::Problem { problem } => Ok(Err(work_problem(
+        DaemonInvocationOutcome::Problem { problem } => Err(work_problem(
             result_contract,
-            request_id,
+            request_id.clone(),
             daemon_application_problem(problem),
-        ))),
-        _ => Ok(Err(work_problem(
+        )),
+        _ => Err(work_problem(
             result_contract,
-            request_id,
+            request_id.clone(),
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "work_response_unavailable".to_owned(),
                 message: "The daemon returned no canonical Work result".to_owned(),
             }),
-        ))),
+        )),
+    };
+    Ok(WorkCliResponse {
+        outcome,
+        delivery: delivery_eligible.then(|| WorkCliDelivery {
+            client,
+            target_request_id: delivery_request_id,
+        }),
+    })
+}
+
+fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
+    match (operation, outcome) {
+        (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
+        | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))
+        | (WorkOperation::CancelAttempt, WorkApplicationOutcomeV1::CancelAttempt(outcome)) => {
+            application_outcome_payload(outcome).is_some()
+        }
+        (WorkOperation::HydrateArtifacts, WorkApplicationOutcomeV1::HydrateArtifacts(outcome)) => {
+            application_outcome_payload(outcome).is_some_and(|hydration| {
+                matches!(
+                    hydration,
+                    tracedecay_application::WorkArtifactHydrationV1::Hydrated { attempts, .. }
+                        if !attempts.is_empty()
+                )
+            })
+        }
+        _ => false,
+    }
+}
+
+fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T> {
+    match outcome {
+        ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
+        ApplicationOutcome::Preview(result) => result.payload.as_ref(),
+        ApplicationOutcome::Effect(result) => result.payload.as_ref(),
     }
 }
 
@@ -345,10 +497,16 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::AttemptStatus(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::CancelAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeAttempts(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::RetryAttempt(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::MintRetryTestBinding(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ListAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::HydrateArtifacts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Views(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::MutateGraph(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Topology(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::TopologyMetrics(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::AdjudicateDuplicate(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::AdjudicateLeak(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::PauseRun(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeRun(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::RunControl(outcome) => serde_json::to_value(outcome),

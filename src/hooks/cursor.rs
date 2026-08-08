@@ -60,7 +60,17 @@ pub async fn hook_cursor_subagent_start() -> i32 {
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "subagentStart", &event);
     if let Some(decision) = evaluate_cursor_subagent_start(&event) {
-        println!("{decision}");
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            &decision,
+            Some(&_hook_telemetry),
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -82,7 +92,17 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
     if let Some(decision) = cursor_post_tool_use_decision(&event) {
-        println!("{decision}");
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            &decision,
+            Some(&_hook_telemetry),
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -117,7 +137,17 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
     )
     .await;
     let context = Box::pin(cursor_before_submit_prompt_context(&event)).await;
-    println!("{}", cursor_before_submit_prompt_json(context.as_deref()));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        &event,
+        &cursor_before_submit_prompt_json(context.as_deref()),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -213,10 +243,21 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
             let session_id = event_session_id_from_json(&event);
             super::schedule_user_session_review("cursor", session_id.as_deref()).await;
         }
-        if let Some(guidance) = guidance {
-            println!("{}", serde_json::json!({ "additional_context": guidance }));
+        let output = if let Some(guidance) = guidance {
+            serde_json::json!({ "additional_context": guidance }).to_string()
         } else {
-            println!("{}", serde_json::json!({}));
+            serde_json::json!({}).to_string()
+        };
+        if !super::write_hook_output(
+            Some(root),
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            &output,
+            Some(&hook_telemetry),
+        )
+        .await
+        {
+            return 1;
         }
         return 0;
     }
@@ -231,7 +272,17 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         let session_id = event_session_id_from_json(&event);
         super::schedule_user_session_review("cursor", session_id.as_deref()).await;
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -268,7 +319,17 @@ pub async fn hook_cursor_pre_compact() -> i32 {
             outcome.reason
         );
     }
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -310,13 +371,33 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         .into_recorded_guidance(&hook_telemetry)
     {
         if let Some(guidance) = guidance {
-            println!("{}", serde_json::json!({ "additional_context": guidance }));
+            if !super::write_hook_output(
+                Some(root),
+                tracedecay_hooks::HookHostV1::CursorDesktop,
+                &event,
+                &serde_json::json!({ "additional_context": guidance }).to_string(),
+                Some(&hook_telemetry),
+            )
+            .await
+            {
+                return 1;
+            }
         }
         return 0;
     }
     notify_cursor_after_file_edit(&parsed, &hook_telemetry).await;
     if let Some(decision) = cursor_after_file_edit_decision(&event) {
-        println!("{decision}");
+        if !super::write_hook_output(
+            root.as_deref(),
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            &decision,
+            Some(&hook_telemetry),
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -324,7 +405,19 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// Cursor `sessionStart` hook handler.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    println!("{}", cursor_session_start_response(&event).await);
+    let output = cursor_session_start_response(&event).await;
+    let root = cursor_project_root_from_event_with_identity(&event).await;
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        &event,
+        &output,
+        None,
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -370,7 +463,17 @@ pub async fn hook_cursor_workspace_open() -> i32 {
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "workspaceOpen", &event);
     notify_cursor_workspace_open(&event, &hook_telemetry).await;
-    println!("{}", serde_json::json!({}));
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+        &event,
+        &serde_json::json!({}).to_string(),
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
+    }
     0
 }
 
@@ -1051,7 +1154,7 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_cursor_identity";
-        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
             &project_root,
             tracedecay_domain::ProjectId::new(project_id).unwrap(),

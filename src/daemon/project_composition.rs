@@ -530,7 +530,7 @@ pub(super) async fn production_project_server(
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode
     // analyzer-ownership registration adopted on top of the project-level one.
-    let diagnostic_broker = crate::application::dashboard_diagnostics::open_diagnostic_broker(
+    let diagnostic_broker = tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
         canonical_project_path.to_path_buf(),
         &cg.store_layout().dashboard_root,
     )
@@ -775,6 +775,30 @@ pub(super) async fn production_project_server(
             );
             let session_db = Arc::clone(&registered_project_session_db);
             let user_session_db = Arc::clone(&registered_user_session_db);
+            invocation
+                .service
+                .mount_session_holder_databases([
+                    Arc::clone(&registered_profile_db),
+                    Arc::clone(&user_session_db),
+                ])
+                .await;
+            let delivery_access = project_open_owners::daemon_owned_project_source_access_at(
+                &code_search_scope,
+                canonical_project_path,
+                &runtime_configuration,
+                tracedecay_application::now_micros(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project delivery source access denied: {error}"),
+            })?;
+            project_delivery_mount::ensure_project_delivery_settlement(
+                invocation,
+                canonical_project_path,
+                Arc::clone(&session_db),
+                &code_search_scope,
+                &delivery_access,
+            )
+            .await?;
             let host_admission_broker = store_administration
                 .host_admission_broker(&session_db)
                 .await?
@@ -876,7 +900,6 @@ pub(super) async fn production_project_server(
                 Arc::clone(&session_db),
                 profile_identity.profile_root().to_path_buf(),
                 transcript_source_home.clone(),
-                tracedecay_application::doctor::RemoteOperationalReadV1::Unconfigured,
                 cg.get_config().sync.retention.clone(),
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
@@ -884,6 +907,23 @@ pub(super) async fn production_project_server(
                 store_telemetry_sampling,
                 Arc::clone(cg.configuration_runtime()),
             );
+            let delivery_settlement_authority = invocation
+                .service
+                .delivery_settlement_authority(Some(canonical_project_path))
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("delivery settlement authority is invalid: {error}"),
+                })?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "delivery settlement authority is not mounted".to_owned(),
+                })?;
+            let delivery_settlement_recorder = invocation
+                .service
+                .delivery_settlement_recorder(Some(canonical_project_path))
+                .await
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "delivery settlement recorder is not mounted".to_owned(),
+                })?;
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
                 handshake.scope_prefix.clone(),
@@ -908,6 +948,8 @@ pub(super) async fn production_project_server(
                         coordinated_hook_branch_writer(store_administration.clone()),
                         coordinated_background_refresh_writer(store_administration.clone()),
                     ),
+                    delivery_settlement_authority,
+                    delivery_settlement_recorder,
                 },
             )
             .with_dashboard_doctor_report_reader(doctor_report_reader)

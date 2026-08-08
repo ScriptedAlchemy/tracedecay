@@ -16,6 +16,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::errors::{Result, TraceDecayError};
 
+use super::service::invocation::DaemonRetainedRuntimeRegistrar;
 use super::*;
 
 /// Daemon-generation-local state for the closed invocation protocol.
@@ -32,7 +33,7 @@ pub(super) struct DaemonInvocationState {
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
-        crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
+        tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
 impl Clone for DaemonInvocationState {
@@ -73,7 +74,7 @@ impl Default for DaemonInvocationState {
             query_authority_provider:
                 query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
             semantic_projection_scheduler:
-                crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
+                tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
     }
 }
@@ -110,7 +111,7 @@ impl DaemonInvocationState {
             // At this tip `unregister_project_semantic_runtime` already drops
             // the project's retained generation, redundancy state, and
             // activation gate, so one call is the whole teardown.
-            crate::application::semantic_runtime::unregister_project_semantic_runtime(root);
+            tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(root);
         }
         Ok(())
     }
@@ -127,7 +128,7 @@ impl DaemonInvocationState {
         profile_id: &tracedecay_domain::UserProfileId,
         repository_owner: &str,
         repository_name: &str,
-    ) -> crate::application::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
+    ) -> tracedecay_usecases::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
     {
         self.github_credential_lifecycle
             .mount(profile_id, repository_owner, repository_name)
@@ -155,6 +156,10 @@ impl DaemonInvocationState {
 
     pub(super) fn work_runtime_registrar(&self) -> DaemonWorkRuntimeRegistrar {
         DaemonWorkRuntimeRegistrar::new(&self.service)
+    }
+
+    pub(super) fn retained_runtime_registrar(&self) -> DaemonRetainedRuntimeRegistrar {
+        DaemonRetainedRuntimeRegistrar::new(&self.service)
     }
 
     pub(super) fn semantic_runtime_registrar(&self) -> DaemonSemanticRuntimeRegistrar {
@@ -209,7 +214,7 @@ impl DaemonInvocationState {
         let status = self
             .query_authority_provider
             .install_evaluated_initial_state(scope, state.clone(), cursor_keys)?;
-        if !crate::application::semantic_runtime::commit_project_initial_semantic_roots(
+        if !tracedecay_usecases::semantic_runtime::commit_project_initial_semantic_roots(
             project_root.to_path_buf(),
             &state,
         ) {
@@ -224,7 +229,7 @@ impl DaemonInvocationState {
         &self,
         project_root: &Path,
         session_db: Arc<crate::global_db::RegisteredGlobalDb>,
-    ) -> Arc<dyn crate::application::semantic_runtime::RetrievalProfileActivationObserverV1> {
+    ) -> Arc<dyn tracedecay_usecases::semantic_runtime::RetrievalProfileActivationObserverV1> {
         Arc::new(
             query_authority_provider::DaemonQueryActivationRegistrarV1::new(
                 self.query_authority_provider.clone(),
@@ -275,7 +280,7 @@ impl DaemonInvocationState {
         // and Doctor must resolve published vectors through the mounted code
         // graph even when the semantic runtime itself is not configured.
         let vector_graph: Arc<
-            dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1,
+            dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1,
         > = Arc::new(
             code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
                 project_id.clone(),
@@ -291,8 +296,8 @@ impl DaemonInvocationState {
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
             .map(|(((handle, lifecycle), resources), worktree_id)| {
                 let graph = Arc::clone(&vector_graph);
-                crate::application::semantic_runtime::production_saved_generation_schedule_hook(
-                    crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
+                tracedecay_usecases::semantic_runtime::production_saved_generation_schedule_hook(
+                    tracedecay_usecases::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
                         project_root: project_root.to_path_buf(),
                         code_index_store_root: scoped_code_index_store_root.clone(),
                         worktree_id,

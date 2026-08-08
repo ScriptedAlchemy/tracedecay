@@ -1,46 +1,83 @@
 //! Production Plan 26 read-model composition over the canonical accounting store.
 
+mod delivery_recorder;
+mod delivery_settlement;
+mod delivery_spool;
 mod emit;
+mod execution_emit;
 mod export;
+mod github_stack_emit;
 mod producer;
+mod read;
+mod read_model;
+#[cfg(test)]
+mod read_model_tests;
 mod retrieval_emit;
+mod store;
+mod work_blocked_interval_emit;
+mod work_duplicate_emit;
+mod work_owner_observation_recovery;
+mod work_retry_leak_emit;
 
+pub use delivery_recorder::{
+    BoundedDeliverySettlementRecorderV1, DeliverySettlementRecordOutcomeV1,
+    DeliverySettlementRecorderSummaryV1,
+};
+pub use delivery_settlement::{DeliverySettlementAuthorityV1, DeliverySettlementEmissionV1};
 pub use emit::{
     record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
     record_operation_resource, record_retrieval_query, record_storage,
 };
+pub use execution_emit::{
+    ExecutionTopologyObservationUnavailableV1, NativeIntegrationObservationResultV1,
+    execution_owner_fact_envelope, record_native_integration_transition,
+};
 pub use export::RegisteredAggregateShareExporterV1;
+pub use github_stack_emit::{
+    GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
+    GitHubStackProbeOutcomeV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
+    record_github_stack_capability,
+};
 pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
-    ObservabilityProducerSummaryV1,
+    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
+    ObservabilityProducerIdentityV1, ObservabilityProducerSummaryV1,
 };
+pub use read::{observatory_read_model, observatory_unavailable_read_model};
 pub use retrieval_emit::{
     AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
     observe_stage_ablation, record_analytics_consent, record_context_outcome,
     record_retrieval_ablation, record_retrieval_planner, record_retrieval_source,
     record_retrieval_synthesis, record_retriever,
 };
-
-use tracedecay_application::{
-    ApplicationContractError, ObservabilityFuture, ObservabilityPageV1, ObservabilityQueryPort,
-    ObservabilityQueryV1, ObservabilityRecordPort,
+pub use store::RegisteredObservabilityPortV1;
+pub use tracedecay_global_db::{
+    DeliverySourceReceiptReadV1, MAX_PENDING_RECEIPTED_DELIVERIES_V1,
+    PendingDeliverySourceReceiptV1,
 };
+pub use work_blocked_interval_emit::{
+    record_work_blocked_interval_observation, work_blocked_interval_observation_envelope,
+};
+pub use work_duplicate_emit::record_work_duplicate_observation;
+pub use work_owner_observation_recovery::{
+    WorkOwnerObservationRecoverySummaryV1, WorkOwnerObservationRecoveryV1,
+};
+pub use work_retry_leak_emit::{
+    WorkOwnerObservationResultV1, record_work_leak_observation, record_work_retry_observation,
+};
+
 use tracedecay_application::{
     CostsReadModelV1, MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1,
     MetricSourceV1, MetricTemporalV1, MetricUncertaintyV1, MetricValueV1, ObservabilityHorizonV1,
     ObservatoryReadModelV1, now_micros,
 };
-use tracedecay_domain::{
-    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityTerminalResultV1, ObservationScopeV1,
-};
+use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
 
 use crate::feedback::observations::{
     FeedbackCoverageV1, FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1,
     FeedbackSystemMetricKindV1, FeedbackSystemMetricUnitV1,
 };
-use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
+use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::provider_pricing::load_table;
 use crate::provider_usage::{
@@ -107,260 +144,6 @@ pub fn costs_http_value(model: &CostsReadModelV1) -> Result<serde_json::Value, s
 
 pub fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(model)
-}
-
-/// Production adapter for the canonical application record/query boundary.
-/// The complete versioned envelope is retained as JSON while indexed columns
-/// provide bounded scope/kind/time queries.
-#[derive(Clone, Copy)]
-pub struct RegisteredObservabilityPortV1<'a> {
-    db: &'a RegisteredGlobalDb,
-}
-
-impl<'a> RegisteredObservabilityPortV1<'a> {
-    pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
-        Self { db }
-    }
-}
-
-impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
-    fn record(&self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'_, String> {
-        Box::pin(async move {
-            envelope
-                .validate()
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let metadata_json = serde_json::to_string(&envelope)
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let insert = AnalyticsEventInsert {
-                provider: OBSERVABILITY_PROVIDER.to_string(),
-                project_id: envelope.scope_ref.clone(),
-                session_id: None,
-                timestamp: envelope.event_time_micros.div_euclid(1_000_000),
-                event_kind: envelope.event_kind.clone(),
-                hook_name: None,
-                tool_name: None,
-                tool_category: None,
-                skill_name: None,
-                hint_category: None,
-                hint_id: Some(envelope.idempotency_key.clone()),
-                outcome: envelope
-                    .terminal_result
-                    .map(|result| format!("{result:?}").to_ascii_lowercase()),
-                metadata_json: Some(metadata_json),
-            };
-            self.db
-                .append_observability_event(&insert)
-                .await
-                .map(|id| format!("analytics:{id}"))
-                .map_err(ApplicationContractError::Domain)
-        })
-    }
-}
-
-impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
-    fn query(&self, query: ObservabilityQueryV1) -> ObservabilityFuture<'_, ObservabilityPageV1> {
-        Box::pin(async move {
-            if query.limit == 0 {
-                return Err(ApplicationContractError::ZeroValue {
-                    field: "observability_query.limit",
-                });
-            }
-            if query.horizon.until_micros <= query.horizon.since_micros {
-                return Err(ApplicationContractError::InvalidRange {
-                    field: "observability_query.horizon",
-                });
-            }
-            let requested = usize::try_from(query.limit)
-                .unwrap_or(EVENT_LIMIT)
-                .min(EVENT_LIMIT);
-            let mut scan_before_id = match query.after_watermark.as_deref() {
-                None => None,
-                Some(value) => Some(
-                    value
-                        .strip_prefix("analytics:")
-                        .and_then(|value| value.parse::<i64>().ok())
-                        .filter(|value| *value > 0)
-                        .ok_or(ApplicationContractError::InvalidRange {
-                            field: "observability_query.after_watermark",
-                        })?,
-                ),
-            };
-            let scope_ref = query.authorized_scope_ref;
-            let coarse_since = query.horizon.since_micros.div_euclid(1_000_000);
-            let coarse_until = query
-                .horizon
-                .until_micros
-                .saturating_add(999_999)
-                .div_euclid(1_000_000);
-            let scan_limit = requested.clamp(OBSERVABILITY_SCAN_PAGE, EVENT_LIMIT);
-            let mut eligible = Vec::with_capacity(requested.saturating_add(1));
-            let mut watermark_id = None;
-            let mut invalid_in_page = false;
-            let mut invalid_after_page = false;
-            'scan: loop {
-                let rows = self
-                    .db
-                    .query_analytics_events(&AnalyticsEventQuery {
-                        provider: Some(OBSERVABILITY_PROVIDER.to_string()),
-                        project_id: Some(scope_ref.clone()),
-                        event_kind: (query.event_kinds.len() == 1)
-                            .then(|| query.event_kinds[0].clone()),
-                        since: Some(coarse_since),
-                        until: Some(coarse_until),
-                        before_id: scan_before_id,
-                        limit: scan_limit,
-                        ..AnalyticsEventQuery::default()
-                    })
-                    .await
-                    .map_err(ApplicationContractError::Domain)?;
-                if rows.is_empty() {
-                    break;
-                }
-                let Some(newest_row) = rows.last() else {
-                    break;
-                };
-                watermark_id.get_or_insert(newest_row.id);
-                let Some(oldest_row) = rows.first() else {
-                    break;
-                };
-                let next_scan_before_id = oldest_row.id;
-                let exhausted = rows.len() < scan_limit;
-                for row in rows.iter().rev() {
-                    let row_requested =
-                        query.event_kinds.is_empty() || query.event_kinds.contains(&row.event_kind);
-                    let envelope = row
-                        .metadata_json
-                        .as_deref()
-                        .and_then(|value| {
-                            serde_json::from_str::<ObservabilityEnvelopeV1>(value).ok()
-                        })
-                        .filter(|envelope| envelope.validate().is_ok());
-                    let Some(envelope) = envelope else {
-                        if row_requested {
-                            if eligible.len() < requested {
-                                invalid_in_page = true;
-                            } else {
-                                invalid_after_page = true;
-                            }
-                        }
-                        continue;
-                    };
-                    let envelope_requested = query.event_kinds.is_empty()
-                        || query.event_kinds.contains(&envelope.event_kind);
-                    if !row_requested && !envelope_requested {
-                        continue;
-                    }
-                    if envelope.scope_ref != scope_ref
-                        || envelope.event_kind != row.event_kind
-                        || envelope.event_time_micros < query.horizon.since_micros
-                        || envelope.event_time_micros >= query.horizon.until_micros
-                    {
-                        if envelope.event_time_micros >= query.horizon.since_micros
-                            && envelope.event_time_micros < query.horizon.until_micros
-                        {
-                            if eligible.len() < requested {
-                                invalid_in_page = true;
-                            } else {
-                                invalid_after_page = true;
-                            }
-                        }
-                        continue;
-                    }
-                    if !envelope_requested {
-                        continue;
-                    }
-                    eligible.push((row.id, envelope));
-                    if eligible.len() > requested {
-                        break 'scan;
-                    }
-                }
-                if exhausted {
-                    break;
-                }
-                scan_before_id = Some(next_scan_before_id);
-            }
-            let capped = eligible.len() > requested;
-            if capped {
-                eligible.pop();
-            } else if invalid_after_page {
-                invalid_in_page = true;
-            }
-            let next_watermark = if capped {
-                Some(format!(
-                    "analytics:{}",
-                    eligible
-                        .last()
-                        .ok_or(ApplicationContractError::Inconsistent {
-                            field: "observability_page.cursor",
-                        })?
-                        .0
-                ))
-            } else {
-                None
-            };
-            let mut coverage = if capped {
-                CoverageStateV1::Capped
-            } else {
-                CoverageStateV1::Known
-            };
-            for (_, event) in &eligible {
-                coverage = merge_coverage_state(coverage, event.coverage);
-            }
-            if invalid_in_page {
-                coverage = merge_coverage_state(coverage, CoverageStateV1::Partial);
-            }
-            eligible.sort_by(|(_, left), (_, right)| {
-                (
-                    left.event_time_micros,
-                    left.observation_time_micros,
-                    left.producer_sequence,
-                    left.event_id.as_str(),
-                )
-                    .cmp(&(
-                        right.event_time_micros,
-                        right.observation_time_micros,
-                        right.producer_sequence,
-                        right.event_id.as_str(),
-                    ))
-            });
-            let event_cursors = eligible
-                .iter()
-                .map(|(id, _)| format!("analytics:{id}"))
-                .collect();
-            let events = eligible
-                .into_iter()
-                .map(|(_, envelope)| envelope)
-                .collect::<Vec<_>>();
-            Ok(ObservabilityPageV1 {
-                events,
-                event_cursors,
-                watermark: watermark_id.map_or_else(
-                    || "analytics:empty".to_string(),
-                    |id| format!("analytics:{id}"),
-                ),
-                coverage,
-                next_watermark,
-            })
-        })
-    }
-}
-
-fn merge_coverage_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    const fn rank(state: CoverageStateV1) -> u8 {
-        match state {
-            CoverageStateV1::Known => 0,
-            CoverageStateV1::Capped => 1,
-            CoverageStateV1::Sampled => 2,
-            CoverageStateV1::Partial => 3,
-            CoverageStateV1::Stale => 4,
-            CoverageStateV1::Unknown => 5,
-        }
-    }
-    if rank(left) >= rank(right) {
-        left
-    } else {
-        right
-    }
 }
 
 fn coverage(
@@ -485,215 +268,6 @@ fn measurement(spec: MeasurementSpec<'_>) -> MetricValueV1 {
         uncertainty,
         calibration: None,
         unavailable_reason: unavailable_reason.map(str::to_owned),
-    }
-}
-
-pub fn observatory_unavailable_read_model(
-    scope_ref: Option<&str>,
-    since_seconds: i64,
-    reason: &str,
-) -> ObservatoryReadModelV1 {
-    let observed_at_micros = now_micros().0;
-    let read_horizon = horizon(since_seconds, observed_at_micros);
-    let watermark = "analytics:unavailable".to_string();
-    let metric_coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
-    let metrics = {
-        let metric = |name: &str| {
-            measurement(MeasurementSpec {
-                descriptor: MeasurementDescriptor::new(
-                    ANALYTICS_DESCRIPTOR,
-                    name,
-                    "events",
-                    "eligible_observability_events",
-                ),
-                provenance: MeasurementProvenance::new(
-                    MetricSourceV1::ObservabilityEnvelope,
-                    "observability-envelope.v1",
-                    "observatory-projector.v1",
-                    &watermark,
-                ),
-                horizon: &read_horizon,
-                coverage: metric_coverage.clone(),
-                value: None,
-                unavailable_reason: Some(reason),
-            })
-        };
-        vec![
-            metric("observability_events"),
-            metric("observability_failures"),
-            metric("telemetry_drops_lower_bound"),
-        ]
-    };
-    ObservatoryReadModelV1 {
-        authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
-        horizon: read_horizon,
-        watermark,
-        observed_at_micros,
-        current: false,
-        metrics,
-    }
-}
-
-/// Canonical Observatory projection shared by CLI, MCP, and dashboard HTTP.
-pub async fn observatory_read_model(
-    db: &RegisteredGlobalDb,
-    scope_ref: Option<&str>,
-    since_seconds: i64,
-) -> ObservatoryReadModelV1 {
-    let observed_at_micros = now_micros().0;
-    let rows = db
-        .query_analytics_events(&AnalyticsEventQuery {
-            provider: Some(OBSERVABILITY_PROVIDER.to_string()),
-            project_id: scope_ref.map(str::to_owned),
-            since: Some(since_seconds),
-            until: Some(
-                observed_at_micros
-                    .saturating_add(999_999)
-                    .div_euclid(1_000_000),
-            ),
-            limit: EVENT_LIMIT.saturating_add(1),
-            ..AnalyticsEventQuery::default()
-        })
-        .await;
-    let Ok(mut rows) = rows else {
-        return observatory_unavailable_read_model(
-            scope_ref,
-            since_seconds,
-            "observability_store_unavailable",
-        );
-    };
-    let capped = rows.len() > EVENT_LIMIT;
-    if capped {
-        rows.remove(0);
-    }
-    let mut invalid = 0u64;
-    let events = rows
-        .iter()
-        .filter_map(|row| {
-            let envelope = row
-                .metadata_json
-                .as_deref()
-                .and_then(|value| serde_json::from_str::<ObservabilityEnvelopeV1>(value).ok())
-                .filter(|envelope| envelope.validate().is_ok());
-            if envelope.is_none() {
-                invalid = invalid.saturating_add(1);
-            }
-            envelope
-        })
-        .collect::<Vec<_>>();
-    let observed = events.len() as u64;
-    let explicit_drop_carriers = events
-        .iter()
-        .filter_map(|event| match &event.payload {
-            ObservabilityPayloadV1::TelemetryDrop(drop) => Some((
-                (
-                    event.process_boot_id.clone(),
-                    drop.last_missing_sequence.saturating_add(1),
-                ),
-                drop.proved_drop_lower_bound,
-            )),
-            _ => None,
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let dropped = events.iter().fold(0u64, |total, event| {
-        let payload_drops = match &event.payload {
-            ObservabilityPayloadV1::TelemetryDrop(drop) => drop.proved_drop_lower_bound,
-            _ => event.dropped_count.saturating_sub(
-                explicit_drop_carriers
-                    .get(&(event.process_boot_id.clone(), event.producer_sequence))
-                    .copied()
-                    .unwrap_or(0),
-            ),
-        };
-        total.saturating_add(payload_drops)
-    });
-    let unknown = invalid.saturating_add(dropped);
-    let event_state = if capped {
-        CoverageStateV1::Capped
-    } else if events
-        .iter()
-        .any(|event| event.coverage == CoverageStateV1::Unknown)
-    {
-        CoverageStateV1::Unknown
-    } else if events
-        .iter()
-        .any(|event| event.coverage == CoverageStateV1::Stale)
-    {
-        CoverageStateV1::Stale
-    } else if invalid > 0
-        || dropped > 0
-        || events
-            .iter()
-            .any(|event| event.coverage == CoverageStateV1::Partial)
-    {
-        CoverageStateV1::Partial
-    } else if events
-        .iter()
-        .any(|event| event.coverage == CoverageStateV1::Sampled)
-    {
-        CoverageStateV1::Sampled
-    } else if events
-        .iter()
-        .any(|event| event.coverage == CoverageStateV1::Capped)
-    {
-        CoverageStateV1::Capped
-    } else {
-        CoverageStateV1::Known
-    };
-    let complete = event_state == CoverageStateV1::Known;
-    let failed = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.terminal_result,
-                Some(
-                    ObservabilityTerminalResultV1::Failed | ObservabilityTerminalResultV1::TimedOut
-                )
-            )
-        })
-        .count() as u64;
-    let watermark = rows.last().map_or_else(
-        || "analytics:empty".to_string(),
-        |event| format!("analytics:{}", event.id),
-    );
-    let read_horizon = horizon(since_seconds, observed_at_micros);
-    let exact_eligible = complete.then_some(observed);
-    let metric_coverage = coverage(exact_eligible, observed, unknown, event_state);
-    let reason = (!complete).then_some("incomplete_observability_coverage");
-    let metrics = {
-        let metric = |name: &str, value: u64, unit: &str| {
-            measurement(MeasurementSpec {
-                descriptor: MeasurementDescriptor::new(
-                    ANALYTICS_DESCRIPTOR,
-                    name,
-                    unit,
-                    "eligible_observability_events",
-                ),
-                provenance: MeasurementProvenance::new(
-                    MetricSourceV1::ObservabilityEnvelope,
-                    "observability-envelope.v1",
-                    "observatory-projector.v1",
-                    &watermark,
-                ),
-                horizon: &read_horizon,
-                coverage: metric_coverage.clone(),
-                value: complete.then_some(value as f64),
-                unavailable_reason: reason,
-            })
-        };
-        vec![
-            metric("observability_events", observed, "events"),
-            metric("observability_failures", failed, "events"),
-            metric("telemetry_drops_lower_bound", dropped, "events"),
-        ]
-    };
-    ObservatoryReadModelV1 {
-        authorized_scope_ref: scope_ref.unwrap_or("all").to_string(),
-        horizon: read_horizon,
-        watermark,
-        observed_at_micros,
-        current: complete,
-        metrics,
     }
 }
 
@@ -1160,8 +734,12 @@ mod tests {
     use crate::provider_usage::{
         AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
     };
+    use tracedecay_application::{
+        ObservabilityQueryPort, ObservabilityQueryV1, ObservabilityRecordPort,
+    };
     use tracedecay_domain::{
-        ObservabilityPayloadV1, ObservabilityRetentionClassV1, RetrievalQueryObservedV1,
+        ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+        ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
     };
 
     fn envelope(event_id: &str, event_time_micros: i64) -> ObservabilityEnvelopeV1 {

@@ -19,6 +19,13 @@ use tracedecay_runtime_core::{
     store_runtime::registry::StoreRuntimeHandle,
 };
 
+mod delivery_settlement;
+pub use delivery_settlement::{
+    DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
+    MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
+    PendingDeliverySourceReceiptV1, WorkAttemptDeliveryCensusReadV1,
+};
+
 pub struct RegisteredGlobalDb {
     read_connection: ReadConnection,
     write_connection: Connection,
@@ -160,6 +167,20 @@ pub struct RegisteredWorkApplicationServicesV1 {
     artifact_hydration: tracedecay_application::WorkArtifactHydrationService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    duplicate_adjudications: tracedecay_application::WorkDuplicateAdjudicationServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    retry: tracedecay_application::WorkRetryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_application::CompositeWorkRetryEvidenceV1<
+            tracedecay_application::RuntimeWorkRetryEvidenceV1,
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        >,
+    >,
+    retry_test_bindings: tracedecay_application::WorkRetryTestBindingTokenServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 /// The Work product graph authority: its verified reads and its journaled
@@ -176,15 +197,6 @@ pub struct RegisteredWorkProductServicesV1 {
     >,
     mutations: tracedecay_application::WorkProductMutationServiceV1<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    evidence: tracedecay_application::WorkProductEvidenceServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    history: tracedecay_application::WorkHistoryServiceV1<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
@@ -206,31 +218,8 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.mutations
-    }
-
-    /// Task evidence selection and expansion over the same verified versions
-    /// the graph reads serve.
-    pub const fn evidence(
-        &self,
-    ) -> &tracedecay_application::WorkProductEvidenceServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.evidence
-    }
-
-    /// The owner's journaled Work product events, paged in durable sequence
-    /// order.
-    pub const fn history(
-        &self,
-    ) -> &tracedecay_application::WorkHistoryServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.history
     }
 }
 
@@ -294,6 +283,36 @@ impl RegisteredWorkApplicationServicesV1 {
     > {
         &self.artifact_hydration
     }
+
+    /// Explicit revisioned duplicate-effort adjudication authority.
+    pub const fn duplicate_adjudications(
+        &self,
+    ) -> &tracedecay_application::WorkDuplicateAdjudicationServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.duplicate_adjudications
+    }
+
+    pub const fn retry(
+        &self,
+    ) -> &tracedecay_application::WorkRetryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_application::CompositeWorkRetryEvidenceV1<
+            tracedecay_application::RuntimeWorkRetryEvidenceV1,
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        >,
+    > {
+        &self.retry
+    }
+
+    pub const fn retry_test_bindings(
+        &self,
+    ) -> &tracedecay_application::WorkRetryTestBindingTokenServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.retry_test_bindings
+    }
 }
 
 /// Workflow definition reads and journaled mutation authority over the
@@ -319,6 +338,16 @@ impl RegisteredWorkflowApplicationServicesV1 {
 
     pub fn effects(&self) -> &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
         &self.effects
+    }
+
+    pub fn has_pending_effects(
+        &self,
+        worktree_id: &tracedecay_domain::WorktreeId,
+    ) -> Result<bool, tracedecay_application::WorkflowEffectAuthorityErrorV1> {
+        tracedecay_application::WorkflowEffectAuthorityPortV1::has_pending_effects(
+            &self.effects,
+            worktree_id,
+        )
     }
 
     pub fn topology(&self) -> &RegisteredWorkflowTopologyV1 {
@@ -727,6 +756,19 @@ impl RegisteredGlobalDb {
             artifact_hydration: tracedecay_application::WorkArtifactHydrationService::new(
                 storage.clone(),
             ),
+            duplicate_adjudications:
+                tracedecay_application::WorkDuplicateAdjudicationServiceV1::new(storage.clone()),
+            retry: tracedecay_application::WorkRetryServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+                tracedecay_application::CompositeWorkRetryEvidenceV1::new(
+                    tracedecay_application::RuntimeWorkRetryEvidenceV1,
+                    storage.clone(),
+                ),
+            ),
+            retry_test_bindings: tracedecay_application::WorkRetryTestBindingTokenServiceV1::new(
+                storage.clone(),
+            ),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,
@@ -760,18 +802,8 @@ impl RegisteredGlobalDb {
             mutations: tracedecay_application::WorkProductMutationServiceV1::new(
                 storage.clone(),
                 storage.clone(),
-                storage.clone(),
-                storage.clone(),
+                storage,
             ),
-            // Evidence and history take no catalog binding at construction:
-            // each of their operations passes its own binding per call, so one
-            // composed service can serve several mounted operations without a
-            // second copy of the storage handle per binding.
-            evidence: tracedecay_application::WorkProductEvidenceServiceV1::new(
-                storage.clone(),
-                storage.clone(),
-            ),
-            history: tracedecay_application::WorkHistoryServiceV1::new(storage.clone(), storage),
         })
     }
 

@@ -485,6 +485,18 @@ impl DaemonInvocationService {
         self.lsp_sessions.lock().await.len()
     }
 
+    async fn admit_lsp_workspace_holder(
+        &self,
+        workspace: &AuthorizedLspWorkspace,
+    ) -> Option<Vec<tokio::sync::OwnedRwLockReadGuard<()>>> {
+        let mut roots = Vec::with_capacity(workspace.roots().len());
+        for root in workspace.roots() {
+            let path = url::Url::parse(root.uri()).ok()?.to_file_path().ok()?;
+            roots.push(path);
+        }
+        self.worktree_holder_admission.admit_holders(roots).await
+    }
+
     pub(super) async fn open_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -509,6 +521,12 @@ impl DaemonInvocationService {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let Some(_holder_admission) = self.admit_lsp_workspace_holder(&workspace).await else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
             );
         };
         let Some(lsp_owner) = lsp_owner else {
@@ -588,6 +606,9 @@ impl DaemonInvocationService {
             RuntimeLspSession {
                 expires_at_ms,
                 actor,
+                delivery_settlements: lsp_owner.delivery_settlements,
+                in_flight_delivery_attempt: None,
+                next_delivery_sequence: 1,
             },
         );
         DaemonInvocationResponse::lsp_opened(
@@ -656,10 +677,20 @@ impl DaemonInvocationService {
         &self,
         session: &DaemonLspSessionAccess,
         mutation: &tracedecay_lsp::WorkspaceFolderMutation,
-        workspace: Option<AuthorizedLspWorkspace>,
+        mut workspace: Option<AuthorizedLspWorkspace>,
     ) {
         let Ok(access) = session.clone().into_access() else {
             return;
+        };
+        let _holder_admission = match workspace.take() {
+            Some(candidate) => match self.admit_lsp_workspace_holder(&candidate).await {
+                Some(admission) => {
+                    workspace = Some(candidate);
+                    Some(admission)
+                }
+                None => None,
+            },
+            None => None,
         };
         let mut sessions = self.lsp_sessions.lock().await;
         let Some(state) = sessions.get_mut(access.session_id()) else {
@@ -692,11 +723,17 @@ impl DaemonInvocationService {
             );
         };
         let dispatch = session.actor.flush_due(now_ms);
-        let frame = session
-            .actor
-            .poll_outbound()
-            .and_then(|frame| std::str::from_utf8(frame).ok())
-            .map(str::to_owned);
+        let outbound = session.actor.poll_outbound().map(ToOwned::to_owned);
+        if let Some(frame) = outbound.as_deref() {
+            let _ = retain_lsp_delivery_attempt(
+                &mut session.in_flight_delivery_attempt,
+                &mut session.next_delivery_sequence,
+                frame,
+                access.session_id(),
+                current_micros(),
+            );
+        }
+        let frame = outbound.and_then(|frame| String::from_utf8(frame).ok());
         let closed = dispatch.closed
             || matches!(
                 session.actor.lifecycle(),
@@ -726,11 +763,16 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        let acknowledged = session.actor.acknowledge_outbound();
+        if acknowledged {
+            session.settle_in_flight_delivery(
+                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                None,
+            );
+        }
         DaemonInvocationResponse::with_outcome(
             request_id,
-            DaemonInvocationOutcome::LspAcknowledged {
-                acknowledged: session.actor.acknowledge_outbound(),
-            },
+            DaemonInvocationOutcome::LspAcknowledged { acknowledged },
         )
     }
 
@@ -761,6 +803,13 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        // The stdio bridge reaches this path after a write or flush failure.
+        // Removing the actor discards its in-flight frame, so terminalize that
+        // exact captured attempt before any later detach bookkeeping can fail.
+        session.settle_in_flight_delivery(
+            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+            Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+        );
         let lease_cancelled = self
             .lsp_lease_tasks
             .cancel(access.session_id())

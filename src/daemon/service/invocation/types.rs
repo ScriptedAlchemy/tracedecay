@@ -70,7 +70,7 @@ pub(crate) trait HookOrchestrationPortV1: Send + Sync {
 type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type HookOrchestrationWorkV1 = dyn Fn(
         HookOrchestrationRequestV1,
-        crate::application::context::CancellationToken,
+        tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> HookOrchestrationFutureV1
     + Send
     + Sync;
@@ -85,7 +85,7 @@ type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
 struct HookOrchestrationInFlightEntryV1 {
     event: HookOrchestrationEventKeyV1,
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     superseded: std::sync::atomic::AtomicBool,
     completions: StdMutex<Vec<HookOrchestrationCompletionV1>>,
 }
@@ -105,13 +105,16 @@ pub(crate) struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl BoundedHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(HookOrchestrationRequestV1, crate::application::context::CancellationToken) -> Fut
+        F: Fn(
+                HookOrchestrationRequestV1,
+                tracedecay_runtime_core::cancellation::CancellationToken,
+            ) -> Fut
             + Send
             + Sync
             + 'static,
@@ -124,7 +127,7 @@ impl BoundedHookOrchestratorV1 {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
                 in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
-                cancellation: crate::application::context::CancellationToken::new(),
+                cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
             })
         })
     }
@@ -228,7 +231,7 @@ impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
                 };
                 Some(permit)
             };
-            let work_cancellation = crate::application::context::CancellationToken::new();
+            let work_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
             let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
                 event,
                 cancellation: work_cancellation,
@@ -363,7 +366,7 @@ enum DeferredHookOrchestratorStateV1 {
 pub(crate) struct DeferredHookOrchestratorV1 {
     state: StdMutex<DeferredHookOrchestratorStateV1>,
     setup_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl DeferredHookOrchestratorV1 {
@@ -374,7 +377,7 @@ impl DeferredHookOrchestratorV1 {
                 claimed: false,
             }),
             setup_task: Mutex::new(None),
-            cancellation: crate::application::context::CancellationToken::new(),
+            cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
         })
     }
 
@@ -413,7 +416,7 @@ impl DeferredHookOrchestratorV1 {
         }
     }
 
-    pub(crate) fn cancellation(&self) -> crate::application::context::CancellationToken {
+    pub(crate) fn cancellation(&self) -> tracedecay_runtime_core::cancellation::CancellationToken {
         self.cancellation.clone()
     }
 
@@ -810,6 +813,27 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     /// The complete resolved work topology policy pinned at registration;
     /// workflow run admission and placement evaluate against this policy.
     pub(super) work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
+    /// Project-owned bounded replay for receipts that closed outside a request
+    /// response, such as terminal attempt compare-and-swaps.
+    pub(super) blocked_interval_observation_recovery:
+        super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1,
+    /// Project-owned bounded durable recovery for exact workflow topology
+    /// census observations, including terminal intervals after restart.
+    pub(super) workflow_census_observation_recovery:
+        super::work::workflow_census::WorkflowFanOutCensusObservationRecoveryOwnerV1,
+    /// Retained bounded restart reconciliation for active workflow fan-out
+    /// runs. `None` exists only while the runtime value used by the owner is
+    /// assembled; every published runtime retains a mounted owner.
+    pub(super) workflow_fan_out_recovery:
+        Option<super::work::workflow_fan_out::WorkflowFanOutRecoveryOwnerV1>,
+}
+
+#[derive(Clone)]
+pub(in crate::daemon::service) struct RegisteredRetainedRuntime {
+    pub(super) scope: ResolvedScope,
+    pub(super) actor: ActorId,
+    pub(super) grant: CapabilityGrantSnapshot,
+    pub(super) port: Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>,
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {
@@ -865,21 +889,19 @@ impl RegisteredConfigurationRuntime {
 pub(super) struct RuntimeLspSession {
     pub(super) expires_at_ms: u64,
     pub(super) actor: RuntimeLspActor,
-}
-
-impl Drop for RuntimeLspSession {
-    fn drop(&mut self) {
-        // Every removal path (explicit detach, transport loss, TTL expiry, and
-        // daemon shutdown) must cancel provider work and release overlays,
-        // subscriptions, publications, and queued frames before the actor is
-        // discarded.
-        self.actor.expire();
-    }
+    pub(super) delivery_settlements:
+        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+    /// Captured at the first poll of the current outbound frame. Retries and
+    /// terminalization must reuse its exact timestamps and identity.
+    pub(super) in_flight_delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
+    /// Each queued outbound occurrence receives a unique session-local event
+    /// sequence when first polled; retries retain the already captured attempt.
+    pub(super) next_delivery_sequence: u64,
 }
 
 struct LspLeaseTask {
     generation: u64,
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -949,7 +971,7 @@ impl LspLeaseTaskRegistry {
                 return Err(DaemonInvocationProblem::Unavailable);
             };
             state.next_generation = generation;
-            let cancellation = crate::application::context::CancellationToken::new();
+            let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
             let task_cancellation = cancellation.clone();
             let task_registry = Arc::downgrade(self);
             let task_session_id = session_id.clone();
@@ -1082,6 +1104,8 @@ pub(crate) struct DaemonLspInvocationOwner {
     pub(super) scope_grant: Option<CapabilityGrantSnapshot>,
     pub(super) scope_set_storage:
         Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
+    pub(super) delivery_settlements:
+        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
 }
 
 #[derive(Clone)]
@@ -1097,6 +1121,7 @@ impl DaemonLspInvocationOwner {
             factory,
             scope_grant: None,
             scope_set_storage: None,
+            delivery_settlements: None,
         }
     }
 
@@ -1104,11 +1129,15 @@ impl DaemonLspInvocationOwner {
         factory: Arc<DaemonLspSessionFactory>,
         scope_grant: CapabilityGrantSnapshot,
         scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
+        delivery_settlements: Arc<
+            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+        >,
     ) -> Self {
         Self {
             factory,
             scope_grant: Some(scope_grant),
             scope_set_storage: Some(scope_set_storage),
+            delivery_settlements: Some(delivery_settlements),
         }
     }
 }

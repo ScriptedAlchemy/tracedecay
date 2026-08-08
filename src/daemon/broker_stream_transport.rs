@@ -4,12 +4,13 @@
 //! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
 //! signatures, or behavior changed.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
+use crate::mcp::server::RmcpWorkDeliverySettlement;
 use crate::mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
@@ -19,9 +20,34 @@ use super::*;
 pub(super) struct BrokerStreamTransport {
     reader: tokio::io::BufReader<BrokerReadHalf>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
-    active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
+    active_requests: Arc<
+        std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,
+    >,
     replay: VecDeque<String>,
     response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
+    work_delivery_settlement: Option<RmcpWorkDeliverySettlement>,
+}
+
+enum RmcpResponseWrite {
+    Suppressed,
+    Write(Option<tracedecay_domain::DeliverySettlementAttemptV1>),
+}
+
+enum RmcpResponseWriteFailure {
+    Cancelled,
+    Transport(std::io::Error),
+}
+
+impl RmcpResponseWriteFailure {
+    fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::Cancelled => std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "project server response was revoked",
+            ),
+            Self::Transport(error) => error,
+        }
+    }
 }
 
 impl BrokerStreamTransport {
@@ -30,21 +56,22 @@ impl BrokerStreamTransport {
         Self {
             reader: tokio::io::BufReader::new(reader),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
-            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             replay: VecDeque::new(),
             response_lifecycle: None,
+            work_delivery_settlement: None,
         }
     }
 
     pub(super) fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
+        if line.len() > crate::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
             let prefix = line.as_bytes()[..line
                 .len()
-                .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                .min(crate::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                 .to_vec();
-            return Err(
-                crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix),
-            );
+            return Err(crate::host_admission::wire_oversized_io_error_with_prefix(
+                prefix,
+            ));
         }
         self.replay.push_back(line);
         Ok(())
@@ -55,6 +82,14 @@ impl BrokerStreamTransport {
         lifecycle: crate::mcp::server::ProjectServerResponseLifecycle,
     ) -> Self {
         self.response_lifecycle = Some(lifecycle);
+        self
+    }
+
+    pub(super) fn with_rmcp_work_delivery_settlement(
+        mut self,
+        settlement: RmcpWorkDeliverySettlement,
+    ) -> Self {
+        self.work_delivery_settlement = Some(settlement);
         self
     }
 
@@ -86,21 +121,36 @@ impl BrokerStreamTransport {
             .and_then(Self::request_key)
     }
 
-    async fn write_if_active(
-        writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
-        active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
+    fn take_response_write(
+        active_requests: Arc<
+            std::sync::Mutex<
+                HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>,
+            >,
+        >,
         request_key: Option<String>,
-        bytes: Vec<u8>,
-    ) -> std::io::Result<()> {
-        if let Some(request_key) = request_key
-            && !active_requests
-                .lock()
-                .map_err(|_| std::io::Error::other("active RMCP request registry poisoned"))?
-                .remove(&request_key)
-        {
-            return Ok(());
+    ) -> std::io::Result<RmcpResponseWrite> {
+        let Some(request_key) = request_key else {
+            return Ok(RmcpResponseWrite::Write(None));
+        };
+        let response = active_requests
+            .lock()
+            .map_err(|_| std::io::Error::other("active RMCP request registry poisoned"))?
+            .remove(&request_key);
+        match response {
+            Some(delivery_attempt) => Ok(RmcpResponseWrite::Write(delivery_attempt)),
+            None => Ok(RmcpResponseWrite::Suppressed),
         }
-        Self::write_all_and_flush(writer, bytes).await
+    }
+
+    fn settle_work_delivery(
+        settlement: Option<&RmcpWorkDeliverySettlement>,
+        delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        if let (Some(settlement), Some(attempt)) = (settlement, delivery_attempt) {
+            settlement.settle(attempt, outcome, drop_reason);
+        }
     }
 
     async fn observe_incoming_message(&self, value: &serde_json::Value) {
@@ -117,13 +167,14 @@ impl BrokerStreamTransport {
             let Some(request_key) = Self::request_key(request_id) else {
                 return;
             };
-            let cancelled = self
+            let delivery_attempt = self
                 .active_requests
                 .lock()
-                .is_ok_and(|mut active| active.remove(&request_key));
-            if !cancelled {
+                .ok()
+                .and_then(|mut active| active.remove(&request_key));
+            let Some(delivery_attempt) = delivery_attempt else {
                 return;
-            }
+            };
             let response = JsonRpcResponse::error_with_data(
                 request_id.clone(),
                 ErrorCode::RequestCancelled,
@@ -132,7 +183,20 @@ impl BrokerStreamTransport {
             );
             if let Ok(mut bytes) = serde_json::to_vec(&response) {
                 bytes.push(b'\n');
-                let _ = Self::write_all_and_flush(Arc::clone(&self.writer), bytes).await;
+                match Self::write_all_and_flush(Arc::clone(&self.writer), bytes).await {
+                    Ok(()) => Self::settle_work_delivery(
+                        self.work_delivery_settlement.as_ref(),
+                        delivery_attempt,
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Cancelled),
+                    ),
+                    Err(_) => Self::settle_work_delivery(
+                        self.work_delivery_settlement.as_ref(),
+                        delivery_attempt,
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                    ),
+                }
             }
             return;
         }
@@ -140,7 +204,11 @@ impl BrokerStreamTransport {
             return;
         };
         if let Ok(mut active) = self.active_requests.lock() {
-            active.insert(request_key);
+            let delivery_attempt = self
+                .work_delivery_settlement
+                .as_ref()
+                .and_then(|settlement| settlement.attempt_for_request(value));
+            active.insert(request_key, delivery_attempt);
         }
     }
 
@@ -182,7 +250,7 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
         }
-        crate::application::host_admission::read_bounded_mcp_line(&mut self.reader).await
+        crate::host_admission::read_bounded_mcp_line(&mut self.reader).await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -225,6 +293,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let writer = Arc::clone(&self.writer);
         let active_requests = Arc::clone(&self.active_requests);
         let response_lifecycle = self.response_lifecycle.clone();
+        let work_delivery_settlement = self.work_delivery_settlement.clone();
         async move {
             let value = serde_json::to_value(&item)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -232,23 +301,53 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
             let mut bytes = serde_json::to_vec(&value)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             bytes.push(b'\n');
-            let Some(lifecycle) = response_lifecycle else {
-                return Self::write_if_active(writer, active_requests, request_key, bytes).await;
+            let RmcpResponseWrite::Write(delivery_attempt) =
+                Self::take_response_write(active_requests, request_key)?
+            else {
+                return Ok(());
             };
-            if lifecycle.response_revoked().is_cancelled() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "project server response was revoked",
-                ));
+            let write_result = match response_lifecycle {
+                None => Self::write_all_and_flush(writer, bytes)
+                    .await
+                    .map_err(RmcpResponseWriteFailure::Transport),
+                Some(lifecycle) if lifecycle.response_revoked().is_cancelled() => {
+                    Err(RmcpResponseWriteFailure::Cancelled)
+                }
+                Some(lifecycle) => {
+                    tokio::select! {
+                        biased;
+                        () = lifecycle.response_revoked().cancelled() => {
+                            Err(RmcpResponseWriteFailure::Cancelled)
+                        }
+                        result = Self::write_all_and_flush(writer, bytes) => {
+                            result.map_err(RmcpResponseWriteFailure::Transport)
+                        }
+                    }
+                }
+            };
+            if let Some(attempt) = delivery_attempt {
+                match &write_result {
+                    Ok(()) => Self::settle_work_delivery(
+                        work_delivery_settlement.as_ref(),
+                        Some(attempt),
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                        None,
+                    ),
+                    Err(RmcpResponseWriteFailure::Cancelled) => Self::settle_work_delivery(
+                        work_delivery_settlement.as_ref(),
+                        Some(attempt),
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Cancelled),
+                    ),
+                    Err(RmcpResponseWriteFailure::Transport(_)) => Self::settle_work_delivery(
+                        work_delivery_settlement.as_ref(),
+                        Some(attempt),
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                    ),
+                }
             }
-            tokio::select! {
-                biased;
-                () = lifecycle.response_revoked().cancelled() => Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "project server response was revoked",
-                )),
-                result = Self::write_if_active(writer, active_requests, request_key, bytes) => result,
-            }
+            write_result.map_err(RmcpResponseWriteFailure::into_io_error)
         }
     }
 
@@ -265,9 +364,7 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     self.peer_fully_closed_after_eof().await;
                     return None;
                 }
-                Err(error)
-                    if crate::application::host_admission::is_wire_oversized_io_error(&error) =>
-                {
+                Err(error) if crate::host_admission::is_wire_oversized_io_error(&error) => {
                     let _ =
                         crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
                     return None;
@@ -320,7 +417,115 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
 mod peer_close_tests {
     use super::*;
     use crate::mcp::McpTransport;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tracedecay_application::{
+        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
+    };
+    use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
+    use tracedecay_usecases::observability::{
+        BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
+        DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1,
+        RegisteredObservabilityPortV1,
+    };
+
+    struct DeliverySettlementFixture {
+        _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
+        _project: tempfile::TempDir,
+        recorder: Arc<BoundedDeliverySettlementRecorderV1>,
+        authority: Arc<DeliverySettlementAuthorityV1>,
+        producer: Arc<BoundedObservabilityProducerV1>,
+        db: Arc<crate::global_db::RegisteredGlobalDb>,
+        project_id: ProjectId,
+    }
+
+    async fn delivery_settlement_fixture() -> DeliverySettlementFixture {
+        let pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project");
+        let project_id = ProjectId::new("project.rmcp.delivery").expect("project id");
+        let runtime = crate::global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered runtime");
+        let db = runtime.project_database_arc().expect("project database");
+        let identity = ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: "boot:rmcp-delivery".to_owned(),
+            producer_revision: "rmcp-delivery-producer.v1".to_owned(),
+            configuration_revision: "rmcp-delivery-config.v1".to_owned(),
+            policy_revision: "rmcp-delivery-policy.v1".to_owned(),
+        };
+        let producer = Arc::new(
+            BoundedObservabilityProducerV1::start(Arc::clone(&db), identity.clone(), 8)
+                .expect("producer"),
+        );
+        let authority = Arc::new(
+            DeliverySettlementAuthorityV1::new(Arc::clone(&db), Arc::clone(&producer), identity)
+                .expect("settlement authority"),
+        );
+        let recorder = Arc::new(
+            BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 8)
+                .expect("settlement recorder"),
+        );
+        DeliverySettlementFixture {
+            _pin: pin,
+            _project: project,
+            recorder,
+            authority,
+            producer,
+            db,
+            project_id,
+        }
+    }
+
+    async fn settled_fanout(
+        fixture: DeliverySettlementFixture,
+    ) -> tracedecay_domain::WorkDeliveryFanoutObservedV1 {
+        let summary = fixture
+            .recorder
+            .shutdown()
+            .await
+            .expect("drain settlement recorder");
+        assert_eq!(summary.settled, 1, "one RMCP Work response must settle");
+        assert_eq!(summary.failed, 0, "transport settlement must persist");
+
+        drop(fixture.recorder);
+        drop(fixture.authority);
+        let producer = match Arc::try_unwrap(fixture.producer) {
+            Ok(producer) => producer,
+            Err(_) => panic!("settlement authority releases producer"),
+        };
+        producer
+            .shutdown()
+            .await
+            .expect("flush observability producer");
+
+        let page = RegisteredObservabilityPortV1::new(fixture.db.as_ref())
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: fixture.project_id.as_str().to_owned(),
+                event_kinds: vec!["work.delivery_fanout.observed.v1".to_owned()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 0,
+                    until_micros: i64::MAX,
+                },
+                after_watermark: None,
+                limit: 8,
+            })
+            .await
+            .expect("read settled delivery fanout");
+        assert_eq!(
+            page.events.len(),
+            1,
+            "settlement must be durably observable"
+        );
+        let ObservabilityPayloadV1::WorkDeliveryFanout(fanout) = page.events[0].payload.clone()
+        else {
+            panic!("expected Work delivery fanout observation");
+        };
+        fanout
+    }
 
     #[tokio::test]
     async fn full_close_wait_ignores_request_half_close() {
@@ -375,5 +580,87 @@ mod peer_close_tests {
                 .expect("rmcp receive must finish after full peer close")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
+        let fixture = delivery_settlement_fixture().await;
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+            .with_rmcp_work_delivery_settlement(
+                crate::mcp::server::RmcpWorkDeliverySettlement::new(
+                    Some(Arc::clone(&fixture.recorder)),
+                    "rmcp-transport-settlement-test".to_owned(),
+                ),
+            );
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"settlement-test","version":"1"}}}
+"#,
+            )
+            .await
+            .expect("initialize request");
+        client_writer
+            .flush()
+            .await
+            .expect("flush initialize request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must accept initialize before Work"
+        );
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tracedecay_work_start_attempt","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("Work request");
+        client_writer.flush().await.expect("flush Work request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must retain the pending Work response"
+        );
+
+        let response = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"content": [{"type": "text", "text": "delivered"}]}
+        }))
+        .expect("typed RMCP Work response");
+        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+            &mut transport,
+            response,
+        )
+        .await
+        .expect("transport response write and flush");
+
+        let mut client_reader = tokio::io::BufReader::new(client_reader);
+        let mut line = String::new();
+        client_reader
+            .read_line(&mut line)
+            .await
+            .expect("flushed Work response");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).expect("response JSON")["id"],
+            serde_json::json!(2),
+            "the client must observe the response before it is recorded as delivered"
+        );
+
+        drop(transport);
+        let fanout = settled_fanout(fixture).await;
+        assert_eq!(fanout.delivered, 1);
+        assert_eq!(fanout.dropped, 0);
+        assert_eq!(fanout.unknown, 0);
     }
 }

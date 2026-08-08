@@ -398,13 +398,13 @@ impl McpServer {
         // project's own registered id. The application lane retains it even
         // without a connected dashboard; the SSE adapter coalesces the burst.
         let activity_project_id =
-            crate::application::event_lane::enabled(self.session_db.as_deref())
+            tracedecay_usecases::event_lane::enabled(self.session_db.as_deref())
                 .then(|| cg.store_layout().identity.project_id.clone())
                 .flatten();
         if let Some(activity_db) = self.session_db.as_deref() {
-            crate::application::event_lane::publish(
+            tracedecay_usecases::event_lane::publish(
                 activity_db,
-                crate::application::event_lane::ActivityFamilyV1::Hook,
+                tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
                 &root,
                 activity_project_id.as_deref(),
                 1,
@@ -426,9 +426,9 @@ impl McpServer {
             if sink(root.clone(), event.rel_paths.clone()).await
                 && let Some(activity_db) = self.session_db.as_deref()
             {
-                crate::application::event_lane::publish(
+                tracedecay_usecases::event_lane::publish(
                     activity_db,
-                    crate::application::event_lane::ActivityFamilyV1::CodeIndex,
+                    tracedecay_usecases::event_lane::ActivityFamilyV1::CodeIndex,
                     &root,
                     activity_project_id.as_deref(),
                     event.rel_paths.len() as u64,
@@ -913,6 +913,7 @@ impl McpServer {
                 dashboard_application_invocation_executor: self
                     .application_invocation_executor
                     .clone(),
+                dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
                 application_request_id,
                 application_deadline,
                 application_cancellation,
@@ -1141,7 +1142,8 @@ impl McpServer {
     ) -> ApplicationSurfaceDispatch<'a> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let invocation_executor = if application_surface.is_some() {
+        let work_operation = crate::mcp::tools::binding::work_operation_for_tool(tool_name);
+        let invocation_executor = if application_surface.is_some() || work_operation.is_some() {
             match self.application_invocation_executor.as_deref() {
                 Some(executor) => Some(executor),
                 None => self
@@ -1601,15 +1603,15 @@ impl McpServer {
     }
 
     async fn publish_tool_call_activity(&self, tool_name: &str, cg: &TraceDecay) {
-        if !crate::application::event_lane::enabled(self.session_db.as_deref()) {
+        if !tracedecay_usecases::event_lane::enabled(self.session_db.as_deref()) {
             return;
         }
         let Some(activity_db) = self.session_db.as_deref() else {
             return;
         };
-        crate::application::event_lane::publish(
+        tracedecay_usecases::event_lane::publish(
             activity_db,
-            crate::application::event_lane::ActivityFamilyV1::ToolCall,
+            tracedecay_usecases::event_lane::ActivityFamilyV1::ToolCall,
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
             1,

@@ -57,6 +57,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
@@ -268,6 +269,9 @@ pub struct DashboardEventV1 {
     pub observation_time_micros: i64,
     pub source_watermark: Option<DashboardWatermarkV1>,
     pub coverage: DashboardCoverageV1,
+    /// Opaque server-minted token acknowledged only after browser receipt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_receipt: Option<String>,
     pub kind: DashboardEventKindV1,
 }
 
@@ -316,6 +320,7 @@ impl EventStreamState {
             observation_time_micros: now_micros(),
             source_watermark: None,
             coverage: DashboardCoverageV1::unknown(),
+            delivery_receipt: None,
             kind: DashboardEventKindV1::Heartbeat,
         }
     }
@@ -355,6 +360,7 @@ impl EventStreamState {
                 watermark: digest,
             }),
             coverage: DashboardCoverageV1::complete(project_count, "projects"),
+            delivery_receipt: None,
             kind: DashboardEventKindV1::ProjectRegistryChanged {
                 project_count,
                 digest: self.last_registry_digest.clone().unwrap_or_default(),
@@ -392,6 +398,7 @@ impl EventStreamState {
                 watermark: total_bytes.to_string(),
             }),
             coverage: DashboardCoverageV1::unknown(),
+            delivery_receipt: None,
             kind: DashboardEventKindV1::StorageTelemetryInvalidated { total_bytes },
         })
     }
@@ -456,6 +463,7 @@ impl EventStreamState {
                 watermark: record.producer_sequence.to_string(),
             }),
             coverage,
+            delivery_receipt: None,
             kind: DashboardEventKindV1::activity(
                 key.family,
                 bucket.count,
@@ -533,6 +541,10 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
     };
 
     tokio::spawn(async move {
+        let delivery_settlements = Arc::clone(&state.delivery_settlements);
+        let connection_ref = crate::events_delivery::connection_ref(&run_id, &scope);
+        let connection_ref_for_stream = connection_ref.clone();
+        async {
         let mut stream_state = EventStreamState::new(run_id);
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -578,10 +590,15 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             .into_iter()
             .chain(stream_state.flush_activity(&mut pending, &scope))
         {
-            let Ok(frame) = encode_event(&event) else {
-                return;
-            };
-            if tx.send(Ok(frame)).await.is_err() {
+            if send_event(
+                &tx,
+                delivery_settlements.as_ref(),
+                connection_ref_for_stream.as_deref(),
+                event,
+            )
+            .await
+            .is_err()
+            {
                 return;
             }
         }
@@ -624,10 +641,12 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                             {
                                 if replay.resume_gap {
                                     let event = resume_gap_event(producer_cursor, &replay.frontier, &scope);
-                                    let Ok(frame) = encode_event(&event) else {
-                                        return;
-                                    };
-                                    if tx.send(Ok(frame)).await.is_err() {
+                                    if send_event(
+                                        &tx,
+                                        delivery_settlements.as_ref(),
+                                        connection_ref_for_stream.as_deref(),
+                                        event,
+                                    ).await.is_err() {
                                         return;
                                     }
                                     producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
@@ -650,13 +669,23 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             };
 
             for event in batch {
-                let Ok(frame) = encode_event(&event) else {
-                    return;
-                };
-                if tx.send(Ok(frame)).await.is_err() {
+                if send_event(
+                    &tx,
+                    delivery_settlements.as_ref(),
+                    connection_ref_for_stream.as_deref(),
+                    event,
+                )
+                .await
+                .is_err()
+                {
                     return; // client disconnected
                 }
             }
+        }
+        }
+        .await;
+        if let Some(connection_ref) = connection_ref.as_deref() {
+            delivery_settlements.disconnect(connection_ref).await;
         }
     });
 
@@ -665,6 +694,34 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             .interval(KEEP_ALIVE_INTERVAL)
             .text("keep-alive"),
     )
+}
+
+async fn send_event(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    delivery_settlements: &crate::events_delivery::DashboardDeliverySettlementRegistryV1,
+    connection_ref: Option<&str>,
+    mut event: DashboardEventV1,
+) -> Result<(), ()> {
+    if let Some(connection_ref) = connection_ref
+        && !delivery_settlements
+            .attach_receipt(&mut event, connection_ref)
+            .await
+    {
+        return Ok(());
+    }
+    let receipt = event.delivery_receipt.clone();
+    let frame = match encode_event(&event) {
+        Ok(frame) => frame,
+        Err(_) => {
+            if let Some(receipt) = receipt.as_deref() {
+                delivery_settlements
+                    .drop_receipt(receipt, tracedecay_domain::DeliveryDropReasonV1::Invalid)
+                    .await;
+            }
+            return Err(());
+        }
+    };
+    tx.send(Ok(frame)).await.map_err(|_| ())
 }
 
 #[derive(Clone)]
@@ -729,6 +786,7 @@ fn resume_gap_event(
                 vec!["resume_gap".to_string()],
             )
         },
+        delivery_receipt: None,
         kind: DashboardEventKindV1::ResumeGap {
             requested_after,
             first_available: frontier.retained_from_sequence,
@@ -920,6 +978,9 @@ pub(crate) async fn dashboard_state_fixture(
         automation_writer: crate::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         application_invocation_executor: None,
+        delivery_settlements: Arc::new(
+            crate::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
+        ),
     };
     (project, state)
 }

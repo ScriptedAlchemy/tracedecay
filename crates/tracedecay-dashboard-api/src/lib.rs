@@ -76,6 +76,7 @@ pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
 mod events_api;
+mod events_delivery;
 mod explorer_api;
 pub mod feedback_api;
 mod graph_api;
@@ -237,6 +238,10 @@ pub struct DashboardStateCompositionV1 {
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    /// Daemon-owned canonical authority for browser-confirmed SSE delivery.
+    /// Standalone dashboards leave this absent and emit no receipt token.
+    pub delivery_settlement_authority:
+        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
 }
 
 #[derive(Clone)]
@@ -361,6 +366,7 @@ pub struct DashboardState {
     /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    pub(crate) delivery_settlements: Arc<events_delivery::DashboardDeliverySettlementRegistryV1>,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -565,6 +571,7 @@ async fn build_state_inner(
         feedback_status_reader,
         code_diagnostics_broker,
         application_invocation_executor,
+        delivery_settlement_authority,
     } = composition;
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -586,6 +593,12 @@ async fn build_state_inner(
         .map(|db| db.db_path().display().to_string())
         .or_else(|| tracedecay_global_db::global_db_path().map(|path| path.display().to_string()))
         .unwrap_or_default();
+    let delivery_settlements = Arc::new(
+        events_delivery::DashboardDeliverySettlementRegistryV1::new(delivery_settlement_authority),
+    );
+    events_delivery::DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(
+        &delivery_settlements,
+    );
     let mut state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
@@ -625,6 +638,7 @@ async fn build_state_inner(
         automation_writer,
         doctor_report_reader: None,
         application_invocation_executor,
+        delivery_settlements,
     };
     state.retain_admitted_authorities(code_diagnostics_authority, doctor_report_reader);
     // Pre-count non-usage messages in the background so the first Savings
@@ -657,6 +671,7 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
             feedback_status_reader: None,
             code_diagnostics_broker: None,
             application_invocation_executor: None,
+            delivery_settlement_authority: None,
         },
     )
     .await
@@ -698,6 +713,7 @@ pub async fn build_selected_project_state(
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
             application_invocation_executor: active.application_invocation_executor.clone(),
+            delivery_settlement_authority: None,
         },
     )
     .await
@@ -883,6 +899,7 @@ where
             feedback_status_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: None,
+            delivery_settlement_authority: None,
         },
     )
     .await?;
@@ -1160,6 +1177,7 @@ fn router_with_active_application(
         .route("/api/code-index/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
+        .route("/api/events/delivery-ack", any(active_api_gateway))
         .with_state(runtime)
         // Embedded SPA/static routes are supplied by the owning binary: the
         // asset bundle is generated into `OUT_DIR` by the root crate's
@@ -1445,6 +1463,10 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/delivery/overview", get(delivery_api::overview))
         .route("/api/events", get(events_api::events))
+        .route(
+            "/api/events/delivery-ack",
+            post(events_delivery::acknowledge),
+        )
 }
 
 async fn active_api_gateway(
@@ -1872,6 +1894,9 @@ mod authority_tests {
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,
                 application_invocation_executor: None,
+                delivery_settlements: Arc::new(
+                    events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
+                ),
             };
             Self {
                 state,

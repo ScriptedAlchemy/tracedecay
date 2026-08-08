@@ -19,24 +19,29 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationContractError, ApplicationOutcome, ApplicationProblem,
-    AttachRuntimeEvidenceCommand, AuthorityReceipt, AuthorizedScopeSet, CancelWorkAttemptCommand,
-    CancellationContext, CreateWorkCommand, Deadline, EffectId, EffectReceipt, EffectResult,
-    EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore, ExecutionTopologyViewV1,
-    GenerateProposalRequest, GeneratedWorkProposal, IdempotencyKey, MultiRootExecuteRequestV1,
+    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationContractError,
+    ApplicationOutcome, ApplicationProblem, AttachRuntimeEvidenceCommand, AuthorityReceipt,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CancellationContext, CreateWorkCommand, Deadline,
+    EffectId, EffectReceipt, EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket,
+    EvidenceScore, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, IdempotencyKey,
+    IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
     Omission, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
     OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState,
     PauseWorkRunCommand, PreviewId, PreviewResult, ReconciliationState,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResolvedScope,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetrieverContribution,
-    ReviewProposalRequestV1, StartWorkAttemptCommand, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
-    WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    RetryWorkAttemptCommandV1, ReviewProposalRequestV1, StartWorkAttemptCommand, TaskHandoffGrant,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+    WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkProductMutationRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkRetryTestBindingTokenOutcomeV1, WorkRetryTestBindingTokenRequestV1,
     WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
     WorkTopologyViewRequestV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
     WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest,
@@ -47,8 +52,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
-    ScopeSetId, UtcMicros, WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    ScopeSetId, UtcMicros, WorkAttemptV1, WorkDuplicateAdjudicationCommandV1,
+    WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection, WorkProjectionDeltaV1,
+    WorkProjectionSnapshotV1, WorkRunControlV1,
 };
 use tracedecay_lsp::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
@@ -56,12 +62,12 @@ use tracedecay_lsp::{
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
-use crate::application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
-use crate::application::primitives::PrimitiveRequest;
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
     GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
+use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
+use tracedecay_usecases::primitives::PrimitiveRequest;
 
 /// Request-field character rules. The contract accepts opaque handles and ids
 /// only in a shape it can echo back safely, so validation travels with the
@@ -91,6 +97,7 @@ pub(crate) const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocatio
 /// Initial revision of the daemon-owned invocation wire shape.
 pub(crate) const DAEMON_INVOCATION_REVISION: u16 = 1;
 const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
+const DAEMON_INVOCATION_DELIVERY_ACK_OPERATION: &str = "invocation_delivery_ack";
 
 const MAX_INVOCATION_REQUEST_ID_BYTES: usize = 128;
 const MAX_CLIENT_REVISION_BYTES: usize = 128;
@@ -140,6 +147,218 @@ pub(crate) fn parse_daemon_invocation_cancellation_request(
     request.validate().then_some(request)
 }
 
+/// Terminal acknowledgement emitted by a surface adapter only after its own
+/// response boundary has completed.  The daemon socket write is deliberately
+/// not a delivery receipt: a CLI must first write and flush stdout, then send
+/// this frame on the authenticated connection that carried the invocation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct DaemonInvocationDeliveryAckRequest {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    target_request_id: String,
+    outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DaemonInvocationDeliveryAckRejectReason {
+    RecorderUnavailable,
+    RecorderAtCapacity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DaemonInvocationDeliveryAckResponse {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    #[serde(flatten)]
+    outcome: DaemonInvocationDeliveryAckResponseOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum DaemonInvocationDeliveryAckResponseOutcome {
+    Accepted,
+    Rejected {
+        reason: DaemonInvocationDeliveryAckRejectReason,
+    },
+}
+
+impl DaemonInvocationDeliveryAckResponse {
+    pub(crate) fn accepted(request_id: impl Into<String>) -> Self {
+        Self::with_outcome(
+            request_id,
+            DaemonInvocationDeliveryAckResponseOutcome::Accepted,
+        )
+    }
+
+    pub(crate) fn rejected(
+        request_id: impl Into<String>,
+        reason: DaemonInvocationDeliveryAckRejectReason,
+    ) -> Self {
+        Self::with_outcome(
+            request_id,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected { reason },
+        )
+    }
+
+    fn with_outcome(
+        request_id: impl Into<String>,
+        outcome: DaemonInvocationDeliveryAckResponseOutcome,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            outcome,
+        }
+    }
+
+    pub(crate) fn matches_request(&self, request_id: &str) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_DELIVERY_ACK_OPERATION
+            && self.request_id == request_id
+    }
+
+    pub(crate) fn rejection_reason(&self) -> Option<DaemonInvocationDeliveryAckRejectReason> {
+        match self.outcome {
+            DaemonInvocationDeliveryAckResponseOutcome::Accepted => None,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected { reason } => Some(reason),
+        }
+    }
+}
+
+impl DaemonInvocationDeliveryAckRequest {
+    pub(crate) fn delivered(target_request_id: impl Into<String>) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            target_request_id,
+            outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+            drop_reason: None,
+        }
+    }
+
+    pub(crate) fn dropped(
+        target_request_id: impl Into<String>,
+        drop_reason: tracedecay_domain::DeliveryDropReasonV1,
+    ) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_DELIVERY_ACK_OPERATION.to_owned(),
+            target_request_id,
+            outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+            drop_reason: Some(drop_reason),
+        }
+    }
+
+    pub(crate) fn target_request_id(&self) -> &str {
+        &self.target_request_id
+    }
+
+    pub(crate) fn outcome(
+        &self,
+    ) -> (
+        tracedecay_domain::DeliverySettlementOutcomeV1,
+        Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        (self.outcome, self.drop_reason)
+    }
+
+    fn validate(&self) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_DELIVERY_ACK_OPERATION
+            && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && self.request_id == self.target_request_id
+            && match (self.outcome, self.drop_reason) {
+                (tracedecay_domain::DeliverySettlementOutcomeV1::Delivered, None) => true,
+                (tracedecay_domain::DeliverySettlementOutcomeV1::Dropped, Some(_)) => true,
+                _ => false,
+            }
+    }
+}
+
+pub(crate) fn parse_daemon_invocation_delivery_ack_request(
+    line: &str,
+) -> Option<DaemonInvocationDeliveryAckRequest> {
+    let value = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    (value.get("protocol").and_then(serde_json::Value::as_str) == Some(DAEMON_INVOCATION_PROTOCOL)
+        && value.get("operation").and_then(serde_json::Value::as_str)
+            == Some(DAEMON_INVOCATION_DELIVERY_ACK_OPERATION))
+    .then_some(())?;
+    let request = serde_json::from_value::<DaemonInvocationDeliveryAckRequest>(value).ok()?;
+    request.validate().then_some(request)
+}
+
+#[cfg(test)]
+mod delivery_ack_tests {
+    use super::{
+        DaemonInvocationDeliveryAckRequest, DaemonInvocationDeliveryAckResponse,
+        DaemonInvocationDeliveryAckResponseOutcome, parse_daemon_invocation_delivery_ack_request,
+    };
+    use tracedecay_domain::DeliveryDropReasonV1;
+
+    #[test]
+    fn delivered_ack_round_trips_and_rejects_a_drop_reason() {
+        let ack = DaemonInvocationDeliveryAckRequest::delivered("request.cli.delivery.1");
+        let wire = serde_json::to_string(&ack).expect("delivery ACK wire");
+        let parsed = parse_daemon_invocation_delivery_ack_request(&wire)
+            .expect("delivered ACK should parse");
+        assert_eq!(parsed.target_request_id(), "request.cli.delivery.1");
+        assert_eq!(
+            parsed.outcome().0,
+            tracedecay_domain::DeliverySettlementOutcomeV1::Delivered
+        );
+
+        let invalid = wire.replace(
+            "\"outcome\":\"delivered\"",
+            "\"outcome\":\"delivered\",\"drop_reason\":\"disconnected\"",
+        );
+        assert!(parse_daemon_invocation_delivery_ack_request(&invalid).is_none());
+    }
+
+    #[test]
+    fn dropped_ack_requires_a_reason_and_response_is_typed() {
+        let ack = DaemonInvocationDeliveryAckRequest::dropped(
+            "request.cli.delivery.2",
+            DeliveryDropReasonV1::Disconnected,
+        );
+        let wire = serde_json::to_string(&ack).expect("dropped ACK wire");
+        assert!(parse_daemon_invocation_delivery_ack_request(&wire).is_some());
+
+        let response = DaemonInvocationDeliveryAckResponse::rejected(
+            "request.cli.delivery.2",
+            super::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity,
+        );
+        let value = serde_json::to_value(response).expect("ACK response wire");
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(value["reason"], "recorder_at_capacity");
+        assert!(matches!(
+            serde_json::from_value::<DaemonInvocationDeliveryAckResponse>(value)
+                .expect("ACK response parse")
+                .outcome,
+            DaemonInvocationDeliveryAckResponseOutcome::Rejected {
+                reason: super::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity
+            }
+        ));
+    }
+}
+
 /// Closed operations accepted by the daemon invocation connection.
 ///
 /// Git operations carry only their reviewed typed surface DTOs. Authority,
@@ -161,6 +380,11 @@ pub(crate) enum DaemonInvocationOperation {
     NativeIntegrationApply,
     NativeIntegrationStatus,
     NativeIntegrationCancel,
+    NativeIntegrationWorktreeInventory,
+    NativeIntegrationWorktreeInspect,
+    NativeIntegrationWorktreeConfirm,
+    NativeIntegrationWorktreeRemove,
+    NativeIntegrationWorktreeReconcile,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
@@ -184,6 +408,7 @@ pub(crate) enum DaemonInvocationOperation {
     CodeReferences,
     Configuration,
     ContextScout,
+    RetainedApplication,
     MultiRootScopeSetRead,
     MultiRootScopeSetCompareAndSwap,
     MultiRootExecute,
@@ -215,6 +440,11 @@ impl DaemonInvocationOperation {
             Self::NativeIntegrationApply => "apply_native_integration",
             Self::NativeIntegrationStatus => "native_integration_status",
             Self::NativeIntegrationCancel => "cancel_native_integration",
+            Self::NativeIntegrationWorktreeInventory => "worktree_inventory",
+            Self::NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect",
+            Self::NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm",
+            Self::NativeIntegrationWorktreeRemove => "worktree_cleanup_remove",
+            Self::NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
@@ -238,6 +468,7 @@ impl DaemonInvocationOperation {
             Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
+            Self::RetainedApplication => "retained_application",
             Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
             Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
             Self::MultiRootExecute => "multi_root_execute",
@@ -314,10 +545,16 @@ pub(crate) enum WorkApplicationInvocationV1 {
     AttemptStatus(WorkAttemptStatusRequestV1),
     CancelAttempt(CancelWorkAttemptCommand),
     ResumeAttempts(ResumeWorkAttemptsCommand),
+    RetryAttempt(RetryWorkAttemptCommandV1),
+    MintRetryTestBinding(WorkRetryTestBindingTokenRequestV1),
     ListAttempts(WorkAttemptListRequestV1),
     HydrateArtifacts(WorkArtifactHydrationRequestV1),
     Views(WorkGraphReadRequestV1),
+    MutateGraph(WorkProductMutationRequestV1),
     Topology(WorkTopologyViewRequestV1),
+    TopologyMetrics(ExecutionTopologyMetricsRequestV1),
+    AdjudicateDuplicate(WorkDuplicateAdjudicationCommandV1),
+    AdjudicateLeak(AdjudicateWorkLeakCommandV1),
     PauseRun(PauseWorkRunCommand),
     ResumeRun(ResumeWorkRunCommand),
     RunControl(WorkRunControlRequestV1),
@@ -345,10 +582,16 @@ impl WorkApplicationInvocationV1 {
             Self::AttemptStatus(_) => "attempt_status",
             Self::CancelAttempt(_) => "cancel_attempt",
             Self::ResumeAttempts(_) => "resume_attempts",
+            Self::RetryAttempt(_) => "retry_attempt",
+            Self::MintRetryTestBinding(_) => "mint_retry_test_binding",
             Self::ListAttempts(_) => "list_attempts",
             Self::HydrateArtifacts(_) => "hydrate_artifacts",
             Self::Views(_) => "views",
+            Self::MutateGraph(_) => "mutate_graph",
             Self::Topology(_) => "topology",
+            Self::TopologyMetrics(_) => "topology_metrics",
+            Self::AdjudicateDuplicate(_) => "adjudicate_duplicate",
+            Self::AdjudicateLeak(_) => "adjudicate_leak",
             Self::PauseRun(_) => "pause_run",
             Self::ResumeRun(_) => "resume_run",
             Self::RunControl(_) => "run_control",
@@ -407,6 +650,7 @@ impl WorkflowApplicationInvocation {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub(crate) enum HandoffApplicationInvocationV1 {
+    IssueTaskHandoff(IssueTaskHandoffRequestV1),
     OpenInvestigationHandoff(OpenInvestigationHandoffRequestV1),
     OpenTaskHandoff(OpenTaskHandoffRequestV1),
 }
@@ -414,6 +658,7 @@ pub(crate) enum HandoffApplicationInvocationV1 {
 impl HandoffApplicationInvocationV1 {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
+            Self::IssueTaskHandoff(_) => "issue_task_handoff",
             Self::OpenInvestigationHandoff(_) => "open_investigation_handoff",
             Self::OpenTaskHandoff(_) => "open_task_handoff",
         }
@@ -568,6 +813,12 @@ pub(crate) enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    RetainedApplication {
+        request: tracedecay_application::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     MultiRootScopeSetRead {
         request: MultiRootScopeSetReadRequestV1,
         observed_at: UtcMicros,
@@ -605,7 +856,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     SemanticEvaluateAndPublish {
-        candidate: Box<crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
+        candidate: Box<tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -843,13 +1094,15 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus
-            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel
-            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
+                unreachable!("native-integration operations use their typed constructor")
+            }
+            crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
-                unreachable!("native-integration operations use their typed constructor")
+                unreachable!("native worktree operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ConfigurationList
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationExplain
@@ -863,7 +1116,15 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRetry
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRemove
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRollback
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticEmbeddingImportLocal
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticEmbeddingImportConfiguredHttps
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerImportLocal
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerImportConfiguredHttps
+            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerRollback => {
                 unreachable!("configuration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
@@ -878,6 +1139,33 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ContextScoutDelivery
             | crate::application_surface::ApplicationSurfaceOperation::ContextScoutFeedback => {
                 unreachable!("Context Scout operations use their typed constructor")
+            }
+            crate::application_surface::ApplicationSurfaceOperation::FactStoreAdd
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreSearch
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreProbe
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreRelated
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreReason
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreContradict
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreGet
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreUpdate
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreRemove
+            | crate::application_surface::ApplicationSurfaceOperation::FactStoreList
+            | crate::application_surface::ApplicationSurfaceOperation::FactFeedback
+            | crate::application_surface::ApplicationSurfaceOperation::MemoryStatus
+            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshStatus
+            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshCancel
+            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshBegin
+            | crate::application_surface::ApplicationSurfaceOperation::MessageSearch
+            | crate::application_surface::ApplicationSurfaceOperation::SessionsFor
+            | crate::application_surface::ApplicationSurfaceOperation::Workflows
+            | crate::application_surface::ApplicationSurfaceOperation::LcmStatus
+            | crate::application_surface::ApplicationSurfaceOperation::LcmDoctor
+            | crate::application_surface::ApplicationSurfaceOperation::LcmLoadSession
+            | crate::application_surface::ApplicationSurfaceOperation::LcmGrep
+            | crate::application_surface::ApplicationSurfaceOperation::LcmDescribe
+            | crate::application_surface::ApplicationSurfaceOperation::LcmExpand
+            | crate::application_surface::ApplicationSurfaceOperation::LcmExpandQuery => {
+                unreachable!("retained operations use their typed constructor")
             }
         };
         Self {
@@ -1083,6 +1371,27 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn retained_application(
+        request_id: impl Into<String>,
+        request: tracedecay_application::RetainedSurfaceRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::RetainedApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn multi_root_scope_set_read(
         request_id: impl Into<String>,
         request: MultiRootScopeSetReadRequestV1,
@@ -1211,7 +1520,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn semantic_evaluate_and_publish(
         request_id: impl Into<String>,
-        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1501,6 +1810,21 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
                     DaemonInvocationOperation::NativeIntegrationCancel
                 }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory => {
+                    DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect => {
+                    DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm => {
+                    DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove => {
+                    DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+                }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+                    DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+                }
                 _ => unreachable!(
                     "native integration payloads use a native integration surface operation"
                 ),
@@ -1580,6 +1904,9 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::Configuration
             }
             DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
+            DaemonInvocationPayload::RetainedApplication { .. } => {
+                DaemonInvocationOperation::RetainedApplication
+            }
             DaemonInvocationPayload::MultiRootScopeSetRead { .. } => {
                 DaemonInvocationOperation::MultiRootScopeSetRead
             }
@@ -1628,6 +1955,11 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::NativeIntegrationApply
                 | DaemonInvocationOperation::NativeIntegrationStatus
                 | DaemonInvocationOperation::NativeIntegrationCancel
+                | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+                | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+                | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+                | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+                | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
                 | DaemonInvocationOperation::FeedbackDiagnostics
                 | DaemonInvocationOperation::FeedbackGet
                 | DaemonInvocationOperation::FeedbackExpand
@@ -1651,6 +1983,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeReferences
                 | DaemonInvocationOperation::Configuration
                 | DaemonInvocationOperation::ContextScout
+                | DaemonInvocationOperation::RetainedApplication
                 | DaemonInvocationOperation::MultiRootScopeSetRead
                 | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
                 | DaemonInvocationOperation::MultiRootExecute
@@ -1667,6 +2000,16 @@ impl DaemonInvocationRequest {
             &self.payload,
             DaemonInvocationPayload::WorkflowApplication { .. }
         )
+    }
+
+    /// The caller's immutable budget also bounds the terminal delivery ACK.
+    /// Work output must not hold an authenticated connection past the
+    /// invocation's own deadline when a surface disappears before ACKing.
+    pub(crate) fn delivery_ack_deadline(&self) -> Option<&Deadline> {
+        match &self.payload {
+            DaemonInvocationPayload::WorkApplication { deadline, .. } => Some(deadline),
+            _ => None,
+        }
     }
 
     pub(crate) fn validate(&self) -> Result<(), DaemonInvocationProblem> {
@@ -1922,13 +2265,26 @@ impl DaemonInvocationRequest {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                    || !request.matches(*surface_operation)
+                    || !request.matches_operation(surface_operation.as_str())
                     || matches!(
                         request,
                         ContextScoutSurfaceRequest::Recent(request)
                             | ContextScoutSurfaceRequest::Explain(request)
                             if !(1..=32).contains(&request.limit)
                     )
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::RetainedApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2097,7 +2453,7 @@ pub(crate) enum DaemonInvocationProblem {
 }
 
 /// Response envelope paired with one invocation request id.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DaemonInvocationResponse {
     pub(crate) protocol: String,
     pub(crate) revision: u16,
@@ -2370,7 +2726,7 @@ impl DaemonFeedbackResult {
 // (work_cli, application_surface, service::invocation::work and its tests);
 // boxing it would ripple through all of them for a wire contract type.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOutcome {
     GitRead {
@@ -2408,6 +2764,10 @@ pub(crate) enum DaemonInvocationOutcome {
     ContextScout {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    RetainedApplication {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<tracedecay_application::RetainedSurfaceResultV1>,
     },
     MultiRootScopeSetRead {
         scope: ResolvedScope,
@@ -2474,7 +2834,7 @@ pub(crate) enum DaemonInvocationOutcome {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
 pub(crate) enum WorkApplicationOutcomeV1 {
     Snapshot(ApplicationOutcome<WorkProjectionSnapshotV1>),
@@ -2492,10 +2852,16 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
     CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
+    RetryAttempt(ApplicationOutcome<tracedecay_application::WorkRetryAttemptOutcomeV1>),
+    MintRetryTestBinding(ApplicationOutcome<WorkRetryTestBindingTokenOutcomeV1>),
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
     HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),
     Views(ApplicationOutcome<WorkGraphReadV1>),
+    MutateGraph(ApplicationOutcome<WorkProductMutationReceiptV1>),
     Topology(ApplicationOutcome<ExecutionTopologyViewV1>),
+    TopologyMetrics(ApplicationOutcome<ExecutionTopologyMetricsV1>),
+    AdjudicateDuplicate(ApplicationOutcome<WorkDuplicateAdjudicationAppendOutcomeV1>),
+    AdjudicateLeak(ApplicationOutcome<WorkLeakAdjudicationOutcomeV1>),
     PauseRun(ApplicationOutcome<WorkRunControlV1>),
     ResumeRun(ApplicationOutcome<WorkRunControlV1>),
     RunControl(ApplicationOutcome<WorkRunControlReadingV1>),
@@ -2529,6 +2895,7 @@ pub(crate) enum WorkflowApplicationOutcome {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
 pub(crate) enum HandoffApplicationOutcomeV1 {
+    IssueTaskHandoff(ApplicationOutcome<IssueTaskHandoffResultV1>),
     OpenInvestigationHandoff(ApplicationOutcome<OpenInvestigationHandoffResultV1>),
     OpenTaskHandoff(ApplicationOutcome<OpenTaskHandoffResultV1>),
 }

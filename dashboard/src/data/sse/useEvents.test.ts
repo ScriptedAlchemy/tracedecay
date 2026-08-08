@@ -63,10 +63,10 @@ describe("SSE query invalidation", () => {
   });
 
   /**
-   * Every Work read part, not just the projection pair. The attempt list is in
-   * here deliberately: it is scoped like the snapshot it is drawn beside, so an
-   * attempt page that survived a project switch would put one project's
-   * execution record under another project's snapshot. Adding a read part to
+   * Every Work read part, not just the projection pair. The attempt list and
+   * canonical topology page are scoped like the snapshot they are drawn beside,
+   * so either surviving a project switch would put one project's execution
+   * structure under another project's snapshot. Adding a read part to
    * `workScopeInvalidationKeys` is expected to widen these lists — a part
    * missing from them is a stale read, not a saved refetch.
    */
@@ -84,10 +84,12 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.alpha"],
       ["work", "delta", "project:project.alpha"],
       ["work", "list-attempts", "project:project.alpha"],
+      ["work", "topology", "project:project.alpha"],
       ["work", "views", "project:project.alpha"],
       ["work", "snapshot", "all"],
       ["work", "delta", "all"],
       ["work", "list-attempts", "all"],
+      ["work", "topology", "all"],
       ["work", "views", "all"],
     ]);
   });
@@ -106,6 +108,7 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.beta"],
       ["work", "delta", "project:project.beta"],
       ["work", "list-attempts", "project:project.beta"],
+      ["work", "topology", "project:project.beta"],
       ["work", "views", "project:project.beta"],
     ]);
   });
@@ -129,10 +132,12 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.alpha"],
       ["work", "delta", "project:project.alpha"],
       ["work", "list-attempts", "project:project.alpha"],
+      ["work", "topology", "project:project.alpha"],
       ["work", "views", "project:project.alpha"],
       ["work", "snapshot", "project:project.beta"],
       ["work", "delta", "project:project.beta"],
       ["work", "list-attempts", "project:project.beta"],
+      ["work", "topology", "project:project.beta"],
       ["work", "views", "project:project.beta"],
     ]);
   });

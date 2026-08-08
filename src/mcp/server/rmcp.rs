@@ -28,6 +28,99 @@ use super::{ConnectionRouteState, McpServer};
 pub(crate) type RmcpInitializeResponseDecorator =
     Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
 
+/// Connection-local Work-delivery ledger input for the RMCP transport.
+///
+/// The RMCP request handler finishes before the transport writes its response.
+/// Keeping the pending attempt with the transport makes the write-and-flush
+/// boundary the only place allowed to offer a delivery settlement.
+#[derive(Clone)]
+pub(crate) struct RmcpWorkDeliverySettlement {
+    recorder: Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+    connection_scope: String,
+}
+
+impl RmcpWorkDeliverySettlement {
+    pub(crate) fn new(
+        recorder: Option<
+            Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
+        >,
+        connection_scope: String,
+    ) -> Self {
+        Self {
+            recorder,
+            connection_scope,
+        }
+    }
+
+    pub(crate) fn attempt_for_request(
+        &self,
+        request: &Value,
+    ) -> Option<tracedecay_domain::DeliverySettlementAttemptV1> {
+        self.recorder.as_ref()?;
+        (request.get("method").and_then(Value::as_str) == Some("tools/call")).then_some(())?;
+        let request_id = request.get("id")?;
+        let tool_name = request
+            .get("params")
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)?;
+        crate::mcp::tools::binding::work_operation_for_tool(tool_name)?;
+        let identity = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.mcp-work-delivery.v1",
+            &self.connection_scope,
+            tool_name,
+            request_id,
+        ))
+        .ok()?;
+        let channel = tracedecay_domain::canonical_sha256(&(
+            "tracedecay.mcp-delivery-channel.v1",
+            &self.connection_scope,
+        ))
+        .ok()?;
+        let identity = identity.as_str().trim_start_matches("sha256:");
+        let channel = channel.as_str().trim_start_matches("sha256:");
+        let observed_at = tracedecay_application::clock::now_micros();
+        Some(tracedecay_domain::DeliverySettlementAttemptV1 {
+            owner_event_id: format!("work:mcp-response:{identity}"),
+            event_class: tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
+            channel: tracedecay_domain::DeliveryChannelIdentityV1 {
+                surface: tracedecay_domain::DeliverySurfaceFamilyV1::Mcp,
+                channel_ref: format!("mcp:connection:{channel}"),
+            },
+            work_attempt: None,
+            eligible: 1,
+            valid_at: observed_at,
+            attempted_at: observed_at,
+        })
+    }
+
+    pub(crate) fn settle(
+        &self,
+        attempt: tracedecay_domain::DeliverySettlementAttemptV1,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        let settlement = tracedecay_domain::DeliverySettlementV1 {
+            settled_at: std::cmp::max(
+                attempt.attempted_at,
+                tracedecay_application::clock::now_micros(),
+            ),
+            attempt,
+            outcome,
+            drop_reason,
+        };
+        match recorder.try_record(settlement) {
+            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {}
+            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity) => {
+                tracing::warn!("RMCP Work delivery settlement was dropped at recorder capacity");
+            }
+            Err(error) => tracing::warn!(%error, "RMCP Work delivery settlement was refused"),
+        }
+    }
+}
+
 async fn await_dispatch_with_cancellation<F, C, N>(
     handling: F,
     cancellation: N,
@@ -87,6 +180,13 @@ impl RmcpConnectionAdapter {
             initialize_response_decorator,
             admission: crate::daemon::current_connection_admission(),
         })
+    }
+
+    pub(crate) fn work_delivery_settlement(&self) -> RmcpWorkDeliverySettlement {
+        RmcpWorkDeliverySettlement::new(
+            self.server.delivery_settlement_recorder.clone(),
+            self.memory_request_scope.clone(),
+        )
     }
 
     async fn dispatch(

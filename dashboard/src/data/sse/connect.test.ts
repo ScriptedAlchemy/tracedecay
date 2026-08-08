@@ -36,6 +36,7 @@ class FakeEventSource {
 
 describe("dashboard SSE wire bridge", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     FakeEventSource.instances = [];
   });
@@ -92,13 +93,75 @@ describe("dashboard SSE wire bridge", () => {
     connection.close();
   });
 
-  it("subscribes only to server-emitted code-index activity", () => {
+  it("acknowledges a receipt only after decoding the browser-delivered frame", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetch);
+    const connection = connectEvents("/api/events?project=active");
+    const source = FakeEventSource.instances[0]!;
+
+    source.emit("heartbeat", {
+      stream: "heartbeat",
+      run_id: "run-42-1700000000000000",
+      event_revision: 1,
+      entity_revision: null,
+      scope: { project_id: null, storage_mode: "project_local", store_root: "/s" },
+      observation_time_micros: 1700000000000000,
+      source_watermark: null,
+      coverage: { completeness: "unknown" },
+      delivery_receipt: `dsa1:${"a".repeat(64)}`,
+      kind: { family: "heartbeat" },
+    });
+
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(fetch).toHaveBeenCalledWith("/api/events/delivery-ack", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receipt: `dsa1:${"a".repeat(64)}` }),
+      keepalive: true,
+    });
+    connection.close();
+  });
+
+  it.each([404, 410])(
+    "does not treat a %s delivery response as browser ACK success",
+    async (status) => {
+      vi.useFakeTimers();
+      vi.stubGlobal("EventSource", FakeEventSource);
+      const fetch = vi.fn().mockResolvedValue(new Response(null, { status }));
+      vi.stubGlobal("fetch", fetch);
+      const connection = connectEvents("/api/events");
+      const source = FakeEventSource.instances[0]!;
+
+      source.emit("heartbeat", {
+        stream: "heartbeat",
+        run_id: "run-42-1700000000000000",
+        event_revision: 1,
+        entity_revision: null,
+        scope: { project_id: null, storage_mode: "project_local", store_root: "/s" },
+        observation_time_micros: 1700000000000000,
+        source_watermark: null,
+        coverage: { completeness: "unknown" },
+        delivery_receipt: `dsa1:${"b".repeat(64)}`,
+        kind: { family: "heartbeat" },
+      });
+
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      connection.close();
+    },
+  );
+
+  it("subscribes to server-emitted activity and resume-control names", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
     const source = FakeEventSource.instances[0]!;
 
     expect(source.listeners.has("code_index")).toBe(false);
     expect(source.listeners.has("code_index_activity")).toBe(true);
+    expect(source.listeners.has("control")).toBe(true);
     connection.close();
   });
 

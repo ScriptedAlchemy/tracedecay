@@ -8,8 +8,8 @@ use tracedecay_lsp::{
 };
 use url::Url;
 
-use crate::application::lsp_runtime::LspWorkspaceDocumentIndexPort;
 use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_usecases::lsp_runtime::LspWorkspaceDocumentIndexPort;
 
 #[derive(Clone)]
 pub(in crate::daemon::service::invocation) struct PublishedCodeIndexWorkspaceDocuments {

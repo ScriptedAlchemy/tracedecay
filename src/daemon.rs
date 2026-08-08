@@ -17,7 +17,6 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use crate::application::context::CancellationToken;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
@@ -44,6 +43,7 @@ use scheduler::{
     daemon_scheduler_record_log_line, run_automation_scheduler_tick, scheduler_task_log_fields,
     user_config_for_client,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
@@ -205,11 +205,17 @@ mod github_credential_lifecycle;
 mod graph_resolution;
 mod native_integration;
 use graph_resolution::retained_project_graph_resolver;
+pub(crate) use native_integration::daemon_worktree_holder_admission_fence;
 mod http_application;
 mod http_application_router;
+mod remote_https;
+#[cfg(test)]
+mod remote_https_tests;
 mod remote_protocol;
+pub use remote_https::RemoteHttpsListenerConfigV1;
 mod remote_query;
 mod remote_replay_transaction;
+pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
     mount_http_application_router,
@@ -267,6 +273,7 @@ use projectless::{
 };
 pub(crate) mod profile_identity;
 mod project_composition;
+mod project_delivery_mount;
 #[cfg(test)]
 use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
@@ -354,7 +361,7 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_request,
 };
-pub use bootstrap::run_foreground;
+pub use bootstrap::{run_foreground, run_foreground_with_remote_https};
 pub(crate) use service::invocation::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
@@ -375,8 +382,8 @@ pub use service::{
     quiesce_installed_service_before_lease, refresh_installed_service,
     refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
     refresh_service, restore_installed_service_after_update, restore_scoop_package_service,
-    service_spec, service_status, socket_path_or_default, start_service, stop_service,
-    uninstall_service, verify_installed_service_quiesced_under_lease,
+    service_spec, service_spec_for_installed_refresh, service_status, socket_path_or_default,
+    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };

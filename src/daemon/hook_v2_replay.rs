@@ -324,9 +324,71 @@ where
     admit(envelope, native_session_id).await
 }
 
-async fn drain_all_hosts(graph: &crate::tracedecay::TraceDecay, data_root: &Path) {
+async fn drain_hook_delivery_receipts(
+    data_root: &Path,
+    host: HookHostV1,
+    authority: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
+) {
+    let root = tracedecay_hooks::hook_delivery_receipt_spool_root(data_root, host);
+    if !root.is_dir() {
+        return;
+    }
+    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(&root) else {
+        return;
+    };
+    let Ok(receipts) = spool.pending(usize::from(tracedecay_hooks::MAX_REPLAY_BATCH_RECORDS))
+    else {
+        return;
+    };
+    drop(spool);
+
+    let mut settled = Vec::new();
+    for receipt in receipts {
+        let source_receipt_ref = format!(
+            "hook:delivery:{}",
+            receipt
+                .receipt_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        if authority
+            .begin_receipted(&receipt.settlement.attempt, &source_receipt_ref)
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(_emission) = authority.settle(&receipt.settlement).await else {
+            continue;
+        };
+        // A successful durable settlement is enough to release the source
+        // receipt.  Early recipients legitimately return `observability: None`
+        // while their fan-out census is partial; only the final recipient
+        // emits the complete owner fact.  Retaining those partial files would
+        // replay immutable attempts forever after the database already owns
+        // them.
+        settled.push(receipt.receipt_id);
+    }
+    if settled.is_empty() {
+        return;
+    }
+    let Ok(spool) = tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(root) else {
+        return;
+    };
+    for receipt_id in settled {
+        let _ = spool.acknowledge(receipt_id);
+    }
+}
+
+async fn drain_all_hosts(
+    graph: &crate::tracedecay::TraceDecay,
+    data_root: &Path,
+    delivery_settlements: &tracedecay_usecases::observability::DeliverySettlementAuthorityV1,
+) {
     for host in crate::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
+        drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await;
         for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
             let _ = admit_replayed_envelope_with_authoritative_session(
                 envelope,
@@ -403,6 +465,7 @@ fn hook_replay_now() -> UtcMicros {
 
 struct RegisteredReplayConsumer {
     graph: Weak<crate::tracedecay::TraceDecay>,
+    delivery_settlements: Weak<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -414,31 +477,34 @@ fn registered_replay_roots() -> &'static StdMutex<BTreeMap<PathBuf, RegisteredRe
 #[cfg(all(test, unix))]
 pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
     registered_replay_roots().lock().is_ok_and(|roots| {
-        roots
-            .get(data_root)
-            .and_then(|consumer| consumer.graph.upgrade())
-            .is_some()
+        roots.get(data_root).is_some_and(|consumer| {
+            consumer.graph.upgrade().is_some() && consumer.delivery_settlements.upgrade().is_some()
+        })
     })
 }
 
 /// Start the per-project replay consumer exactly once per hook data root.
 /// Returns `false` when one is already running for this root.
-pub(crate) fn register_hook_v2_replay_consumer(graph: Arc<crate::tracedecay::TraceDecay>) -> bool {
+pub(crate) fn register_hook_v2_replay_consumer(
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    delivery_settlements: Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let graph = Arc::downgrade(&graph);
+    let delivery_settlements = Arc::downgrade(&delivery_settlements);
     match registered_replay_roots().lock() {
         Ok(mut roots) => {
-            if roots
-                .get(&data_root)
-                .and_then(|consumer| consumer.graph.upgrade())
-                .is_some()
-            {
+            if roots.get(&data_root).is_some_and(|consumer| {
+                consumer.graph.upgrade().is_some()
+                    && consumer.delivery_settlements.upgrade().is_some()
+            }) {
                 return false;
             }
             roots.insert(
                 data_root.clone(),
                 RegisteredReplayConsumer {
                     graph: graph.clone(),
+                    delivery_settlements: delivery_settlements.clone(),
                     task: None,
                 },
             );
@@ -447,13 +513,17 @@ pub(crate) fn register_hook_v2_replay_consumer(graph: Arc<crate::tracedecay::Tra
     }
     let task_data_root = data_root.clone();
     let task_graph = graph.clone();
+    let task_delivery_settlements = delivery_settlements.clone();
     let task = tokio::spawn(async move {
         loop {
-            let Some(graph_owner) = task_graph.upgrade() else {
+            let (Some(graph_owner), Some(delivery_settlements)) =
+                (task_graph.upgrade(), task_delivery_settlements.upgrade())
+            else {
                 break;
             };
-            drain_all_hosts(&graph_owner, &task_data_root).await;
+            drain_all_hosts(&graph_owner, &task_data_root, delivery_settlements.as_ref()).await;
             drop(graph_owner);
+            drop(delivery_settlements);
             tokio::time::sleep(REPLAY_INTERVAL).await;
         }
         if let Ok(mut roots) = registered_replay_roots().lock()

@@ -8,8 +8,8 @@ use super::schema_contract::{
 };
 use super::{
     configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
-    observation_projection, project_registry, session_temporal,
+    ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
+    observability_rollup, observation, observation_projection, project_registry, session_temporal,
 };
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior,
@@ -165,6 +165,35 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_event_idempotency
         ON analytics_events(provider, project_id, hint_id)
         WHERE provider = 'tracedecay-observability' AND hint_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS observability_emission_outbox (
+        project_id TEXT NOT NULL,
+        owner_event_id TEXT NOT NULL,
+        owner_fact_json TEXT NOT NULL CHECK(json_valid(owner_fact_json)),
+        delivery_envelope_json TEXT NOT NULL CHECK(json_valid(delivery_envelope_json)),
+        state TEXT NOT NULL CHECK(state IN ('pending', 'settled')),
+        analytics_event_id INTEGER,
+        PRIMARY KEY(project_id, owner_event_id),
+        CHECK (
+            (state = 'pending' AND analytics_event_id IS NULL)
+            OR (state = 'settled' AND analytics_event_id IS NOT NULL)
+        ),
+        FOREIGN KEY(analytics_event_id) REFERENCES analytics_events(id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS idx_observability_emission_outbox_pending
+        ON observability_emission_outbox(project_id, owner_event_id)
+        WHERE state = 'pending';
+    CREATE TRIGGER IF NOT EXISTS observability_emission_outbox_identity_immutable
+    BEFORE UPDATE ON observability_emission_outbox
+    WHEN OLD.project_id != NEW.project_id
+      OR OLD.owner_event_id != NEW.owner_event_id
+      OR OLD.owner_fact_json != NEW.owner_fact_json
+      OR OLD.state = 'settled'
+      OR (OLD.delivery_envelope_json != NEW.delivery_envelope_json
+          AND (OLD.state != 'pending' OR NEW.state != 'pending'))
+    BEGIN
+        SELECT RAISE(ABORT, 'observability emission outbox identity is immutable');
+    END;
+    DROP TRIGGER IF EXISTS observability_emission_outbox_no_delete;
     CREATE TABLE IF NOT EXISTS sessions (
         provider TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -183,6 +212,9 @@ const TRANSCRIPT_SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(provider, project_key);
     CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_active_project_path
+        ON sessions(project_path, provider, session_id)
+        WHERE ended_at IS NULL;
     CREATE TABLE IF NOT EXISTS session_messages (
         provider TEXT NOT NULL,
         message_id TEXT NOT NULL,
@@ -246,6 +278,110 @@ const TRANSCRIPT_SCHEMA: &str = "
             INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
             VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;
+";
+
+const DELIVERY_SETTLEMENT_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS delivery_fanout_events (
+        project_id TEXT NOT NULL,
+        owner_event_id TEXT NOT NULL,
+        surface TEXT NOT NULL CHECK(surface IN ('hook', 'mcp', 'lsp', 'dashboard', 'cli', 'other')),
+        event_class TEXT NOT NULL CHECK(event_class IN (
+            'operation_accepted', 'operation_progress', 'operation_terminal',
+            'diagnostic', 'activity', 'other'
+        )),
+        eligible INTEGER NOT NULL CHECK(eligible BETWEEN 1 AND 64),
+        valid_at_micros INTEGER NOT NULL CHECK(valid_at_micros > 0),
+        -- Canonical optional source binding for Work-attempt delivery. The
+        -- JSON is the authority; the digest is only a bounded exact lookup
+        -- key and is revalidated before use.
+        work_attempt_json TEXT CHECK(work_attempt_json IS NULL OR json_valid(work_attempt_json)),
+        work_attempt_digest TEXT,
+        CHECK(
+            (work_attempt_json IS NULL AND work_attempt_digest IS NULL)
+            OR (work_attempt_json IS NOT NULL AND work_attempt_digest IS NOT NULL)
+        ),
+        PRIMARY KEY(project_id, owner_event_id, surface)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS delivery_settlements (
+        project_id TEXT NOT NULL,
+        owner_event_id TEXT NOT NULL,
+        surface TEXT NOT NULL,
+        channel_ref TEXT NOT NULL,
+        attempted_at_micros INTEGER NOT NULL,
+        outcome TEXT CHECK(outcome IN ('delivered', 'deduplicated', 'dropped')),
+        settled_at_micros INTEGER,
+        drop_reason TEXT CHECK(drop_reason IN (
+            'backpressure', 'cancelled', 'deadline', 'disconnected',
+            'invalid', 'rejected', 'unknown'
+        )),
+        census_json TEXT CHECK(census_json IS NULL OR json_valid(census_json)),
+        PRIMARY KEY(project_id, owner_event_id, surface, channel_ref),
+        FOREIGN KEY(project_id, owner_event_id, surface)
+            REFERENCES delivery_fanout_events(project_id, owner_event_id, surface),
+        CHECK (
+            (outcome IS NULL AND settled_at_micros IS NULL
+                AND drop_reason IS NULL AND census_json IS NULL)
+            OR (outcome IN ('delivered', 'deduplicated')
+                AND settled_at_micros IS NOT NULL
+                AND drop_reason IS NULL AND census_json IS NOT NULL)
+            OR (outcome = 'dropped'
+                AND settled_at_micros IS NOT NULL
+                AND drop_reason IS NOT NULL AND census_json IS NOT NULL)
+        )
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS idx_delivery_settlements_pending
+        ON delivery_settlements(project_id, owner_event_id, surface)
+        WHERE outcome IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_delivery_settlements_pending_due
+        ON delivery_settlements(
+            project_id, surface, attempted_at_micros, channel_ref
+        )
+        WHERE outcome IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_delivery_fanout_work_attempt
+        ON delivery_fanout_events(project_id, work_attempt_digest)
+        WHERE work_attempt_digest IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS delivery_source_receipts (
+        project_id TEXT NOT NULL,
+        receipt_ref TEXT NOT NULL,
+        owner_event_id TEXT NOT NULL,
+        surface TEXT NOT NULL,
+        channel_ref TEXT NOT NULL,
+        PRIMARY KEY(project_id, receipt_ref),
+        UNIQUE(project_id, owner_event_id, surface, channel_ref),
+        FOREIGN KEY(project_id, owner_event_id, surface, channel_ref)
+            REFERENCES delivery_settlements(project_id, owner_event_id, surface, channel_ref)
+    ) STRICT;
+    CREATE TRIGGER IF NOT EXISTS delivery_fanout_events_immutable
+    BEFORE UPDATE ON delivery_fanout_events BEGIN
+        SELECT RAISE(ABORT, 'delivery fanout identity is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS delivery_fanout_events_no_delete
+    BEFORE DELETE ON delivery_fanout_events BEGIN
+        SELECT RAISE(ABORT, 'delivery fanout receipts are retained');
+    END;
+    CREATE TRIGGER IF NOT EXISTS delivery_settlements_identity_immutable
+    BEFORE UPDATE ON delivery_settlements
+    WHEN OLD.project_id != NEW.project_id
+      OR OLD.owner_event_id != NEW.owner_event_id
+      OR OLD.surface != NEW.surface
+      OR OLD.channel_ref != NEW.channel_ref
+      OR OLD.attempted_at_micros != NEW.attempted_at_micros
+      OR OLD.outcome IS NOT NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'delivery settlement identity is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS delivery_settlements_no_delete
+    BEFORE DELETE ON delivery_settlements BEGIN
+        SELECT RAISE(ABORT, 'delivery settlement receipts are retained');
+    END;
+    CREATE TRIGGER IF NOT EXISTS delivery_source_receipts_immutable
+    BEFORE UPDATE ON delivery_source_receipts BEGIN
+        SELECT RAISE(ABORT, 'delivery source receipt identity is immutable');
+    END;
+    CREATE TRIGGER IF NOT EXISTS delivery_source_receipts_no_delete
+    BEFORE DELETE ON delivery_source_receipts BEGIN
+        SELECT RAISE(ABORT, 'delivery source receipts are retained');
+    END;
 ";
 
 /// Installs the global/session schema at its final shape through the exact
@@ -386,6 +522,13 @@ pub async fn ensure_registered_schema_for_admission(
             .execute_batch(TRANSCRIPT_SCHEMA)
             .await
             .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
+        transaction
+            .execute_batch(DELIVERY_SETTLEMENT_SCHEMA)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize delivery settlement schema", error)
+            })?;
+        observability_rollup::ensure_observability_rollup_schema(&transaction).await?;
         if workflow_admission == WorkflowSchemaAdmission::Create {
             for table in WORKFLOW_TABLE_CONTRACTS_V1 {
                 transaction

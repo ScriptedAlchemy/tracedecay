@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::application::host_admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
-};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
+use crate::host_admission::{
+    HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
+};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
@@ -78,7 +78,9 @@ pub(crate) use live_transcript_refresh::{
 };
 pub(crate) use protocol::*;
 use read_coalescing::*;
-pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
+pub(crate) use rmcp::{
+    RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpWorkDeliverySettlement,
+};
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use session_retrieval::*;
@@ -176,7 +178,7 @@ pub(crate) type SourceEditFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = crate::errors::Result<
-                    crate::application::edit::SourceEditApplicationResult,
+                    tracedecay_usecases::edit::SourceEditSurfaceResultV1,
                 >,
             > + Send
             + 'static,
@@ -313,13 +315,18 @@ pub struct McpServer {
     registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Daemon-retained admission queue for non-replayable project host events.
     /// Direct servers do not create an independent spool authority.
-    host_admission_broker: Option<crate::application::host_admission::SharedHostAdmissionBroker>,
+    host_admission_broker: Option<crate::host_admission::SharedHostAdmissionBroker>,
     project_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     user_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     user_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
+    /// Exact registered session-store coordinates retained with the project
+    /// refresh authority. V2 refresh requests must match these values; caller
+    /// selectors never rename the mounted store in receipts or digest inputs.
+    project_session_store_id: Option<tracedecay_usecases::context::SessionStoreId>,
+    project_session_root_id: Option<tracedecay_usecases::context::SessionRootId>,
     session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
@@ -376,8 +383,7 @@ pub struct McpServer {
     /// graph store for a mounted root.
     dashboard_graph_interactive_resolver: Option<DashboardGraphInteractiveResolver>,
     #[cfg(any(test, feature = "test-transport"))]
-    _host_admission_test_runtime:
-        Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+    _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -481,6 +487,10 @@ pub struct McpServer {
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    delivery_settlement_authority:
+        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+    delivery_settlement_recorder:
+        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
@@ -559,7 +569,7 @@ impl McpServer {
     #[doc(hidden)]
     pub fn host_admission_test_runtime_for_test(
         &self,
-    ) -> Option<&crate::application::host_admission::HostAdmissionTestRuntimeV1> {
+    ) -> Option<&crate::host_admission::HostAdmissionTestRuntimeV1> {
         self._host_admission_test_runtime.as_deref()
     }
 
@@ -568,7 +578,7 @@ impl McpServer {
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
     ) -> crate::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_graphs_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
@@ -586,7 +596,7 @@ impl McpServer {
     pub async fn new_with_retained_test_graphs_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
         retained_graphs: Vec<Arc<TraceDecay>>,
     ) -> crate::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
@@ -600,9 +610,7 @@ impl McpServer {
         {
             let database_path = session_db.db_path().to_path_buf();
             let (admission_runtime, _) = tokio::task::spawn_blocking(move || {
-                crate::application::host_admission::HostAdmissionRuntime::open_for_database(
-                    &database_path,
-                )
+                crate::host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
             .map_err(|error| crate::errors::TraceDecayError::Config {
@@ -612,7 +620,7 @@ impl McpServer {
                 message: format!("test server host-admission spool failed: {error:?}"),
             })?;
             context.host_admission_broker = Some(Arc::new(
-                crate::application::host_admission::HostAdmissionBroker::new(admission_runtime),
+                crate::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
         }
         Self::new_with_registered_test_context(context, retained_graphs).await
@@ -758,6 +766,8 @@ impl McpServer {
             dashboard_graph_interactive_resolver,
             project_routes,
             application_invocation_executor,
+            delivery_settlement_authority,
+            delivery_settlement_recorder,
             project_server_live,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
@@ -805,7 +815,7 @@ impl McpServer {
         let diagnostics_lsp = match diagnostics_lsp {
             Some(diagnostics_lsp) => diagnostics_lsp,
             None => {
-                crate::application::dashboard_diagnostics::open_diagnostic_broker(
+                tracedecay_usecases::dashboard_diagnostics::open_diagnostic_broker(
                     cg.project_root().to_path_buf(),
                     &cg.store_layout().dashboard_root,
                 )
@@ -828,6 +838,12 @@ impl McpServer {
                 Some(identity) => root.with_project_runtime_shard(identity),
                 None => Some(root),
             });
+        let project_session_store_id = project_session_retrieval_root
+            .as_ref()
+            .map(|root| root.identity().store_id().clone());
+        let project_session_root_id = project_session_retrieval_root
+            .as_ref()
+            .map(|root| root.identity().root_id().clone());
         let profile_session_retrieval_root =
             DaemonSessionRetrievalRoot::profile().and_then(|root| {
                 match profile_identity.as_ref() {
@@ -955,6 +971,8 @@ impl McpServer {
             user_session_refresh_wake,
             project_session_refresh_service,
             user_session_refresh_service,
+            project_session_store_id,
+            project_session_root_id,
             session_sync_service,
             project_session_retrieval_service,
             user_session_retrieval_service,
@@ -1011,6 +1029,8 @@ impl McpServer {
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
+            delivery_settlement_authority,
+            delivery_settlement_recorder,
             project_server_live,
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
             dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
@@ -1182,6 +1202,46 @@ impl McpServer {
 
     pub(crate) fn project_session_db(&self) -> Option<Arc<RegisteredGlobalDb>> {
         self.session_db.clone()
+    }
+
+    pub(crate) fn retained_surface_port(
+        &self,
+        project_root: &Path,
+        configuration_digest: tracedecay_domain::ManifestDigest,
+    ) -> Result<Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>> {
+        let mounted_profile_id = self
+            .profile_identity()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained surface requires exact mounted profile identity".to_owned(),
+            })?
+            .profile_id()
+            .clone();
+        crate::daemon::retained_owner::retained_surface_port(
+            crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
+                cg: Arc::clone(&self.cg),
+                project_root: project_root.to_path_buf(),
+                configuration_digest,
+                mounted_profile_id,
+                mounted_session_store_id: self.project_session_store_id.clone().ok_or_else(
+                    || TraceDecayError::Config {
+                        message: "retained surface requires exact mounted session store identity"
+                            .to_owned(),
+                    },
+                )?,
+                mounted_session_root_id: self.project_session_root_id.clone().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "retained surface requires exact mounted session root identity"
+                            .to_owned(),
+                    }
+                })?,
+                registry_db: self.registry_db.clone(),
+                registered_session_db: self.registered_session_db.clone(),
+                project_refresh: self.project_session_refresh_service.clone(),
+                project_retrieval: self.project_session_retrieval_service.clone(),
+                project_retrieval_sweep: self.session_retrieval_sweep.clone(),
+                project_lcm: self.project_lcm_authority.clone(),
+            },
+        )
     }
 
     /// Clones out the currently served `TraceDecay` instance. The lock is

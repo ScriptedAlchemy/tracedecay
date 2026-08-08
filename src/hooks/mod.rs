@@ -3,6 +3,7 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -148,6 +149,162 @@ pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path)
         .flatten()
 }
 
+pub(crate) async fn write_hook_output(
+    project_root: Option<&Path>,
+    host: tracedecay_hooks::HookHostV1,
+    event_json: &str,
+    output: &str,
+    telemetry: Option<&analytics::HookTimingSpan>,
+) -> bool {
+    let delivery_writer = match project_root {
+        None => None,
+        Some(project_root) => {
+            let layout =
+                match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
+                    project_root,
+                ) {
+                    Ok(Some(layout)) => layout,
+                    Ok(None) => {
+                        tracing::warn!(
+                            host = host.hook_key(),
+                            "Hook output delivery has no enrolled project layout"
+                        );
+                        return false;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            host = host.hook_key(),
+                            %error,
+                            "Hook output delivery project layout could not be resolved"
+                        );
+                        return false;
+                    }
+                };
+            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+                tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+            ) {
+                Ok(writer) => Some(writer),
+                Err(error) => {
+                    tracing::warn!(host = host.hook_key(), %error, "Hook output delivery receipt spool could not be opened");
+                    return false;
+                }
+            }
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let written = stdout
+        .write_all(output.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush());
+    drop(stdout);
+    if let Err(error) = written {
+        eprintln!("tracedecay hook: failed to flush host output: {error}");
+        return false;
+    }
+    let Some(project_root) = project_root else {
+        return true;
+    };
+    let Some(delivery_writer) = delivery_writer else {
+        tracing::error!(
+            host = host.hook_key(),
+            "Hook output delivery writer disappeared"
+        );
+        return false;
+    };
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    let session = event_session_id(&parsed).unwrap_or_else(|| "session-unavailable".to_owned());
+    let settled_at = daemon_ports::now_utc();
+    let Some(owner) = hook_output_owner_event_id(host, event_json, output) else {
+        tracing::error!(
+            host = host.hook_key(),
+            "Hook output delivery identity could not be derived"
+        );
+        return false;
+    };
+    let Ok(channel) = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.hook-output-channel.v1",
+        host.hook_key(),
+        session,
+    )) else {
+        tracing::error!(
+            host = host.hook_key(),
+            "Hook output delivery channel identity could not be derived"
+        );
+        return false;
+    };
+    let settlement = tracedecay_domain::DeliverySettlementV1 {
+        attempt: tracedecay_domain::DeliverySettlementAttemptV1 {
+            owner_event_id: owner,
+            event_class: tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
+            channel: tracedecay_domain::DeliveryChannelIdentityV1 {
+                surface: tracedecay_domain::DeliverySurfaceFamilyV1::Hook,
+                channel_ref: format!(
+                    "hook:{}:{}",
+                    host.hook_key(),
+                    channel.as_str().trim_start_matches("sha256:")
+                ),
+            },
+            work_attempt: None,
+            eligible: 1,
+            valid_at: settled_at,
+            attempted_at: settled_at,
+        },
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+        settled_at,
+        drop_reason: None,
+    };
+    let receipt = match tracedecay_hooks::HookDeliverySourceReceiptV1::new(settlement) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            tracing::warn!(%error, "Hook output delivery receipt is invalid");
+            return false;
+        }
+    };
+    let receipt = match delivery_writer.append_or_replay(&receipt) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
+            return false;
+        }
+    };
+    let settlement = receipt.settlement;
+    drop(delivery_writer);
+    if let Err(error) = daemon_hook_action(
+        Some(project_root),
+        serde_json::json!({
+            "action": "delivery_settlement",
+            "settlement": settlement,
+        }),
+        telemetry,
+    )
+    .await
+    {
+        // The source receipt is durable and the daemon replay lane will retry
+        // the exact retained settlement after a transport or daemon failure.
+        tracing::warn!(%error, "Hook output delivery receipt could not be reported; retained for replay");
+    }
+    true
+}
+
+fn hook_output_owner_event_id(
+    host: tracedecay_hooks::HookHostV1,
+    event_json: &str,
+    output: &str,
+) -> Option<String> {
+    let owner = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.hook-output-delivery.v1",
+        host.hook_key(),
+        event_json,
+        output,
+    ))
+    .ok()?;
+    Some(format!(
+        "hook:output:{}",
+        owner.as_str().trim_start_matches("sha256:")
+    ))
+}
+
 macro_rules! read_hook_event {
     () => {{
         match $crate::hooks::read_stdin_bounded() {
@@ -155,7 +312,7 @@ macro_rules! read_hook_event {
             Ok($crate::hooks::HookStdinRead::Oversized) => {
                 eprintln!(
                     "tracedecay hook: stdin exceeds wire message bound ({})",
-                    $crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                    $crate::host_admission::WIRE_RECORD_TOO_LARGE
                 );
                 return 0;
             }
@@ -174,7 +331,17 @@ pub async fn hook_kimi_event() -> i32 {
         return 0;
     };
     if let Some(guidance) = dispatch_kimi_event(&event, &root).await {
-        println!("{guidance}");
+        if !write_hook_output(
+            Some(&root),
+            tracedecay_hooks::HookHostV1::KimiCode,
+            &event,
+            &guidance,
+            None,
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -185,7 +352,17 @@ pub async fn hook_opencode_event() -> i32 {
         return 0;
     };
     if let Some(guidance) = dispatch_opencode_event(&event, &root).await {
-        println!("{guidance}");
+        if !write_hook_output(
+            Some(&root),
+            tracedecay_hooks::HookHostV1::OpenCode,
+            &event,
+            &guidance,
+            None,
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -196,7 +373,17 @@ pub async fn hook_opencode_tool_after() -> i32 {
         return 0;
     };
     if let Some(guidance) = dispatch_opencode_tool_after(&event, &root).await {
-        println!("{guidance}");
+        if !write_hook_output(
+            Some(&root),
+            tracedecay_hooks::HookHostV1::OpenCode,
+            &event,
+            &guidance,
+            None,
+        )
+        .await
+        {
+            return 1;
+        }
     }
     0
 }
@@ -410,7 +597,17 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     .into_recorded_guidance(&hook_telemetry)
     {
         if let Some(guidance) = guidance {
-            println!("{}", serde_json::json!({ "additional_context": guidance }));
+            if !write_hook_output(
+                project_root.as_deref(),
+                tracedecay_hooks::HookHostV1::Hermes,
+                &event_json,
+                &serde_json::json!({ "additional_context": guidance }).to_string(),
+                Some(&hook_telemetry),
+            )
+            .await
+            {
+                return 1;
+            }
         }
         return 0;
     }
@@ -838,7 +1035,7 @@ fn append_tool_hint(context: &mut String, hint: &ToolHint) {
 
 pub(crate) enum HookStdinRead {
     Event(String),
-    /// Stdin exceeded [`crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES`].
+    /// Stdin exceeded [`crate::host_admission::MAX_WIRE_MESSAGE_BYTES`].
     /// No payload bytes are retained.
     Oversized,
 }
@@ -850,13 +1047,11 @@ pub(crate) fn read_stdin_bounded() -> std::io::Result<HookStdinRead> {
 }
 
 /// Testable stdin reader: streams until EOF while retaining at most
-/// [`crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES`].
+/// [`crate::host_admission::MAX_WIRE_MESSAGE_BYTES`].
 pub(crate) fn read_stdin_bounded_from(
     reader: &mut impl std::io::Read,
 ) -> std::io::Result<HookStdinRead> {
-    use crate::application::host_admission::{
-        MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string,
-    };
+    use crate::host_admission::{MAX_WIRE_MESSAGE_BYTES, WireReadOutcome, read_bounded_to_string};
     match read_bounded_to_string(reader, MAX_WIRE_MESSAGE_BYTES)? {
         WireReadOutcome::Ready(event) => Ok(HookStdinRead::Event(event)),
         WireReadOutcome::Oversized => Ok(HookStdinRead::Oversized),

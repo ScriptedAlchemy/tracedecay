@@ -5,6 +5,7 @@ const DASHBOARD_EVENT_NAMES = [
   'heartbeat',
   'project_registry',
   'storage_telemetry',
+  'control',
   // Live agent activity, coalesced server-side to at most 2/s per family per
   // project. Named events are opt-in, so a new family must be listed here.
   'hook_activity',
@@ -73,6 +74,7 @@ export function connectEvents(url = '/api/events'): SseConnection {
 
   let activity: LiveActivityPulse[] = [];
   let activityRevision = 0;
+  const deliveryAckUrl = `${url.replace(/\?.*$/, '').replace(/\/$/, '')}/delivery-ack`;
 
   /** Record an accepted event as a pulse. Only newly accepted events pulse —
    * duplicates, stale generations, and superseded revisions must not light the
@@ -104,6 +106,9 @@ export function connectEvents(url = '/api/events'): SseConnection {
       const raw: unknown = JSON.parse(event.data);
       const parsed = decodeDashboardEvent(raw);
       if (!parsed) return;
+      if (isRecord(raw) && typeof raw.delivery_receipt === 'string') {
+        void acknowledgeDelivery(deliveryAckUrl, raw.delivery_receipt);
+      }
       if (reducer.ingest(parsed)) recordActivity(raw, parsed.stream.stream_id);
       notify();
     } catch {
@@ -131,6 +136,27 @@ export function connectEvents(url = '/api/events'): SseConnection {
       setState('offline');
     },
   };
+}
+
+async function acknowledgeDelivery(url: string, receipt: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ receipt }),
+        keepalive: true,
+      });
+      if (response.ok) return;
+    } catch {
+      // Retry transient transport refusal below.
+    }
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  // A non-success never becomes browser receipt evidence. A later replay may
+  // retry the token; the server owns its exact deadline and terminal state.
 }
 
 function decodeDashboardEvent(value: unknown): SseEventEnvelope | null {

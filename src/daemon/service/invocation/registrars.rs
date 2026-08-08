@@ -224,7 +224,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> crate::application::configuration::ConfigurationOperationFuture<
+    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
         'a,
         ScopeRevalidationEvidenceV1,
     > {
@@ -233,7 +233,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(crate::application::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
         })
     }
 
@@ -241,7 +241,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> crate::application::configuration::ConfigurationOperationFuture<
+    ) -> tracedecay_usecases::configuration::ConfigurationOperationFuture<
         'a,
         ScopeRevalidationEvidenceV1,
     > {
@@ -250,7 +250,7 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(crate::application::configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(tracedecay_usecases::configuration::ConfigurationError::TargetUnavailable)
         })
     }
 }
@@ -734,6 +734,14 @@ impl DaemonWorkRuntimeRegistrar {
             canonical_sha256(&authority).map_err(|error| TraceDecayError::Config {
                 message: format!("Workflow authority digest failed: {error}"),
             })?;
+        let observability_producer = self
+            .service
+            .observability_producer(Some(&project_root))
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "registered Work runtime requires the mounted observability producer"
+                    .to_owned(),
+            })?;
         self.service
             .project_runtimes
             .register_or_reconcile(
@@ -747,7 +755,16 @@ impl DaemonWorkRuntimeRegistrar {
                         && registered.configuration_digest == configuration_digest
                     {
                         // The same authority re-registering only renews its grant.
-                        registered.grant = grant.clone();
+                        if registered.grant != grant {
+                            let recovery = registered.workflow_fan_out_recovery.as_ref().ok_or_else(
+                                || TraceDecayError::Config {
+                                    message: "Workflow fan-out recovery owner is not mounted"
+                                        .to_owned(),
+                                },
+                            )?;
+                            recovery.refresh_grant(grant.clone());
+                            registered.grant = grant.clone();
+                        }
                         return Ok(());
                     }
                     Err(TraceDecayError::Config {
@@ -757,18 +774,57 @@ impl DaemonWorkRuntimeRegistrar {
                     })
                 },
                 || {
-                    Ok(RegisteredWorkRuntime {
-                        database,
+                    let mut registered = RegisteredWorkRuntime {
+                        database: Arc::clone(&database),
                         actor: actor.clone(),
                         grant: grant.clone(),
                         authority_digest: authority_digest.clone(),
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),
                         work_topology_policy: work_topology_policy.clone(),
-                    })
+                        blocked_interval_observation_recovery:
+                            super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1::mount(
+                                Arc::clone(&database),
+                                actor.clone(),
+                                grant.clone(),
+                                Arc::clone(&observability_producer),
+                            )
+                            .map_err(|error| TraceDecayError::Config {
+                                message: format!(
+                                    "Work blocked-interval recovery owner could not mount: {error}"
+                                ),
+                            })?,
+                        workflow_census_observation_recovery:
+                            super::work::workflow_census::WorkflowFanOutCensusObservationRecoveryOwnerV1::mount(
+                                Arc::clone(&database),
+                                grant.scope.project_id.clone(),
+                                Arc::clone(&observability_producer),
+                            )
+                            .map_err(|error| TraceDecayError::Config {
+                                message: format!(
+                                    "Workflow census recovery owner could not mount: {error}"
+                                ),
+                            })?,
+                        workflow_fan_out_recovery: None,
+                    };
+                    registered.workflow_fan_out_recovery = Some(
+                        super::work::workflow_fan_out::WorkflowFanOutRecoveryOwnerV1::mount(
+                            registered.clone(),
+                            Arc::clone(&self.service.work_attempt_processes),
+                            project_root.clone(),
+                            Some(Arc::clone(&observability_producer)),
+                        )
+                        .map_err(|problem| TraceDecayError::Config {
+                            message: format!(
+                                "Workflow fan-out recovery owner could not mount: {problem:?}"
+                            ),
+                        })?,
+                    );
+                    Ok(registered)
                 },
             )
-            .await
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn authority_matches(
@@ -795,6 +851,63 @@ impl DaemonWorkRuntimeRegistrar {
             })
             .await
             .unwrap_or(false)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonRetainedRuntimeRegistrar {
+    service: DaemonInvocationService,
+}
+
+impl DaemonRetainedRuntimeRegistrar {
+    pub(crate) fn new(service: &DaemonInvocationService) -> Self {
+        Self {
+            service: service.clone(),
+        }
+    }
+
+    pub(crate) async fn register(
+        &self,
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        actor: ActorId,
+        grant: CapabilityGrantSnapshot,
+        port: Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>,
+    ) -> Result<(), TraceDecayError> {
+        if grant.scope != scope || grant.issuer != actor {
+            return Err(TraceDecayError::Config {
+                message: "retained runtime grant does not match its project authority".to_owned(),
+            });
+        }
+        self.service
+            .project_runtimes
+            .register_or_reconcile(
+                project_root,
+                |registered: &mut RegisteredRetainedRuntime| {
+                    if registered.scope == scope
+                        && registered.actor == actor
+                        && registered.grant.digest == grant.digest
+                        && Arc::ptr_eq(&registered.port, &port)
+                    {
+                        registered.grant = grant.clone();
+                        Ok(())
+                    } else {
+                        Err(TraceDecayError::Config {
+                            message: "a different retained runtime is already registered for this project"
+                                .to_owned(),
+                        })
+                    }
+                },
+                || {
+                    Ok(RegisteredRetainedRuntime {
+                        scope: scope.clone(),
+                        actor: actor.clone(),
+                        grant: grant.clone(),
+                        port: Arc::clone(&port),
+                    })
+                },
+            )
+            .await
     }
 }
 
@@ -919,7 +1032,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         registration: Arc<dyn Any + Send + Sync>,
         advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
         feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
-        cancellation: &crate::application::context::CancellationToken,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> Result<
         super::super::project_runtime::AdvisoryRuntimePublicationV1,
         DaemonAdvisoryRuntimeRegistrationError,
