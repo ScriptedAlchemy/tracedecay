@@ -139,11 +139,15 @@ pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json
         r#"{"doctor_runtime":{"status":"unavailable","reason":"serialization_failed","read_only":true}}"#
             .to_string()
     });
+    // The runtime snapshot is machine-read (doctor CLI, tests, dashboards);
+    // expose it as MCP structured content beside the human-readable text so
+    // consumers do not have to re-parse an escaped JSON string.
     json!({
         "content": [{
             "type": "text",
             "text": text,
         }],
+        "structuredContent": value,
     })
 }
 
@@ -263,30 +267,60 @@ async fn doctor_runtime_value_inner(
     let canonical_graph_path = graph_path
         .canonicalize()
         .unwrap_or_else(|_| graph_path.clone());
-    let (quick_check_ok, quick_check_error) = match graph.quick_check_report().await {
-        Ok(None) => (true, None),
-        Ok(Some(problem)) => (false, Some(problem)),
-        Err(_) => {
-            return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+    // A daemon-retained project route that passed post-open health validation
+    // and has not been revoked is live evidence on its own: the fast runtime
+    // snapshot projects that retained liveness instead of re-probing SQLite
+    // (`quick_check`, page counts, schema pragma) on every doctor read.
+    let route_live = {
+        let servers = store_administration.project_servers().lock().await;
+        servers.servers.iter().any(|(key, entry)| {
+            key.project_root == canonical_project_path
+                && entry.server.project_route_live() == Some(true)
+        })
+    };
+    let (quick_check_ok, quick_check_error) = if route_live {
+        (None, None)
+    } else {
+        match graph.quick_check_report().await {
+            Ok(None) => (Some(true), None),
+            Ok(Some(problem)) => (Some(false), Some(problem)),
+            Err(_) => {
+                return doctor_runtime_unavailable(Some(project_path), "project_store_unavailable");
+            }
         }
     };
-    let page_counts = graph.storage_page_counts().await.ok();
-    let db_size_bytes = page_counts
-        .map(|(page_size, page_count, _)| page_size.saturating_mul(page_count))
-        .unwrap_or_default();
+    let page_counts = if route_live {
+        None
+    } else {
+        graph.storage_page_counts().await.ok()
+    };
+    let db_size_bytes = match page_counts {
+        Some((page_size, page_count, _)) => page_size.saturating_mul(page_count),
+        // Filesystem metadata, not a SQLite probe, sizes the live store.
+        None => std::fs::metadata(&graph_path).map_or(0, |metadata| metadata.len()),
+    };
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
-    let schema_version = match graph
-        .db()
-        .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version")
-        .await
-    {
-        Ok(version) => version,
-        Err(_) => {
-            return doctor_runtime_unavailable(Some(project_path), "project_schema_unavailable");
+    let expected_schema_version = crate::db::migrations::SCHEMA_VERSION;
+    let schema_version = if route_live {
+        // Opening a project store migrates or refuses it; a mounted live
+        // graph is therefore at the current schema by the open contract.
+        i64::from(expected_schema_version)
+    } else {
+        match graph
+            .db()
+            .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version")
+            .await
+        {
+            Ok(version) => version,
+            Err(_) => {
+                return doctor_runtime_unavailable(
+                    Some(project_path),
+                    "project_schema_unavailable",
+                );
+            }
         }
     };
     let schema_state = doctor_graph_schema_state(schema_version);
-    let expected_schema_version = crate::db::migrations::SCHEMA_VERSION;
     let mut value = json!({
         "tracedecay_version": crate::version::build_version(),
         "process": {
@@ -306,7 +340,7 @@ async fn doctor_runtime_value_inner(
             "schema_drift": (schema_state != DoctorGraphSchemaState::Current),
         },
         "doctor_runtime": {
-            "status": "complete",
+            "status": if route_live { "live" } else { "complete" },
             "reason": null,
             "read_only": true,
         },
