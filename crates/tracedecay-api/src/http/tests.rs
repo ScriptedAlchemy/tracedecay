@@ -271,7 +271,7 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
 
 #[test]
 fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
-    assert_eq!(HttpApplicationOperation::ALL.len(), 66);
+    assert_eq!(HttpApplicationOperation::ALL.len(), 77);
     for operation in HttpApplicationOperation::ALL {
         assert_eq!(
             HttpApplicationOperation::from_tool_name(&format!("tracedecay_{}", operation.as_str())),

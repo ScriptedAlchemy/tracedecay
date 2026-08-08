@@ -9,6 +9,7 @@ mod public_wire;
 mod read;
 mod surface_catalog;
 mod transactions;
+mod worktree;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
 #[cfg(feature = "native-git")]
@@ -55,6 +56,20 @@ pub use transactions::{
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, git_index_effect_class,
+};
+pub use worktree::{
+    AuthorizedScopeSetPort, NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION,
+    NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION, NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
+    NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION, NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
+    NativeWorktreePort, NativeWorktreeScopeBindingV1, NativeWorktreeService,
+    NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, NativeWorktreeTargetV1,
+    WorktreeCleanupConfirmRequestV1, WorktreeCleanupConfirmationV1,
+    WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1,
+    WorktreeCleanupReconciliationV1, WorktreeCleanupRemovalV1, WorktreeCleanupRemoveRequestV1,
+    WorktreeContractError, WorktreeCoverageV1, WorktreeInspectionOutcomeV1, WorktreeInspectionV1,
+    WorktreeInventoryEntryV1, WorktreeInventoryOutcomeV1, WorktreeInventoryRequestV1,
+    WorktreeInventorySnapshotV1, WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1,
+    worktree_confirmation_digest, worktree_inspection_digest,
 };
 
 #[cfg(test)]

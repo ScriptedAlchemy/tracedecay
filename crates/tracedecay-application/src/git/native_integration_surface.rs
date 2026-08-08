@@ -49,6 +49,11 @@ use crate::git::native_integration::{
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
     NativeIntegrationStackResolutionRequestV1,
 };
+use crate::git::worktree::{
+    NativeWorktreeSurfaceResultV1, WorktreeCleanupConfirmRequestV1,
+    WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1, WorktreeCleanupRemovalV1,
+    WorktreeCleanupRemoveRequestV1, WorktreeInventoryRequestV1,
+};
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
@@ -61,6 +66,11 @@ pub const NATIVE_INTEGRATION_APPROVE_OPERATION: &str = "approve_native_integrati
 pub const NATIVE_INTEGRATION_APPLY_OPERATION: &str = "apply_native_integration";
 pub const NATIVE_INTEGRATION_STATUS_OPERATION: &str = "native_integration_status";
 pub const NATIVE_INTEGRATION_CANCEL_OPERATION: &str = "cancel_native_integration";
+pub use crate::git::worktree::{
+    NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION, NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
+    NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
+    NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION, NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
+};
 
 // ---------------------------------------------------------------------------
 // stack_snapshot
@@ -468,6 +478,7 @@ pub enum NativeIntegrationSurfaceResultV1 {
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
     Cancellation(NativeIntegrationCancellationProjectionV1),
+    Worktree(NativeWorktreeSurfaceResultV1),
     Unavailable {
         reason: NativeIntegrationSurfaceUnavailableV1,
     },
@@ -481,7 +492,13 @@ impl NativeIntegrationSurfaceResultV1 {
     /// Whether this result advanced or proved durable state. Every other
     /// result is read-only evidence and never authorizes apply.
     pub const fn is_advancing(&self) -> bool {
-        matches!(self, Self::Receipt(_))
+        matches!(
+            self,
+            Self::Receipt(_)
+                | Self::Worktree(NativeWorktreeSurfaceResultV1::Removal(
+                    WorktreeCleanupRemovalV1::Removed { .. }
+                ))
+        )
     }
 
     pub fn from_stack_resolution(
@@ -575,14 +592,20 @@ struct NativeIntegrationSurfaceSpec {
     summary: &'static str,
     description: &'static str,
     example: &'static str,
+    surfaces: &'static [BindingSurface],
 }
 
 /// Plan 36 exposes this journey through CLI and MCP only. HTTP is deliberately
 /// excluded for the same reason `git_preview`/`git_apply` are: apply is an
 /// authoritative native mutation and there is no transport fallback path.
 const NATIVE_INTEGRATION_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
+const NATIVE_WORKTREE_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
 
-const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
+const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 11] = [
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
         capability: "capability.application.native-integration.stack-snapshot",
@@ -594,6 +617,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
         description: "Reauthorize and freeze the visible node/edge set, repository tips, and \
                       inventory epoch into the immutable snapshot identity preflight consumes.",
         example: "Freeze this authorized branch-stack edge for preflight",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_PREFLIGHT_OPERATION,
@@ -606,6 +630,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
         description: "Compute one immutable preview in a private daemon-owned environment \
                       without touching real refs, indexes, or worktrees.",
         example: "Preflight the frozen branch-stack edge",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_APPROVE_OPERATION,
@@ -619,6 +644,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
                       requesting principal, the apply capability, and the exact preview digest. \
                       Approving an identity without its content digest is unrepresentable.",
         example: "Approve this native-integration preview for apply",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_APPLY_OPERATION,
@@ -631,6 +657,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
         description: "Apply exactly one unexpired preview under a one-use content-bound \
                       approval through the daemon transaction, returning one terminal receipt.",
         example: "Apply the approved native-integration preview",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_STATUS_OPERATION,
@@ -643,6 +670,7 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
         description: "Read the durable phase, cancellation request, and terminal outcome of \
                       one native-integration transaction.",
         example: "Show the status of this native-integration transaction",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_CANCEL_OPERATION,
@@ -655,6 +683,67 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
         description: "Request cancellation of one native-integration transaction. After the \
                       native commit point the committed receipt is returned instead.",
         example: "Cancel this native-integration transaction",
+        surfaces: &NATIVE_INTEGRATION_SURFACES,
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
+        capability: "capability.application.native-integration.worktree-inventory",
+        use_case: "use-case.application.native-integration.worktree-inventory",
+        request_schema: "schema.application.native-integration.worktree-inventory.request",
+        result_schema: "schema.application.native-integration.worktree-inventory.result",
+        effect: EffectClass::Read,
+        summary: "Inventory explicitly authorized native worktrees",
+        description: "Read only the native worktree administration records covered by one persisted scope-set revision and digest.",
+        example: "Inventory the explicitly authorized repository worktrees",
+        surfaces: &NATIVE_WORKTREE_SURFACES,
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
+        capability: "capability.application.native-integration.worktree-cleanup-inspect",
+        use_case: "use-case.application.native-integration.worktree-cleanup-inspect",
+        request_schema: "schema.application.native-integration.worktree-cleanup-inspect.request",
+        result_schema: "schema.application.native-integration.worktree-cleanup-inspect.result",
+        effect: EffectClass::Read,
+        summary: "Freshly inspect one linked worktree for cleanup",
+        description: "Re-read exact native worktree state and emit a digest-bound cleanup inspection without mutating Git.",
+        example: "Inspect this exact linked worktree before cleanup",
+        surfaces: &NATIVE_WORKTREE_SURFACES,
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION,
+        capability: "capability.application.native-integration.worktree-cleanup-confirm",
+        use_case: "use-case.application.native-integration.worktree-cleanup-confirm",
+        request_schema: "schema.application.native-integration.worktree-cleanup-confirm.request",
+        result_schema: "schema.application.native-integration.worktree-cleanup-confirm.result",
+        effect: EffectClass::Preview,
+        summary: "Confirm one exact safe worktree inspection",
+        description: "Revalidate the inspection digest and mint a confirmation proof only when clean, unlocked, unheld, and non-unique linked-worktree evidence still holds.",
+        example: "Confirm this inspected worktree for removal",
+        surfaces: &NATIVE_WORKTREE_SURFACES,
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
+        capability: "capability.application.native-integration.worktree-cleanup-remove",
+        use_case: "use-case.application.native-integration.worktree-cleanup-remove",
+        request_schema: "schema.application.native-integration.worktree-cleanup-remove.request",
+        result_schema: "schema.application.native-integration.worktree-cleanup-remove.result",
+        effect: EffectClass::Administrative,
+        summary: "Remove one separately confirmed linked worktree",
+        description: "Remove only the exact clean, unlocked, unheld, non-unique linked worktree registration and root; branches are never deleted.",
+        example: "Remove the confirmed linked worktree",
+        surfaces: &NATIVE_WORKTREE_SURFACES,
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION,
+        capability: "capability.application.native-integration.worktree-cleanup-reconcile",
+        use_case: "use-case.application.native-integration.worktree-cleanup-reconcile",
+        request_schema: "schema.application.native-integration.worktree-cleanup-reconcile.request",
+        result_schema: "schema.application.native-integration.worktree-cleanup-reconcile.result",
+        effect: EffectClass::Read,
+        summary: "Reconcile one worktree cleanup outcome",
+        description: "Re-read exact native administration state after removal or restart and distinguish removed, still-present, stale, and uncertain outcomes.",
+        example: "Reconcile the confirmed worktree removal",
+        surfaces: &NATIVE_WORKTREE_SURFACES,
     },
 ];
 
@@ -670,7 +759,7 @@ pub fn native_integration_surface_catalog_contribution()
         let (spec_bindings, binding_ids) = current_bindings(
             &capability_id,
             spec.operation,
-            NATIVE_INTEGRATION_SURFACES.iter().copied(),
+            spec.surfaces.iter().copied(),
         )?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
@@ -753,6 +842,26 @@ fn native_integration_executable_schemas(
     add!(
         NATIVE_INTEGRATION_CANCEL_OPERATION,
         NativeIntegrationCancelSurfaceRequest
+    );
+    add!(
+        NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
+        WorktreeInventoryRequestV1
+    );
+    add!(
+        NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
+        WorktreeCleanupInspectRequestV1
+    );
+    add!(
+        NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION,
+        WorktreeCleanupConfirmRequestV1
+    );
+    add!(
+        NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
+        WorktreeCleanupRemoveRequestV1
+    );
+    add!(
+        NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION,
+        WorktreeCleanupReconcileRequestV1
     );
     Ok(schemas)
 }
@@ -955,14 +1064,33 @@ mod tests {
     }
 
     #[test]
-    fn the_journey_is_not_exposed_over_http_and_adds_no_index_step() {
+    fn only_the_transaction_journey_is_withheld_from_http_and_no_index_step_is_added() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
-        assert!(
-            contribution
-                .bindings()
-                .iter()
-                .all(|binding| binding.surface() != BindingSurface::Http)
-        );
+        for operation in [
+            NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
+            NATIVE_INTEGRATION_PREFLIGHT_OPERATION,
+            NATIVE_INTEGRATION_APPROVE_OPERATION,
+            NATIVE_INTEGRATION_APPLY_OPERATION,
+            NATIVE_INTEGRATION_STATUS_OPERATION,
+            NATIVE_INTEGRATION_CANCEL_OPERATION,
+        ] {
+            assert!(contribution.bindings().iter().all(|binding| {
+                binding.operation().as_str() != operation
+                    || binding.surface() != BindingSurface::Http
+            }));
+        }
+        for operation in [
+            NATIVE_INTEGRATION_WORKTREE_INVENTORY_OPERATION,
+            NATIVE_INTEGRATION_WORKTREE_INSPECT_OPERATION,
+            NATIVE_INTEGRATION_WORKTREE_CONFIRM_OPERATION,
+            NATIVE_INTEGRATION_WORKTREE_REMOVE_OPERATION,
+            NATIVE_INTEGRATION_WORKTREE_RECONCILE_OPERATION,
+        ] {
+            assert!(contribution.bindings().iter().any(|binding| {
+                binding.operation().as_str() == operation
+                    && binding.surface() == BindingSurface::Http
+            }));
+        }
         assert!(contribution.bindings().iter().all(|binding| {
             let operation = binding.operation().as_str();
             !operation.contains("stage_hunks")
@@ -974,7 +1102,7 @@ mod tests {
     #[test]
     fn every_capability_is_schema_backed_and_separately_authorized() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
-        assert_eq!(contribution.capabilities().len(), 6);
+        assert_eq!(contribution.capabilities().len(), 11);
         for manifest in contribution.capabilities() {
             assert!(
                 contribution

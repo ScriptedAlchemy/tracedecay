@@ -109,6 +109,11 @@ pub enum HttpApplicationOperation {
     NativeIntegrationApply,
     NativeIntegrationStatus,
     NativeIntegrationCancel,
+    NativeIntegrationWorktreeInventory,
+    NativeIntegrationWorktreeInspect,
+    NativeIntegrationWorktreeConfirm,
+    NativeIntegrationWorktreeRemove,
+    NativeIntegrationWorktreeReconcile,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
@@ -183,7 +188,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 77] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -197,6 +202,11 @@ impl HttpApplicationOperation {
         Self::NativeIntegrationApply,
         Self::NativeIntegrationStatus,
         Self::NativeIntegrationCancel,
+        Self::NativeIntegrationWorktreeInventory,
+        Self::NativeIntegrationWorktreeInspect,
+        Self::NativeIntegrationWorktreeConfirm,
+        Self::NativeIntegrationWorktreeRemove,
+        Self::NativeIntegrationWorktreeReconcile,
         Self::FeedbackDiagnostics,
         Self::FeedbackGet,
         Self::FeedbackExpand,
@@ -287,6 +297,11 @@ impl HttpApplicationOperation {
             Self::NativeIntegrationApply => "apply_native_integration",
             Self::NativeIntegrationStatus => "native_integration_status",
             Self::NativeIntegrationCancel => "cancel_native_integration",
+            Self::NativeIntegrationWorktreeInventory => "worktree_inventory",
+            Self::NativeIntegrationWorktreeInspect => "worktree_cleanup_inspect",
+            Self::NativeIntegrationWorktreeConfirm => "worktree_cleanup_confirm",
+            Self::NativeIntegrationWorktreeRemove => "worktree_cleanup_remove",
+            Self::NativeIntegrationWorktreeReconcile => "worktree_cleanup_reconcile",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
@@ -363,7 +378,14 @@ impl HttpApplicationOperation {
             | Self::NativeIntegrationApprove
             | Self::NativeIntegrationApply
             | Self::NativeIntegrationStatus
-            | Self::NativeIntegrationCancel => HttpApplicationOwnerKind::NativeIntegration,
+            | Self::NativeIntegrationCancel
+            | Self::NativeIntegrationWorktreeInventory
+            | Self::NativeIntegrationWorktreeInspect
+            | Self::NativeIntegrationWorktreeConfirm
+            | Self::NativeIntegrationWorktreeRemove
+            | Self::NativeIntegrationWorktreeReconcile => {
+                HttpApplicationOwnerKind::NativeIntegration
+            }
             Self::FeedbackDiagnostics
             | Self::FeedbackGet
             | Self::FeedbackExpand
@@ -621,6 +643,11 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture;
+
+    fn invoke_native_integration(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -655,6 +682,13 @@ where
     }
 
     fn invoke_context_scout(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_native_integration(
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture {
@@ -782,6 +816,10 @@ where
         .route(
             "/context-scout/{operation}",
             post(context_scout_operation::<O>),
+        )
+        .route(
+            "/native-integration/{operation}",
+            post(native_integration_operation::<O>),
         )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
@@ -919,6 +957,13 @@ parsed_operation_handlers! {
     callable_code_read => parse_callable_code_operation;
     configuration_operation => parse_configuration_operation;
     context_scout_operation => parse_context_scout_operation;
+    native_integration_operation => parse_native_integration_operation;
+}
+
+fn parse_native_integration_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    HttpApplicationOperation::from_catalog_name(operation)
+        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::NativeIntegration)
+        .filter(|operation| operation.is_http_exposed())
 }
 
 async fn invoke_route<O>(
@@ -979,16 +1024,7 @@ where
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
-        // The Plan 36 native-integration journey has no HTTP binding, so no
-        // parser can mount it here. Apply is an authoritative native mutation
-        // and this transport has no fallback mutation path: an operation that
-        // reached this arm is indistinguishable from an unauthorized one.
-        HttpApplicationOwnerKind::NativeIntegration => {
-            return application_problem_response(adapter_problem(
-                request.request_id,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            ));
-        }
+        HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
     };
     invocation.await.into_http_response()
 }
