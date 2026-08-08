@@ -861,7 +861,7 @@ fn read_matching_enrollment(
     expected_project_id: &ProjectId,
 ) -> LocalStoreLocatorResult<storage::EnrollmentMarker> {
     let marker_path = storage::enrollment_marker_path(project_root);
-    validate_absolute_no_symlink_components(&marker_path)?;
+    reject_symlink_components_below(project_root, &marker_path)?;
     match fs::symlink_metadata(&marker_path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
             return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
@@ -909,8 +909,17 @@ fn filesystem_probe_failure(
     }
 }
 
+/// Resolves an authority anchor — a profile root or an enrollment root — to
+/// the canonical directory it names.
+///
+/// The anchor is the boundary every later path is confined to, so it is the
+/// one path that must be *resolved* rather than accepted as spelled. Its own
+/// final component still may not be a symlink: a root reached by an alias
+/// would let a second alias claim the same profile under a different name.
+/// Its ancestors are a different matter — they belong to the host, not to the
+/// caller — and are resolved by `fs::canonicalize` below.
 fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf> {
-    validate_absolute_no_symlink_components(path)?;
+    reject_traversal_or_relative(path)?;
     let metadata =
         fs::symlink_metadata(path).map_err(|error| filesystem_probe_failure(path, &error))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
@@ -923,10 +932,7 @@ fn canonical_or_prospective_directory(
     path: &Path,
     canonical_parent: &Path,
 ) -> LocalStoreLocatorResult<PathBuf> {
-    if !path.starts_with(canonical_parent) {
-        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-    }
-    validate_absolute_no_symlink_components(path)?;
+    reject_symlink_components_below(canonical_parent, path)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
             Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
@@ -948,10 +954,7 @@ fn canonical_or_prospective_regular_file(
     path: &Path,
     canonical_parent: &Path,
 ) -> LocalStoreLocatorResult<PathBuf> {
-    if !path.starts_with(canonical_parent) {
-        return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-    }
-    validate_absolute_no_symlink_components(path)?;
+    reject_symlink_components_below(canonical_parent, path)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
             Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
@@ -969,39 +972,54 @@ fn canonical_or_prospective_regular_file(
     }
 }
 
-fn validate_absolute_no_symlink_components(path: &Path) -> LocalStoreLocatorResult<()> {
-    if !path.is_absolute() {
+/// Rejects the spellings no locator may take whatever the filesystem holds: a
+/// relative path, and any `.` or `..` component.
+///
+/// The check is purely lexical, so it never probes a path prefix. A prefix
+/// never names a filesystem object on its own — a bare drive (`C:`) resolves
+/// against that drive's current directory, and a verbatim drive (`\\?\C:`)
+/// names the volume *device* rather than the volume's root directory — and
+/// `Path::is_absolute` cannot express that, because `std` grants every prefix
+/// except `Prefix::Disk` an implicit root. `fs::canonicalize` returns the
+/// verbatim form for every Windows path, so a probe of the leading component
+/// opened the volume device, returned an error that was not `NotFound`, and
+/// typed every canonical locator root on that host as unavailable.
+fn reject_traversal_or_relative(path: &Path) -> LocalStoreLocatorResult<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
         return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
     }
+    Ok(())
+}
 
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            // A path prefix never names a filesystem object on its own, so it
-            // is never probed: a bare drive (`C:`) resolves against that
-            // drive's current directory, and a verbatim drive (`\\?\C:`) names
-            // the volume *device* rather than the volume's root directory.
-            // Both must wait for the root component that follows.
-            //
-            // `Path::is_absolute` cannot express that. `std` grants every
-            // prefix except `Prefix::Disk` an implicit root, so `\\?\C:`
-            // already reports absolute with no root component pushed, and the
-            // probe below would open the volume device and get back an error
-            // that is not `NotFound`. `fs::canonicalize` returns exactly this
-            // verbatim form for every Windows path, so every canonical locator
-            // root hit that device open and was reported as unavailable.
-            Component::Prefix(prefix) => {
-                current.push(prefix.as_os_str());
-                continue;
-            }
-            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
-            Component::CurDir | Component::ParentDir => {
-                return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-            }
-        }
-        if !current.is_absolute() {
-            continue;
-        }
+/// Rejects a symlink among the components `path` adds below `boundary`, and
+/// any `path` that is not below `boundary` at all.
+///
+/// `boundary` is always an `fs::canonicalize` result, so nothing at or above
+/// it can be a symlink and probing those ancestors can never find a redirect.
+/// It can only find the host's own layout: macOS reaches `/tmp` and `/var`
+/// through symlinks, so every profile rooted under `TMPDIR` — and any home
+/// directory reached through a symlinked ancestor — was refused outright even
+/// though it resolves to a directory squarely inside the profile. Walking
+/// from the boundary keeps the guarantee that matters, because confinement is
+/// decided by the canonical identity the callers compute; the walk only has
+/// to stop a symlink planted in the tail that is still prospective, which is
+/// the one stretch of the path no canonicalization has resolved yet.
+fn reject_symlink_components_below(boundary: &Path, path: &Path) -> LocalStoreLocatorResult<()> {
+    reject_traversal_or_relative(path)?;
+    let tail = path
+        .strip_prefix(boundary)
+        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)?;
+
+    let mut current = boundary.to_path_buf();
+    for component in tail.components() {
+        let Component::Normal(part) = component else {
+            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
+        };
+        current.push(part);
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
@@ -2320,11 +2338,62 @@ mod tests {
         let nested = canonical.join("profile").join("store");
         fs::create_dir_all(&nested).expect("nested store root");
 
-        assert_eq!(validate_absolute_no_symlink_components(&canonical), Ok(()));
-        assert_eq!(validate_absolute_no_symlink_components(&nested), Ok(()));
+        assert_eq!(reject_traversal_or_relative(&canonical), Ok(()));
+        assert_eq!(reject_traversal_or_relative(&nested), Ok(()));
+        assert_eq!(reject_symlink_components_below(&canonical, &nested), Ok(()));
         assert_eq!(
             canonical_existing_directory(&nested),
             Ok(nested.canonicalize().expect("canonical nested store root"))
+        );
+    }
+
+    /// A root reached through a symlinked ancestor is the host's own layout,
+    /// not a redirect. macOS reaches `/tmp` and `/var` through symlinks, so a
+    /// profile rooted under `TMPDIR` — and any home directory reached through
+    /// a symlinked ancestor — arrives spelled through one. Refusing the
+    /// spelling denied the entire profile on that host; resolving it yields
+    /// exactly the canonical root the same directory named directly yields.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_behind_a_symlinked_ancestor_resolves_to_its_canonical_form() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let real_root = root.join("private").join("var");
+        fs::create_dir_all(real_root.join("profile")).expect("real profile root");
+        symlink("private/var", root.join("var")).expect("platform layout symlink");
+
+        assert_eq!(
+            canonical_existing_directory(&root.join("var").join("profile")),
+            Ok(real_root.join("profile")),
+            "a profile reached through a symlinked ancestor must resolve"
+        );
+
+        // The two guarantees the relaxed ancestor policy must not give up.
+        let alias = root.join("profile-alias");
+        symlink(real_root.join("profile"), &alias).expect("alias symlink");
+        assert_eq!(
+            canonical_existing_directory(&alias),
+            Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath),
+            "a root named by an alias of its own is still refused"
+        );
+
+        let boundary = real_root.join("profile");
+        let planted = boundary.join("planted");
+        symlink(&root, &planted).expect("planted tail symlink");
+        assert_eq!(
+            reject_symlink_components_below(&boundary, &planted.join("store.db")),
+            Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath),
+            "a symlink planted below the boundary is still refused"
+        );
+        assert_eq!(
+            reject_symlink_components_below(&boundary, &root.join("elsewhere")),
+            Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath),
+            "a path outside the boundary is still refused"
         );
     }
 
