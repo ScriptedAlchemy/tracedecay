@@ -380,6 +380,31 @@ fn is_lcm_payload_ref(candidate: &str) -> bool {
         })
 }
 
+/// Shannon entropy of `token` in bits per character, scaled to per mille.
+///
+/// This is the same fixed-point sum [`looks_high_entropy_token`] thresholds on,
+/// reported rather than compared, so a finding can name the score that produced
+/// it on a versioned scale. Integer arithmetic keeps it exactly reproducible.
+/// `None` means the fixed-point value could not be represented, so callers
+/// retain the redaction but abstain from emitting an invented score.
+pub(crate) fn entropy_bits_per_mille(token: &str) -> Option<u32> {
+    if token.is_empty() {
+        return Some(0);
+    }
+    let mut counts = [0usize; 256];
+    for byte in token.bytes() {
+        counts[byte as usize] += 1;
+    }
+    let len = token.len() as u128;
+    let entropy_sum = len * fixed_log2(token.len())
+        - counts
+            .into_iter()
+            .filter(|count| *count != 0)
+            .map(|count| count as u128 * fixed_log2(count))
+            .sum::<u128>();
+    u32::try_from(entropy_sum * 1_000 / (len * ENTROPY_SCALE)).ok()
+}
+
 pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
     if token.len() < 36
         || !token.bytes().all(token_byte)

@@ -11,8 +11,8 @@ use tracedecay_domain::{
 };
 
 use super::detect::{
-    SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1, SanitizationRemediationClassV1,
-    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
+    DetectionError, SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1,
+    SanitizationRemediationClassV1, SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
 use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION_V1};
 use super::{
@@ -1445,6 +1445,28 @@ fn lcm_sensitive_redaction_fails_closed_for_unknown_configured_patterns() {
 
     assert!(!outcome.text().contains(secret));
     assert_eq!(outcome.patterns(), &["api_key".to_string()]);
+}
+
+#[test]
+fn lcm_sensitive_redaction_rejects_duplicate_json_keys_before_materialization() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
+    let raw = r#"{"api_key":"unit-test-placeholder-value","api_key":"safe-replacement"}"#;
+
+    assert!(matches!(
+        redact_lcm_sensitive_payload(raw, &policy),
+        Err(DetectionError::Receipt)
+    ));
+}
+
+#[test]
+fn lcm_sensitive_redaction_rejects_payloads_above_the_canonical_raw_byte_limit() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
+    let raw = format!("{{{}", " ".repeat(MAX_OBSERVATION_RECORD_BYTES));
+
+    assert!(matches!(
+        redact_lcm_sensitive_payload(&raw, &policy),
+        Err(DetectionError::ScanLimitExceeded)
+    ));
 }
 
 #[test]

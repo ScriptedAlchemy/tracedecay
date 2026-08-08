@@ -1,5 +1,5 @@
-use super::detect::sanitize_provider_metadata_text;
 use super::length_prefixed_sha256_hex;
+use super::structured_text::sanitize_provider_metadata_text;
 
 const PROTECTION_DOMAIN_V1: &[u8] = b"tracedecay.structural-identity-protection.v1";
 const PROTECTION_PREFIX_V1: &str = "privacy.structural-id.v1.";
