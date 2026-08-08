@@ -139,6 +139,9 @@ measurements, not inferred table sizes.
    could not see the artifacts it was claimed to own.
 6. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
    compaction policy exists.
+   Corrected 2026-08-08: this class is closed. A compaction policy now exists
+   and is engaged — see the dated Delivery amendment below. The sentence above
+   is retained as the original measured finding, not as current state.
 
 ## Product contract
 
@@ -254,6 +257,31 @@ measurements, not inferred table sizes.
   tracing only; the dashboard exposes per-store size/free ratio and whole-store
   history, while CLI Doctor uses a separate path. This is not a user-visible
   per-table reporting surface or acceptance of historical ad hoc figures.
+- Amended 2026-08-08: **compaction policy (product contract §6) is delivered.**
+  The prior Delivery section omitted it entirely and failure class 6 still read
+  "no compaction policy exists"; both were stale. `CompactionTriggerPolicyV1`
+  (free-page-ratio threshold plus a reclaimable-bytes floor) and
+  `CompactionPlacementV1::DeferredBackground` live in
+  `crates/tracedecay-application/src/storage/compaction.rs`. The placement enum
+  is the type-level enforcement of the "no background compaction that competes
+  with foreground writes" non-goal: a compaction cannot be constructed into a
+  foreground lane. The daemon maintenance cadence applies the policy at
+  `src/daemon/git_watch/store_maintenance.rs:1649` and performs the pass at
+  `:1558`. The bounded mechanic underneath is
+  `Database::run_incremental_vacuum` in
+  `crates/tracedecay-runtime-core/src/db/maintenance.rs:27`, delegating to
+  `run_bounded_incremental_compaction` in
+  `crates/tracedecay-runtime-core/src/store_runtime/registry.rs:288`, which
+  takes an explicit authority and a page bound. The configuration surface is
+  `CompactionThresholdConfig`, covered by `src/config/tests.rs:1832-1927`.
+- Amended 2026-08-08: the historical ~41 GB identity-drift orphan-store backlog
+  remains **operationally unverified**. The identity-drift *code* repairs are
+  landed (moved-checkout daemon source rebinding; former-path project-root
+  resolution), so new drift no longer strands stores. Whether Registry GC
+  reclaims the already-orphaned backlog without an operator-run pass is not
+  established, and deliberately was not attempted here: verifying it requires
+  running against the operator's live profile, which Plan 39's constraint
+  forbids. This stays operator-gated and is recorded, not claimed.
 - Direct tests only: seeded stores with stale branches/orphans/debris must
   produce the findings and the collections; retention windows must be
   provable with ordinary tests. They create no locked gate or PR acceptance
