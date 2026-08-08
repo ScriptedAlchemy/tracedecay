@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::CoverageStateV1;
@@ -7,7 +8,7 @@ pub const MAX_CAUSE_BUCKETS_V1: usize = 16;
 
 macro_rules! closed_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name {
             $($variant),+
