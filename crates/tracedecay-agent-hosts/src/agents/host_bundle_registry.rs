@@ -98,7 +98,10 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::KimiCode
         | HostKindV1::OpenCode
         // Gemini packages its whole integration as a CLI-installed extension.
-        | HostKindV1::Gemini => None,
+        | HostKindV1::Gemini
+        // Copilot's registration is driven by `copilot mcp add|remove`, with
+        // the receipt-owned component descriptor as its managed artifact.
+        | HostKindV1::Copilot => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -137,7 +140,13 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         // Gemini is the same shape for a different reason: its extension
         // carries the MCP server and the context file, and declares no hook,
         // so the separable MCP route is the whole installable set.
-        HostKindV1::Kiro | HostKindV1::Gemini => vec![HostBundleComponentV1::ContextMcp],
+        //
+        // Copilot is Kiro's shape exactly: `copilot mcp add` registers the MCP
+        // server into the host's own registry, and no hook route exists to put
+        // in a Core component.
+        HostKindV1::Kiro | HostKindV1::Gemini | HostKindV1::Copilot => {
+            vec![HostBundleComponentV1::ContextMcp]
+        }
         HostKindV1::CursorCloud
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
@@ -621,6 +630,21 @@ fn component_assets(
                 r#"{"host":"kiro","registration":"settings/mcp.json","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
+        // Copilot's `~/.copilot/mcp-config.json` is written by `copilot mcp
+        // add`, never by TraceDecay, so it must never be a managed artifact:
+        // owning it here would put the transaction's own write in the middle of
+        // the host command's registry merge, which is the exact failure Kiro's
+        // comment above records. Own a receipt descriptor under
+        // `.copilot/tracedecay` instead. It names the registry document the
+        // host CLI owns so a receipt reader can find it without the catalog
+        // ever claiming to write it.
+        (HostKindV1::Copilot, HostBundleComponentV1::ContextMcp) => (
+            ".copilot/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"copilot","registration":"mcp-config.json","registrar":"copilot mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
         (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
             ".kiro/tracedecay",
             vec![(
@@ -1063,6 +1087,7 @@ mod tests {
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
             HostKindV1::Gemini,
+            HostKindV1::Copilot,
         ] {
             let bundles = default_components(host)
                 .into_iter()
@@ -1177,6 +1202,67 @@ mod tests {
         assert_eq!(
             verified_embedded_host_component_set(
                 HostKindV1::Kiro,
+                &[HostBundleComponentV1::Core],
+                0
+            ),
+            Err(HostBundleRegistryError::Incompatible)
+        );
+    }
+
+    /// Copilot's one installable component is the MCP route that
+    /// `copilot mcp add` registers. The managed artifact must be a TraceDecay
+    /// descriptor, never Copilot's own `mcp-config.json`: that document is
+    /// written by the host command, and owning it here would make the
+    /// transaction's artifact write race the host's registry merge. Core is
+    /// refused through the capability matrix, not through a missing arm — the
+    /// host reports no hook route to install.
+    #[test]
+    fn copilot_packages_only_the_mcp_route_its_host_cli_registers() {
+        assert_eq!(
+            unsupported_host_component_set_reason(HostKindV1::Copilot),
+            None
+        );
+        assert_eq!(
+            default_components(HostKindV1::Copilot),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        assert_eq!(
+            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Copilot).components(),
+            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
+        );
+
+        let installed = "/opt/tracedecay-distinct/bin/tracedecay";
+        let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
+            HostKindV1::Copilot,
+            HostBundleComponentV1::ContextMcp,
+            0,
+            installed,
+        )
+        .unwrap();
+        assert_eq!(bundle.contents.len(), 1);
+        assert_eq!(
+            bundle.contents[0].relative_path,
+            ".copilot/tracedecay/context-mcp.json"
+        );
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(&bundle.contents[0].bytes).unwrap();
+        assert_eq!(descriptor["registration"], "mcp-config.json");
+        assert_eq!(descriptor["registrar"], "copilot mcp add|remove");
+        assert_eq!(descriptor["server"]["command"], installed);
+        assert_eq!(descriptor["server"]["args"], serde_json::json!(["serve"]));
+
+        // The host-owned registry document is never a managed artifact:
+        // writing `~/.copilot/mcp-config.json` ourselves would hand-write the
+        // state `copilot mcp add` owns.
+        assert!(
+            bundle
+                .contents
+                .iter()
+                .all(|content| !content.relative_path.ends_with("mcp-config.json"))
+        );
+        assert_eq!(
+            verified_embedded_host_component_set(
+                HostKindV1::Copilot,
                 &[HostBundleComponentV1::Core],
                 0
             ),

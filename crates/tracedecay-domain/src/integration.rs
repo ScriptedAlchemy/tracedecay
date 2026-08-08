@@ -43,10 +43,11 @@ pub enum HostKindV1 {
     KimiCode,
     OpenCode,
     Gemini,
+    Copilot,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -60,6 +61,7 @@ impl HostKindV1 {
         Self::KimiCode,
         Self::OpenCode,
         Self::Gemini,
+        Self::Copilot,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -78,7 +80,8 @@ impl HostKindV1 {
             | Self::Kilo
             | Self::KimiCode
             | Self::OpenCode
-            | Self::Gemini => None,
+            | Self::Gemini
+            | Self::Copilot => None,
         }
     }
 }
@@ -206,6 +209,28 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(CheckedInEvidenceMissing),
+            Supported,
+            Supported,
+        ),
+        // GitHub Copilot's adopted lifecycle drives exactly one route:
+        // `copilot mcp add|remove`, which owns `~/.copilot/mcp-config.json`.
+        // That is an MCP registration performed through the host's own CLI, so
+        // `Mcp` and `Cli` are the only supported capabilities.
+        //
+        // `Hooks` is `HostApiAbsent`, not `CheckedInEvidenceMissing`: unlike
+        // Gemini — whose extension format admits hooks that no fixture yet
+        // proves — Copilot publishes no third-party event or hook registration
+        // surface at all, in the CLI or in the VS Code extension. There is no
+        // route to gather evidence for, so naming the gap "evidence missing"
+        // would imply a capability that is one fixture away from working.
+        //
+        // `Lsp` is `HostRegistrationUnsupported` (no analyzer registration
+        // route) and `NativeDiagnostics` is `HostApiAbsent` (no diagnostics
+        // API), matching every other host that exposes neither.
+        HostKindV1::Copilot => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(HostApiAbsent),
             Supported,
             Supported,
         ),
@@ -446,6 +471,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::KimiCode => &STOCK_HOST_CAPABILITIES[10],
             HostKindV1::OpenCode => &STOCK_HOST_CAPABILITIES[11],
             HostKindV1::Gemini => &STOCK_HOST_CAPABILITIES[12],
+            HostKindV1::Copilot => &STOCK_HOST_CAPABILITIES[13],
         }
     }
 
@@ -536,7 +562,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 13] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 14] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -550,6 +576,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 13] = [
     canonical_stock_host_capabilities(HostKindV1::KimiCode),
     canonical_stock_host_capabilities(HostKindV1::OpenCode),
     canonical_stock_host_capabilities(HostKindV1::Gemini),
+    canonical_stock_host_capabilities(HostKindV1::Copilot),
 ];
 
 #[derive(Serialize)]

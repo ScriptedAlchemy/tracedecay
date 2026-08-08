@@ -338,6 +338,11 @@ impl CatalogHostComponentRegistrationAuthority {
             // only carries the integration once `gemini extensions install`
             // adopts them, so the deployed bytes alone are not the lifecycle.
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Gemini
+            // Copilot's deployed artifact is a receipt-owned component
+            // descriptor; the host carries nothing until `copilot mcp add`
+            // writes its own registry, so the deployed bytes alone are not the
+            // lifecycle and artifact-only backup/restore must refuse it.
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Copilot
             || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
@@ -2008,6 +2013,36 @@ mod tests {
             )
             .expect("Cursor has a compiled default set");
         assert!(cursor.supports_artifact_only_backup_restore(&cursor_set.component_set));
+    }
+
+    /// Copilot's deployed artifact is a receipt-owned descriptor; the host
+    /// carries nothing until `copilot mcp add` writes its own registry.
+    /// Classifying the set as artifact-only would let artifact backup/restore
+    /// claim it can reverse a host registration it never snapshots — the same
+    /// truthfulness violation Gemini's case above pins.
+    #[test]
+    fn copilot_component_sets_are_not_artifact_only_lifecycles() {
+        let home = tempfile::tempdir().expect("home");
+        let lifecycle_root = tempfile::tempdir().expect("lifecycle root");
+        let authority = CatalogHostComponentRegistrationAuthority::new(
+            "copilot",
+            home.path(),
+            lifecycle_root.path(),
+            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
+        )
+        .expect("catalog registration authority");
+        let component_set =
+            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
+                crate::agents::host_bundle_v2::HostKindV1::Copilot,
+                0,
+            )
+            .expect("Copilot has a compiled default set");
+
+        assert!(
+            !authority.supports_artifact_only_backup_restore(&component_set.component_set),
+            "the Copilot lifecycle drives `copilot mcp add`, so its deployed \
+             bytes are not the whole lifecycle"
+        );
     }
 
     /// Build an authority plus an on-disk registration backup whose mutation plan

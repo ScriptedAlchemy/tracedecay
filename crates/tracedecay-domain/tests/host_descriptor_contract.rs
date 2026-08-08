@@ -50,7 +50,18 @@ fn native_identities_preserve_provider_specific_hosts() {
     for host in HostKindV1::ALL {
         let descriptor = host.descriptor();
         match (host, host.native_identity(), descriptor.hook()) {
-            (HostKindV1::ClineFamily, None, HostHookMappingV1::NotApplicable) => {}
+            // Hosts with no native hook identity must also carry no hook
+            // mapping. The Cline family is an alias surface; Gemini's staged
+            // extension declares no hook; Copilot publishes no third-party hook
+            // surface at all. Each was admitted after this test was written, so
+            // the arm is a set rather than a single variant — a host that
+            // reports `None` here and a `Native`/`Unavailable` mapping below is
+            // still an incoherent projection and still panics.
+            (
+                HostKindV1::ClineFamily | HostKindV1::Gemini | HostKindV1::Copilot,
+                None,
+                HostHookMappingV1::NotApplicable,
+            ) => {}
             (
                 HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo,
                 Some(identity),

@@ -276,6 +276,26 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
                 starts_analyzer: false,
             },
         ]),
+        // Copilot's adopted lifecycle carries exactly one registration route:
+        // the `mcpServers.tracedecay` entry that `copilot mcp add` writes into
+        // the host-owned `~/.copilot/mcp-config.json`. The hook route is typed
+        // `HostApiAbsent` rather than `CheckedInEvidenceMissing` because there
+        // is no Copilot hook surface to gather a fixture for — see the
+        // capability row in `tracedecay-domain`.
+        HostKindV1::Copilot => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(HostApiAbsent),
+                evidence_ref: "copilot_host_hook_surface_absent_v1",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "src/agents/copilot.rs",
+                starts_analyzer: false,
+            },
+        ]),
     }
     evidence
 }
@@ -477,7 +497,8 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::Cline
         | HostKindV1::RooCode
         | HostKindV1::Kilo
-        | HostKindV1::Gemini => return None,
+        | HostKindV1::Gemini
+        | HostKindV1::Copilot => return None,
     };
     let bytes = assets
         .native_fixtures

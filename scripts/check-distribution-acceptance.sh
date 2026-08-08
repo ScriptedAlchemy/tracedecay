@@ -641,7 +641,7 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
     "capability.application.feedback.proximity",
 ];
 
-const REQUIRED_HOSTS: [HostKindV1; 8] = [
+const REQUIRED_HOSTS: [HostKindV1; 9] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -650,6 +650,7 @@ const REQUIRED_HOSTS: [HostKindV1; 8] = [
     HostKindV1::KimiCode,
     HostKindV1::OpenCode,
     HostKindV1::Gemini,
+    HostKindV1::Copilot,
 ];
 
 fn main() {

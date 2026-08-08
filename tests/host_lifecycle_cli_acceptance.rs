@@ -80,6 +80,15 @@ const GEMINI_CONFIGS: &[(&str, &[u8])] = &[(
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}},"theme":"dark"}
 "#,
 )];
+/// Copilot's MCP registry is host-owned: `copilot mcp add|remove` is its only
+/// writer. TraceDecay reads it to guard operator-owned peers and to record the
+/// bytes rollback restores. Seeding a foreign server means a run that started
+/// merging the document itself would be caught.
+const COPILOT_CONFIGS: &[(&str, &[u8])] = &[(
+    ".copilot/mcp-config.json",
+    br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}}}
+"#,
+)];
 
 fn host_case(host: HostKindV1) -> HostCase {
     let configs = match host {
@@ -91,6 +100,7 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::KimiCode => &[],
         HostKindV1::OpenCode => OPENCODE_CONFIGS,
         HostKindV1::Gemini => GEMINI_CONFIGS,
+        HostKindV1::Copilot => COPILOT_CONFIGS,
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -470,14 +480,14 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
                 ("hook-opencode-event", packet_request(packet, "stop")),
             ])
         }
-        HostKindV1::Kiro | HostKindV1::Gemini => None,
+        HostKindV1::Kiro | HostKindV1::Gemini | HostKindV1::Copilot => None,
         _ => unreachable!("non-acceptance host"),
     }
 }
 
 /// Hosts whose install/uninstall lifecycle drives a *host-owned* binary
-/// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`) or defers
-/// activation to an interactive host flow (Kimi).
+/// (`claude plugin`, `codex mcp`, `kiro-cli mcp`, `gemini extensions`,
+/// `copilot mcp`) or defers activation to an interactive host flow (Kimi).
 ///
 /// This suite runs the production CLI against an isolated `HOME` that contains
 /// no host binaries at all, so for these hosts the lifecycle correctly refuses
@@ -492,6 +502,7 @@ fn lifecycle_requires_absent_host_binary(host: HostKindV1) -> bool {
             | HostKindV1::KimiCode
             | HostKindV1::Kiro
             | HostKindV1::Gemini
+            | HostKindV1::Copilot
     )
 }
 

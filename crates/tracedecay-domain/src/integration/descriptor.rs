@@ -190,11 +190,12 @@ impl HostKindV1 {
             Self::Codex => Some(NativeHostIdentityV1::Codex),
             Self::Hermes => Some(NativeHostIdentityV1::Hermes),
             Self::Kiro => Some(NativeHostIdentityV1::Kiro),
-            // Neither host owns a native hook identity: the Cline family is an
-            // alias surface, and the Gemini extension declares no hook route,
-            // so persisting a hook key for either would name a spool no event
+            // None of these hosts owns a native hook identity: the Cline family
+            // is an alias surface, the Gemini extension declares no hook route,
+            // and Copilot publishes no third-party hook surface at all, so
+            // persisting a hook key for any of them would name a spool no event
             // can ever reach.
-            Self::ClineFamily | Self::Gemini => None,
+            Self::ClineFamily | Self::Gemini | Self::Copilot => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -341,6 +342,27 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
         HostKindV1::Gemini => (
             "gemini",
             "gemini",
+            NotApplicable,
+            vec![ContextMcp],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
+        ),
+        // GitHub Copilot owns its MCP registry through `copilot mcp
+        // add|remove`; TraceDecay drives those commands and never merges
+        // `~/.copilot/mcp-config.json` itself. The one managed artifact is the
+        // receipt-owned component descriptor under `.copilot/tracedecay/`,
+        // which is why the assets are `ManagedEmbedded` and the activation is
+        // `Managed` — exactly Kiro's shape, for exactly Kiro's reason.
+        //
+        // The project registration path is `Unavailable`: Copilot exposes no
+        // project-scoped registry command, and the workspace surface that does
+        // exist (`.vscode/mcp.json`) is written by the operator and only ever
+        // *read* by this integration. Naming a project directory here would
+        // claim a registration route TraceDecay does not drive.
+        HostKindV1::Copilot => (
+            "copilot",
+            "copilot",
             NotApplicable,
             vec![ContextMcp],
             ManagedEmbedded,
