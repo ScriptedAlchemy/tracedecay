@@ -14,6 +14,7 @@ pub mod context_scout;
 pub mod dashboard_graph;
 pub mod diagnostics;
 pub mod doctor;
+pub mod execution_topology_metrics;
 pub mod external_source;
 pub mod feedback;
 /// Compatibility re-export: the framed-log primitives moved down into
@@ -135,6 +136,7 @@ pub use doctor::{
     observability_finding, operational_audit_findings, runtime_health_finding,
 };
 pub use error::ApplicationContractError;
+pub use execution_topology_metrics::*;
 pub use external_source::{
     MAX_SOURCE_OBSERVATIONS_PER_ADMISSION_V1, SourceAdmissionAuthorityV1, SourceAuthorityContextV1,
     SourceCanonicalRefetchAuthorityV1, SourceCaptureAdmissionErrorV1, SourceCaptureAdmissionV1,
@@ -173,9 +175,10 @@ pub use git::{
     NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
     NativeIntegrationStatusRequestV1, NativeIntegrationStatusSurfaceRequest,
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
-    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
-    git_surface_catalog_contribution, git_surface_handler_descriptors,
-    is_canonical_repository_relative_path, native_integration_surface_catalog_contribution,
+    NativeWorktreeSurfaceRequest, git_index_catalog_contribution, git_index_effect_class,
+    git_index_handler_descriptors, git_surface_catalog_contribution,
+    git_surface_handler_descriptors, is_canonical_repository_relative_path,
+    native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 pub use handlers::{
