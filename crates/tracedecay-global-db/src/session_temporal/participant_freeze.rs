@@ -366,6 +366,11 @@ mod tests {
             .expect("registered schema");
         connection
             .execute_batch(
+                // Generations are walked through their real lifecycle rather
+                // than inserted in a terminal state: the schema triggers admit
+                // only `building` on insert and only the declared transitions
+                // after it, so a fixture that writes `active` directly is
+                // rejected and would test nothing.
                 "INSERT INTO sessions (provider, session_id, project_key, project_path)
                  VALUES ('codex', 'session.graph-stale', 'user', '/fixture');
                  INSERT INTO session_temporal_generations (
@@ -373,19 +378,34 @@ mod tests {
                     ready_at, activated_at, completed_at
                  ) VALUES
                     (
-                        'session.graph-stale', 1, 'superseded',
+                        'session.graph-stale', 1, 'building',
                         '{\"active_generation\":1,\"cursor_key\":null,
                           \"projection_frontier\":11,\"source_frontier\":11,
                           \"summary_frontier\":11}',
-                        1, 1, 1, 2
+                        1, NULL, NULL, NULL
                     ),
                     (
-                        'session.graph-stale', 2, 'active',
+                        'session.graph-stale', 2, 'building',
                         '{\"active_generation\":2,\"cursor_key\":null,
                           \"projection_frontier\":22,\"source_frontier\":22,
                           \"summary_frontier\":22}',
-                        2, 2, 2, NULL
+                        2, NULL, NULL, NULL
                     );
+                 UPDATE session_temporal_generations
+                    SET state = 'ready', ready_at = 1
+                  WHERE session_id = 'session.graph-stale' AND generation = 1;
+                 UPDATE session_temporal_generations
+                    SET state = 'active', activated_at = 1
+                  WHERE session_id = 'session.graph-stale' AND generation = 1;
+                 UPDATE session_temporal_generations
+                    SET state = 'superseded', completed_at = 2
+                  WHERE session_id = 'session.graph-stale' AND generation = 1;
+                 UPDATE session_temporal_generations
+                    SET state = 'ready', ready_at = 2
+                  WHERE session_id = 'session.graph-stale' AND generation = 2;
+                 UPDATE session_temporal_generations
+                    SET state = 'active', activated_at = 2
+                  WHERE session_id = 'session.graph-stale' AND generation = 2;
                  INSERT INTO session_relation_receipts (
                     session_id, generation, scope_kind, scope_id,
                     expected_graph_watermark, state, graph_watermark,

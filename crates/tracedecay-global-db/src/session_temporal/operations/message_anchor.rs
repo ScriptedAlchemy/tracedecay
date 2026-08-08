@@ -835,22 +835,37 @@ mod tests {
             .expect("profile writer");
         seed_raw_source(&conn, "1715000001").await;
         publish(&conn).await.expect("leaf summary publication");
+        // Summary nodes are immutable, so the malformed horizon is written as
+        // its own node rather than by rewriting the published one: the schema
+        // rejects the update, and a fixture that depends on rewriting history
+        // is testing something the store cannot produce.
         conn.execute(
-            "UPDATE session_summary_nodes SET source_horizon_json = '{}'
-             WHERE summary_id = 'summary.message-anchor'",
+            "INSERT INTO session_summary_nodes (
+                summary_id, session_id, summary_anchor_id, summary_text,
+                index_text, source_horizon_json, publication_json, created_at
+             )
+             SELECT 'summary.message-anchor.malformed', session_id, summary_anchor_id,
+                    summary_text, index_text, '{}', publication_json, created_at
+               FROM session_summary_nodes
+              WHERE summary_id = 'summary.message-anchor'",
             (),
         )
         .await
         .expect("malformed source horizon");
 
-        let result = super::super::sources::prepare_sources(&conn, &parent_publication()).await;
+        let mut publication = parent_publication();
+        publication.draft.source_refs = vec![LcmSourceRef::SummaryNode {
+            node_id: "summary.message-anchor.malformed".to_string(),
+        }];
+
+        let result = super::super::sources::prepare_sources(&conn, &publication).await;
 
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceUnavailable {
                 ref source_id,
                 ref reason,
-            }) if source_id == "summary.message-anchor"
+            }) if source_id == "summary.message-anchor.malformed"
                 && reason == "unverifiable_source_horizon"
         ));
     }
