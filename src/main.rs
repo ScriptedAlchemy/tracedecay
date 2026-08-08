@@ -249,7 +249,7 @@ fn async_main() -> tracedecay::errors::Result<()> {
     // ingest paths all read these slots, and an unregistered slot fails quietly
     // (no LCM redaction, no memory injection, zero turn costs) rather than
     // loudly.
-    tracedecay::register_runtime_ports();
+    tracedecay::register_runtime_ports()?;
     let args: Vec<String> = std::env::args().collect();
     if render_dynamic_command_help(&args) {
         return Ok(());

@@ -52,6 +52,7 @@ fn embedded_plugin_tool_mentions() -> BTreeSet<String> {
 /// tool the bundle legitimately references).
 fn registered_tool_names() -> BTreeSet<String> {
     let mut names: BTreeSet<String> = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
         .collect();
@@ -140,6 +141,7 @@ fn readme_mcp_allowlist_matches_read_only_tools() {
     listed.dedup();
 
     let mut read_only: Vec<String> = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .filter(tool_is_read_only)
         .map(|definition| definition.name)

@@ -28,10 +28,12 @@ mod lcm;
 mod memory;
 mod multi_root;
 mod native_integration;
+mod native_worktree;
 mod session;
 mod skills;
 mod testing;
 mod work;
+mod workflow;
 
 use admin::*;
 use analysis::*;
@@ -308,16 +310,22 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
 }
 
 /// Returns tool definitions with a dynamic call budget for `tracedecay_context`.
-pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<ToolDefinition> {
-    let mut defs = get_tool_definitions();
+pub fn get_tool_definitions_with_budget(
+    node_count: u64,
+    budget: u8,
+) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    let mut defs = get_tool_definitions()?;
     apply_context_budget(&mut defs, node_count, budget);
-    defs
+    Ok(defs)
 }
 
-fn get_maximal_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<ToolDefinition> {
-    let mut defs = get_maximal_tool_definitions();
+fn get_maximal_tool_definitions_with_budget(
+    node_count: u64,
+    budget: u8,
+) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    let mut defs = get_maximal_tool_definitions()?;
     apply_context_budget(&mut defs, node_count, budget);
-    defs
+    Ok(defs)
 }
 
 fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
@@ -366,7 +374,7 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
         .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
         .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
         .collect::<BTreeSet<_>>();
-    let mut definitions = get_maximal_tool_definitions_with_budget(node_count, budget);
+    let mut definitions = get_maximal_tool_definitions_with_budget(node_count, budget)?;
     if registry_mode == ToolRegistryMode::HostAvailable {
         retain_host_available_tool_definitions(&mut definitions);
     }
@@ -430,10 +438,12 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
 
 /// Returns tool definitions with a conservative temporary context budget while
 /// a daemon opens the project graph needed to calculate the exact node count.
-pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinition> {
-    let mut defs = get_tool_definitions();
+pub fn get_tool_definitions_with_warming_budget(
+    budget: u8,
+) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    let mut defs = get_tool_definitions()?;
     apply_context_warming_budget(&mut defs, budget);
-    defs
+    Ok(defs)
 }
 
 fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
@@ -463,13 +473,15 @@ fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 /// `tracedecay_outline` remains advertised and reports its runtime
 /// `ast-grep outline` requirement from the handler, because the Cursor
 /// plugin docs/rules intentionally teach agents to start there.
-pub fn get_tool_definitions() -> Vec<ToolDefinition> {
-    let mut definitions = get_maximal_tool_definitions();
+pub fn get_tool_definitions()
+-> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    let mut definitions = get_maximal_tool_definitions()?;
     retain_host_available_tool_definitions(&mut definitions);
-    definitions
+    Ok(definitions)
 }
 
-pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
+pub(super) fn get_maximal_tool_definitions()
+-> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
     let mut definitions = vec![
         def_search(),
         def_grep(),
@@ -631,11 +643,13 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
-    definitions.extend(work::work_definitions());
+    definitions.extend(work::work_definitions()?);
+    definitions.extend(workflow::workflow_definitions()?);
+    definitions.extend(native_worktree::native_worktree_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
-    definitions
+    Ok(definitions)
 }
 
 fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefinition>) {
@@ -948,6 +962,7 @@ mod tests {
     fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
         assert!(
             get_tool_definitions()
+                .expect("tool definitions")
                 .iter()
                 .all(|definition| definition.name != "tracedecay_hook_runtime")
         );
@@ -960,7 +975,7 @@ mod tests {
 
     #[test]
     fn multi_root_tools_are_discoverable() {
-        let definitions = get_tool_definitions();
+        let definitions = get_tool_definitions().expect("tool definitions");
         for name in [
             "tracedecay_multi_root_scope_set_read",
             "tracedecay_multi_root_scope_set_compare_and_swap",
@@ -1001,7 +1016,7 @@ mod tests {
 
     #[test]
     fn context_scout_read_surfaces_are_registered_read_only() {
-        let definitions = get_tool_definitions();
+        let definitions = get_tool_definitions().expect("tool definitions");
         for name in [
             "tracedecay_context_scout_status",
             "tracedecay_context_scout_recent",
@@ -1102,7 +1117,7 @@ mod tests {
 
     #[test]
     fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
-        let definitions = get_tool_definitions();
+        let definitions = get_tool_definitions().expect("tool definitions");
         for name in [
             "tracedecay_feedback_diagnostics",
             "tracedecay_feedback_get",
@@ -1155,7 +1170,7 @@ mod tests {
 
     #[test]
     fn test_get_tool_definitions_with_budget() {
-        let defs = get_tool_definitions_with_budget(10000, 4);
+        let defs = get_tool_definitions_with_budget(10000, 4).expect("tool definitions");
         let context_tool = defs
             .iter()
             .find(|d| d.name == "tracedecay_context")

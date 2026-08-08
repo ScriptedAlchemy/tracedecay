@@ -712,9 +712,26 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
                  the live daemon serves no route at {route}"
             ));
         }
+        graded += 1;
+        let mcp_subject = format!("mcp:work:{}", operation.route_segment());
+        let mcp_tool = format!("tracedecay_work_{}", operation.operation_key());
+        if !mcp_tools.contains(&mcp_tool) && sanctioned_citation(&mcp_subject).is_none() {
+            failures.push(format!(
+                "{mcp_subject}: WorkOperation::ALL names it a mounted operation \
+                 but {mcp_tool} is absent from the live MCP server's tools/list \
+                 answer"
+            ));
+        }
     }
 
     // -- Workflow operations. -----------------------------------------------
+    // Graded on BOTH declared external surfaces, not just HTTP. Checking only
+    // HTTP here is how the entire sixteen-operation family came to be mounted
+    // on CLI and HTTP while carrying no MCP tool at all: every row passed, and
+    // the absence was invisible because nothing ever asked the question. A
+    // closed family that publishes a transport-independent descriptor has to be
+    // graded against every transport that descriptor claims, or the sweep only
+    // proves the surface it happened to look at.
     assert!(
         WorkflowOperation::ALL.len() >= 8,
         "the Workflow operation set shrank to {}; a removed operation must be \
@@ -731,6 +748,16 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
             failures.push(format!(
                 "{subject}: declared by WorkflowOperation::ALL but the live \
                  daemon serves no route at {route}"
+            ));
+        }
+        graded += 1;
+        let mcp_subject = format!("mcp:workflow:{}", operation.route_segment());
+        let mcp_tool = format!("tracedecay_workflow_{}", operation.operation_key());
+        if !mcp_tools.contains(&mcp_tool) && sanctioned_citation(&mcp_subject).is_none() {
+            failures.push(format!(
+                "{mcp_subject}: declared by WorkflowOperation::ALL but \
+                 {mcp_tool} is absent from the live MCP server's tools/list \
+                 answer"
             ));
         }
     }

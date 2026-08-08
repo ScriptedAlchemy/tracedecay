@@ -54,7 +54,9 @@ fn fake_codex_response_timeout_secs() -> u64 {
 /// backend end-to-end. Registration is `OnceLock`-based and idempotent.
 fn register_runtime_ports() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(tracedecay::register_runtime_ports);
+    ONCE.call_once(|| {
+        tracedecay::register_runtime_ports().expect("runtime port registration");
+    });
 }
 
 struct EchoBackend;

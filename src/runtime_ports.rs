@@ -30,12 +30,13 @@ use crate::errors::Result;
 /// Call this as early as possible in a process: the slots below are read by
 /// transcript ingest, agent-host installers, hooks, and branch locking, all of
 /// which fail quietly (or fail closed) when the root never registered.
-pub fn register_runtime_ports() {
+pub fn register_runtime_ports() -> Result<()> {
     register_session_ports();
     register_agent_host_ports();
-    crate::agents::register_mcp_tool_catalog_ports();
+    crate::agents::register_mcp_tool_catalog_ports()?;
     crate::automation::register_runtime_ports();
     crate::dashboard::register_runtime_ports();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +132,9 @@ mod tests {
     fn registered() -> crate::config::PinnedUserDataDir {
         static ONCE: std::sync::Once = std::sync::Once::new();
         let pinned = crate::config::PinnedUserDataDir::new();
-        ONCE.call_once(register_runtime_ports);
+        ONCE.call_once(|| {
+            register_runtime_ports().expect("runtime port registration");
+        });
         pinned
     }
 

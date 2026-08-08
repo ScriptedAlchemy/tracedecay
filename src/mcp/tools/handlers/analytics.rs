@@ -330,7 +330,7 @@ pub(super) async fn handle_analytics(
             .await
             .map_err(config_error)?;
         if let Some(object) = value.as_object_mut() {
-            object.insert("tools".to_string(), tools_section(&counts));
+            object.insert("tools".to_string(), tools_section(&counts)?);
         }
     }
     if wants_section(section, "hints") {
@@ -361,7 +361,7 @@ pub(super) async fn handle_analytics(
     }))
 }
 
-fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {
         let counts = per_tool.entry(row.tool_name.clone()).or_default();
@@ -402,6 +402,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
         .collect();
 
     let defined: Vec<String> = crate::mcp::tools::get_tool_definitions()
+        .map_err(config_error)?
         .into_iter()
         .map(|definition| definition.name)
         .collect();
@@ -414,7 +415,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
     let zero_call_sample: Vec<&String> =
         zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
 
-    json!({
+    Ok(json!({
         "available": !rows.is_empty(),
         "tiers": tiers,
         "top_tools": top_tools,
@@ -425,7 +426,7 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
             "sample": zero_call_sample,
             "sample_truncated": zero_call_count > zero_call_sample.len(),
         },
-    })
+    }))
 }
 
 async fn facts_section(

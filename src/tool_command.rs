@@ -167,7 +167,13 @@ pub(crate) async fn run(
     name: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
-    let defs = get_tool_definitions();
+    let defs = get_tool_definitions().map_err(|error| {
+        TraceDecayError::project_route(
+            "mcp.catalog_discovery_unavailable",
+            false,
+            format!("MCP tool discovery is unavailable: {error}"),
+        )
+    })?;
 
     let Some(raw_name) = name else {
         print_tool_list(&defs);
@@ -240,7 +246,14 @@ pub(crate) async fn run(
                 message: error.to_string(),
             }
         })?;
-    if internal_def.is_none() && !LegacyToolCompatibilityOwner::admits(&def.name) {
+    let compatibility_owned = LegacyToolCompatibilityOwner::admits(&def.name).map_err(|error| {
+        TraceDecayError::project_route(
+            "mcp.catalog_discovery_unavailable",
+            false,
+            format!("MCP tool discovery is unavailable: {error}"),
+        )
+    })?;
+    if internal_def.is_none() && !compatibility_owned {
         return Err(TraceDecayError::Config {
             message: format!(
                 "{} does not own {}: {}",

@@ -199,7 +199,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
     let options = ToolCallRegistryOptions::default();
     let mut advertised = BTreeSet::new();
 
-    for definition in get_tool_definitions() {
+    for definition in get_tool_definitions().expect("tool definitions") {
         assert!(
             advertised.insert(definition.name.clone()),
             "{} is advertised more than once",
@@ -235,8 +235,14 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     definition.name
                 ),
                 McpToolDispatchGroup::Work => assert!(
-                    super::work::work_operation_for_tool(&definition.name).is_some(),
+                    crate::mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
                     "{} has no canonical Work operation entry",
+                    definition.name
+                ),
+                McpToolDispatchGroup::Workflow => assert!(
+                    crate::mcp::tools::binding::workflow_operation_for_tool(&definition.name)
+                        .is_some(),
+                    "{} has no canonical Workflow operation entry",
                     definition.name
                 ),
                 McpToolDispatchGroup::RetainedApplication => {
@@ -322,7 +328,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
 
 #[test]
 fn graph_reader_selector_dispatch_policy_is_allowlisted() {
-    for tool in get_tool_definitions() {
+    for tool in get_tool_definitions().expect("tool definitions") {
         let properties = &tool.input_schema["properties"];
         let schema_has_registered_project_selector =
             ["project_selector", "project_id", "project_path"]

@@ -165,6 +165,7 @@ fn mechanical_edit_prompts_get_atomic_edit_ladder() {
 #[test]
 fn every_hint_route_names_a_registered_agent_tool() {
     let registered = crate::mcp::tools::get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .map(|definition| definition.name)
         .collect::<std::collections::HashSet<_>>();

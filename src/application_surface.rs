@@ -118,6 +118,7 @@ use configuration_wire::{
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
+pub(crate) use workflow::invoke_workflow_operation;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -1239,6 +1240,86 @@ impl RegisteredHttpOperation for HandoffOperation {
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
         tracedecay_application::handoff_executable_binding_registry()
     }
+}
+
+/// Return the same typed result-contract envelope used after daemon dispatch
+/// when a caller has no authenticated daemon executor to invoke.
+///
+/// MCP can be constructed before the daemon route is attached. That state is
+/// still an application failure of the named family, not an MCP tool-resolution
+/// failure, so the response must retain the operation's registered result
+/// schema and canonical runtime problem taxonomy.
+pub(crate) fn registered_executor_unavailable<T, O>(operation: O, request_id: RequestId) -> Response
+where
+    T: Serialize,
+    O: RegisteredHttpOperation,
+{
+    let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
+    let family = operation.display_family();
+    let registry = match operation.registry() {
+        Ok(registry) => registry,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("catalog_unavailable"),
+                &format!("The {family} capability catalog is unavailable"),
+            );
+        }
+    };
+    let operation_id =
+        match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
+            Ok(operation_id) => operation_id,
+            Err(_) => {
+                return registered_adapter_unavailable(
+                    request_id,
+                    &problem_code("operation_identity_unavailable"),
+                    &format!("The {family} operation identity is unavailable"),
+                );
+            }
+        };
+    let Some(binding) = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+    else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("binding_unavailable"),
+            &format!("The {family} operation is not advertised by this build"),
+        );
+    };
+    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+        return registered_adapter_unavailable(
+            request_id,
+            &problem_code("route_unavailable"),
+            &format!("The {family} operation binding carries no public route"),
+        );
+    };
+    let result_contract = match ResultContractRef::new(
+        binding.result_schema().schema_ref().schema_id().clone(),
+        binding.result_schema().schema_ref().revision(),
+    ) {
+        Ok(contract) => contract,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("result_contract_unavailable"),
+                &format!("The {family} operation result contract is unavailable"),
+            );
+        }
+    };
+    CanonicalInvocationResult::<T>::new(
+        binding_id.clone(),
+        Err(ApplicationProblemEnvelope::new(
+            result_contract,
+            request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: problem_code("transport_unavailable"),
+                message: format!("The {family} application transport is unavailable"),
+            }),
+        )
+        .with_owning_layer(ProblemOwningLayer::Runtime)),
+    )
+    .into_http_response()
 }
 
 async fn invoke_registered_http<T, O>(

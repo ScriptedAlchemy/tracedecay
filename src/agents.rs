@@ -13,8 +13,22 @@
 //! `crates/tracedecay-agent-hosts/SEAMS.md`.
 pub use tracedecay_agent_hosts::agents::*;
 
+use std::sync::OnceLock;
+
+use crate::errors::{Result, TraceDecayError};
+
+static ADVERTISED_MCP_TOOLS: OnceLock<
+    Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1>,
+> = OnceLock::new();
+
 fn advertised_mcp_tools() -> Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1> {
-    crate::mcp::tools::get_tool_definitions()
+    ADVERTISED_MCP_TOOLS.get().cloned().unwrap_or_default()
+}
+
+fn build_advertised_mcp_tools(
+    definitions: Vec<crate::mcp::tools::ToolDefinition>,
+) -> Vec<tracedecay_agent_hosts::ports::mcp_tools::AdvertisedToolV1> {
+    definitions
         .into_iter()
         .map(|tool| {
             let read_only = tool
@@ -34,11 +48,20 @@ fn advertised_mcp_tools() -> Vec<tracedecay_agent_hosts::ports::mcp_tools::Adver
 }
 
 /// Wires the root MCP catalog into extracted agent-host installers.
-pub fn register_mcp_tool_catalog_ports() {
+pub fn register_mcp_tool_catalog_ports() -> Result<()> {
+    let definitions = crate::mcp::tools::get_tool_definitions().map_err(|error| {
+        TraceDecayError::project_route(
+            "mcp.catalog_discovery_unavailable",
+            false,
+            format!("MCP tool discovery is unavailable: {error}"),
+        )
+    })?;
+    let _ = ADVERTISED_MCP_TOOLS.set(build_advertised_mcp_tools(definitions));
     tracedecay_agent_hosts::ports::mcp_tools::register(advertised_mcp_tools);
     tracedecay_agent_hosts::ports::mcp_tools::register_format_capable_names(
         crate::mcp::tools::format_capable_tool_names,
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -47,6 +70,7 @@ mod tests {
 
     #[test]
     fn root_mcp_catalog_adapter_preserves_tools_and_annotations() {
+        register_mcp_tool_catalog_ports().expect("MCP tool catalog ports");
         let tools = advertised_mcp_tools();
         let search = tools
             .iter()

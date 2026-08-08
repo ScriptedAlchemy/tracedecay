@@ -56,6 +56,7 @@ mod support;
 mod tool_call_support;
 mod work;
 pub mod workflow;
+mod workflow_family;
 mod workflow_index;
 pub mod workflow_query;
 pub(crate) use project_registry::{
@@ -174,6 +175,7 @@ use retained_catalog::dispatch_profile_retained_application_tool;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use work::handle_work;
+use workflow_family::handle_workflow;
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -506,6 +508,20 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             ))
             .await;
         }
+        if dispatch_group == Some(McpToolDispatchGroup::Workflow) {
+            // Workflow is Work's sibling closed family and reaches the same
+            // canonical owner HTTP and the CLI reach, for the same reason.
+            ensure_mcp_dispatch_available(tool_name)?;
+            return boxed_send(handle_workflow(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            ))
+            .await;
+        }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
         // application-catalog contract remain under the explicit root MCP
@@ -515,9 +531,15 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 message: error.to_string(),
             });
         }
-        if !LegacyToolCompatibilityOwner::admits(tool_name)
-            && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
-        {
+        let compatibility_owned =
+            LegacyToolCompatibilityOwner::admits(tool_name).map_err(|error| {
+                TraceDecayError::project_route(
+                    "mcp.catalog_discovery_unavailable",
+                    false,
+                    format!("MCP tool discovery is unavailable: {error}"),
+                )
+            })?;
+        if !compatibility_owned && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
             return Err(unknown_tool_error(tool_name));
         }
         ensure_mcp_dispatch_available(tool_name)?;
@@ -624,7 +646,8 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 Some(
                     McpToolDispatchGroup::ApplicationSurface
                     | McpToolDispatchGroup::MultiRoot
-                    | McpToolDispatchGroup::Work,
+                    | McpToolDispatchGroup::Work
+                    | McpToolDispatchGroup::Workflow,
                 )
                 | None => Err(unknown_tool_error(tool_name)),
             }

@@ -4,14 +4,13 @@
 //! arguments. Completed results are removed immediately, so this never becomes
 //! a cross-generation response cache or widens a project's privacy boundary.
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::mcp::tools::{ToolResult, get_tool_definitions};
+use crate::mcp::tools::{ToolResult, mcp_dispatch_contract};
 use crate::support::weak_registry::WeakRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -170,23 +169,7 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
     ) {
         return false;
     }
-    static READ_ONLY_TOOLS: OnceLock<HashSet<String>> = OnceLock::new();
-    READ_ONLY_TOOLS
-        .get_or_init(|| {
-            get_tool_definitions()
-                .into_iter()
-                .filter(|definition| {
-                    definition
-                        .annotations
-                        .as_ref()
-                        .and_then(|annotations| annotations.get("readOnlyHint"))
-                        .and_then(Value::as_bool)
-                        == Some(true)
-                })
-                .map(|definition| definition.name)
-                .collect()
-        })
-        .contains(tool_name)
+    mcp_dispatch_contract(tool_name).is_ok_and(|contract| contract.read_only())
 }
 
 fn read_flight_key(

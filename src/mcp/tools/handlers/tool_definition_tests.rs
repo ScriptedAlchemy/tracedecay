@@ -5,14 +5,14 @@ use super::*;
 
 #[test]
 fn test_tool_definitions_complete() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let compatibility_tools = tools
         .iter()
         .filter(|tool| ApplicationSurfaceOperation::from_tool_name(&tool.name).is_none())
         .collect::<Vec<_>>();
     for tool in compatibility_tools {
         assert!(
-            LegacyToolCompatibilityOwner::admits(&tool.name),
+            LegacyToolCompatibilityOwner::admits(&tool.name).expect("tool definitions"),
             "{} must have an explicit compatibility owner",
             tool.name
         );
@@ -156,7 +156,9 @@ fn test_tool_definitions_complete() {
 /// undiscoverable to MCP clients.
 #[test]
 fn work_definitions_cover_the_canonical_operation_registry() {
+    let registry = tracedecay_application::work_executable_binding_registry().unwrap();
     let work_definitions = get_tool_definitions()
+        .expect("tool definitions")
         .into_iter()
         .filter(|definition| definition.name.starts_with("tracedecay_work_"))
         .collect::<Vec<_>>();
@@ -194,12 +196,23 @@ fn work_definitions_cover_the_canonical_operation_registry() {
             Some(operation.is_read_only()),
             "{tool_name} read-only annotation must match the canonical Work operation",
         );
+        let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
+            .expect("canonical Work operation identity");
+        let binding = registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .expect("canonical Work operation must be executable");
+        assert_eq!(
+            &definition.input_schema,
+            binding.request_schema().body(),
+            "{tool_name} must expose the exact executable request schema",
+        );
     }
 }
 
 #[test]
 fn test_tool_definitions_have_schemas() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool in &tools {
         assert!(!tool.name.is_empty());
         assert!(!tool.description.is_empty());
@@ -210,7 +223,7 @@ fn test_tool_definitions_have_schemas() {
 
 #[test]
 fn format_capable_tools_advertise_markdown_json_without_tables() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in super::super::definitions::format_capable_tool_names() {
         if *tool_name == "tracedecay_ast_grep_rewrite"
             && !super::super::definitions::ast_grep_available()
@@ -247,7 +260,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 
 #[test]
 fn every_advertised_application_surface_uses_canonical_output_formats() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let tool_name = format!("tracedecay_{}", operation.as_str());
         let tool = tools
@@ -264,7 +277,7 @@ fn every_advertised_application_surface_uses_canonical_output_formats() {
 
 #[test]
 fn redundancy_tool_definition_describes_ranking_contract() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let tool = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_redundancy")
@@ -286,7 +299,7 @@ fn redundancy_tool_definition_describes_ranking_contract() {
 
 #[test]
 fn test_tool_definitions_have_annotations() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let write_tools = [
         "tracedecay_str_replace",
         "tracedecay_multi_str_replace",
@@ -352,7 +365,7 @@ fn test_tool_definitions_have_annotations() {
 #[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
     let catalog = crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
-    for tool in get_tool_definitions() {
+    for tool in get_tool_definitions().expect("tool definitions") {
         if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
             continue;
         }
@@ -377,7 +390,7 @@ fn advertised_read_only_matches_canonical_execution_effect() {
 
 #[test]
 fn lcm_doctor_exposes_diagnostics_only() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let doctor = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_lcm_doctor")
@@ -409,7 +422,7 @@ fn lcm_doctor_exposes_diagnostics_only() {
 
 #[test]
 fn test_always_load_tools() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let always_load: Vec<&str> = tools
         .iter()
         .filter(|t| {
@@ -462,7 +475,7 @@ fn test_always_load_tools() {
 
 #[test]
 fn test_tool_definitions_serializable() {
-    let tools = get_tool_definitions();
+    let tools = get_tool_definitions().expect("tool definitions");
     let json = serde_json::to_string(&tools).unwrap();
     assert!(json.contains("tracedecay_search"));
     assert!(json.contains("tracedecay_status"));

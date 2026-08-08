@@ -6,7 +6,8 @@ use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQue
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand, AuthorizedScopeSet,
-    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkCommand, ExecutionTopologyViewV1,
+    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkCommand,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
     GenerateProposalRequest, GeneratedWorkProposal, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
     ObservatoryReadModelV1, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
@@ -147,6 +148,8 @@ struct DashboardContractCatalogV1 {
     work_placement_reading: WorkPlacementReadingV1,
     work_topology_view_request: WorkTopologyViewRequestV1,
     work_topology_view: ExecutionTopologyViewV1,
+    work_topology_metrics_request: ExecutionTopologyMetricsRequestV1,
+    work_topology_metrics: ExecutionTopologyMetricsV1,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -303,6 +306,11 @@ mod tests {
             ("work_placement_reading", "WorkPlacementReadingV1"),
             ("work_topology_view_request", "WorkTopologyViewRequestV1"),
             ("work_topology_view", "ExecutionTopologyViewV1"),
+            (
+                "work_topology_metrics_request",
+                "ExecutionTopologyMetricsRequestV1",
+            ),
+            ("work_topology_metrics", "ExecutionTopologyMetricsV1"),
         ] {
             assert!(
                 definitions.contains_key(contract),

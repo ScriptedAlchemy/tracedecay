@@ -1,10 +1,10 @@
 //! Canonical binding between an MCP tool name and how the server treats it.
 //!
-//! One table answers both questions the dispatcher and the schema layer used
-//! to answer from separate name lists: which dispatch group owns a tool, and
-//! whether the tool accepts a registered-project selector. Keeping them in one
-//! row means a tool cannot gain a dispatch group while silently keeping the
-//! wrong project access, which is what two independent lists allowed.
+//! The root-owned table answers both questions the dispatcher and schema layer
+//! used to answer from separate name lists: which dispatch group owns a tool,
+//! and whether it accepts a registered-project selector. Work is intentionally
+//! projected from its executable registry instead, because that registry owns
+//! its complete mounted operation set and lifecycle contracts.
 //!
 //! `group` is `None` for tools whose group resolves dynamically through the
 //! application-surface or retained-surface predicates; those predicates remain
@@ -29,6 +29,13 @@ use tracedecay_tool_catalog::{
     McpIdempotencyContract, McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 
+mod work;
+mod workflow;
+
+use work::work_executable_binding_for_tool;
+pub(crate) use work::work_operation_for_tool;
+pub(crate) use workflow::workflow_operation_for_tool;
+
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpToolDispatchGroup {
@@ -45,6 +52,7 @@ pub(crate) enum McpToolDispatchGroup {
     Memory,
     SessionWorkflow,
     Work,
+    Workflow,
 }
 
 /// How a tool may be pointed at a project other than the active one.
@@ -214,6 +222,11 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_native_integration_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_preflight_native_integration", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_stack_snapshot", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_worktree_inventory", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_worktree_cleanup_inspect", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_worktree_cleanup_confirm", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_worktree_cleanup_remove", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_worktree_cleanup_reconcile", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_git_blame", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_git_diff", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_git_history", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -247,39 +260,13 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_fact_store", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_work_snapshot", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_delta", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_generate_proposal", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_create", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_replan_dependencies", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_review_proposal", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_accept_proposal", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_admit_execution", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_attach_runtime_evidence", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_accept_task", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_start_attempt", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_synthesize", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_attempt_status", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_cancel_attempt", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_resume_attempts", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_list_attempts", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_hydrate_artifacts", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_views", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_topology", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_pause_run", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_resume_run", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_run_control", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_placement_preflight", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_admit_placement", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_placement_status", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_work_release_placement", group: Some(McpToolDispatchGroup::Work), project: RegisteredProjectAccess::ActiveProjectOnly },
 ];
 
-/// Resolves a tool name against [`MCP_TOOL_BINDINGS`].
+/// Resolves a static MCP tool name against [`MCP_TOOL_BINDINGS`].
 ///
 /// Every dispatched tool call asks this two or three times, so the table is
 /// indexed by name once per process rather than scanned each time.
-/// `MCP_TOOL_BINDINGS` stays the authority for the rows: a duplicate name
+/// `MCP_TOOL_BINDINGS` stays the authority for static rows: a duplicate name
 /// would collapse in the index, which `every_tool_is_bound_once` forbids.
 fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
     static BY_NAME: LazyLock<HashMap<&'static str, &'static McpToolBinding>> =
@@ -294,7 +281,10 @@ fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
 
 /// The statically bound dispatch group, if this tool has one.
 pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
-    binding(tool_name).and_then(|binding| binding.group)
+    binding(tool_name)
+        .and_then(|binding| binding.group)
+        .or_else(|| work_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Work))
+        .or_else(|| workflow_operation_for_tool(tool_name).map(|_| McpToolDispatchGroup::Workflow))
 }
 
 pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {
@@ -354,30 +344,36 @@ fn multi_root_capability_for_tool(
         .map_err(super::dispatch::McpDispatchMetadataError::CatalogValidation)
 }
 
-/// Resolve the executable Work binding that names an MCP tool.
-///
-/// The Work executable registry is the source of effects, cancellation,
-/// idempotency, and deadlines. MCP owns only the `tracedecay_work_` transport
-/// prefix; it must not recreate those lifecycle contracts in a second table.
-fn work_executable_binding_for_tool(
-    tool_name: &str,
-) -> Result<Option<ExecutableBindingV1>, super::dispatch::McpDispatchMetadataError> {
-    let Some(operation) = tool_name.strip_prefix("tracedecay_work_") else {
-        return Ok(None);
-    };
-    let operation_id = tracedecay_tool_catalog::OperationId::new(format!(
-        "operation.work.{operation}"
-    ))
-    .map_err(|_| {
-        super::dispatch::McpDispatchMetadataError::CatalogValidation(
-            tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-                field: "MCP Work operation identity",
-                reason: "must name one canonical Work operation",
-            },
-        )
-    })?;
-    tracedecay_application::work_executable_binding(&operation_id)
-        .map_err(super::dispatch::McpDispatchMetadataError::CatalogValidation)
+/// One MCP dispatch entry normalized from either the static root-owned binding
+/// table or a canonical Work executable binding.
+pub(super) struct DispatchCatalogBinding {
+    pub(super) name: String,
+    pub(super) group: Option<McpToolDispatchGroup>,
+    pub(super) executable_binding: Option<ExecutableBindingV1>,
+}
+
+fn dispatch_catalog_bindings()
+-> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
+    let mut bindings = MCP_TOOL_BINDINGS
+        .iter()
+        .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
+        .map(|binding| DispatchCatalogBinding {
+            name: binding.name.to_owned(),
+            group: binding.group,
+            executable_binding: None,
+        })
+        .collect::<Vec<_>>();
+    bindings.extend(work::dispatch_catalog_bindings()?);
+    bindings.extend(workflow::dispatch_catalog_bindings()?);
+    Ok(bindings)
+}
+
+fn dispatch_catalog_tool_names()
+-> Result<std::collections::BTreeSet<String>, super::dispatch::McpDispatchMetadataError> {
+    Ok(dispatch_catalog_bindings()?
+        .into_iter()
+        .map(|binding| binding.name)
+        .collect())
 }
 
 fn application_capability_for_tool(
@@ -500,16 +496,21 @@ fn verified_effect_journey(tool_name: &str) -> bool {
 }
 
 fn executable_handler_is_available(
-    binding: &McpToolBinding,
+    tool_name: &str,
+    group: Option<McpToolDispatchGroup>,
     effect: EffectClass,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
 ) -> bool {
     matches!(
-        binding.group,
-        Some(McpToolDispatchGroup::MultiRoot | McpToolDispatchGroup::Work)
+        group,
+        Some(
+            McpToolDispatchGroup::MultiRoot
+                | McpToolDispatchGroup::Work
+                | McpToolDispatchGroup::Workflow
+        )
     ) || effect.is_read_only()
-        || verified_effect_journey(binding.name)
-        || matches!(binding.group, Some(McpToolDispatchGroup::Edit))
+        || verified_effect_journey(tool_name)
+        || matches!(group, Some(McpToolDispatchGroup::Edit))
             && application_capability.is_some_and(|capability| {
                 capability.effect() == EffectClass::SourceEdit
                     && capability.availability().is_callable()
@@ -582,22 +583,19 @@ fn cancellation_for_tool(
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
-    for binding in MCP_TOOL_BINDINGS
-        .iter()
-        .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
-    {
-        let application_capability = application_capability_for_tool(binding.name)?;
-        let multi_root_capability = multi_root_capability_for_tool(binding.name)?;
-        let work_binding = work_executable_binding_for_tool(binding.name)?;
+    for binding in dispatch_catalog_bindings()? {
+        let application_capability = application_capability_for_tool(&binding.name)?;
+        let multi_root_capability = multi_root_capability_for_tool(&binding.name)?;
+        let executable_binding = binding.executable_binding.as_ref();
         // The multi-root catalog is the sole contract authority for its own
         // tools; every field below prefers it and falls back to the
         // application-surface capability for everything else.
         let contract_capability = multi_root_capability.as_ref().or(application_capability);
-        let direct_effect = direct_effect(binding.name);
+        let direct_effect = direct_effect(&binding.name);
         let effect = if direct_effect.is_effect() {
             direct_effect
         } else {
-            work_binding.as_ref().map_or_else(
+            executable_binding.map_or_else(
                 || {
                     contract_capability.map_or(
                         EffectClass::Read,
@@ -610,12 +608,17 @@ fn build_mcp_dispatch_catalog()
         let available = multi_root_capability
             .as_ref()
             .is_some_and(|capability| capability.availability().is_callable())
-            || work_binding.is_some()
-            || executable_handler_is_available(binding, effect, application_capability);
-        let cancellation = match (multi_root_capability.as_ref(), work_binding.as_ref()) {
+            || executable_binding.is_some()
+            || executable_handler_is_available(
+                &binding.name,
+                binding.group,
+                effect,
+                application_capability,
+            );
+        let cancellation = match (multi_root_capability.as_ref(), executable_binding) {
             (Some(capability), _) => capability.cancellation().clone(),
             (None, Some(binding)) => binding.cancellation().clone(),
-            (None, None) => cancellation_for_tool(binding.name, application_capability)?,
+            (None, None) => cancellation_for_tool(&binding.name, application_capability)?,
         };
         let mut terminal_states = vec![
             McpTerminalState::Completed,
@@ -632,7 +635,7 @@ fn build_mcp_dispatch_catalog()
             .filter(|streaming| streaming.is_supported())
             .cloned();
         contracts.push(McpDispatchContractV1::new(McpDispatchContractInputV1 {
-            tool_name: binding.name.to_owned(),
+            tool_name: binding.name.clone(),
             availability: if available {
                 McpDispatchAvailability::Available
             } else {
@@ -642,10 +645,10 @@ fn build_mcp_dispatch_catalog()
                 }
             },
             effect,
-            deadline: McpDeadlineContractV1::new(work_binding.as_ref().map_or_else(
+            deadline: McpDeadlineContractV1::new(executable_binding.map_or_else(
                 || {
                     contract_capability.map_or_else(
-                        || super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
+                        || super::handlers::tool_dispatch_ceiling(&binding.name).as_millis() as u64,
                         |capability| capability.deadline().maximum_millis(),
                     )
                 },
@@ -653,8 +656,8 @@ fn build_mcp_dispatch_catalog()
             ))?,
             idempotency: multi_root_capability.as_ref().map_or_else(
                 || {
-                    work_binding.as_ref().map_or_else(
-                        || idempotency_for_tool(binding.name, application_capability),
+                    executable_binding.map_or_else(
+                        || idempotency_for_tool(&binding.name, application_capability),
                         |binding| match binding.idempotency() {
                             tracedecay_tool_catalog::IdempotencyContract::Required => {
                                 McpIdempotencyContract::KeyRequired
@@ -674,7 +677,7 @@ fn build_mcp_dispatch_catalog()
                     }
                 },
             ),
-            inverse: inverse_for_tool(binding.name, effect),
+            inverse: inverse_for_tool(&binding.name, effect),
             cancellation,
             terminal_states,
             pagination: contract_capability
@@ -724,7 +727,11 @@ mod tests {
 
     #[test]
     fn every_tool_is_bound_once() {
-        let mut names: Vec<&str> = MCP_TOOL_BINDINGS.iter().map(|entry| entry.name).collect();
+        let mut names = dispatch_catalog_bindings()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
         let total = names.len();
         names.sort_unstable();
         names.dedup();
@@ -734,16 +741,11 @@ mod tests {
     #[test]
     fn every_maximal_tool_definition_has_a_binding() {
         let defined = super::super::definitions::get_maximal_tool_definitions()
+            .unwrap()
             .into_iter()
             .map(|definition| definition.name)
             .collect::<std::collections::BTreeSet<_>>();
-        let bound = MCP_TOOL_BINDINGS
-            .iter()
-            .filter(|binding| {
-                !super::super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name)
-            })
-            .map(|binding| binding.name.to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
+        let bound = dispatch_catalog_tool_names().unwrap();
         assert_eq!(
             defined, bound,
             "MCP definitions and dispatch bindings must be a bijection"
@@ -751,49 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn work_bindings_are_a_projection_of_the_executable_registry() {
-        let registry = tracedecay_application::work_executable_binding_registry().unwrap();
-        let work_bindings = MCP_TOOL_BINDINGS
-            .iter()
-            .filter(|binding| binding.group == Some(McpToolDispatchGroup::Work))
-            .collect::<Vec<_>>();
-
-        assert_eq!(work_bindings.len(), 26);
-        assert_eq!(work_bindings.len(), registry.iter().count());
-        for operation in tracedecay_api::WorkOperation::ALL {
-            let tool_name = format!("tracedecay_work_{}", operation.operation_key());
-            let binding = work_bindings
-                .iter()
-                .find(|binding| binding.name == tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} is not bound for MCP dispatch"));
-            let operation_id =
-                tracedecay_tool_catalog::OperationId::new(operation.operation_id()).unwrap();
-            let executable = registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .unwrap_or_else(|| panic!("{} is not executable", operation.operation_id()));
-            assert_eq!(executable.effect().is_read_only(), operation.is_read_only());
-            assert_eq!(binding.project, RegisteredProjectAccess::ActiveProjectOnly);
-        }
-    }
-
-    #[test]
     fn dispatch_catalog_covers_every_advertised_binding_with_canonical_deadline() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        let advertised = MCP_TOOL_BINDINGS
-            .iter()
-            .filter(|binding| {
-                !super::super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name)
-            })
-            .map(|binding| binding.name)
-            .collect::<std::collections::BTreeSet<_>>();
+        let advertised = dispatch_catalog_tool_names().unwrap();
         let cataloged = catalog
             .contracts()
-            .map(tracedecay_tool_catalog::McpDispatchContractV1::tool_name)
+            .map(|contract| contract.tool_name().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(cataloged, advertised);
         for contract in catalog.contracts() {
-            let binding = binding(contract.tool_name()).unwrap();
             let application_capability =
                 application_capability_for_tool(contract.tool_name()).unwrap();
             assert_eq!(
@@ -804,7 +772,12 @@ mod tests {
             );
             assert_eq!(
                 contract.availability().is_available(),
-                executable_handler_is_available(binding, contract.effect(), application_capability,)
+                executable_handler_is_available(
+                    contract.tool_name(),
+                    dispatch_group_for_tool(contract.tool_name()),
+                    contract.effect(),
+                    application_capability,
+                )
             );
         }
     }

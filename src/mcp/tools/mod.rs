@@ -15,9 +15,7 @@ pub(crate) mod renderers;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::sync::OnceLock;
 
 pub(crate) use binding::{
     mcp_dispatch_contract, tool_dispatches_registered_project_reader,
@@ -92,16 +90,12 @@ impl LegacyToolCompatibilityOwner {
     pub const REASON: &'static str =
         "typed ApplicationSurfaceRequest contract has not yet landed for this tool family";
 
-    pub fn admits(tool_name: &str) -> bool {
-        static ADVERTISED_TOOLS: OnceLock<BTreeSet<String>> = OnceLock::new();
-        ADVERTISED_TOOLS
-            .get_or_init(|| {
-                get_tool_definitions()
-                    .into_iter()
-                    .map(|definition| definition.name)
-                    .collect()
-            })
-            .contains(tool_name)
+    pub fn admits(
+        tool_name: &str,
+    ) -> std::result::Result<bool, dispatch::McpDispatchMetadataError> {
+        Ok(get_tool_definitions()?
+            .iter()
+            .any(|definition| definition.name == tool_name))
     }
 }
 

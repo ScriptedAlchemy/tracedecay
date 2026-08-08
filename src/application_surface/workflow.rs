@@ -60,12 +60,19 @@ impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
         &self,
         request: tracedecay_api::WorkflowHttpRequest,
     ) -> tracedecay_api::WorkflowInvocationFuture {
-        Box::pin(invoke_operation(Arc::clone(&self.executor), request))
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move { invoke_workflow_operation(Some(executor.as_ref()), request).await })
     }
 }
 
-async fn invoke_operation(
-    executor: Arc<dyn DaemonInvocationExecutor>,
+/// Invoke the typed Workflow owner shared by the HTTP router and MCP adapter.
+///
+/// A missing executor stays a canonical Workflow runtime-unavailable response
+/// selected by the operation's own catalog binding; it never becomes a
+/// transport-specific MCP error, which is the same contract the Work adapter
+/// holds and the reason both surfaces can be graded against one descriptor.
+pub(crate) async fn invoke_workflow_operation(
+    executor: Option<&dyn DaemonInvocationExecutor>,
     request: tracedecay_api::WorkflowHttpRequest,
 ) -> Response {
     let tracedecay_api::WorkflowHttpRequest {
@@ -309,7 +316,7 @@ async fn invoke_operation(
 }
 
 async fn invoke<T>(
-    executor: Arc<dyn DaemonInvocationExecutor>,
+    executor: Option<&dyn DaemonInvocationExecutor>,
     operation: WorkflowOperation,
     request_id: tracedecay_application::RequestId,
     controls: tracedecay_api::HttpApplicationControls,
@@ -331,13 +338,11 @@ where
         controls.deadline.clone(),
         controls.cancellation.context(),
     );
+    let Some(executor) = executor else {
+        return super::registered_executor_unavailable::<T, _>(operation, request_id);
+    };
     invoke_registered_http::<T, _>(
-        executor.as_ref(),
-        operation,
-        request_id,
-        controls,
-        invocation,
-        select,
+        executor, operation, request_id, controls, invocation, select,
     )
     .await
 }
