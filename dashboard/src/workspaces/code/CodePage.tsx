@@ -22,6 +22,7 @@ import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { CodeDiagnostics } from './CodeDiagnostics.tsx';
+import { CortexRelief } from './CortexRelief.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import { SymbolPath } from './SymbolPath.tsx';
@@ -317,18 +318,28 @@ export function CodePage() {
               kind={subgraph.isPending ? 'loading' : 'unavailable'}
             />
           ) : (
-          // Two scroll containers, one inside the other: the archetype already
-          // scrolls the list slot, and this pane pinned itself to `h-full` of
-          // it and then divided that height between a canvas that cannot
-          // shrink and a hub list that can. Below `md` the canvas alone is
-          // taller than the pane, so the hub list resolved to `height: 0` and
-          // took its scrollbar with it — "top 12 of 12,873" over nothing. It is
-          // one scroll at narrow widths now: the pane grows to its content and
-          // the archetype's scroller carries the whole column. The pinned
-          // canvas with a separately scrolling list is kept from `md` up, where
-          // there is room to divide, with a floor so the division can never
-          // reach zero again.
-          <div className="flex min-h-full flex-col md:h-full">
+          // ONE scroll for the whole cortex position, at every width.
+          //
+          // This pane used to divide `h-full` from `md` up between a pinned
+          // canvas and a separately scrolling hub list, because there were
+          // exactly two blocks to divide (below `md` the canvas alone was
+          // taller than the pane, the hub list resolved to `height: 0`, and it
+          // took its scrollbar with it — "top 12 of 12,873" over nothing).
+          // There are three blocks now, and they are three altitudes on ONE
+          // aggregation continuum rather than a pair of panes: the CORTEX
+          // relief over the whole clustering, then the graph slice over the
+          // busiest connected region of it, then the ranked symbols. A
+          // continuum cannot be pinned in halves, so the pane grows to its
+          // content and the archetype's scroller carries the column — which is
+          // the behaviour that already applied below `md` and is what makes
+          // reading down the column mean "aggregation decreases", the same
+          // sentence the lens ruler above prints.
+          <div className="flex min-h-full flex-col">
+            {/* Far = CORTEX (plan 11b `:229`). The macro underlay comes first
+              * because it is the farthest position on the continuum, and it is
+              * handed the current focus so the terrain can ring the region the
+              * traced symbol actually lives in. */}
+            <CortexRelief focusPath={resolvedFocus?.file_path ?? null} />
             <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
               <GraphSlicePane
                 pending={subgraph.isPending}
@@ -342,7 +353,7 @@ export function CodePage() {
                 seedLabel={selected ? displayName(selected) : null}
               />
             </div>
-            <div className="md:min-h-[var(--pane-min-height)] md:flex-1 md:overflow-auto">
+            <div className="md:min-h-[var(--pane-min-height)]">
               {submitted === '' ? (
                 <TopConnectedList
                   overviewPending={overview.isPending}

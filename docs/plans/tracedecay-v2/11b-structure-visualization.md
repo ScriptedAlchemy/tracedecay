@@ -230,6 +230,48 @@ Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE floods.
 Enter a file = CORE SAMPLE. LENS is the theory of motion between them. The
 sensory contract rides on top: channel = spring, mass = weight, churn = warmth.
 
+## Correction — CORTEX is shipped (2026-08-08)
+
+The synthesis above was PARTIAL: Anatomy, Transit (CallChain + Strata), TRACE,
+CORE SAMPLE and the LENS ruler were all in `dashboard/src/workspaces/code/`,
+and the macro end of the continuum had no shipped surface. It does now.
+`CortexRelief.tsx` renders in the `cortex` position of the existing
+`StructureLensRuler`, above the connectivity spine, over one wire reading:
+`GET /api/plugins/graph/strata` (`StrataMeasurementV1`). The model/renderer
+split the "Rendering strategy" section requires is `cortexRelief.ts` (pure
+layout) → `cortexRender.ts` (Canvas2D, decides nothing) → `CortexCanvas.tsx`
+(browser wiring), matching the TRACE arrangement; tests hit the pure modules.
+
+Two channels of the round-one sheet are NOT drawn, because nothing serves them,
+and the surface says so in a "not on this sheet" panel rather than omitting
+them silently:
+
+- **churn tint.** No git-churn read is exposed to the dashboard contract at all
+  (`grep -i churn dashboard/src/contracts/generated.ts` is empty). Closing this
+  needs a hotspots-style read model on the dashboard surface.
+- **cross-module channels.** `StrataClusterV1` carries each cluster's own
+  `internal/incoming/outgoing/boundary_edges` totals but no region-PAIR edge
+  count, and `dsm_clusters` (`src/graph/health.rs:259`) never computes one. A
+  ribbon drawn between two regions from a per-region total would be invented,
+  so none is drawn; each region's in/out totals are columns in the table
+  instead. Closing this needs a per-pair boundary aggregate on `/strata`.
+
+The `:134` "area = symbol mass" channel is drawn as **file mass**: the strata
+read is file-granular by its own `granularity` field, and no per-directory
+symbol count is served (`overview.largest_files` is a top-N sample, so deriving
+one from it would understate every region outside the sample). The legend says
+"files and not symbols" on the surface.
+
+The round-two open question at `:218` — whether contours should encode coupling
+ratio rather than edges-per-symbol — is still open and is now a one-line change
+in `buildCortexModel`, where `density` is computed.
+
+`viz/trace/render.ts` still carries its deliberate note that the dimmed cortex
+underlay is dropped "until the cortex endpoint exists". That remains accurate
+for TRACE: this surface aggregates the strata read at the macro altitude and
+publishes no per-symbol region membership, so the TRACE underlay is unchanged
+and out of scope here.
+
 ## Visual artifact index (reference images)
 
 This branch-tied index is historical design evidence, not a delivery authority,
