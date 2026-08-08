@@ -21,13 +21,21 @@ fn scope() -> DashboardScopeV1 {
 
 #[test]
 fn configuration_patch_and_cas_errors_are_api_owned() {
+    // Both the expected revision and the idempotency key are required: a patch
+    // that carries neither a compare-and-set target nor a replay identity is
+    // not a settings edit this transport will accept.
     let project = parse_project_settings_patch(json!({
         "expected_revision_id": "revision.project.1",
+        "idempotency_key": "configuration.idempotency.project.1",
         "include": ["src/**"],
         "sync": {"auto_track_pr_branches": true}
     }))
     .expect("valid project patch");
     assert_eq!(project.expected_revision_id, "revision.project.1");
+    assert_eq!(
+        project.idempotency_key,
+        "configuration.idempotency.project.1"
+    );
     assert_eq!(project.include, Some(vec!["src/**".to_owned()]));
     assert_eq!(
         project.sync.expect("sync patch").auto_track_pr_branches,

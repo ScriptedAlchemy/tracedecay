@@ -498,6 +498,7 @@ mod tests {
                 WorkOperation::ListAttempts,
                 WorkOperation::HydrateArtifacts,
                 WorkOperation::Views,
+                WorkOperation::Topology,
                 WorkOperation::RunControl,
                 WorkOperation::PlacementPreflight,
                 WorkOperation::PlacementStatus,
