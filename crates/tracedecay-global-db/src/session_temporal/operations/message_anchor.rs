@@ -852,6 +852,22 @@ mod tests {
         )
         .await
         .expect("malformed source horizon");
+        // Availability is generation-scoped and checked before the horizon is
+        // read, so the copied node needs the published node's availability row
+        // or the refusal under test is never reached.
+        conn.execute(
+            "INSERT INTO session_summary_availability (
+                session_id, generation, summary_id, availability,
+                source_horizon_json, reason, checked_at
+             )
+             SELECT session_id, generation, 'summary.message-anchor.malformed',
+                    availability, source_horizon_json, reason, checked_at
+               FROM session_summary_availability
+              WHERE summary_id = 'summary.message-anchor'",
+            (),
+        )
+        .await
+        .expect("malformed node availability");
 
         let mut publication = parent_publication();
         publication.draft.source_refs = vec![LcmSourceRef::SummaryNode {
