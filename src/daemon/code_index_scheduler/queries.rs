@@ -660,6 +660,32 @@ pub(in crate::daemon) struct GenerationRecordIndexV1 {
     chunk_by_file_symbol: HashMap<(FileOccurrenceId, SymbolOccurrenceId), usize>,
     edges_from: HashMap<SymbolOccurrenceId, Vec<usize>>,
     edges_to: HashMap<SymbolOccurrenceId, Vec<usize>>,
+    kind_facet_rows: Vec<(usize, usize)>,
+    qualified_name_order: Vec<usize>,
+    last_segment_order: Vec<usize>,
+}
+
+/// The final `::` segment of a qualified name, or the whole name when it has
+/// none. `rsplit` always yields at least one item, so the fallback only
+/// satisfies the type.
+fn last_qualified_segment(qualified_name: &str) -> &str {
+    qualified_name.rsplit("::").next().unwrap_or(qualified_name)
+}
+
+/// The sub-slice of `order` whose keys equal `selector`.
+///
+/// `order` must be sorted ascending by `key` with ties in ascending position
+/// order, which is what [`GenerationRecordIndexV1::build`] produces; the
+/// returned positions are therefore in the same ascending order a full scan
+/// would have visited them.
+fn sorted_positions_for<'a>(
+    order: &'a [usize],
+    selector: &str,
+    key: impl Fn(usize) -> &'a str,
+) -> &'a [usize] {
+    let start = order.partition_point(|&position| key(position) < selector);
+    let end = start + order[start..].partition_point(|&position| key(position) == selector);
+    &order[start..end]
 }
 
 impl GenerationRecordIndexV1 {
@@ -696,6 +722,36 @@ impl GenerationRecordIndexV1 {
                 .or_insert(position);
         }
 
+        let mut qualified_name_order = (0..symbols.len()).collect::<Vec<_>>();
+        qualified_name_order.sort_unstable_by(|left, right| {
+            symbols[*left]
+                .qualified_name
+                .cmp(&symbols[*right].qualified_name)
+                .then(left.cmp(right))
+        });
+        let mut last_segment_order = (0..symbols.len()).collect::<Vec<_>>();
+        last_segment_order.sort_unstable_by(|left, right| {
+            last_qualified_segment(&symbols[*left].qualified_name)
+                .cmp(last_qualified_segment(&symbols[*right].qualified_name))
+                .then(left.cmp(right))
+        });
+
+        // Keep only the symbol/file joins that `symbol_record_by_id` could
+        // resolve. Facet reads can then use the borrowed lineage kind and file
+        // path directly instead of allocating a complete application record
+        // for every symbol on every request.
+        let mut kind_facet_rows = Vec::with_capacity(symbols.len());
+        for (symbol_position, symbol) in symbols.iter().enumerate() {
+            let Some(chunk_position) = chunk_by_symbol.get(&symbol.occurrence) else {
+                continue;
+            };
+            let file_occurrence = &chunks[*chunk_position].anchor.file_occurrence_id;
+            let Some(file_position) = files_by_occurrence.get(file_occurrence) else {
+                continue;
+            };
+            kind_facet_rows.push((symbol_position, *file_position));
+        }
+
         let mut edges_from: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
         let mut edges_to: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
         for (position, edge) in generation.edges().iter().enumerate() {
@@ -717,6 +773,9 @@ impl GenerationRecordIndexV1 {
             chunk_by_file_symbol,
             edges_from,
             edges_to,
+            kind_facet_rows,
+            qualified_name_order,
+            last_segment_order,
         }
     }
 
@@ -764,6 +823,33 @@ impl GenerationRecordIndexV1 {
             self.edges_from.get(symbol)
         };
         adjacency.map_or(&[][..], Vec::as_slice)
+    }
+
+    /// Resolvable symbol/file rows in canonical symbol position order.
+    pub(super) fn kind_facet_rows(&self) -> &[(usize, usize)] {
+        &self.kind_facet_rows
+    }
+
+    /// Canonical symbol positions whose full qualified name equals `selector`.
+    pub(super) fn qualified_name_positions<'a>(
+        &'a self,
+        symbols: &'a [tracedecay_code_index::lineage::LineageSymbolRecordV1],
+        selector: &str,
+    ) -> &'a [usize] {
+        sorted_positions_for(&self.qualified_name_order, selector, |position| {
+            symbols[position].qualified_name.as_str()
+        })
+    }
+
+    /// Canonical symbol positions whose last qualified segment equals `selector`.
+    pub(super) fn last_segment_positions<'a>(
+        &'a self,
+        symbols: &'a [tracedecay_code_index::lineage::LineageSymbolRecordV1],
+        selector: &str,
+    ) -> &'a [usize] {
+        sorted_positions_for(&self.last_segment_order, selector, |position| {
+            last_qualified_segment(&symbols[position].qualified_name)
+        })
     }
 }
 
@@ -1829,13 +1915,13 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
+            let symbols = &prepared.latest.generation.symbols().symbols;
             let mut items = prepared
                 .latest
-                .generation
-                .symbols()
-                .symbols
+                .record_index()
+                .qualified_name_positions(symbols, &request.qualified_name)
                 .iter()
-                .filter(|symbol| symbol.qualified_name == request.qualified_name)
+                .map(|position| &symbols[*position])
                 .filter_map(|symbol| symbol_record_by_id(&prepared.latest, &symbol.occurrence))
                 .filter(|record| path_is_in_code_query_scope(&record.file, &request.scope))
                 .collect::<Vec<_>>();
@@ -1937,22 +2023,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     name
                 }
             };
-            let mut items = Vec::new();
-            for target in prepared
-                .latest
-                .generation
-                .symbols()
-                .symbols
+            let symbols = &prepared.latest.generation.symbols().symbols;
+            let index = prepared.latest.record_index();
+            let target_positions = index
+                .qualified_name_positions(symbols, selector)
                 .iter()
-                .filter(|symbol| {
-                    symbol.qualified_name == *selector
-                        || symbol
-                            .qualified_name
-                            .rsplit("::")
-                            .next()
-                            .is_some_and(|name| name == selector)
-                })
-            {
+                .chain(index.last_segment_positions(symbols, selector))
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let mut items = Vec::new();
+            for target_position in target_positions {
+                let target = &symbols[target_position];
                 items.extend(relation_records(
                     &prepared.latest,
                     &target.occurrence,
@@ -2264,14 +2345,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let mut counts = std::collections::BTreeMap::<String, u64>::new();
             match request.dimension {
                 CodeFacetDimension::Kind => {
-                    for symbol in &prepared.latest.generation.symbols().symbols {
-                        let Some(record) =
-                            symbol_record_by_id(&prepared.latest, &symbol.occurrence)
-                        else {
-                            continue;
-                        };
-                        if path_is_in_code_query_scope(&record.file, &request.scope) {
-                            *counts.entry(record.kind).or_default() += 1;
+                    let symbols = &prepared.latest.generation.symbols().symbols;
+                    let files = &prepared.latest.generation.snapshot().files;
+                    for (symbol_position, file_position) in
+                        prepared.latest.record_index().kind_facet_rows()
+                    {
+                        let file = &files[*file_position];
+                        if path_is_in_code_query_scope(&file.logical_path, &request.scope) {
+                            *counts
+                                .entry(symbols[*symbol_position].kind.clone())
+                                .or_default() += 1;
                         }
                     }
                 }

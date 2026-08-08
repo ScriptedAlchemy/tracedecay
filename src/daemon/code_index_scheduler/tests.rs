@@ -1964,6 +1964,61 @@ fn generation_record_index_matches_linear_scan_lookups() {
         );
     }
 
+    let facet_rows = index.kind_facet_rows();
+    let expected_facet_rows = symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(symbol_position, symbol)| {
+            let chunk = chunks.iter().find(|candidate| {
+                candidate.anchor.symbol_occurrence_id.as_ref() == Some(&symbol.occurrence)
+            })?;
+            let file_position = snapshot_files.iter().position(|candidate| {
+                candidate.file_occurrence_id == chunk.anchor.file_occurrence_id
+            })?;
+            Some((symbol_position, file_position))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        facet_rows, expected_facet_rows,
+        "indexed facet rows must match the resolvable linear symbol/file joins"
+    );
+
+    for selector in symbols
+        .iter()
+        .take(12)
+        .map(|symbol| symbol.qualified_name.as_str())
+    {
+        let expected = symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, symbol)| symbol.qualified_name == selector)
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index.qualified_name_positions(symbols, selector),
+            expected,
+            "indexed qualified-name lookup must match the linear scan"
+        );
+    }
+
+    for selector in symbols
+        .iter()
+        .take(12)
+        .map(|symbol| symbol.qualified_name.rsplit("::").next().expect("segment"))
+    {
+        let expected = symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, symbol)| symbol.qualified_name.rsplit("::").next() == Some(selector))
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            index.last_segment_positions(symbols, selector),
+            expected,
+            "indexed last-segment lookup must match the linear scan"
+        );
+    }
+
     for chunk in chunks {
         let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() else {
             continue;
