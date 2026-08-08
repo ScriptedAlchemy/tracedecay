@@ -142,6 +142,25 @@ fn profile_project_databases_share_the_profile_scope() {
 }
 
 #[test]
+fn legacy_profile_store_databases_share_the_profile_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let first = profile.join("stores/first/graph.db");
+    let second = profile.join("stores/second/branches/main.db");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+
+    let first = DatabaseIdentity::for_path(&first).unwrap();
+    let second = DatabaseIdentity::for_path(&second).unwrap();
+    assert_eq!(
+        first.profile_root,
+        profile.canonicalize().unwrap(),
+        "legacy profile stores must inherit the profile lifecycle fence"
+    );
+    assert_eq!(second.profile_root, first.profile_root);
+}
+
+#[test]
 fn remote_node_databases_inherit_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
