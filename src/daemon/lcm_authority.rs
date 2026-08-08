@@ -54,7 +54,18 @@ impl RegisteredLcmDaemonStore {
 
 impl LcmDaemonStore for RegisteredLcmDaemonStore {
     fn ingest(&self, request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
-        Box::pin(self.database.lcm_preflight(request))
+        let database = Arc::clone(&self.database);
+        Box::pin(async move {
+            // Persist the host-completed turn through the canonical
+            // compression ingest route (session upsert + protected raw-message
+            // ingest). The no-op summarizer stops before any summary is
+            // minted, so ingest commits raw turn content and nothing else.
+            let turn = turn_ingest_compression_request(request.clone());
+            super::lcm_effects::DaemonLcmEffectService::new(Arc::clone(&database), None, None)
+                .compress(turn)
+                .await?;
+            database.lcm_preflight(request).await
+        })
     }
 
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
@@ -94,10 +105,26 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
 /// daemon's authoritative summarization route (native evidence or a provider
 /// auxiliary summarizer), never from caller-authored text.
 fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressionRequest {
+    compression_request_from_preflight(preflight, Vec::new(), LcmSummarizerMode::HermesAuxiliary)
+}
+
+/// Durable ingest of a host-completed turn: the canonical compression route
+/// upserts the session and protected raw messages, and the no-op summarizer
+/// guarantees ingest never mints summary state.
+fn turn_ingest_compression_request(mut preflight: LcmPreflightRequest) -> LcmCompressionRequest {
+    let messages = std::mem::take(&mut preflight.messages);
+    compression_request_from_preflight(preflight, messages, LcmSummarizerMode::Noop)
+}
+
+fn compression_request_from_preflight(
+    preflight: LcmPreflightRequest,
+    messages: Vec<serde_json::Value>,
+    summarizer: LcmSummarizerMode,
+) -> LcmCompressionRequest {
     LcmCompressionRequest {
         provider: preflight.provider,
         session_id: preflight.session_id,
-        messages: Vec::new(),
+        messages,
         current_tokens: preflight.current_tokens,
         focus_topic: None,
         ignore_session_patterns: preflight.ignore_session_patterns,
@@ -115,7 +142,7 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
         dynamic_leaf_chunk_max: preflight.dynamic_leaf_chunk_max,
         context_length: preflight.context_length,
         reserve_tokens_floor: preflight.reserve_tokens_floor,
-        summarizer: LcmSummarizerMode::HermesAuxiliary,
+        summarizer,
     }
 }
 

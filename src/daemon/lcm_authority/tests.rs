@@ -23,6 +23,7 @@ use super::*;
 #[derive(Default)]
 struct FakeStore {
     calls: Mutex<Vec<LcmAuthorityOperation>>,
+    compact_requests: Mutex<Vec<LcmCompressionRequest>>,
     status: Mutex<Option<LcmStatus>>,
 }
 
@@ -31,6 +32,13 @@ impl FakeStore {
         self.calls
             .lock()
             .map(|calls| calls.clone())
+            .unwrap_or_default()
+    }
+
+    fn compact_requests(&self) -> Vec<LcmCompressionRequest> {
+        self.compact_requests
+            .lock()
+            .map(|requests| requests.clone())
             .unwrap_or_default()
     }
 }
@@ -53,6 +61,9 @@ impl LcmDaemonStore for FakeStore {
     fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(LcmAuthorityOperation::Compact);
+        }
+        if let Ok(mut requests) = self.compact_requests.lock() {
+            requests.push(request.clone());
         }
         Box::pin(async move {
             Ok(LcmCompressionResponse {
@@ -475,12 +486,18 @@ async fn expired_deadline_stops_before_store_effect() {
 }
 
 #[tokio::test]
-async fn pressure_only_event_is_read_only_and_reports_missing_native_payload() {
+async fn pressure_only_event_compacts_daemon_owned_without_caller_payload() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
+    let mut pressure_preflight = preflight("cursor");
+    pressure_preflight.messages = vec![serde_json::json!({
+        "id": "message.caller-authored",
+        "role": "user",
+        "content": "caller-authored text must never reach the store"
+    })];
     let command = LcmCompactionCommand {
-        preflight: preflight("cursor"),
+        preflight: pressure_preflight,
         evidence: LcmCompressionEvidence::PressureOnly {
             protocol: LcmHostProtocol::CursorPreCompact {
                 protocol_revision: "cursor.precompact.v1".to_owned(),
@@ -499,15 +516,26 @@ async fn pressure_only_event_is_read_only_and_reports_missing_native_payload() {
         })
         .await;
 
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
-        }
+    // A pressure signal triggers the daemon-owned compaction route; the
+    // summarization source is the daemon's canonical store, never
+    // caller-authored preflight text.
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
+    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
+    let requests = store.compact_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.is_empty(),
+        "pressure evidence must not carry caller-authored messages into the store"
     );
-    assert!(store.calls().is_empty());
-    assert!(response.payload.is_none());
-    assert!(response.receipt.committed_state.is_none());
+    assert!(matches!(
+        requests[0].summarizer,
+        LcmSummarizerMode::HermesAuxiliary
+    ));
+    assert!(matches!(
+        response.payload,
+        Some(LcmAuthorityPayload::Compaction(_))
+    ));
+    assert!(response.receipt.committed_state.is_some());
 }
 
 #[tokio::test]
@@ -639,13 +667,11 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
         })
         .await;
 
-    assert_eq!(
-        response.outcome,
-        LcmAuthorityOutcome::Unavailable {
-            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
-        }
-    );
-    assert!(response.receipt.committed_state.is_none());
+    // The daemon-owned compaction route runs against its own canonical
+    // store; for a session it never ingested there is nothing to compact
+    // and, critically, the caller-authored preflight payload must not mint
+    // durable session, raw-message, or summary state.
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
     for table in [
         "lcm_raw_messages",
         "lcm_summary_nodes",
