@@ -84,8 +84,10 @@ impl LatestCompleteCodeIndexV1 {
         let snapshot = retained
             .publish_verified_snapshot(&self.generation, Arc::clone(&cancellation))
             .map_err(CodeGraphProjectionError::from)?;
-        let store =
-            CodeGraphProjectionStore::from_verified_snapshot(snapshot, generation_id.clone())?;
+        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+            snapshot,
+            generation_id.clone(),
+        )?);
         let reader = store.evidence_reader_with_cancellation(
             &generation_id,
             Some(self.generation.snapshot().repository.clone()),
@@ -95,6 +97,10 @@ impl LatestCompleteCodeIndexV1 {
         )?;
         self.install_query_owners(reader, CodeGraphServingAuthorityV1::Persistent(authority))
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        // First activation of a generation retains its store; a repeat
+        // activation keeps the original, which is pinned to the same verified
+        // snapshot and generation.
+        let _ = self.interactive_graph.set(store);
         let _ = self.generation.admitted_chunks();
         let _ = self.generation.test_attribution_authority();
         let _ = self.record_index();

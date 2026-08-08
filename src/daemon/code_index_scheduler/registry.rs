@@ -12,7 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -139,7 +139,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     /// Packed [`CodeIndexCadenceTriggerV1`] for the pending wake.
     pending_wake_trigger: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
-    reconcile_in_progress: Arc<AtomicBool>,
+    /// Count of in-flight owner passes; nonzero means activation or reconcile
+    /// work is running for this worktree.
+    reconcile_in_progress: Arc<AtomicUsize>,
     active_generation_encoded_bytes: Arc<AtomicU64>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
@@ -590,7 +592,7 @@ impl CodeIndexSchedulerRegistryV1 {
             reconciling_worktrees: u64::try_from(
                 mounted
                     .values()
-                    .filter(|worktree| worktree.reconcile_in_progress.load(Ordering::Acquire))
+                    .filter(|worktree| worktree.reconcile_in_progress.load(Ordering::Acquire) != 0)
                     .count(),
             )
             .unwrap_or(u64::MAX),
@@ -757,6 +759,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let pending_wake_micros = Arc::new(AtomicU64::new(0));
         let pending_wake_trigger = Arc::new(AtomicU64::new(0));
         let worker_scheduler = Arc::clone(&scheduler);
+        let worker_reconcile_in_progress = Arc::clone(&reconcile_in_progress);
         let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_wake = Arc::clone(&wake);
         let worker_pending_wake_micros = Arc::clone(&pending_wake_micros);
@@ -792,6 +795,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
+                // Hold the in-progress signal for the entire pass — from the
+                // moment the pending wake is claimed until a failed pass has
+                // restored its arrival — so query admission never observes a
+                // claimed-but-flagless gap and misreads in-flight owner work
+                // as plain unavailability.
+                let _reconcile_pass =
+                    super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
                 // Dequeue instant: admission is held and the reconcile is about
                 // to start, so queue wait ends here and service time begins.
                 let started_micros = now_micros().0;
@@ -1607,7 +1617,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         tokio::task::spawn_blocking(move || {
-            let refreshing = reconcile_in_progress.load(Ordering::Acquire);
+            let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
             let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -2134,7 +2144,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_none()
-            && (worktree.reconcile_in_progress.load(Ordering::Acquire)
+            && (worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
                 || worktree.pending_wake_micros.load(Ordering::Acquire) != 0)
     }
 

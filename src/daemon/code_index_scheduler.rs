@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -34,7 +34,9 @@ use crate::{
     },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
-        graph_projection::{CodeGraphEvidenceReader, CodeGraphProjectionError},
+        graph_projection::{
+            CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+        },
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -1258,13 +1260,15 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 }
 
 /// The lazily built serving caches shared by every handle bound to one sealed
-/// generation: the exact/lexical/graph lane owners and the record lookup index.
-/// Both are rebuilt only when a new generation is loaded.
+/// generation: the exact/lexical/graph lane owners, the record lookup index,
+/// and the retained interactive graph store. All are rebuilt only when a new
+/// generation is loaded.
 type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
     Arc<Mutex<()>>,
+    Arc<OnceLock<Arc<CodeGraphProjectionStore>>>,
 );
 
 #[derive(Clone)]
@@ -1277,6 +1281,11 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     /// projection inline — N concurrent cold queries did N store-sized builds,
     /// each blowing its own dispatch deadline while the warm was still running.
     query_owners_build_gate: Arc<Mutex<()>>,
+    /// The verified-snapshot projection store retained by persistent graph
+    /// activation. Interactive readers open from it per request; a cold value
+    /// means the persistent Grafeo activation has not completed and every
+    /// interactive read answers its typed unavailable state.
+    interactive_graph: Arc<OnceLock<Arc<CodeGraphProjectionStore>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1447,6 +1456,22 @@ impl LatestCompleteCodeIndexV1 {
         }
     }
 
+    /// The retained verified-snapshot projection store for interactive graph
+    /// reads, present once persistent graph activation has completed.
+    ///
+    /// Interactive reads require the persistent Grafeo activation: unlike the
+    /// retrieval lanes there is no in-memory fallback, so a cold store is the
+    /// typed not-activated state, never an empty serve.
+    pub fn interactive_graph_store(
+        &self,
+    ) -> Result<Arc<CodeGraphProjectionStore>, RetrievalPortError> {
+        self.interactive_graph.get().map(Arc::clone).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "code graph projection has not completed activation".to_owned(),
+            )
+        })
+    }
+
     fn source_freshness(&self) -> Result<tracedecay_domain::SourceFreshness, RetrievalPortError> {
         production_code_index_freshness(
             self.generation.manifest().seal.sealed_at,
@@ -1555,11 +1580,23 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     GraphActivation(String),
 }
 
-struct AtomicFlagReset(Arc<AtomicBool>);
+/// Counts in-flight owner passes (retained activation or reconcile). A
+/// counter rather than a flag so the background worker can hold the state
+/// across an entire pass — claim of the pending wake through arrival restore —
+/// while the scheduler's own entry points nest inside it without clearing the
+/// in-progress signal early.
+pub(super) struct ReconcilePassGuard(Arc<AtomicUsize>);
 
-impl Drop for AtomicFlagReset {
+impl ReconcilePassGuard {
+    pub(super) fn enter(passes: &Arc<AtomicUsize>) -> Self {
+        passes.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(passes))
+    }
+}
+
+impl Drop for ReconcilePassGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1605,7 +1642,9 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
-    reconcile_in_progress: Arc<AtomicBool>,
+    /// Number of in-flight owner passes; nonzero means activation or
+    /// reconcile work is running for this worktree.
+    reconcile_in_progress: Arc<AtomicUsize>,
     latest_content_identity: Option<ContentDigest>,
     query_owners: Mutex<Option<GenerationServingCachesV1>>,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
@@ -1701,7 +1740,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
-            reconcile_in_progress: Arc::new(AtomicBool::new(false)),
+            reconcile_in_progress: Arc::new(AtomicUsize::new(0)),
             latest_content_identity,
             query_owners: Mutex::new(None),
             semantic_schedule: None,
@@ -1837,6 +1876,12 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn activate_or_reconcile(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        // The in-progress signal must cover the retained-activation branch
+        // too: the worker has already claimed the pending wake, so without it
+        // a failing activation pass would leave query admission unable to see
+        // any in-flight owner work and misreport unverified retained state as
+        // plain unavailability.
+        let _reconcile_guard = ReconcilePassGuard::enter(&self.reconcile_in_progress);
         if let Some(outcome) = self.activate_retained_generation_from_frontier()? {
             return Ok(outcome);
         }
@@ -1849,8 +1894,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        self.reconcile_in_progress.store(true, Ordering::Release);
-        let _reconcile_guard = AtomicFlagReset(Arc::clone(&self.reconcile_in_progress));
+        let _reconcile_guard = ReconcilePassGuard::enter(&self.reconcile_in_progress);
         // Re-resolve exact identity before indexing (tier-3 backstop). The
         // worktree must still be the same structural identity this scheduler is
         // bound to; a HEAD move under the same worktree is allowed and simply
@@ -2294,21 +2338,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index, query_owners_build_gate) = match cached.as_ref() {
-            Some((cached_id, owners, index, gate)) if cached_id == &generation_id => {
-                (Arc::clone(owners), Arc::clone(index), Arc::clone(gate))
-            }
+        let (query_owners, record_index, query_owners_build_gate, interactive_graph) = match cached
+            .as_ref()
+        {
+            Some((cached_id, owners, index, gate, interactive)) if cached_id == &generation_id => (
+                Arc::clone(owners),
+                Arc::clone(index),
+                Arc::clone(gate),
+                Arc::clone(interactive),
+            ),
             _ => {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
                 let gate = Arc::new(Mutex::new(()));
+                let interactive = Arc::new(OnceLock::new());
                 *cached = Some((
                     generation_id,
                     Arc::clone(&owners),
                     Arc::clone(&index),
                     Arc::clone(&gate),
+                    Arc::clone(&interactive),
                 ));
-                (owners, index, gate)
+                (owners, index, gate, interactive)
             }
         };
         LatestCompleteCodeIndexV1 {
@@ -2316,6 +2367,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             query_owners,
             record_index,
             query_owners_build_gate,
+            interactive_graph,
         }
     }
 
@@ -2366,12 +2418,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                         query_owners: Arc::new(OnceLock::new()),
                         record_index: Arc::new(OnceLock::new()),
                         query_owners_build_gate: Arc::new(Mutex::new(())),
+                        interactive_graph: Arc::new(OnceLock::new()),
                     })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
-    pub(super) fn reconcile_in_progress(&self) -> Arc<AtomicBool> {
+    pub(super) fn reconcile_in_progress(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.reconcile_in_progress)
     }
 
