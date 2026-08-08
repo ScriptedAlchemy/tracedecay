@@ -632,7 +632,24 @@ where
 pub fn worktree_inspection_digest(
     inspection: &WorktreeInspectionV1,
 ) -> Result<ManifestDigest, WorktreeContractError> {
-    canonical_sha256(inspection).map_err(|_| WorktreeContractError::Inconsistent {
+    // The observation timestamp and this field itself are audit/sealing
+    // metadata, not state identity. Excluding both makes an unchanged native
+    // worktree replayable after a crash or daemon restart.
+    canonical_sha256(&(
+        "tracedecay.native-worktree-inspection.v1",
+        &inspection.target,
+        inspection.presence,
+        inspection.kind,
+        &inspection.worktree_id,
+        &inspection.reference,
+        &inspection.head,
+        inspection.clean,
+        inspection.locked,
+        inspection.holder,
+        inspection.unique_data,
+        &inspection.operation,
+    ))
+    .map_err(|_| WorktreeContractError::Inconsistent {
         field: "worktree inspection digest",
     })
 }
