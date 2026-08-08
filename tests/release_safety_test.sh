@@ -26,9 +26,14 @@ version = Path("version.txt").read_text(encoding="utf-8").strip()
 release_manifest = json.loads(
     Path(".release-please-manifest.json").read_text(encoding="utf-8")
 )
+server_manifest = json.loads(Path("server.json").read_text(encoding="utf-8"))
 if root["package"].get("publish") is not False:
     raise SystemExit("root Cargo package must remain private")
-if root["package"]["version"] != version or release_manifest.get(".") != version:
+if (
+    root["package"]["version"] != version
+    or release_manifest.get(".") != version
+    or server_manifest.get("version") != version
+):
     raise SystemExit("release version authorities are not aligned")
 with Path("Cargo.lock").open("rb") as handle:
     lockfile = tomllib.load(handle)

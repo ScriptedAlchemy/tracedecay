@@ -25,6 +25,15 @@ def main() -> None:
     assert "164 MCP tools" in registry["description"]
     assert "50+ languages" in registry["description"]
 
+    release_config = json.loads(
+        (repository / "release-please-config.json").read_text(encoding="utf-8")
+    )
+    assert {
+        "type": "json",
+        "path": "server.json",
+        "jsonpath": "$.version",
+    } in release_config["packages"]["."]["extra-files"]
+
     targets = json.loads(
         (repository / ".github/release-targets.json").read_text(encoding="utf-8")
     )

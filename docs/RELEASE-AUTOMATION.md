@@ -4,8 +4,8 @@ TraceDecay uses two workflows with one publication authority:
 
 1. `Release Please` runs on pushes to `master`.
    - Opens or updates a release PR.
-   - Bumps `.release-please-manifest.json`, `version.txt`, `Cargo.toml`, and
-     `Cargo.lock`.
+   - Bumps `.release-please-manifest.json`, `version.txt`, `Cargo.toml`,
+     `server.json`, and `Cargo.lock`.
    - Updates `CHANGELOG.md`.
    - Creates the `vX.Y.Z` tag and GitHub Release.
 2. `Release` runs after a GitHub Release is published.
@@ -74,7 +74,7 @@ required reviewers if release-time approval is wanted; the environment gates
 review, while authentication itself is the OIDC workflow identity.
 
 Release PRs may modify only `.release-please-manifest.json`, `CHANGELOG.md`,
-`Cargo.lock`, `Cargo.toml`, and `version.txt`. The
+`Cargo.lock`, `Cargo.toml`, `server.json`, and `version.txt`. The
 read-only `Release PR integrity` workflow loads its guard from the trusted base
 commit, not from the proposed release branch. If a reviewed release PR must
 carry another change, apply the `release-extra-files-approved` label; tracked
