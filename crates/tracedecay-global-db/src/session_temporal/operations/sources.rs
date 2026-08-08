@@ -179,7 +179,7 @@ async fn prepare_summary_source(
     let timestamp = serde_json::from_str::<Value>(&horizon)
         .ok()
         .and_then(|value| value.get("knowledge_through").and_then(Value::as_i64))
-        .unwrap_or_default();
+        .ok_or_else(|| unavailable(node_id, "unverifiable_source_horizon"))?;
     Ok(PreparedSource {
         canonical: CanonicalSourceBinding {
             kind: "summary".to_string(),

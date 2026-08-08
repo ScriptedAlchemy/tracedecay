@@ -135,48 +135,52 @@ async fn resolve_canonical_observation(
     let mut rows = conn
         .query(
             "SELECT observation.observation_json, observation.receipt_id,
-                    link.anchor_id, anchor.anchor_json, anchor.owner_json
+                    effect.receipt_id, link.anchor_id, anchor.anchor_json,
+                    anchor.owner_json
              FROM session_temporal_observation_effects AS effect
-             JOIN observations AS observation
+             LEFT JOIN observations AS observation
                ON observation.observation_id = effect.observation_id
-             JOIN observation_retrieval_anchors AS link
+             LEFT JOIN observation_retrieval_anchors AS link
                ON link.observation_id = observation.observation_id
-             JOIN retrieval_anchors AS anchor
+             LEFT JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = link.anchor_id
              WHERE effect.session_id = ?1
                AND effect.output_count > 0
-               AND json_extract(
-                       observation.observation_json, '$.identity.source.provider'
-                   ) = ?2
-               AND json_extract(
-                       observation.observation_json, '$.identity.source.session_id'
-                   ) = ?1
-               AND COALESCE(
-                       json_extract(
-                           observation.observation_json, '$.payload.relations.message_id'
-                       ),
-                       json_extract(
-                           observation.observation_json, '$.payload.stable_record_id'
-                       )
-                   ) = ?3
              ORDER BY effect.observation_sequence, link.anchor_id",
-            params![session_id, provider, message_id],
+            params![session_id],
         )
         .await?;
     let mut resolved: Option<ResolvedMessageAnchor> = None;
     while let Some(row) = rows.next().await? {
-        let observation_raw = row.get::<String>(0)?;
-        let receipt_id = row.get::<String>(1)?;
-        let retained_anchor_id = row.get::<String>(2)?;
-        let anchor_json = row.get::<String>(3)?;
-        let owner_json = row.get::<String>(4)?;
-        // The SQL identity prefilter has established that this is a canonical
-        // observation for the requested message. From here on, malformed or
-        // inconsistent authority is a typed failure; only no selected row may
-        // fall back to the legacy raw-message identity space.
+        let observation_raw = row
+            .get::<Option<String>>(0)?
+            .ok_or_else(|| unavailable(message_id, "missing_observation_authority"))?;
         let observation = serde_json::from_str::<DurableObservationV1>(&observation_raw)
             .map_err(|_| unavailable(message_id, "unverifiable_observation"))?;
-        require_projects_message(&observation, message_id)?;
+        if observation.source().provider().as_str() != provider
+            || observation.source().session_id().as_str() != session_id
+        {
+            continue;
+        }
+        if !projects_message(&observation, message_id)? {
+            continue;
+        }
+        let receipt_id = row
+            .get::<Option<String>>(1)?
+            .ok_or_else(|| unavailable(message_id, "missing_observation_receipt"))?;
+        let effect_receipt_id = row.get::<String>(2)?;
+        if effect_receipt_id != receipt_id {
+            return Err(LcmError::SummarySourceNotOwnedBySession);
+        }
+        let retained_anchor_id = row
+            .get::<Option<String>>(3)?
+            .ok_or_else(|| unavailable(message_id, "missing_anchor_binding"))?;
+        let anchor_json = row
+            .get::<Option<String>>(4)?
+            .ok_or_else(|| unavailable(&retained_anchor_id, "missing_anchor_authority"))?;
+        let owner_json = row
+            .get::<Option<String>>(5)?
+            .ok_or_else(|| unavailable(&retained_anchor_id, "missing_anchor_owner"))?;
         let anchor = serde_json::from_str::<RetrievalAnchorRecord>(&anchor_json)
             .map_err(|_| unavailable(&retained_anchor_id, "unverifiable_anchor"))?;
         require_session_owned_observation(
@@ -206,18 +210,15 @@ async fn resolve_canonical_observation(
     Ok(resolved)
 }
 
-fn require_projects_message(
+fn projects_message(
     observation: &DurableObservationV1,
     message_id: &str,
-) -> Result<(), LcmError> {
+) -> Result<bool, LcmError> {
     let projects_message = derive_canonical_projection(observation)
         .map_err(|_| unavailable(message_id, "unverifiable_observation"))?
         .messages()
         .any(|output| output.message().message_id == message_id);
-    if !projects_message {
-        return Err(unavailable(message_id, "non_exact_observation"));
-    }
-    Ok(())
+    Ok(projects_message)
 }
 
 fn require_session_owned_observation(
@@ -436,6 +437,36 @@ mod tests {
         anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
         owner_json: &str,
     ) {
+        seed_canonical_observation(conn, observation_json, observation).await;
+        conn.execute(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (?1, ?2, ?3, 'projection.message-anchor-test.v1')",
+            params![
+                anchor.anchor_id().as_str(),
+                serde_json::to_string(anchor).expect("anchor json"),
+                owner_json,
+            ],
+        )
+        .await
+        .expect("retrieval anchor");
+        conn.execute(
+            "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
+             VALUES (?1, ?2)",
+            params![
+                observation.observation_id().as_str(),
+                anchor.anchor_id().as_str(),
+            ],
+        )
+        .await
+        .expect("observation anchor binding");
+    }
+
+    async fn seed_canonical_observation(
+        conn: &impl Executor,
+        observation_json: &str,
+        observation: &DurableObservationV1,
+    ) {
         let receipt = observation.receipt();
         conn.execute(
             "INSERT INTO sanitization_receipts (
@@ -465,28 +496,6 @@ mod tests {
         .await
         .expect("observation");
         conn.execute(
-            "INSERT INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES (?1, ?2, ?3, 'projection.message-anchor-test.v1')",
-            params![
-                anchor.anchor_id().as_str(),
-                serde_json::to_string(anchor).expect("anchor json"),
-                owner_json,
-            ],
-        )
-        .await
-        .expect("retrieval anchor");
-        conn.execute(
-            "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
-             VALUES (?1, ?2)",
-            params![
-                observation.observation_id().as_str(),
-                anchor.anchor_id().as_str(),
-            ],
-        )
-        .await
-        .expect("observation anchor binding");
-        conn.execute(
             "INSERT INTO session_temporal_observation_effects (
                 observation_id, observation_sequence, session_id, receipt_id,
                 effect_digest, output_count, recorded_at
@@ -511,6 +520,29 @@ mod tests {
                 depth: 0,
                 summary_text: "summary body".to_string(),
                 source_refs: vec![LcmSourceRef::RawMessage { store_id: 41 }],
+                source_token_count: 2,
+                summary_token_count: 2,
+                source_time_start: Some(1_715_000_001),
+                source_time_end: Some(1_715_000_001),
+                expand_hint: None,
+                metadata_json: None,
+            },
+        }
+    }
+
+    fn parent_publication() -> LcmImmutableSummaryPublication {
+        LcmImmutableSummaryPublication {
+            summary_id: "summary.message-anchor.parent".to_string(),
+            predecessor_summary_id: None,
+            draft: LcmSummaryNodeDraft {
+                provider: "codex".to_string(),
+                conversation_id: "conversation.message-anchor".to_string(),
+                session_id: "session.message-anchor".to_string(),
+                depth: 1,
+                summary_text: "parent summary body".to_string(),
+                source_refs: vec![LcmSourceRef::SummaryNode {
+                    node_id: "summary.message-anchor".to_string(),
+                }],
                 source_token_count: 2,
                 summary_token_count: 2,
                 source_time_start: Some(1_715_000_001),
@@ -603,6 +635,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_canonical_message_identity_is_not_hidden_by_candidate_filtering() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        let observation =
+            fixture_observation("codex", "session.message-anchor", "message.source", 1);
+        let anchor = fixture_anchor(&observation);
+        let mut malformed = serde_json::to_value(&observation).expect("observation json");
+        malformed["payload"]["relations"]["message_id"] = Value::from(7);
+        malformed["payload"]["stable_record_id"] = Value::from(8);
+        seed_canonical_binding(
+            &conn,
+            &malformed.to_string(),
+            &observation,
+            &anchor,
+            &serde_json::to_string(anchor.owner()).expect("owner json"),
+        )
+        .await;
+
+        let result = publish(&conn).await;
+
+        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert!(matches!(
+            result,
+            Err(LcmError::SummarySourceUnavailable { ref reason, .. })
+                if reason == "unverifiable_observation"
+        ));
+    }
+
+    #[tokio::test]
     async fn ownership_mismatched_canonical_binding_never_falls_back_to_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -671,6 +740,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_canonical_anchor_binding_never_falls_back_to_a_legacy_anchor() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        let observation =
+            fixture_observation("codex", "session.message-anchor", "message.source", 1);
+        seed_canonical_observation(
+            &conn,
+            &serde_json::to_string(&observation).expect("observation json"),
+            &observation,
+        )
+        .await;
+
+        let result = publish(&conn).await;
+
+        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert!(matches!(
+            result,
+            Err(LcmError::SummarySourceUnavailable { ref reason, .. })
+                if reason == "missing_anchor_binding"
+        ));
+    }
+
+    #[tokio::test]
     async fn unavailable_session_owner_never_inserts_a_legacy_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -719,6 +819,39 @@ mod tests {
             result,
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
                 if reason == "unverifiable_timestamp"
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_summary_horizon_never_fabricates_a_zero_knowledge_time() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        publish(&conn).await.expect("leaf summary publication");
+        conn.execute(
+            "UPDATE session_summary_nodes SET source_horizon_json = '{}'
+             WHERE summary_id = 'summary.message-anchor'",
+            (),
+        )
+        .await
+        .expect("malformed source horizon");
+
+        let result = super::super::sources::prepare_sources(&conn, &parent_publication()).await;
+
+        assert!(matches!(
+            result,
+            Err(LcmError::SummarySourceUnavailable {
+                ref source_id,
+                ref reason,
+            }) if source_id == "summary.message-anchor"
+                && reason == "unverifiable_source_horizon"
         ));
     }
 }

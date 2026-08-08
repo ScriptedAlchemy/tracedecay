@@ -334,7 +334,7 @@ fn candidate_generation(
                 "candidate is absent from the frozen participant manifest",
             )
         })?;
-    if participant.graph_watermark() != participant.watermarks().projection {
+    if participant.graph_watermark() != participant.generation() {
         return Err(read_message(
             RECORD_OPERATION,
             "candidate graph watermark is stale for the frozen projection",
