@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::privacy::detector_kernel::{
-    CredentialPattern, CredentialPatternKind, CredentialPatternProfile,
+    CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
     compile_credential_patterns, looks_high_entropy_token,
 };
 
@@ -25,8 +25,9 @@ fn compile_patterns(
         .collect()
 }
 
-fn regex_set() -> Result<&'static [CredentialPattern], &'static regex::Error> {
-    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, regex::Error>> = OnceLock::new();
+fn regex_set() -> Result<&'static [CredentialPattern], &'static CredentialRuleSetError> {
+    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, CredentialRuleSetError>> =
+        OnceLock::new();
     PATTERNS
         .get_or_init(|| compile_credential_patterns(CredentialPatternProfile::Memory))
         .as_deref()
@@ -125,7 +126,7 @@ mod tests {
     fn detects_known_prefixes_and_credentialish_assignments() {
         assert!(detect_secret_like("sk-proj1234567890abcdefghijklmn").is_some());
         assert!(detect_secret_like("Deploys used sk-test-742913 before rotation").is_some());
-        assert!(detect_secret_like("ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_some());
+        assert!(detect_secret_like("ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ").is_some());
         assert!(detect_secret_like("AKIAIOSFODNN7EXAMPLE is the access key").is_some());
         assert!(detect_secret_like(concat!("api_", "key=", "0000000000000000")).is_some());
         assert!(detect_secret_like("password: hunter2hunter2hunter2").is_some());

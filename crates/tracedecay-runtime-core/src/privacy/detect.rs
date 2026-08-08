@@ -14,9 +14,10 @@ use super::assessment::{
     validate_assessment,
 };
 use super::detector_kernel::{
-    CredentialPattern, CredentialPatternKind, CredentialPatternProfile, JsonPathSegment,
-    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, compile_credential_patterns,
-    entropy_bits_per_mille, high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
+    CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
+    JsonPathSegment, JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy,
+    compile_credential_patterns, entropy_bits_per_mille, high_entropy_ranges,
+    visit_json_object_keys, visit_sensitive_json_mut,
 };
 use super::length_prefixed_sha256_hex;
 
@@ -755,7 +756,8 @@ pub(super) fn redact_text(
 }
 
 pub(super) fn credential_patterns() -> Result<&'static [CredentialPattern], DetectionError> {
-    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, regex::Error>> = OnceLock::new();
+    static PATTERNS: OnceLock<Result<Vec<CredentialPattern>, CredentialRuleSetError>> =
+        OnceLock::new();
     PATTERNS
         .get_or_init(|| compile_credential_patterns(CredentialPatternProfile::Observation))
         .as_deref()

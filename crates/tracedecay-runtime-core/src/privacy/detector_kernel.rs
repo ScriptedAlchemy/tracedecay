@@ -1,177 +1,17 @@
 #![allow(dead_code)] // white-box test include; not all items exercised
 use std::ops::Range;
 
-use regex::Regex;
 use serde_json::Value;
 
-const KNOWN_CREDENTIAL_PATTERN: &str = r"\b(?:sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternKind {
-    PrivateKey,
-    BearerToken,
-    KnownCredential,
-    CredentialAssignment,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternProfile {
-    Observation,
-    Memory,
-}
-
-pub(crate) struct CredentialPattern {
-    kind: CredentialPatternKind,
-    regex: Regex,
-    assignment_min_len: Option<usize>,
-}
-
-impl CredentialPattern {
-    pub fn kind(&self) -> CredentialPatternKind {
-        self.kind
-    }
-
-    pub fn is_match(&self, text: &str) -> bool {
-        if let Some(min_len) = self.assignment_min_len {
-            return credential_assignment_ranges(text, &self.regex, min_len)
-                .next()
-                .is_some();
-        }
-        self.regex.is_match(text)
-    }
-
-    pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
-        if let Some(min_len) = self.assignment_min_len {
-            return credential_assignment_ranges(text, &self.regex, min_len).collect();
-        }
-        self.regex
-            .find_iter(text)
-            .map(|matched| matched.range())
-            .collect()
-    }
-}
-
-pub(crate) fn compile_credential_patterns(
-    profile: CredentialPatternProfile,
-) -> Result<Vec<CredentialPattern>, regex::Error> {
-    pattern_specs(profile)
-        .iter()
-        .map(|&(kind, pattern, assignment_min_len)| {
-            compile_pattern(kind, pattern, assignment_min_len)
-        })
-        .collect()
-}
-
-fn compile_pattern(
-    kind: CredentialPatternKind,
-    pattern: &str,
-    assignment_min_len: Option<usize>,
-) -> Result<CredentialPattern, regex::Error> {
-    Ok(CredentialPattern {
-        kind,
-        regex: Regex::new(pattern)?,
-        assignment_min_len,
-    })
-}
-
-fn pattern_specs(
-    profile: CredentialPatternProfile,
-) -> &'static [(CredentialPatternKind, &'static str, Option<usize>)] {
-    use CredentialPatternKind::{BearerToken, CredentialAssignment, KnownCredential, PrivateKey};
-
-    match profile {
-        CredentialPatternProfile::Observation => &[
-            (
-                PrivateKey,
-                r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)",
-                None,
-            ),
-            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}", None),
-            (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
-            (
-                CredentialAssignment,
-                r"(?i)\b(?:api[_ -]?(?:key|token)|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?(?:key|token)|client[_ -]?secret)\b[ \t]*[:=][ \t]*",
-                Some(6),
-            ),
-        ],
-        CredentialPatternProfile::Memory => &[
-            (
-                PrivateKey,
-                r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----",
-                None,
-            ),
-            (BearerToken, r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{20,}", None),
-            (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
-            (
-                CredentialAssignment,
-                r"(?i)\b(?:api[_-]?(?:key|token)|secret|token|passwd|password|credential|private[_-]?key|access[_-]?(?:key|token)|client[_-]?secret)\b[ \t]*[:=][ \t]*",
-                Some(16),
-            ),
-        ],
-    }
-}
-
-const MAX_ASSIGNMENT_SCAN_BYTES: usize = 1_048_576;
-
-fn credential_assignment_ranges<'a>(
-    text: &'a str,
-    prefix: &'a Regex,
-    min_len: usize,
-) -> impl Iterator<Item = Range<usize>> + 'a {
-    prefix.find_iter(text).filter_map(move |matched| {
-        let value_start = matched.end();
-        let limit = value_start
-            .saturating_add(MAX_ASSIGNMENT_SCAN_BYTES)
-            .min(text.len());
-        let bytes = text.as_bytes();
-        let quote = bytes
-            .get(value_start)
-            .copied()
-            .filter(|byte| matches!(byte, b'"' | b'\''));
-        let content_start = value_start + usize::from(quote.is_some());
-        let mut cursor = content_start;
-        let mut closed = false;
-
-        while cursor < limit {
-            let byte = bytes[cursor];
-            if matches!(byte, b'\r' | b'\n') {
-                break;
-            }
-            let escaped = quote.is_some_and(|quote| {
-                byte == quote
-                    && bytes[content_start..cursor]
-                        .iter()
-                        .rev()
-                        .take_while(|&&previous| previous == b'\\')
-                        .count()
-                        % 2
-                        == 1
-            });
-            if quote.is_some_and(|quote| byte == quote) && !escaped {
-                closed = true;
-                break;
-            }
-            if quote.is_none()
-                && matches!(
-                    byte,
-                    b' ' | b'\t' | b',' | b';' | b'}' | b']' | b'"' | b'\''
-                )
-            {
-                break;
-            }
-            cursor += 1;
-        }
-
-        while !text.is_char_boundary(cursor) {
-            cursor -= 1;
-        }
-        if cursor.saturating_sub(content_start) < min_len {
-            return None;
-        }
-        let end = cursor + usize::from(closed);
-        Some(matched.start()..end)
-    })
-}
+// Credential rules — the vendored community catalogue and TraceDecay's local
+// supplement — live in `super::rules`, which owns their schema, provenance and
+// compilation. They are re-exported here because this is the module every
+// consumer already imports the detector kernel from, and moving the rules out
+// of hand-written code should not move every caller with them.
+pub(crate) use super::rules::{
+    CredentialPattern, CredentialPatternKind, CredentialPatternProfile, CredentialRuleSetError,
+    compile_credential_patterns,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NormalizedSensitiveKey {
@@ -544,28 +384,6 @@ mod tests {
         });
 
         assert_eq!(strings, ["kept"]);
-    }
-
-    #[test]
-    fn assignment_patterns_include_bounded_quoted_punctuation() {
-        let patterns = compile_credential_patterns(CredentialPatternProfile::Observation)
-            .expect("valid observation patterns");
-        let assignment = patterns
-            .iter()
-            .find(|pattern| pattern.kind() == CredentialPatternKind::CredentialAssignment)
-            .expect("credential assignment pattern");
-
-        assert!(assignment.is_match(r#"password = "p@ssw0rd!""#));
-        assert!(assignment.is_match("password = p@ssw0rd!"));
-        assert!(assignment.is_match("password = \"truncated!"));
-
-        let escaped_quote = r#"password = "abcdef\"tailsecret""#;
-        assert_eq!(
-            assignment.ranges(escaped_quote),
-            vec![0..escaped_quote.len()]
-        );
-        let truncated = "password = \"truncated!";
-        assert_eq!(assignment.ranges(truncated), vec![0..truncated.len()]);
     }
 
     #[test]

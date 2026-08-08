@@ -8,6 +8,7 @@ mod assessment;
 mod detect;
 pub mod detector_kernel;
 mod lcm;
+mod rules;
 mod sanitize;
 mod structural_id;
 mod structured;
