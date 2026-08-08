@@ -787,16 +787,18 @@ mod tests {
         )
         .expect("open scheduler");
         scheduler.reconcile_now().expect("publish dirty generation");
+        let dirty = scheduler.latest_complete().expect("dirty generation");
         assert!(
-            scheduler
-                .latest_complete()
-                .expect("dirty generation")
-                .generation()
-                .snapshot()
-                .source_revision
-                .is_none(),
+            dirty.generation().snapshot().source_revision.is_none(),
             "dirty capture must not claim the unchanged HEAD"
         );
+        let dirty_content_identity = dirty
+            .generation()
+            .snapshot()
+            .content_identity
+            .as_str()
+            .to_owned();
+        drop(dirty);
         drop(scheduler);
 
         let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -820,23 +822,65 @@ mod tests {
         )
         .expect("resolved scope");
 
-        assert!(matches!(
-            registry
-                .generations_for_revisions(
-                    &scope,
-                    &reference,
-                    &revision,
-                    &tree,
-                    &reference,
-                    &revision,
-                    &tree,
-                    BranchGenerationReadControlV1 {
-                        deadline: None,
-                        cancellation: None,
-                    },
-                )
-                .await,
-            Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
-        ));
+        // The exact pair is no longer unavailable: the registry mints sealed
+        // exact generations straight from the commit's ODB tree on demand.
+        // The invariant this test guards is unchanged — the dirty sealed
+        // generation itself must never serve as exact-commit evidence.
+        let control = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match registry
+                    .generations_for_revisions(
+                        &scope,
+                        &reference,
+                        &revision,
+                        &tree,
+                        &reference,
+                        &revision,
+                        &tree,
+                        control.clone(),
+                    )
+                    .await
+                {
+                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
+                        tokio::task::yield_now().await;
+                    }
+                    result => break result,
+                }
+            }
+        })
+        .await
+        .expect("bounded exact-generation read")
+        .expect("exact generation minted from the commit tree");
+        for generation in [pair.base.generation(), pair.head.generation()] {
+            assert_eq!(
+                generation
+                    .snapshot()
+                    .source_revision
+                    .as_ref()
+                    .map(|value| value.as_str()),
+                Some(revision.as_str()),
+                "exact evidence must carry the requested commit revision"
+            );
+            assert_ne!(
+                generation.snapshot().content_identity.as_str(),
+                dirty_content_identity,
+                "the dirty sealed generation must never serve as exact-commit evidence"
+            );
+        }
+        let symbols = generation_symbols(pair.base.generation(), None, None, &control)
+            .expect("exact symbols");
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| symbol.name == "committed_value")
+        );
+        assert!(
+            symbols.iter().all(|symbol| symbol.name != "dirty_value"),
+            "exact generations must read immutable commit-tree blobs, not dirty worktree bytes"
+        );
     }
 }
