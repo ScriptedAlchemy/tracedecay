@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
@@ -21,9 +22,18 @@ impl DaemonSessionRuntimeRegistryV1 {
         // SQLite owner. Holding this map lock through first publication makes
         // linked-worktree opens one singleflight even though their route-local
         // servers and code-index schedulers remain distinct.
+        //
+        // Both sides of every locator check here are resolved before they are
+        // compared. The retained and registered sides have been through
+        // `fs::canonicalize` while the requested side is the name
+        // `StoreLayout` built, and those two spellings differ on hosts that
+        // offer more than one name for a file: Windows canonicalizes to the
+        // `\\?\` verbatim form, macOS resolves `/var` to `/private/var`.
+        // Comparing spellings refused a mount whose two locators name one
+        // file.
         let mut mounted = self.project_memory.lock().await;
         if let Some(database) = mounted.get(&project_id) {
-            if database.canonical_database_path() != database_path {
+            if !same_canonical_path(database.canonical_database_path(), &database_path) {
                 return Err(session_registry_error(
                     "reuse project graph runtime",
                     format!(
@@ -90,7 +100,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ));
             }
         };
-        if runtime.canonical_path() != database_path {
+        if !same_canonical_path(runtime.canonical_path(), &database_path) {
             return Err(session_registry_error(
                 "mount project graph runtime",
                 format!(

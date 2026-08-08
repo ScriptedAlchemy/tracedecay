@@ -56,6 +56,25 @@ pub fn canonicalize_path_or_existing_parent(path: &Path) -> PathBuf {
     canonicalize_existing_prefix(path).unwrap_or_else(|| path.to_path_buf())
 }
 
+/// Whether two pathnames name the same file, whatever spelling each carries.
+///
+/// A host offers more than one name for one file, and the two sides of a
+/// registry check routinely arrive spelled differently: one side has been
+/// through [`std::fs::canonicalize`] and the other is the name a caller built.
+/// `canonicalize` returns the `\\?\` verbatim form for every Windows path, so
+/// a registered locator reads `\\?\D:\store\graph.db` where its caller built
+/// `D:\store\graph.db`; macOS reaches `/tmp` and `/var` through symlinks, so
+/// the same pair reads `/private/var/...` against `/var/...`. Comparing the
+/// spellings reports two names of one file as two files.
+///
+/// Both sides are resolved through their deepest existing ancestor, so a
+/// locator whose final component has not been created yet still compares.
+#[must_use]
+pub fn same_canonical_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
+}
+
 /// Drops `.` and resolves `..` lexically, without touching the filesystem.
 ///
 /// This is a separate step rather than part of canonicalization because the
@@ -123,7 +142,7 @@ pub fn source_edit_path_error(operation: &'static str, error: io::Error) -> Trac
 mod tests {
     use super::{
         canonicalize_existing_prefix, collapse_relative_components,
-        normalize_source_edit_relative_path,
+        normalize_source_edit_relative_path, same_canonical_path,
     };
     use std::path::{Path, PathBuf};
 
@@ -142,6 +161,51 @@ mod tests {
     #[test]
     fn canonicalization_reports_no_existing_ancestor() {
         assert_eq!(canonicalize_existing_prefix(Path::new("")), None);
+    }
+
+    /// The registry shape: one side has been canonicalized, the other is the
+    /// name its caller built, and the file itself does not exist yet.
+    #[test]
+    fn a_canonicalized_locator_matches_the_spelling_its_caller_built() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let built = temp.path().join("projects").join("graph.db");
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("projects")
+            .join("graph.db");
+
+        assert!(same_canonical_path(&canonical, &built));
+        assert!(same_canonical_path(&built, &canonical));
+    }
+
+    /// The macOS shape reproduced on every host that has symlinks: `/var` and
+    /// `/private/var` are one directory reached by two names.
+    #[cfg(unix)]
+    #[test]
+    fn a_locator_reached_through_a_symlinked_ancestor_matches_its_target() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical temp root");
+        let real = root.join("private");
+        std::fs::create_dir(&real).expect("target directory");
+        std::os::unix::fs::symlink(&real, root.join("alias")).expect("directory alias");
+
+        assert!(same_canonical_path(
+            &real.join("graph.db"),
+            &root.join("alias").join("graph.db"),
+        ));
+    }
+
+    #[test]
+    fn two_distinct_locators_stay_distinct() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical temp root");
+
+        assert!(!same_canonical_path(
+            &root.join("left.db"),
+            &root.join("right.db"),
+        ));
     }
 
     #[test]
