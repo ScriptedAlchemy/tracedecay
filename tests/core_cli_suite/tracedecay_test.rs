@@ -3,9 +3,6 @@
 
 use std::{collections::BTreeSet, fs, process::Command, time::Duration};
 use tempfile::TempDir;
-use tracedecay::application::edit::{
-    SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
-};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, is_test_file};
@@ -19,6 +16,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+};
+use tracedecay_usecases::edit::{
+    SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
 };
 
 // ---------------------------------------------------------------------------
@@ -872,7 +872,7 @@ async fn str_replace_reindex_resolves_new_cross_file_call() {
         "source-edit.core-cli.reindex",
     )
     .await;
-    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
         panic!("str_replace returned the wrong outcome");
     };
     assert!(edit.success, "edit should succeed: {edit:?}");
@@ -928,7 +928,7 @@ async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
         "source-edit.core-cli.dry-run",
     )
     .await;
-    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
         panic!("str_replace returned the wrong outcome");
     };
 
@@ -1133,7 +1133,7 @@ async fn replace_symbol_dry_run_previews_without_writing() {
         "source-edit.core-cli.replace-preview",
     )
     .await;
-    let tracedecay::application::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
+    let tracedecay_usecases::edit::SourceEditOutcome::Edit(edit) = result.outcome else {
         panic!("replace_symbol returned the wrong outcome");
     };
 
@@ -1305,7 +1305,7 @@ async fn replace_symbol_preserves_first_in_file_doc_comment() {
         "source-edit.core-cli.preserve-doc",
     )
     .await;
-    let tracedecay::application::edit::SourceEditOutcome::Edit(result) = application_result.outcome
+    let tracedecay_usecases::edit::SourceEditOutcome::Edit(result) = application_result.outcome
     else {
         panic!("replace_symbol returned the wrong outcome");
     };
@@ -1337,8 +1337,7 @@ async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
         "source-edit.core-cli.insert-before-doc",
     )
     .await;
-    let tracedecay::application::edit::SourceEditOutcome::Insert(result) =
-        application_result.outcome
+    let tracedecay_usecases::edit::SourceEditOutcome::Insert(result) = application_result.outcome
     else {
         panic!("insert_at_symbol returned the wrong outcome");
     };

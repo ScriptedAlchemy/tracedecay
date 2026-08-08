@@ -21,11 +21,11 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
-use tracedecay::application::host_admission::{
-    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay::host_admission::{
+    HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::types::{Node, NodeKind, Visibility};
@@ -1194,6 +1194,25 @@ pub async fn write_empty_global_db_schema(db_path: &Path) {
         empty_lcm_db_template().await
     };
     seed_database_from_template(db_path, bytes, "global").await;
+
+    // Seeding creates the parent directory under the process umask, and that
+    // parent is the caller's profile root. `load_or_create_pinned` only chmods
+    // a root it created itself, so pre-seeding silently skips the 0700
+    // restriction and `validate_private_profile_root` then fail-closes with
+    // "profile identity root ... must have permissions 0700". This is the same
+    // compensation `TraceDecayStorageEnvGuard::set` already applies for the
+    // same reason; the seeding path needs it too.
+    #[cfg(unix)]
+    if let Some(profile_root) = db_path.parent() {
+        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap_or_else(
+            |err| {
+                panic!(
+                    "failed to restrict seeded test profile root '{}': {err}",
+                    profile_root.display()
+                )
+            },
+        );
+    }
 }
 
 async fn seed_lcm_db_from_template(db_path: &Path) {

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::application::host_admission::{
+pub(crate) use tracedecay::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1,
 };
 pub(crate) use tracedecay::automation::backend::{
@@ -38,7 +38,7 @@ pub(crate) use tracedecay::automation::runner::{
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1051,10 +1051,43 @@ pub(crate) fn assert_noop_fallback_record(
     );
 }
 
+/// Profile shard for a fixture project, pinned inside the fixture's own
+/// temporary tree.
+///
+/// A bare `TraceDecay::init` resolves the profile from `TRACEDECAY_DATA_DIR`,
+/// and `.cargo/config.toml` points that at the DURABLE, workspace-resident
+/// `target/test-profile/.tracedecay`. Pairing a durable profile with a
+/// `TempDir` project root is exactly the combination
+/// `project_registry::ephemeral_root_rejection` refuses ("project root
+/// '/tmp/.tmpXXXX' is under the OS temporary directory and cannot be
+/// registered as a durable authority in profile '...'"), and every fixture in
+/// this binary would additionally serialize on that one profile's exclusive
+/// lifecycle lease. The hermetic escape hatch
+/// (`TraceDecay::standalone_test_open_options`) is `cfg(test)`/`test-transport`
+/// gated, so it is inactive for this integration binary and cannot be relied
+/// on — the fixture must pin the profile itself, the same shape
+/// `memory_eval_test::initialize_fixture_project` already uses.
+///
+/// The shard lives under the project's own `.tracedecay/` marker directory so
+/// it is ephemeral (satisfying the guard), unique per fixture (no cross-test
+/// lease contention), and invisible to the indexer. It is deliberately NOT
+/// pre-created: `load_or_create_pinned` only applies the mandatory 0700
+/// restriction to a root it created itself, and a pre-created root would then
+/// fail `validate_private_profile_root`.
+pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions {
+    let profile_root = project_root.join(".tracedecay").join("fixture-profile");
+    TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root),
+    }
+}
+
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    TraceDecay::init(project_root).await.unwrap()
+    TraceDecay::init_with_options(project_root, fixture_open_options(project_root))
+        .await
+        .unwrap()
 }
 
 #[cfg(feature = "test-transport")]
