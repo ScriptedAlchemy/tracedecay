@@ -26,6 +26,8 @@ mod search;
 mod semantic_vector_staging;
 mod sql;
 mod stats;
+#[cfg(test)]
+mod symbol_occurrence_tests;
 mod tx;
 mod unresolved;
 
@@ -58,6 +60,7 @@ pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
 pub use nodes::{NodesByFilesPage, NodesByFilesPageEntry, NodesByFilesPageKey};
+pub use nodes::{SymbolOccurrenceBindOutcome, SymbolOccurrenceBinding};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

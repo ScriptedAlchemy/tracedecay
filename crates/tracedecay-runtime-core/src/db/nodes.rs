@@ -15,6 +15,121 @@ use crate::types::*;
 
 const CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS: usize = 64;
 
+/// One canonical node row's binding to the symbol occurrence that a published
+/// code-index generation minted for it.
+///
+/// Wire identity stays `nodes.id`; the occurrence is the internal join key
+/// only, so nothing a client holds changes when a generation is republished
+/// (ruling A1').
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolOccurrenceBinding {
+    pub node_id: String,
+    pub symbol_occurrence_id: String,
+}
+
+/// What a rebind actually wrote, against what it was asked to write.
+///
+/// `bound < requested` means the published generation named symbols the
+/// relational index does not carry. The count is reported rather than
+/// swallowed so the publish path can refuse instead of leaving a partially
+/// bridged generation that reads cannot tell apart from a complete one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolOccurrenceBindOutcome {
+    pub requested: usize,
+    pub bound: usize,
+}
+
+impl SymbolOccurrenceBindOutcome {
+    /// Every requested binding reached a canonical node row.
+    pub fn is_complete(&self) -> bool {
+        self.bound == self.requested
+    }
+}
+
+/// Drops every stored binding, so a rebind cannot leave a row carrying an
+/// occurrence minted against a generation that is no longer published.
+pub(super) const CLEAR_SYMBOL_OCCURRENCE_BINDINGS_SQL: &str =
+    "UPDATE nodes SET symbol_occurrence_id = NULL WHERE symbol_occurrence_id IS NOT NULL";
+
+/// Rows bound per statement. Three bound parameters per row (the `CASE` key,
+/// the `CASE` value, and the `IN` key) keeps a full chunk at 768 parameters,
+/// below `SQLite`'s conservative 999-parameter floor.
+pub(super) const SYMBOL_OCCURRENCE_ROWS_PER_BIND: usize = 256;
+
+/// Occurrences resolved per statement, against the same parameter floor.
+pub(super) const SYMBOL_OCCURRENCES_PER_READ: usize = 512;
+
+/// Rejects a binding set that a single `CASE` statement could only apply by
+/// silently picking a winner: an empty identity, one node claimed by two
+/// occurrences, or one occurrence claimed by two nodes.
+pub(super) fn validate_symbol_occurrence_bindings(
+    bindings: &[SymbolOccurrenceBinding],
+) -> Result<()> {
+    let mut seen_nodes = HashSet::with_capacity(bindings.len());
+    let mut seen_occurrences = HashSet::with_capacity(bindings.len());
+    for binding in bindings {
+        if binding.node_id.is_empty() || binding.symbol_occurrence_id.is_empty() {
+            return Err(TraceDecayError::Database {
+                message: "symbol occurrence binding carries an empty identity".to_owned(),
+                operation: "bind_symbol_occurrence_ids".to_owned(),
+            });
+        }
+        if !seen_nodes.insert(binding.node_id.as_str()) {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "node {} is claimed by more than one symbol occurrence binding",
+                    binding.node_id
+                ),
+                operation: "bind_symbol_occurrence_ids".to_owned(),
+            });
+        }
+        if !seen_occurrences.insert(binding.symbol_occurrence_id.as_str()) {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "symbol occurrence {} is claimed by more than one node",
+                    binding.symbol_occurrence_id
+                ),
+                operation: "bind_symbol_occurrence_ids".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The rebind statement for one chunk of `rows` bindings.
+pub(super) fn symbol_occurrence_bind_sql(rows: usize) -> String {
+    let cases = (0..rows)
+        .map(|_| "WHEN ? THEN ?")
+        .collect::<Vec<_>>()
+        .join(" ");
+    let placeholders = build_qmark_placeholders(rows);
+    format!(
+        "UPDATE nodes SET symbol_occurrence_id = CASE id {cases} END WHERE id IN ({placeholders})"
+    )
+}
+
+/// Parameters for [`symbol_occurrence_bind_sql`], in statement order: the
+/// `CASE` key/value pairs first, then the `IN` keys.
+pub(super) fn symbol_occurrence_bind_params(chunk: &[SymbolOccurrenceBinding]) -> Vec<Value> {
+    let mut values = Vec::with_capacity(chunk.len().saturating_mul(3));
+    for binding in chunk {
+        values.push(Value::Text(binding.node_id.clone()));
+        values.push(Value::Text(binding.symbol_occurrence_id.clone()));
+    }
+    for binding in chunk {
+        values.push(Value::Text(binding.node_id.clone()));
+    }
+    values
+}
+
+/// The occurrence-keyed resolution statement for `occurrences` bound ids.
+pub(super) fn node_ids_by_symbol_occurrence_sql(occurrences: usize) -> String {
+    let placeholders = build_qmark_placeholders(occurrences);
+    format!(
+        "SELECT symbol_occurrence_id, id FROM nodes WHERE symbol_occurrence_id IN ({placeholders})"
+    )
+}
+
 /// One `rowid` keyset page of the nodes declared by a single file.
 pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
     "SELECT ",
@@ -550,6 +665,13 @@ impl Database {
 
     /// Inserts nodes using a prepared statement: parse SQL once, then
     /// bind+execute+reset for each row — zero SQL parsing after the first call.
+    ///
+    /// `symbol_occurrence_id` is deliberately absent from the column list. It
+    /// is a per-generation binding minted by the published code index, not an
+    /// extraction fact, so `INSERT OR REPLACE` clearing it is the intended
+    /// behavior: a re-indexed node must not keep an occurrence minted against
+    /// a generation it no longer belongs to. See
+    /// [`Self::bind_symbol_occurrence_ids`].
     pub async fn insert_nodes(&self, nodes: &[Node]) -> Result<()> {
         if nodes.is_empty() {
             return Ok(());
@@ -633,6 +755,108 @@ impl Database {
                 })?;
         }
         Ok(())
+    }
+
+    /// Replaces every `nodes.symbol_occurrence_id` binding with the bindings a
+    /// single published code-index generation minted.
+    ///
+    /// The occurrence digest takes the generation id as an input, so a binding
+    /// is meaningful with exactly one generation. This write therefore clears
+    /// the whole column before applying `bindings`: a row the new generation
+    /// does not mention ends up NULL rather than keeping an occurrence from a
+    /// generation that is no longer published. Reads must treat NULL as a
+    /// typed staleness refusal, never as "no such symbol".
+    ///
+    /// Returns [`SymbolOccurrenceBindOutcome`] so the caller can compare what
+    /// it asked for against what the relational index could actually carry; a
+    /// shortfall means the two pipelines disagree about which nodes exist and
+    /// is the caller's to refuse, not this writer's to hide.
+    pub async fn bind_symbol_occurrence_ids(
+        &self,
+        bindings: &[SymbolOccurrenceBinding],
+    ) -> Result<SymbolOccurrenceBindOutcome> {
+        let transaction = self
+            .begin_write_transaction("bind_symbol_occurrence_ids")
+            .await?;
+        let outcome = self
+            .bind_symbol_occurrence_ids_unguarded(&transaction, bindings)
+            .await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    /// [`Self::bind_symbol_occurrence_ids`] inside a caller-owned transaction,
+    /// so a publish path can rebind in the same unit of work that stamps the
+    /// generation watermark.
+    pub async fn bind_symbol_occurrence_ids_unguarded(
+        &self,
+        transaction: &DatabaseWriteTransaction<'_>,
+        bindings: &[SymbolOccurrenceBinding],
+    ) -> Result<SymbolOccurrenceBindOutcome> {
+        validate_symbol_occurrence_bindings(bindings)?;
+
+        transaction
+            .execute_engine(CLEAR_SYMBOL_OCCURRENCE_BINDINGS_SQL, ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to clear prior symbol occurrence bindings: {e}"),
+                operation: "bind_symbol_occurrence_ids".to_owned(),
+            })?;
+
+        let mut bound = 0_usize;
+        for chunk in bindings.chunks(SYMBOL_OCCURRENCE_ROWS_PER_BIND) {
+            let sql = symbol_occurrence_bind_sql(chunk.len());
+            let affected = transaction
+                .execute_engine(&sql, params_from_iter(symbol_occurrence_bind_params(chunk)))
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to bind symbol occurrence ids: {e}"),
+                    operation: "bind_symbol_occurrence_ids".to_owned(),
+                })?;
+            bound = bound.saturating_add(usize::try_from(affected).unwrap_or(usize::MAX));
+        }
+
+        Ok(SymbolOccurrenceBindOutcome {
+            requested: bindings.len(),
+            bound,
+        })
+    }
+
+    /// Resolves published symbol occurrences to the canonical node ids bound to
+    /// them, for the generation whose bindings are currently stored.
+    ///
+    /// An occurrence absent from the returned map has no binding in the stored
+    /// generation. That is never a silent "not found": the caller holds the
+    /// published-generation watermark and must answer a typed staleness or
+    /// corruption refusal, per ruling A1'.
+    pub async fn node_ids_by_symbol_occurrence_ids(
+        &self,
+        occurrences: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut resolved = std::collections::BTreeMap::new();
+        if occurrences.is_empty() {
+            return Ok(resolved);
+        }
+        for chunk in occurrences.chunks(SYMBOL_OCCURRENCES_PER_READ) {
+            let sql = node_ids_by_symbol_occurrence_sql(chunk.len());
+            let values: Vec<Value> = chunk.iter().cloned().map(Value::Text).collect();
+            let mut rows = self
+                .engine_conn()
+                .query(&sql, params_from_iter(values))
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to resolve symbol occurrence bindings: {e}"),
+                    operation: "node_ids_by_symbol_occurrence_ids".to_owned(),
+                })?;
+            let page = collect_rows(
+                &mut rows,
+                |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+                "node_ids_by_symbol_occurrence_ids",
+            )
+            .await?;
+            resolved.extend(page);
+        }
+        Ok(resolved)
     }
 
     /// Retrieves a node by its unique ID, returning `None` if not found.

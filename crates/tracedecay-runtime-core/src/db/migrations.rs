@@ -17,7 +17,14 @@ use crate::errors::{Result, TraceDecayError};
 /// `memory_v2_assertion_vectors`) per the Plan 39 Task 7 owner decisions of
 /// 2026-08-07; holographic recall re-encodes from canonical fact content at
 /// query time.
-pub const SCHEMA_VERSION: u32 = 30;
+///
+/// v31 adds `nodes.symbol_occurrence_id`, the per-generation identity bridge
+/// between the canonical relational node row and the published code-index
+/// symbol occurrence (ruling DR-C as amended by A1', 2026-08-08). A store
+/// written before the column exists cannot answer the occurrence join, and
+/// answering it from a name key instead is the ambiguity the ruling rejects,
+/// so the version stamp refuses the older shape rather than degrade the read.
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -140,7 +147,20 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
             -- that a stored 0 is never mistaken for a defaulted/unknown value.
             -- See row_to_node in db/rows.rs for the read-side contract.
             attrs_start_line INTEGER,
-            parent_id TEXT
+            parent_id TEXT,
+            -- The symbol occurrence the published code index minted for this
+            -- node, and ONLY for the generation that published it. The
+            -- occurrence digest takes `generation_id` as an input
+            -- (tracedecay-code-index chunks.rs `symbol_occurrence_id`), so the
+            -- binding is meaningful with exactly one generation and is
+            -- deliberately NOT carried across one. `insert_nodes` omits this
+            -- column from its `INSERT OR REPLACE` column list, so re-indexing a
+            -- node clears its binding rather than preserving a value minted
+            -- against a generation that no longer exists — a read that finds
+            -- NULL must answer a typed staleness refusal, never a lookup miss.
+            -- Wire identity remains `nodes.id`; this column is the internal
+            -- join key only (ruling A1').
+            symbol_occurrence_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS edges (
@@ -193,7 +213,14 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
             VALUES ('delete', OLD.rowid, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS nodes_fts_update AFTER UPDATE ON nodes BEGIN
+        -- Scoped to the four columns `nodes_fts` actually indexes. An UPDATE
+        -- that touches only bookkeeping columns (`parent_id`,
+        -- `symbol_occurrence_id`) changes nothing the index contains, and
+        -- re-writing every full-text row for it would make the per-generation
+        -- occurrence rebind cost one FTS delete+insert per node. Any UPDATE
+        -- that does name a searchable column still reindexes the row.
+        CREATE TRIGGER IF NOT EXISTS nodes_fts_update
+        AFTER UPDATE OF name, qualified_name, docstring, signature ON nodes BEGIN
             INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, docstring, signature)
             VALUES ('delete', OLD.rowid, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
             INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
@@ -218,6 +245,14 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name));
         CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id);
+
+        -- One node row per symbol occurrence, enforced by the store rather than
+        -- by the writer's diligence: two rows claiming the same occurrence is
+        -- exactly the silently-picked winner the ruling forbids, so the
+        -- second write fails instead of making the join ambiguous. SQLite
+        -- treats NULLs as distinct, so unbound rows are unconstrained.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_symbol_occurrence_id
+            ON nodes(symbol_occurrence_id);
 
         CREATE TABLE IF NOT EXISTS node_fingerprints (
             node_id TEXT PRIMARY KEY,
