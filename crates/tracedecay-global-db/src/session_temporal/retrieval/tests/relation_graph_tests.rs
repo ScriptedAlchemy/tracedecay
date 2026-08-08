@@ -355,6 +355,64 @@ async fn anchor_lookups_that_resolve_a_summary_read_its_summary_relations() {
 }
 
 #[test]
+fn current_relation_reads_reject_a_stale_graph_generation() {
+    let store = crate::session_temporal::relations::memory_relation_store();
+    let mut projection = relation_projection(
+        "session-snapshot",
+        vec![SummaryRelationNode {
+            summary_id: "summary-current".to_string(),
+            sources: Vec::new(),
+            predecessor_summary_id: None,
+        }],
+        Vec::new(),
+    );
+    projection.generation = 2;
+    store.replace(&projection).expect("relation projection");
+    let watermarks = TemporalWatermarks {
+        generation: 2,
+        source: 2,
+        projection: 2,
+        index: 2,
+        summary: 2,
+    };
+    let snapshot = scoped_snapshot(2, Some("claude"))
+        .with_participant_manifest(
+            TemporalParticipantManifest::new(vec![
+                TemporalParticipantGeneration::new(
+                    SessionId::new("session-snapshot").expect("participant session"),
+                    "claude",
+                    watermarks,
+                    1,
+                    &BindingDigest::new("configuration", digest('4')).expect("configuration"),
+                    &BindingDigest::new("authorization", digest('2')).expect("authorization"),
+                    TemporalParticipantAuthorization::Authorized,
+                    TemporalSourceAccess::Available,
+                )
+                .expect("stale graph participant"),
+            ])
+            .expect("participant manifest"),
+        )
+        .expect("root snapshot");
+    let mut candidate = candidate_for_anchor("anchor-summary-current");
+    candidate.channel = CandidateChannel::Summary;
+    candidate.retriever_record_id = "summary-current".to_string();
+    candidate.source = Some("claude".to_string());
+
+    let error = load_record_relations(
+        &store,
+        &projection.scope,
+        snapshot.retrieval_scope(),
+        &snapshot,
+        &[candidate],
+        0,
+        &record_request(),
+    )
+    .expect_err("a stale graph watermark must not satisfy a current relation read");
+
+    assert!(matches!(error, TemporalPortError::Read { .. }));
+}
+
+#[test]
 fn relation_reads_do_not_alias_profile_scope_to_project_scope() {
     let store = crate::session_temporal::relations::memory_relation_store();
     store

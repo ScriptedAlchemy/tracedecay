@@ -106,12 +106,20 @@ async fn prepare_raw_source(
         None
     };
     let content_hash = string("content_hash")?;
-    let source_timestamp = normalize_timestamp(raw["timestamp"].as_i64().unwrap_or(0));
-    let (canonical_id, compatibility_anchor, timestamp) = canonical_anchor.unwrap_or((
-        compatibility_anchor_id(&provider, &session_id, store_id, &content_hash),
-        true,
-        source_timestamp,
-    ));
+    let (canonical_id, compatibility_anchor, timestamp) = match canonical_anchor {
+        Some(canonical) => canonical,
+        None => {
+            let source_timestamp = raw["timestamp"]
+                .as_i64()
+                .map(normalize_timestamp)
+                .ok_or_else(|| unavailable(&store_id.to_string(), "unverifiable_timestamp"))?;
+            (
+                compatibility_anchor_id(&provider, &session_id, store_id, &content_hash),
+                true,
+                source_timestamp,
+            )
+        }
+    };
     Ok(PreparedSource {
         canonical: CanonicalSourceBinding {
             kind: "anchor".to_string(),

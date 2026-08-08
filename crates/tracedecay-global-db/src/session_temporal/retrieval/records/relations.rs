@@ -321,20 +321,26 @@ fn candidate_generation(
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| read_message(RECORD_OPERATION, "candidate provider is missing"))?;
-    snapshot
+    let participant = snapshot
         .participant_manifest()
         .entries()
         .iter()
         .find(|participant| {
             participant.session_id() == session_id && participant.source_id() == source
         })
-        .map(tracedecay_temporal_query::ports::TemporalParticipantGeneration::generation)
         .ok_or_else(|| {
             read_message(
                 RECORD_OPERATION,
                 "candidate is absent from the frozen participant manifest",
             )
-        })
+        })?;
+    if participant.graph_watermark() != participant.watermarks().projection {
+        return Err(read_message(
+            RECORD_OPERATION,
+            "candidate graph watermark is stale for the frozen projection",
+        ));
+    }
+    Ok(participant.generation())
 }
 
 fn map_relation_error(
