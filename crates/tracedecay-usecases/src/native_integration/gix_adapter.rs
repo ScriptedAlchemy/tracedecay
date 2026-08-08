@@ -60,7 +60,12 @@ impl GixNativeIntegrationAdapter {
         if index_digest != preview.repository_snapshot.index_digest
             || worktree_digest != preview.repository_snapshot.worktree_digest
         {
-            return Ok(NativeIntegrationProbeV1::Diverged);
+            return Ok(NativeIntegrationProbeV1::Diverged {
+                tip: live_tip,
+                tree: live_tree,
+                index_digest,
+                worktree_digest,
+            });
         }
         if live_tip == preview.repository_snapshot.destination_tip
             && live_tree == preview.repository_snapshot.destination_tree
@@ -80,7 +85,12 @@ impl GixNativeIntegrationAdapter {
                 worktree_digest,
             });
         }
-        Ok(NativeIntegrationProbeV1::Diverged)
+        Ok(NativeIntegrationProbeV1::Diverged {
+            tip: live_tip,
+            tree: live_tree,
+            index_digest,
+            worktree_digest,
+        })
     }
 
     fn commit_tree(&self, commit: &GitOidV1) -> Result<GitOidV1, NativeIntegrationPortError> {
@@ -378,7 +388,12 @@ impl GixNativeIntegrationAdapter {
         if index_digest != preview.repository_snapshot.index_digest
             || worktree_digest != preview.repository_snapshot.worktree_digest
         {
-            return Ok(NativeIntegrationProbeV1::Diverged);
+            return Ok(NativeIntegrationProbeV1::Diverged {
+                tip: live_tip,
+                tree: live_tree,
+                index_digest,
+                worktree_digest,
+            });
         }
         if live_tip == preview.repository_snapshot.destination_tip
             && live_tree == preview.repository_snapshot.destination_tree
@@ -398,7 +413,12 @@ impl GixNativeIntegrationAdapter {
                 worktree_digest,
             });
         }
-        Ok(NativeIntegrationProbeV1::Diverged)
+        Ok(NativeIntegrationProbeV1::Diverged {
+            tip: live_tip,
+            tree: live_tree,
+            index_digest,
+            worktree_digest,
+        })
     }
 }
 
