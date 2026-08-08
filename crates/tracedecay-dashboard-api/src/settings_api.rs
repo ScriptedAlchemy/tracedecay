@@ -15,7 +15,9 @@ use tracedecay_api::configuration::{
     parse_project_settings_patch, parse_user_settings_patch, settings_validation_error,
     validate_user_settings_patch,
 };
-use tracedecay_application::ApplicationOutcome;
+use tracedecay_application::{
+    ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
+};
 
 use super::DashboardState;
 use super::read_model::{
@@ -289,6 +291,7 @@ pub async fn patch_project_settings(
         };
         let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
             .map_err(|_| configuration_authority_unavailable_error())?;
+        let expected_revision = preview.expected_revision.clone();
         match runtime
             .apply_configuration_batch(
                 request_id,
@@ -299,7 +302,13 @@ pub async fn patch_project_settings(
             .await
         {
             Ok(outcome) => Some(outcome),
-            Err(problem) => return Err(configuration_application_problem_error(problem)),
+            Err(problem) => {
+                return Err(project_apply_error(
+                    &state.project_root,
+                    &expected_revision,
+                    problem,
+                ));
+            }
         }
     } else {
         None
@@ -623,6 +632,41 @@ fn project_preview_error(
             configuration_authority_unavailable_error()
         }
     }
+}
+
+/// Renders a rejected project apply as the refusal a settings client can act
+/// on.
+///
+/// The local preview only refuses a stale revision when the patch carries no
+/// mutation at all: a stale patch that does carry one may still be an exact
+/// idempotent replay, and only the daemon owns that replay authority. So the
+/// authority is the one that rejects a genuinely superseded edit — and it
+/// collapses revision and idempotency conflicts into a single opaque
+/// `configuration.conflict`, which names neither the CAS precondition nor the
+/// revision that now holds.
+///
+/// This re-reads the pinned runtime configuration the same route already
+/// serves as the revision authority. When the revision that now holds is no
+/// longer the one this edit expected, the CAS precondition provably failed and
+/// the typed conflict carries both revisions. Every other rejection — an
+/// idempotency conflict against the current revision included — keeps the
+/// daemon's own problem envelope rather than being relabeled by a guess.
+fn project_apply_error(
+    project_root: &Path,
+    expected_revision: &ConfigurationRevisionId,
+    problem: ApplicationProblemEnvelope,
+) -> DashboardConfigurationRouteErrorV1 {
+    if problem.problem.kind() == ApplicationProblemKind::Conflict
+        && let Ok(current) = crate::config::cached_runtime_configuration(project_root)
+        && current.revision_id != *expected_revision
+    {
+        return configuration_revision_conflict_error(
+            "settings changed after this edit began; refresh and retry",
+            expected_revision.as_str(),
+            current.revision_id.as_str(),
+        );
+    }
+    configuration_application_problem_error(problem)
 }
 
 #[cfg(test)]
