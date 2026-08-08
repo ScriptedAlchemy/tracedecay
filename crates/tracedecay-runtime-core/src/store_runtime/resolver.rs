@@ -529,12 +529,18 @@ impl LocalStoreRuntimeResolverV1 {
         filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
     ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
         let canonical_project_root =
-            canonical_existing_directory(enrollment_root).map_err(|reason| {
-                if reason == LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable {
+            canonical_existing_directory(enrollment_root).map_err(|reason| match reason {
+                // An enrollment root that is absent and one whose metadata
+                // cannot be read are the same fact for this alias: it cannot
+                // answer for the project. Both stay `ProjectEnrollmentRoot-
+                // Unavailable` so `resolve_project_locator` keeps deferring to
+                // the next enrollment root instead of denying an enrolled
+                // project because one alias went away.
+                LocalStoreLocatorUnavailableReasonV1::MissingLocatorPath { .. }
+                | LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable { .. } => {
                     LocalStoreLocatorUnavailableReasonV1::ProjectEnrollmentRootUnavailable
-                } else {
-                    reason
                 }
+                reason => reason,
             })?;
         require_local_filesystem(&canonical_project_root, filesystem_safety)?;
 
@@ -764,9 +770,24 @@ pub enum LocalStoreLocatorUnavailableReasonV1 {
     EnrollmentProjectMismatch,
     EnrollmentStorageModeMismatch,
     UnsafeLocatorPath,
-    FilesystemMetadataUnavailable,
-    NetworkFilesystem { filesystem_type: String },
-    FilesystemLocalityUnverified { filesystem_type: String },
+    /// The probed path does not exist. This is a complete answer about the
+    /// path, not a failure to obtain one.
+    MissingLocatorPath {
+        path: PathBuf,
+    },
+    /// The filesystem refused to answer for the probed path. The exact path
+    /// and `io::ErrorKind` are carried because the reason alone cannot say
+    /// which host, mount, or permission produced it.
+    FilesystemMetadataUnavailable {
+        path: PathBuf,
+        error_kind: io::ErrorKind,
+    },
+    NetworkFilesystem {
+        filesystem_type: String,
+    },
+    FilesystemLocalityUnverified {
+        filesystem_type: String,
+    },
     LocatorDigestUnavailable,
 }
 
@@ -805,8 +826,19 @@ impl fmt::Display for LocalStoreLocatorUnavailableReasonV1 {
                 formatter.write_str("project enrollment does not use profile-sharded storage")
             }
             Self::UnsafeLocatorPath => formatter.write_str("locator path is unsafe"),
-            Self::FilesystemMetadataUnavailable => {
-                formatter.write_str("filesystem metadata is unavailable")
+            Self::MissingLocatorPath { path } => {
+                write!(
+                    formatter,
+                    "locator path '{}' does not exist",
+                    path.display()
+                )
+            }
+            Self::FilesystemMetadataUnavailable { path, error_kind } => {
+                write!(
+                    formatter,
+                    "filesystem metadata for '{}' is unavailable ({error_kind})",
+                    path.display()
+                )
             }
             Self::NetworkFilesystem { filesystem_type } => {
                 write!(formatter, "network filesystem '{filesystem_type}'")
@@ -838,7 +870,7 @@ fn read_matching_enrollment(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(LocalStoreLocatorUnavailableReasonV1::MissingEnrollment);
         }
-        Err(_) => return Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+        Err(error) => return Err(filesystem_probe_failure(&marker_path, &error)),
     }
 
     let marker = storage::read_enrollment_marker(project_root)
@@ -853,15 +885,38 @@ fn read_matching_enrollment(
     Ok(marker)
 }
 
+/// Classifies a failed filesystem probe without conflating absence with an
+/// unanswerable filesystem.
+///
+/// `NotFound` is a complete answer about the path, so it becomes
+/// [`LocalStoreLocatorUnavailableReasonV1::MissingLocatorPath`]. Every other
+/// error means the probe itself could not be answered, and the reason carries
+/// the probed path and `io::ErrorKind` so a permission denial is never
+/// reported as the same fact as a device that refuses to be opened.
+fn filesystem_probe_failure(
+    path: &Path,
+    error: &io::Error,
+) -> LocalStoreLocatorUnavailableReasonV1 {
+    if error.kind() == io::ErrorKind::NotFound {
+        LocalStoreLocatorUnavailableReasonV1::MissingLocatorPath {
+            path: path.to_path_buf(),
+        }
+    } else {
+        LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable {
+            path: path.to_path_buf(),
+            error_kind: error.kind(),
+        }
+    }
+}
+
 fn canonical_existing_directory(path: &Path) -> LocalStoreLocatorResult<PathBuf> {
     validate_absolute_no_symlink_components(path)?;
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| filesystem_probe_failure(path, &error))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
         return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
     }
-    fs::canonicalize(path)
-        .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)
+    fs::canonicalize(path).map_err(|error| filesystem_probe_failure(path, &error))
 }
 
 fn canonical_or_prospective_directory(
@@ -877,15 +932,15 @@ fn canonical_or_prospective_directory(
             Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
         }
         Ok(_) => {
-            let canonical = fs::canonicalize(path)
-                .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+            let canonical =
+                fs::canonicalize(path).map_err(|error| filesystem_probe_failure(path, &error))?;
             canonical
                 .starts_with(canonical_parent)
                 .then_some(canonical)
                 .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path.to_path_buf()),
-        Err(_) => Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+        Err(error) => Err(filesystem_probe_failure(path, &error)),
     }
 }
 
@@ -902,15 +957,15 @@ fn canonical_or_prospective_regular_file(
             Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
         }
         Ok(_) => {
-            let canonical = fs::canonicalize(path)
-                .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
+            let canonical =
+                fs::canonicalize(path).map_err(|error| filesystem_probe_failure(path, &error))?;
             canonical
                 .starts_with(canonical_parent)
                 .then_some(canonical)
                 .ok_or(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path.to_path_buf()),
-        Err(_) => Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable),
+        Err(error) => Err(filesystem_probe_failure(path, &error)),
     }
 }
 
@@ -954,8 +1009,8 @@ fn validate_absolute_no_symlink_components(path: &Path) -> LocalStoreLocatorResu
             Ok(_) => {}
             // The remaining tail cannot exist while this ancestor is absent.
             Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(_) => {
-                return Err(LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable);
+            Err(error) => {
+                return Err(filesystem_probe_failure(&current, &error));
             }
         }
     }
@@ -2270,6 +2325,142 @@ mod tests {
         assert_eq!(
             canonical_existing_directory(&nested),
             Ok(nested.canonicalize().expect("canonical nested store root"))
+        );
+    }
+
+    /// "Does not exist" and "the filesystem would not answer" are different
+    /// facts, and every other probe in this resolver already tells them apart.
+    /// The directory canonicalizer must too: reporting an absent root as
+    /// unreadable metadata sends a reader looking for a mount or permission
+    /// fault that is not there.
+    #[test]
+    fn an_absent_directory_is_typed_missing_rather_than_metadata_unavailable() {
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let absent = root.join("absent-root");
+
+        let reason = canonical_existing_directory(&absent);
+        assert_eq!(
+            reason,
+            Err(LocalStoreLocatorUnavailableReasonV1::MissingLocatorPath {
+                path: absent.clone(),
+            })
+        );
+        let message = reason.expect_err("absent root is unavailable").to_string();
+        assert!(
+            message.contains(&absent.display().to_string()),
+            "a missing root must name the path it could not find: {message}"
+        );
+    }
+
+    /// The genuinely unavailable case keeps its own reason and now carries the
+    /// probed path and `io::ErrorKind`. Without them a host-wide failure is
+    /// indistinguishable from a single unreadable directory.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_reports_the_probed_path_and_error_kind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let blocked = root.join("blocked");
+        let target = blocked.join("store");
+        fs::create_dir_all(&target).expect("blocked store root");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
+            .expect("drop traversal permission");
+
+        let probe = fs::symlink_metadata(&target);
+        let reason = canonical_existing_directory(&target);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))
+            .expect("restore traversal permission");
+
+        if probe.is_ok() {
+            // A privileged runner bypasses directory permissions, so the
+            // unreadable case cannot be staged on this host.
+            return;
+        }
+        assert_eq!(
+            reason,
+            Err(
+                LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable {
+                    path: target.clone(),
+                    error_kind: io::ErrorKind::PermissionDenied,
+                }
+            )
+        );
+        let message = reason
+            .expect_err("unreadable root is unavailable")
+            .to_string();
+        assert!(
+            message.contains(&target.display().to_string()),
+            "an unavailable probe must name the path it probed: {message}"
+        );
+    }
+
+    /// The typed split must not change what a caller observes at the project
+    /// boundary: an enrollment root that is simply gone still reports
+    /// `ProjectEnrollmentRootUnavailable`, and it still defers to the next
+    /// enrollment root instead of denying an enrolled project.
+    #[test]
+    fn an_absent_enrollment_root_stays_an_unavailable_project_root() {
+        let fixture = Fixture::new();
+        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
+        let absent = fixture.root.join("absent-alias");
+
+        assert!(matches!(
+            resolve_as_local(&fixture.resolver_for([absent.clone()]), &key),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                reason: LocalStoreLocatorUnavailableReasonV1::ProjectEnrollmentRootUnavailable,
+                ..
+            })
+        ));
+
+        let recovered = resolved(resolve_as_local(
+            &fixture.resolver_for([absent, fixture.first_alias.clone()]),
+            &key,
+        ));
+        let direct = resolved(resolve_as_local(
+            &fixture.resolver_for([fixture.first_alias.clone()]),
+            &key,
+        ));
+        assert_eq!(recovered.locator().path(), direct.locator().path());
+    }
+
+    /// The profile root has no alias loop to fall back on, so it reports the
+    /// split directly: a missing profile root names the path it could not
+    /// find rather than claiming the filesystem was unreadable.
+    #[test]
+    fn an_absent_profile_root_is_typed_missing() {
+        let fixture = Fixture::new();
+        let absent_profile_root = fixture.root.join("absent-profile");
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.local-resolver"),
+            id::<UserProfileId>("profile.local-resolver"),
+            absent_profile_root.clone(),
+        ))
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            fixture.project_id.clone(),
+            [fixture.first_alias.clone()],
+        ))
+        .expect("one project authority");
+
+        assert_eq!(
+            resolve_as_local(
+                &resolver,
+                &StoreRuntimeKey::new(fixture.shard(), incarnation())
+            ),
+            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
+                shard_id: fixture.shard(),
+                reason: LocalStoreLocatorUnavailableReasonV1::MissingLocatorPath {
+                    path: absent_profile_root,
+                },
+            })
         );
     }
 }
