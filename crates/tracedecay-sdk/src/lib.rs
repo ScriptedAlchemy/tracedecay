@@ -25,12 +25,15 @@ pub use tracedecay_tool_catalog as operation;
 pub mod work {
     pub use tracedecay_application::{
         AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-        AttachRuntimeEvidenceCommand, CreateWorkCommand, PauseWorkRunCommand,
-        ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkRunCommand,
-        ReviewProposalCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-        WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1, WorkPlacementPreflightRequestV1,
-        WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-        WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+        AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
+        PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
+        ResumeWorkRunCommand, ReviewProposalCommand, WorkArtifactHydrationRequestV1,
+        WorkArtifactHydrationV1, WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1,
+        WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+        WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
+        WorkRunControlRequestV1, WorkSynthesisAdmissionV1, WorkSynthesisAttemptV1,
+        WorkSynthesisEvidenceGroupV1, WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1,
+        WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
         work_executable_binding_registry as executable_binding_registry,
     };
     pub use tracedecay_domain::{

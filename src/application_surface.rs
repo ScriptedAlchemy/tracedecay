@@ -1042,6 +1042,11 @@ async fn invoke_work_operation(
             StartAttempt,
             tracedecay_domain::WorkAttemptV1
         ),
+        WorkOperation::Synthesize => core!(
+            tracedecay_application::AdmitWorkSynthesisCommand,
+            Synthesize,
+            tracedecay_application::WorkSynthesisAttemptV1
+        ),
         WorkOperation::AttemptStatus => core!(
             WorkAttemptStatusRequestV1,
             AttemptStatus,

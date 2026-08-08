@@ -59,6 +59,7 @@ dashboard_work_routes!(
     AttachRuntimeEvidence,
     AcceptTask,
     StartAttempt,
+    Synthesize,
     AttemptStatus,
     CancelAttempt,
     ResumeAttempts,

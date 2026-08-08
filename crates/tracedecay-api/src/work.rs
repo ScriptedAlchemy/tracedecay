@@ -27,16 +27,17 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    ApplicationProblem, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    AdmitWorkSynthesisCommand, ApplicationProblem, AttachRuntimeEvidenceCommand,
+    CancelWorkAttemptCommand, CreateWorkCommand, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
+    ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
     WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
     WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkTopologyViewRequestV1,
+    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
@@ -66,6 +67,7 @@ pub enum WorkOperation {
     AttachRuntimeEvidence,
     AcceptTask,
     StartAttempt,
+    Synthesize,
     AttemptStatus,
     CancelAttempt,
     ResumeAttempts,
@@ -140,6 +142,7 @@ work_operations! {
     AttachRuntimeEvidence: "attach_runtime_evidence", "attach-runtime-evidence";
     AcceptTask: "accept_task", "accept-task";
     StartAttempt: "start_attempt", "start-attempt";
+    Synthesize: "synthesize", "synthesize";
     AttemptStatus: "attempt_status", "attempt-status";
     CancelAttempt: "cancel_attempt", "cancel-attempt";
     ResumeAttempts: "resume_attempts", "resume-attempts";
@@ -158,7 +161,7 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -170,6 +173,7 @@ impl WorkOperation {
         Self::AttachRuntimeEvidence,
         Self::AcceptTask,
         Self::StartAttempt,
+        Self::Synthesize,
         Self::AttemptStatus,
         Self::CancelAttempt,
         Self::ResumeAttempts,
@@ -223,6 +227,7 @@ impl WorkOperation {
             Self::AttachRuntimeEvidence => schema_name::<AttachRuntimeEvidenceCommand>(),
             Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
+            Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
             Self::AttemptStatus => schema_name::<WorkAttemptStatusRequestV1>(),
             Self::CancelAttempt => schema_name::<CancelWorkAttemptCommand>(),
             Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
@@ -256,6 +261,7 @@ impl WorkOperation {
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
+            Self::Synthesize => schema_name::<WorkSynthesisAttemptV1>(),
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),

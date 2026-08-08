@@ -107,6 +107,7 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
         WorkApplicationInvocationV1::Create(_)
+        | WorkApplicationInvocationV1::Synthesize(_)
         | WorkApplicationInvocationV1::ReplanDependencies(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
         | WorkApplicationInvocationV1::AcceptProposal(_)
@@ -458,6 +459,50 @@ fn dispatch_work_application(
                 observed_at,
                 deadline,
                 WorkApplicationOutcomeV1::StartAttempt,
+            )
+        }
+        WorkApplicationInvocationV1::Synthesize(command) => {
+            // A synthesis attempt is admitted under exactly the reservation
+            // fence every other attempt admission honors; the synthesis
+            // service then reads each source outcome from the authority and
+            // starts the attempt through the standard admission.
+            let admitted = match services.run_control().admit_reservation(
+                &context,
+                &command.start.task_id,
+                &command.start.run_id,
+            ) {
+                Ok(()) => tracedecay_application::admit_work_synthesis(
+                    services.attempts(),
+                    &context,
+                    command,
+                ),
+                Err(problem) => Err(problem),
+            };
+            if let (
+                Ok(tracedecay_application::WorkSynthesisAttemptV1::Admitted(admission)),
+                Some(project_root),
+            ) = (&admitted, project_root.as_ref())
+                && admission.attempt.state() == tracedecay_domain::WorkAttemptStateV1::Leased
+            {
+                super::work_attempt_exec::spawn_attempt_execution(
+                    registered.clone(),
+                    Arc::clone(&attempt_processes),
+                    project_root.clone(),
+                    admission.attempt.clone(),
+                );
+            }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                admitted,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::Synthesize,
             )
         }
         WorkApplicationInvocationV1::AttemptStatus(request) => complete_work_read(

@@ -12,16 +12,16 @@ use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationResult, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationSignal,
-    CreateWorkCommand, Deadline, GenerateProposalRequest, LegalAction, PauseWorkRunCommand,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
-    work_executable_binding_registry,
+    AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
+    ApplicationProblemEnvelope, ApplicationResult, AttachRuntimeEvidenceCommand,
+    CancelWorkAttemptCommand, CancellationSignal, CreateWorkCommand, Deadline,
+    GenerateProposalRequest, LegalAction, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
+    ReplanDependenciesCommand, ResultContractRef, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
+    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1,
+    WorkTopologyViewRequestV1, work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -103,6 +103,9 @@ fn decode_work_invocation(
         WorkOperation::StartAttempt => {
             decode::<StartWorkAttemptCommand>(body).map(WorkApplicationInvocationV1::StartAttempt)
         }
+        WorkOperation::Synthesize => {
+            decode::<AdmitWorkSynthesisCommand>(body).map(WorkApplicationInvocationV1::Synthesize)
+        }
         WorkOperation::AttemptStatus => decode::<WorkAttemptStatusRequestV1>(body)
             .map(WorkApplicationInvocationV1::AttemptStatus),
         WorkOperation::CancelAttempt => {
@@ -180,6 +183,10 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
             | (
                 WorkOperation::StartAttempt,
                 WorkApplicationOutcomeV1::StartAttempt(_)
+            )
+            | (
+                WorkOperation::Synthesize,
+                WorkApplicationOutcomeV1::Synthesize(_)
             )
             | (
                 WorkOperation::AttemptStatus,
@@ -334,6 +341,7 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::AttachRuntimeEvidence(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AcceptTask(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::StartAttempt(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::Synthesize(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AttemptStatus(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::CancelAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeAttempts(outcome) => serde_json::to_value(outcome),

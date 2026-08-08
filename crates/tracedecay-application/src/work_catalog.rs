@@ -19,20 +19,20 @@ use tracedecay_domain::WorkAttemptV1;
 
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkTopologyViewRequestV1,
+    AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand,
+    CreateWorkCommand, ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal,
+    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, ReviewProposalRequestV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 25] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 26] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -79,6 +79,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 25] = [
         "start_attempt",
         "capability.work.start_attempt",
         "use-case.work.start_attempt",
+    ),
+    (
+        "synthesize",
+        "capability.work.synthesize",
+        "use-case.work.synthesize",
     ),
     (
         "attempt_status",
@@ -204,6 +209,11 @@ pub fn work_executable_binding_registry()
         available::<StartWorkAttemptCommand, WorkAttemptV1>(
             "start_attempt",
             "/application/work/start-attempt",
+            EffectClass::Administrative,
+        )?,
+        available::<AdmitWorkSynthesisCommand, WorkSynthesisAttemptV1>(
+            "synthesize",
+            "/application/work/synthesize",
             EffectClass::Administrative,
         )?,
         available::<WorkAttemptStatusRequestV1, WorkAttemptV1>(
