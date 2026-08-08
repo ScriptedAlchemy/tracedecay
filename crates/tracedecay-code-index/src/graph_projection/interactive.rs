@@ -522,14 +522,10 @@ impl CodeGraphInteractiveReader {
                 break;
             }
             batch.push(occurrence.clone());
-            names.push(
-                record
-                    .metadata
-                    .as_ref()
-                    .map_or_else(|| occurrence.as_str().to_owned(), |metadata| {
-                        metadata.qualified_name.clone()
-                    }),
-            );
+            names.push(record.metadata.as_ref().map_or_else(
+                || occurrence.as_str().to_owned(),
+                |metadata| metadata.qualified_name.clone(),
+            ));
             if batch.len() == DEGREE_RANKING_BATCH_SYMBOLS {
                 self.measure_degree_batch(
                     &batch,

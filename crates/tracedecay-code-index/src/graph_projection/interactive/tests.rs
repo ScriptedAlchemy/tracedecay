@@ -665,7 +665,10 @@ fn degree_ranking_is_deterministic_and_bounded() {
     let ranking = reader
         .degree_ranking(2, 16, request())
         .expect("bounded degree ranking");
-    assert!(ranking.complete, "a budget above the symbol count is complete");
+    assert!(
+        ranking.complete,
+        "a budget above the symbol count is complete"
+    );
     assert_eq!(ranking.symbols_examined, 4);
     assert_eq!(
         ranking

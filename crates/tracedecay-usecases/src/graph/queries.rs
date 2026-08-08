@@ -629,8 +629,8 @@ impl<'a> GraphQueryManager<'a> {
             if remaining == 0 {
                 break;
             }
-            let page_limit = i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE))
-                .unwrap_or(i64::MAX);
+            let page_limit =
+                i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE)).unwrap_or(i64::MAX);
             let mut file_rows = self
                 .db
                 .conn()
@@ -644,13 +644,14 @@ impl<'a> GraphQueryManager<'a> {
                     operation: "build_file_adjacency_bounded".to_string(),
                 })?;
             let mut page_rows = 0_i64;
-            while let Some(row) = file_rows
-                .next()
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to read bounded file row: {error}"),
-                    operation: "build_file_adjacency_bounded".to_string(),
-                })?
+            while let Some(row) =
+                file_rows
+                    .next()
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to read bounded file row: {error}"),
+                        operation: "build_file_adjacency_bounded".to_string(),
+                    })?
             {
                 let path = row
                     .get::<String>(0)
@@ -691,8 +692,8 @@ impl<'a> GraphQueryManager<'a> {
             if remaining == 0 {
                 break;
             }
-            let page_limit = i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE))
-                .unwrap_or(i64::MAX);
+            let page_limit =
+                i64::try_from(remaining.min(ADJACENCY_SCAN_PAGE_ROWS_USIZE)).unwrap_or(i64::MAX);
             let page = self
                 .dependency_pair_page(&cursor, page_limit, "build_file_adjacency_bounded")
                 .await?;
@@ -941,7 +942,9 @@ mod bounded_adjacency_tests {
             "a caller file depends on the hub file"
         );
         assert_eq!(
-            scan.adjacency.get(HUB_FILE).map(std::collections::HashSet::len),
+            scan.adjacency
+                .get(HUB_FILE)
+                .map(std::collections::HashSet::len),
             Some(0),
             "the hub file is a leaf with no outgoing dependency"
         );

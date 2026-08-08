@@ -7,9 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
 pub(crate) use tracedecay::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
@@ -36,6 +33,7 @@ pub(crate) use tracedecay::automation::runner::{
     run_skill_writer_with_backend_and_retrieval,
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
+pub(crate) use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};

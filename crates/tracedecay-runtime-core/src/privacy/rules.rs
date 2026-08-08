@@ -244,7 +244,10 @@ impl CompiledAllowlist {
             AllowlistTarget::Match => whole.as_str(),
             AllowlistTarget::Line => line_containing(text, whole.start()),
         };
-        let regex_hit = self.regexes.iter().any(|regex| regex.is_match(regex_target));
+        let regex_hit = self
+            .regexes
+            .iter()
+            .any(|regex| regex.is_match(regex_target));
         let stopword_hit = self
             .stopwords
             .iter()
@@ -1109,7 +1112,10 @@ mod tests {
 
         // `\w` expands to a class outside one, and to bare members inside one.
         assert_eq!(re2_compatible_regex(r"\w+"), "[0-9A-Za-z_]+");
-        assert_eq!(re2_compatible_regex(r"[\w.-]{0,50}?"), "[0-9A-Za-z_.-]{0,50}?");
+        assert_eq!(
+            re2_compatible_regex(r"[\w.-]{0,50}?"),
+            "[0-9A-Za-z_.-]{0,50}?"
+        );
         assert_eq!(re2_compatible_regex(r"[^\w]"), "[^0-9A-Za-z_]");
 
         assert!(Regex::new(&re2_compatible_regex(r"^\$(?:\d+|{\d+})$")).is_ok());
@@ -1134,9 +1140,7 @@ mod tests {
         let sourcegraph = rule(&compiled, "sourcegraph-access-token");
 
         assert!(!sourcegraph.is_match("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
-        assert!(sourcegraph.is_match(
-            "sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"
-        ));
+        assert!(sourcegraph.is_match("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
     }
 
     /// `regexTarget` steers the allowlist regexes only. A stopword read from the

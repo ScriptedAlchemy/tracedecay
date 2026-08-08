@@ -234,9 +234,8 @@ fn a_missing_copilot_binary_refuses_instead_of_editing_host_owned_state() {
     let operator_owned = br#"{"mcpServers":{"someone-elses":{"command":"other"}}}"#;
     std::fs::write(&mcp_path, operator_owned).unwrap();
 
-    let error =
-        crate::agents::host_cli::require_host_cli("copilot-absent", COPILOT_CLI_LIFECYCLE)
-            .expect_err("an absent host binary is a hard requirement failure");
+    let error = crate::agents::host_cli::require_host_cli("copilot-absent", COPILOT_CLI_LIFECYCLE)
+        .expect_err("an absent host binary is a hard requirement failure");
 
     let TraceDecayError::Config { message } = error else {
         panic!("host CLI absence must surface as a config error");
