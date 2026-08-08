@@ -24,9 +24,12 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
+import { AdoptionCoverage } from './AdoptionCoverage.tsx';
+import { AdoptionOutcomes } from './AdoptionOutcomes.tsx';
 import { HookHints } from './HookHints.tsx';
 import { PerformanceBudgets } from './PerformanceBudgets.tsx';
 import { PerformanceComparisons } from './PerformanceComparisons.tsx';
+import { RetrievalQuality } from './RetrievalQuality.tsx';
 import { AnalyticsControls } from './AnalyticsControls.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
@@ -78,6 +81,12 @@ export function ObservatoryPage() {
       <DoctorInspector />
 
       <CanonicalObservations />
+
+      <AdoptionCoverage />
+
+      <AdoptionOutcomes />
+
+      <RetrievalQuality />
 
       <HookHints />
 

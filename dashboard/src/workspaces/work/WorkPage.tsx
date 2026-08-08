@@ -134,6 +134,7 @@ function WorkProjectionView({
         <WorkTopologyView
           snapshot={snapshot}
           attemptList={attemptList}
+          graph={graph}
           selected={selected}
           onSelect={onSelect}
         />

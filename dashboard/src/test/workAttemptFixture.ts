@@ -2,6 +2,7 @@ import type {
   WorkAttemptListCoverageV1,
   WorkAttemptStateV1,
   WorkCancellationStateV1,
+  WorkEffectStateV1,
   WorkProviderRouteV1,
   WorkRecoveryStateV1,
   WorkTerminalEvidenceV1,
@@ -72,6 +73,11 @@ export interface WorkAttemptSpec {
   readonly cancellation?: WorkCancellationStateV1;
   /** Omit for a plain success; `null` for an attempt that has not terminated. */
   readonly terminal?: WorkTerminalEvidenceV1 | null;
+  /** The effect class the execution envelope was admitted under. Defaults to
+   * `observational`, which is the fixture's harmless case; the Plan 26
+   * accounting tests override it because `compound_non_repeatable` is the
+   * eligible denominator a duplicate-effect adjudication would run over. */
+  readonly effectState?: WorkEffectStateV1;
   /** Where the execution envelope pinned this attempt. Every field defaults to
    * the fixture's single-worktree placement; the topology lens tests override
    * them to spread attempts across worktrees and refs. */
@@ -100,7 +106,7 @@ export function workAttempt(spec: WorkAttemptSpec) {
       attempt_identity: identity,
       cancellation_generation: 0,
       commit: spec.placement?.commit ?? 'commit-1',
-      effect_state: 'observational',
+      effect_state: spec.effectState ?? 'observational',
       execution_snapshot: EXECUTION_SNAPSHOT,
       instructions: 'run the task',
       operation: 'operation.work.start_attempt',

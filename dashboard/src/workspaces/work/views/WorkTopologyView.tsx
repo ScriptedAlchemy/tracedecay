@@ -9,6 +9,8 @@ import { cn } from '../../../ui/cn.ts';
 import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import type { WorkResult } from '../workApi.ts';
 import type { WorkChannel } from '../workChannel.ts';
+import type { WorkGraphReading } from '../workGraphModel.ts';
+import { WorkTopologyAccounting } from './WorkTopologyAccounting.tsx';
 import {
   WORK_TOPOLOGY_DIMENSIONS,
   topologyDimensionLabel,
@@ -41,6 +43,19 @@ import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx
  *
  * Selection is the canonical one: a landing names a task, clicking it selects
  * that task everywhere, and the lens never owns the selection.
+ *
+ * PLAN 26'S ACCOUNTING SITS UNDER THE STRUCTURE, NOT BESIDE IT.
+ *
+ * Plan 26 mandates an `execution-topology` product view over twelve measured
+ * dimensions, and it is explicit that this rides the views that already exist
+ * rather than adding a second surface. So the accounting ledger is rendered
+ * here, at the bottom of this lens, and not as a seventh projection: the weave
+ * and the lanes above say what the topology IS, and the ledger below says what
+ * has been measured about how it behaved. `WorkTopologyAccounting.tsx` draws
+ * the ledger and `workTopologyAccounting.ts` derives it; the split between the
+ * structural dimensions above and the measured dimensions below mirrors the
+ * split the plan itself draws between `ExecutionTopologyViewV1` and
+ * `ExecutionTopologyMetricsV1`, which the Rust deliberately refuses to join.
  */
 
 /** Which of the readings the lens is drawing. The middle case is a page that
@@ -68,11 +83,16 @@ function coverageSentence(coverage: WorkAttemptListCoverageV1): string {
 export function WorkTopologyView({
   snapshot,
   attemptList,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
+  /** The work-product graph read, for the Plan 26 accounting ledger below: the
+   * concurrency widths and the blocked-effort figure are properties of one
+   * graph version and are read from it rather than from the attempt page. */
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
@@ -107,6 +127,8 @@ export function WorkTopologyView({
       <WorktreeLanes reading={reading} titles={titles} selected={selected} onSelect={onSelect} />
 
       <DimensionLedger reading={reading} />
+
+      <WorkTopologyAccounting attemptList={attemptList} graph={graph} />
     </div>
   );
 }
