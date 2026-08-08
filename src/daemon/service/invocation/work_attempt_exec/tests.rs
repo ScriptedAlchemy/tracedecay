@@ -790,7 +790,9 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
 
     let instructions = "Execute the admitted provider step.";
     let fixture = leased_attempt(root, instructions, &SnapshotShape::default());
-    execute_provider(
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
@@ -800,6 +802,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
             &CLAUDE_STREAM_JSON_ARGV,
             requested_route(WorkProviderBackendV1::ClaudeCodeCli),
         ),
+        &admitted_environment,
         Arc::new(Notify::new()),
     )
     .await;
@@ -954,7 +957,9 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
             ..SnapshotShape::default()
         },
     );
-    execute_provider(
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
@@ -964,6 +969,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
             &CODEX_EXEC_JSON_ARGV,
             requested_route(WorkProviderBackendV1::CodexCli),
         ),
+        &admitted_environment,
         Arc::new(Notify::new()),
     )
     .await;
@@ -1093,6 +1099,8 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     );
     let identity = fixture.identity().clone();
     let started_at = std::time::Instant::now();
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
 
     let driver = async {
         // Wait for the real child to be up and the attempt to be durably
@@ -1122,11 +1130,12 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     };
 
     tokio::select! {
-        () = execute_provider(
+        () = execute_provider_with_environment(
             &fixture.attempts,
             &fixture.context,
             &fixture.attempt,
             &provider,
+            &admitted_environment,
             Arc::clone(&cancel),
         ) => {}
         _ = driver => unreachable!("the driver loops until execution settles"),
@@ -1302,11 +1311,14 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         }
     );
 
-    execute_provider(
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
         &selection,
+        &admitted_environment,
         Arc::new(Notify::new()),
     )
     .await;
@@ -1565,7 +1577,9 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         "Spawn a provider that is not there.",
         &SnapshotShape::default(),
     );
-    execute_provider(
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    execute_provider_with_environment(
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
@@ -1575,6 +1589,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
             &CLAUDE_STREAM_JSON_ARGV,
             requested_route(WorkProviderBackendV1::ClaudeCodeCli),
         ),
+        &admitted_environment,
         Arc::new(Notify::new()),
     )
     .await;
