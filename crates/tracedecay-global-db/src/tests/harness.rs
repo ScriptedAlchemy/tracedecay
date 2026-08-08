@@ -174,6 +174,20 @@ impl RegisteredGlobalDbHarness {
         crate::register_test_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
+        // The profile root must exist on disk before it is canonicalized into
+        // a daemon scope key. `canonical_profile_root` falls back to the raw,
+        // pre-canonicalization path when the directory is missing, but by the
+        // time `DatabaseIdentity::for_path` resolves the opened database the
+        // directory has been created and canonicalizes to a different path on
+        // any platform where the temp root involves a symlink or an extended
+        // path prefix (macOS `/var` -> `/private/var`, Windows `\\?\`). That
+        // mismatch makes the daemon-scope lookup miss and the authority
+        // acquisition below fail closed. Creating the directory first keeps
+        // both canonicalizations identical, matching the sibling runtimes
+        // (`RegisteredGlobalDbTestRuntime::open`, `HostAdmissionTestRuntimeV1::open`)
+        // that already do this.
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root)
+            .expect("create registered global-db profile root");
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let scope =
             tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
