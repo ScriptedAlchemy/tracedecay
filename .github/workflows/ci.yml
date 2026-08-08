@@ -116,7 +116,15 @@ jobs:
             runner: '"macos-14"'
 
     steps:
+      # Full history: the search-quality workload fixture pins a
+      # `source_repository_commit`, and `validate_source_bindings` resolves that
+      # object out of this checkout to prove the checked-in corpus really is the
+      # product source at that commit. A depth-1 checkout carries only the tip,
+      # so every candidate_output/report test fails with "resolve fixture source
+      # commit: An object with id ... could not be found".
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -223,7 +231,12 @@ jobs:
       matrix:
         partition: [1, 2, 3, 4, 5]
     steps:
+      # Full history for the same reason as the Linux/macOS test job: the
+      # shards run the workspace suite remapped onto this checkout, so the
+      # pinned search-quality fixture commit must be resolvable here too.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Tune Windows runner for test I/O
         shell: pwsh
