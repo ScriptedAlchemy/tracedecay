@@ -102,6 +102,20 @@ pub(super) async fn describe(
         ),
     };
 
+    let session_token_estimate = if target == "session" {
+        let store = tracedecay_sessions::runtime::lcm::query::store_status(
+            snapshot,
+            provider,
+            Some(session_id),
+        )
+        .await?;
+        store
+            .token_estimate
+            .complete
+            .then_some(store.estimated_tokens)
+    } else {
+        None
+    };
     Ok(LcmDescribeResponse {
         target,
         provider: request.provider,
@@ -115,6 +129,7 @@ pub(super) async fn describe(
         summary_nodes,
         summary_node,
         external_payload,
+        session_token_estimate,
     })
 }
 

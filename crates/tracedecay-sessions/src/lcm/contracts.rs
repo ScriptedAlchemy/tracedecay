@@ -405,6 +405,11 @@ pub struct LcmDescribeResponse {
     pub summary_nodes: Vec<LcmSummaryNodeOverview>,
     pub summary_node: Option<LcmDescribeSummaryNode>,
     pub external_payload: Option<LcmDescribeExternalPayload>,
+    /// Complete session token estimate from the store-status authority, or
+    /// typed-absent when the bounded scan could not cover the whole session —
+    /// a partial estimate is never presented as the session's size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token_estimate: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

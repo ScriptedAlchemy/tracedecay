@@ -185,7 +185,7 @@ pub async fn publish_immutable_summary(
             .max()
             .unwrap_or_default(),
     );
-    let source_horizon = sources::source_horizon_json(&sources);
+    let source_horizon = sources::source_horizon_json(&sources, draft.source_time_end);
     let owner_json = sources::session_owner_json(conn, &draft.provider, &draft.session_id).await?;
     sources::insert_compatibility_source_anchors(conn, &sources, &owner_json).await?;
     let typed_summary_anchor =

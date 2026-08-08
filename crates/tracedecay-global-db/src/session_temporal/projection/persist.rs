@@ -503,7 +503,16 @@ pub(super) async fn canonical_occurrence(
     let valid_at = anchor
         .occurred_at()
         .map(|interval| interval.start)
-        .or_else(|| envelope.evidence().native_timestamp().map(UtcMicros));
+        .or_else(|| {
+            // Host-native timestamps arrive in whatever unit the host emits;
+            // the summary-publication side already normalizes through the
+            // same helper, and comparing valid times across the two paths is
+            // only sound if both land in canonical micros.
+            envelope
+                .evidence()
+                .native_timestamp()
+                .map(|native| UtcMicros(super::super::operations::normalize_timestamp(native)))
+        });
     let valid_time = valid_at.map_or_else(
         || json!({"kind": "unknown"}),
         |valid_at| json!({"kind": "known", "valid_at": valid_at}),

@@ -74,6 +74,11 @@ impl DashboardLcmReadAdapter {
         let mut aggregate_results = Vec::new();
         let mut aggregate_omitted = 0_u64;
         let mut aggregate_pages = 0_usize;
+        // A non-aggregate session read serves one window: a Partial outcome
+        // (continuation cursor or genuine omission) keeps the page visibly
+        // partial. Aggregate reads drain to the terminal cursor, so only
+        // their accumulated omissions matter.
+        let mut window_partial = false;
         // Aggregate reads consume the daemon-issued continuation to its
         // terminal page. The opaque cursor binds the frozen participant/source
         // manifest and ordering, while each execute call reauthorizes and
@@ -85,16 +90,19 @@ impl DashboardLcmReadAdapter {
                     "lcm_dashboard_request_invalid",
                 );
             };
-            let (page, omitted) = match self.retrieval.execute(command).await {
-                SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0),
+            let (page, omitted, paged_partial) = match self.retrieval.execute(command).await {
+                SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
                 SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
                     SessionRetrievalPageView {
                         results: Vec::new(),
                         temporal,
                     },
                     0,
+                    false,
                 ),
-                SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => (page, omitted),
+                SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => {
+                    (page, omitted, true)
+                }
                 SessionRetrievalServiceOutcome::Stale { .. } => {
                     return not_ready(
                         DashboardLcmReadStateV1::Stale,
@@ -134,6 +142,9 @@ impl DashboardLcmReadAdapter {
             };
             aggregate_pages = aggregate_pages.saturating_add(1);
             aggregate_omitted = aggregate_omitted.saturating_add(omitted);
+            if !aggregate {
+                window_partial |= paged_partial;
+            }
             let next_cursor = page.temporal.cursor.clone();
             aggregate_results.extend(page.results);
             let temporal = page.temporal;
@@ -265,6 +276,7 @@ impl DashboardLcmReadAdapter {
                         summary_node_count: description.summary_node_count,
                         summary_token_count: None,
                         source_token_count: None,
+                        token_estimate_total: description.session_token_estimate,
                     }
                 }
                 // No temporal record surfaced for the session, so there is no
@@ -300,7 +312,11 @@ impl DashboardLcmReadAdapter {
             next_cursor,
         };
         let total_omitted = omitted.saturating_add(partial_description_count);
-        if total_omitted > 0 {
+        // A windowed page with a continuation cursor stays visibly partial
+        // even when nothing was genuinely omitted (omitted stays 0): the
+        // partiality is a state carried from the retrieval outcome, never
+        // re-derived from the count.
+        if total_omitted > 0 || window_partial {
             DashboardLcmReadOutcomeV1::Partial {
                 page: canonical_page,
                 omitted: total_omitted,

@@ -2,10 +2,9 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, DurableObservationV1, EntityId, EntityKind,
-    EntityRef, EvidenceClass, ObservationScopeV1, PayloadAccessState, ProjectId,
-    ProjectionGenerationId, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, UtcMicros,
+    AnchorDurabilityClass, AnchorSourceGenerationV2, EntityId, EntityKind, EntityRef,
+    EvidenceClass, PayloadAccessState, ProjectionGenerationId, RetentionClass,
+    RetrievalAnchorRecord, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
@@ -14,6 +13,7 @@ use tracedecay_sessions::runtime::lcm::types::{
     LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmStorageKind,
 };
 
+use super::message_anchor::resolve_message_anchor;
 use super::{
     CanonicalPublicationManifest, CanonicalSourceBinding, PUBLICATION_ROUTE, PreparedPayload,
     PreparedSource, normalize_timestamp, unixepoch,
@@ -183,118 +183,7 @@ async fn prepare_summary_source(
     })
 }
 
-async fn resolve_message_anchor(
-    conn: &impl Executor,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    now: i64,
-) -> Result<Option<(String, bool, i64)>, LcmError> {
-    let Some(generation) = super::generation::active_generation(conn, session_id).await? else {
-        return Ok(None);
-    };
-    let mut rows = conn
-        .query(
-            "SELECT DISTINCT json_object(
-                    'anchor_id', occurrence.retrieval_anchor_id,
-                    'anchor_json', anchor.anchor_json,
-                    'owner_json', anchor.owner_json,
-                    'knowledge_at', occurrence.knowledge_at,
-                    'observation_json', observation.observation_json,
-                    'receipt_id', observation.receipt_id
-                )
-             FROM session_occurrences occurrence
-             JOIN retrieval_anchors anchor
-               ON anchor.anchor_id = occurrence.retrieval_anchor_id
-             JOIN observations observation
-               ON observation.observation_id = occurrence.source_observation_id
-             WHERE occurrence.session_id = ?1
-               AND occurrence.generation = ?2
-               AND occurrence.message_id = ?3
-             ORDER BY occurrence.retrieval_anchor_id",
-            params![session_id, generation, message_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Ok(None);
-    };
-    let encoded = row.get::<String>(0)?;
-    let retained: serde_json::Value =
-        serde_json::from_str(&encoded).map_err(|error| LcmError::Db(error.to_string()))?;
-    let string = |field: &str| {
-        retained[field]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| LcmError::Db(format!("retained source {field} is unavailable")))
-    };
-    let anchor_id = string("anchor_id")?;
-    let anchor_json = string("anchor_json")?;
-    let owner_json = string("owner_json")?;
-    let knowledge_at = retained["knowledge_at"]
-        .as_i64()
-        .ok_or_else(|| LcmError::Db("retained source knowledge_at is unavailable".to_string()))?;
-    if rows.next().await?.is_some() {
-        return Err(LcmError::SummarySourceUnavailable {
-            source_id: message_id.to_string(),
-            reason: "ambiguous_anchor".to_string(),
-        });
-    }
-    let anchor: RetrievalAnchorRecord = serde_json::from_str(&anchor_json)
-        .map_err(|_| unavailable(&anchor_id, "unverifiable_anchor"))?;
-    let observation_raw = string("observation_json")?;
-    let observation: DurableObservationV1 = serde_json::from_str(&observation_raw)
-        .map_err(|_| unavailable(&anchor_id, "unverifiable_observation"))?;
-    let expected_scope = publishing_scope(conn, provider, session_id).await?;
-    if observation.source().provider().as_str() != provider
-        || observation.source().session_id().as_str() != session_id
-        || observation.scope() != &expected_scope
-        || anchor.owner() != observation.scope()
-        || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json.as_str())
-        || string("receipt_id")? != observation.receipt().receipt().receipt_id().as_str()
-    {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    }
-    match anchor.payload_access() {
-        PayloadAccessState::Eligible => {}
-        state => {
-            return Err(unavailable(
-                &anchor_id,
-                &format!("{state:?}").to_ascii_lowercase(),
-            ));
-        }
-    }
-    if let AnchorDurabilityClass::RetentionBound { expires_at } = anchor.durability()
-        && expires_at.0 <= now
-    {
-        return Err(unavailable(&anchor_id, "retention_expired"));
-    }
-    Ok(Some((anchor_id, false, knowledge_at)))
-}
-
-async fn publishing_scope(
-    conn: &impl Executor,
-    provider: &str,
-    session_id: &str,
-) -> Result<ObservationScopeV1, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT project_key FROM sessions WHERE provider = ?1 AND session_id = ?2",
-            params![provider, session_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    };
-    let project_key: String = row.get(0)?;
-    if project_key == "user" {
-        return Ok(ObservationScopeV1::Profile);
-    }
-    ProjectId::new(project_key)
-        .map(|project_id| ObservationScopeV1::Project { project_id })
-        .map_err(|_| LcmError::SummarySourceNotOwnedBySession)
-}
-
-fn unavailable(source_id: &str, reason: &str) -> LcmError {
+pub(super) fn unavailable(source_id: &str, reason: &str) -> LcmError {
     LcmError::SummarySourceUnavailable {
         source_id: source_id.to_string(),
         reason: reason.to_string(),
@@ -421,15 +310,30 @@ fn compatibility_anchor_id(
     )
 }
 
-pub(super) fn source_horizon_json(sources: &[PreparedSource]) -> String {
+pub(super) fn source_horizon_json(
+    sources: &[PreparedSource],
+    declared_source_time_end: Option<i64>,
+) -> String {
     let knowledge_through = sources
         .iter()
         .map(|source| source.timestamp)
         .max()
         .unwrap_or_default();
+    // `knowledge_through` lives in the ingest-time domain, but lineage
+    // eligibility compares source occurrences' VALID (event) times against
+    // `valid_through`. A summary that declares the event-time range it
+    // covers must keep sources inside that range eligible even when their
+    // event times exceed the ingest clock, so the declared end extends the
+    // valid horizon; without a declaration the ingest bound is the only
+    // truthful upper bound available.
+    let valid_through = declared_source_time_end
+        .map(normalize_timestamp)
+        .map_or(knowledge_through, |declared| {
+            declared.max(knowledge_through)
+        });
     json!({
         "knowledge_through": knowledge_through,
-        "valid_through": knowledge_through,
+        "valid_through": valid_through,
     })
     .to_string()
 }

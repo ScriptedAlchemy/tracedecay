@@ -839,6 +839,9 @@ pub(super) struct ExplorerSessionCountsV1 {
     summary_node_count: i64,
     summary_token_count: Option<i64>,
     source_token_count: Option<i64>,
+    /// Complete session token estimate from the LCM size authority, or
+    /// typed-absent when the bounded estimate did not cover the session.
+    token_estimate_total: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -867,7 +870,7 @@ pub async fn session_size(
     State(state): State<DashboardState>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let outcome = read_session_page(&state, &session_id, 500).await;
+    let outcome = read_session_page(&state, &session_id, 500, None).await;
     match outcome {
         DashboardLcmReadOutcomeV1::Ready(page) => {
             let payload = ExplorerSessionSizeV1 {
@@ -926,83 +929,89 @@ pub async fn read_context(
         ))
         .into_response();
     }
-    match read_session_page(&state, &session_id, limit).await {
-        DashboardLcmReadOutcomeV1::Partial { mut page, omitted } => {
-            let messages = page.messages.drain(..).collect::<Vec<_>>();
-            let counts = explorer_session_counts(&page.stats);
-            let returned_summary_nodes =
-                i64::try_from(page.summary_nodes.len()).unwrap_or(i64::MAX);
-            let has_more_summary_nodes = page.stats.summary_node_count > returned_summary_nodes;
-            let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
-            let messages = messages
-                .into_iter()
-                .map(explorer_lcm_message)
-                .collect::<Vec<_>>();
-            let payload = ExplorerReadContextV1 {
-                session_id,
-                storage_scope: "project".to_owned(),
-                limit,
-                offset,
-                order: order.to_owned(),
-                counts,
-                messages,
-                summary_nodes: page
-                    .summary_nodes
-                    .into_iter()
-                    .map(explorer_lcm_summary)
-                    .collect(),
-                has_more: page.has_more,
-                has_more_messages: page.has_more,
-                has_more_summary_nodes,
-            };
-            Json(DashboardEnvelopeV1::partial(
-                scope_from_state(&state),
-                examined.saturating_add(omitted),
-                examined,
-                "canonical hydrated records",
-                vec!["lcm_temporal_read_incomplete".to_owned()],
-                Some(payload),
-            ))
-            .into_response()
+    // The kernel serves one ranked stream in which summary nodes ride beside
+    // messages, so a windowed read fills its MESSAGE quota by consuming
+    // continuation pages: summaries accumulate alongside without starving the
+    // caller's limit, and the fill stays bounded so a read never becomes
+    // unbounded background work.
+    const READ_CONTEXT_FILL_PAGES: usize = 8;
+    let mut messages: Vec<DashboardLcmCanonicalMessageV1> = Vec::new();
+    let mut summary_nodes = Vec::new();
+    let mut stats = None;
+    let mut window_partial = false;
+    let mut omitted_total = 0_u64;
+    let mut cursor: Option<String> = None;
+    let mut has_more_messages = false;
+    for _ in 0..READ_CONTEXT_FILL_PAGES {
+        let outcome = read_session_page(&state, &session_id, limit, cursor.take()).await;
+        let (mut page, page_partial, page_omitted) = match outcome {
+            DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
+            DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
+            DashboardLcmReadOutcomeV1::NotReady {
+                state: read_state,
+                reason,
+            } => {
+                return explorer_session_not_ready::<ExplorerReadContextV1>(
+                    &state, read_state, reason,
+                );
+            }
+        };
+        window_partial |= page_partial;
+        omitted_total = omitted_total.saturating_add(page_omitted);
+        summary_nodes.append(&mut page.summary_nodes);
+        let deficit = usize::try_from(limit).unwrap_or(usize::MAX) - messages.len();
+        let overflow = page.messages.len() > deficit;
+        messages.extend(page.messages.drain(..).take(deficit));
+        stats = Some(page.stats);
+        cursor = page.next_cursor;
+        if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+            has_more_messages = overflow || cursor.is_some();
+            break;
         }
-        DashboardLcmReadOutcomeV1::Ready(mut page) => {
-            let messages = page.messages.drain(..).collect::<Vec<_>>();
-            let counts = explorer_session_counts(&page.stats);
-            let returned_summary_nodes =
-                i64::try_from(page.summary_nodes.len()).unwrap_or(i64::MAX);
-            let has_more_summary_nodes = page.stats.summary_node_count > returned_summary_nodes;
-            let messages = messages
-                .into_iter()
-                .map(explorer_lcm_message)
-                .collect::<Vec<_>>();
-            let payload = ExplorerReadContextV1 {
-                session_id,
-                storage_scope: "project".to_owned(),
-                limit,
-                offset,
-                order: order.to_owned(),
-                counts,
-                messages,
-                summary_nodes: page
-                    .summary_nodes
-                    .into_iter()
-                    .map(explorer_lcm_summary)
-                    .collect(),
-                has_more: page.has_more,
-                has_more_messages: page.has_more,
-                has_more_summary_nodes,
-            };
-            Json(DashboardEnvelopeV1::ready(
-                scope_from_state(&state),
-                DashboardCoverageV1::unknown(),
-                Some(payload),
-            ))
-            .into_response()
+        if cursor.is_none() {
+            break;
         }
-        DashboardLcmReadOutcomeV1::NotReady {
-            state: read_state,
-            reason,
-        } => explorer_session_not_ready::<ExplorerReadContextV1>(&state, read_state, reason),
+        has_more_messages = true;
+    }
+    let stats = stats.unwrap_or_default();
+    let counts = explorer_session_counts(&stats);
+    let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
+    let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
+    let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
+    let has_more = has_more_messages || cursor.is_some();
+    let payload = ExplorerReadContextV1 {
+        session_id,
+        storage_scope: "project".to_owned(),
+        limit,
+        offset,
+        order: order.to_owned(),
+        counts,
+        messages: messages.into_iter().map(explorer_lcm_message).collect(),
+        summary_nodes: summary_nodes
+            .into_iter()
+            .map(explorer_lcm_summary)
+            .collect(),
+        has_more,
+        has_more_messages: has_more,
+        has_more_summary_nodes,
+    };
+    if window_partial || has_more {
+        Json(DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            examined.saturating_add(omitted_total),
+            examined,
+            "canonical hydrated records",
+            vec!["lcm_temporal_read_incomplete".to_owned()],
+            Some(payload),
+        ))
+        .into_response()
+    } else {
+        Json(DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::unknown(),
+            Some(payload),
+        ))
+        .into_response()
     }
 }
 
@@ -1010,6 +1019,7 @@ async fn read_session_page(
     state: &DashboardState,
     session_id: &str,
     limit: i64,
+    cursor: Option<String>,
 ) -> DashboardLcmReadOutcomeV1 {
     let Some(authority) = state.lcm_read_authority.as_ref() else {
         return DashboardLcmReadOutcomeV1::NotReady {
@@ -1023,7 +1033,7 @@ async fn read_session_page(
             DashboardLcmReadRequestV1::Session {
                 session_id: session_id.to_owned(),
                 limit,
-                cursor: None,
+                cursor,
             },
         )
         .await
@@ -1112,6 +1122,7 @@ fn explorer_session_counts(stats: &DashboardLcmCanonicalStatsV1) -> ExplorerSess
         summary_node_count: stats.summary_node_count,
         summary_token_count: stats.summary_token_count,
         source_token_count: stats.source_token_count,
+        token_estimate_total: stats.token_estimate_total,
     }
 }
 

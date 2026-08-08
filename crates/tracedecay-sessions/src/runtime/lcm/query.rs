@@ -19,6 +19,7 @@ pub use grep::grep;
 use grep::{contains_cjk, raw_grep_hits, summary_grep_hits};
 pub use payload_health::*;
 pub use session::*;
+pub use status::store_status;
 use status::*;
 
 use super::types::LcmStoreTokenCoverage;
@@ -261,6 +262,15 @@ pub async fn describe(
         ),
     };
 
+    let session_token_estimate = if target == "session" {
+        let store = store_status(conn, provider, Some(session_id)).await?;
+        store
+            .token_estimate
+            .complete
+            .then_some(store.estimated_tokens)
+    } else {
+        None
+    };
     Ok(LcmDescribeResponse {
         target,
         provider: provider.to_string(),
@@ -274,6 +284,7 @@ pub async fn describe(
         summary_nodes,
         summary_node,
         external_payload,
+        session_token_estimate,
     })
 }
 

@@ -603,10 +603,19 @@ fn map_report(
         return SessionRetrievalOutcome::Stale { freshness };
     }
     if has_partial_coverage || result.next_cursor.is_some() {
+        // A continuation cursor keeps a windowed read visibly partial, but it
+        // is pagination, not omission: only genuine coverage gaps carry a
+        // non-zero omitted count. Fabricating `omitted = 1` for a paged read
+        // made every multi-record session describe a partial description.
+        let omitted = if has_partial_coverage {
+            omitted.max(1)
+        } else {
+            omitted
+        };
         return SessionRetrievalOutcome::Partial {
             items: vec![result],
             freshness,
-            omitted: omitted.max(1),
+            omitted,
         };
     }
     SessionRetrievalOutcome::Complete {

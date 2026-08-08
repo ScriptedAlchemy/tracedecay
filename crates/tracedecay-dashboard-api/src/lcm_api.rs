@@ -117,6 +117,9 @@ pub struct DashboardLcmCanonicalStatsV1 {
     pub summary_node_count: i64,
     pub summary_token_count: Option<i64>,
     pub source_token_count: Option<i64>,
+    /// Complete session token estimate from the LCM store-status authority;
+    /// typed-absent when the bounded scan did not cover the whole session.
+    pub token_estimate_total: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

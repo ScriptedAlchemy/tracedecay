@@ -948,8 +948,15 @@ impl DaemonSessionRetrievalService {
                 freshness,
                 omitted,
             } => {
-                let retrieval =
-                    LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted);
+                // A describe is a point read over a deliberately single-item
+                // page, so a pagination-only partial (zero genuine omissions)
+                // still yields a complete description: the rendered counts
+                // come from whole-table aggregates, not from the page.
+                let retrieval = if omitted == 0 {
+                    LcmRetrievalOutcome::complete(lcm_data_freshness(freshness))
+                } else {
+                    LcmRetrievalOutcome::partial(lcm_data_freshness(freshness), omitted)
+                };
                 let Some(result) = items.pop() else {
                     return LcmDescribeServiceOutcome::Partial {
                         description: None,

@@ -506,7 +506,10 @@ pub(super) fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmS
     }
 }
 
-async fn store_status(
+/// Store size and token estimate for one provider/session scope, using the
+/// same bounded scan the status query reports — the single token-estimate
+/// authority for every surface that presents a session's size.
+pub async fn store_status(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,

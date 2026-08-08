@@ -82,7 +82,8 @@ fn build_observation(seed: &DashboardSessionMessageSeedV1<'_>) -> Result<Durable
             model: seed.model.map(ToOwned::to_owned),
             timestamp: Some(seed.timestamp),
         }],
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
+            .with_native_timestamp(seed.timestamp),
     )
     .map_err(|error| fixture_error("canonical envelope", error))?;
     let payload =
