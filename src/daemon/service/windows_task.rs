@@ -1198,6 +1198,7 @@ fn rollback_registration_with(
     previous_xml: Option<&str>,
 ) -> Result<()> {
     let disable_result = api.disable_for_rollback();
+    let disable_failed = disable_result.is_err();
     let definition_result = match (previous, previous_xml) {
         (Some(snapshot), Some(xml)) => api
             .register_xml(xml)
@@ -1212,7 +1213,16 @@ fn rollback_registration_with(
         definition_result,
         disable_result,
     );
-    if rollback_result.is_err() || previous.is_some_and(|snapshot| !snapshot.enabled) {
+    // A re-registered definition may re-enable the task, and a failed disable
+    // leaves enablement unknown; both need one final disable so a residual
+    // task can never stay runnable. Deleting after a successful disable cannot
+    // re-enable anything, so that path must not touch the task again.
+    let needs_final_disable = if previous.is_some() {
+        rollback_result.is_err() || previous.is_some_and(|snapshot| !snapshot.enabled)
+    } else {
+        disable_failed
+    };
+    if needs_final_disable {
         let final_disable_result = api.disable_for_rollback();
         return combine_task_operations(
             "restore disabled daemon task registration",
@@ -1698,7 +1708,10 @@ fn xml_section_text<'a>(xml: &'a str, section: &str) -> Option<&'a str> {
     let opening_prefix = format!("<{section}");
     let opening_start = xml.find(&opening_prefix)?;
     let value_start = xml[opening_start..].find('>')? + opening_start + 1;
-    let closing = format!("</{section}>");
+    // The section selector may pin attributes (e.g. `Principal id="Author"`);
+    // the closing tag carries only the element name.
+    let element_name = section.split_whitespace().next()?;
+    let closing = format!("</{element_name}>");
     let value_end = xml[value_start..].find(&closing)? + value_start;
     Some(&xml[value_start..value_end])
 }
