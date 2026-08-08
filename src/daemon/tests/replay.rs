@@ -4,6 +4,10 @@ use super::*;
 async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
+    // A real profile identity but no daemon database scope: setup passes the
+    // identity gate and must then surface the registered-authority route
+    // failure as JSON-RPC instead of hanging or panicking.
+    let administration = test_store_administration_for_profile(&profile_root);
     let identity = test_client_identity_for(profile_root);
     let params = serde_json::json!({
         "name": "tracedecay_lcm_status",
@@ -18,7 +22,7 @@ async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
         serde_json::json!(1),
         Some(&params),
         &identity,
-        &StoreAdministration::default(),
+        &administration,
     )
     .await;
 
