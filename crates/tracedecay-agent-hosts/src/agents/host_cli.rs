@@ -519,9 +519,17 @@ printf '%s' "$HOME" > "$HOME/home"
             std::fs::read_to_string(home.path().join("kiro-home")).unwrap(),
             "<unset>"
         );
-        assert_eq!(
-            std::fs::read_to_string(home.path().join("path")).unwrap(),
-            "<unset>"
+        // `PATH` cannot be probed for absence the way `KIRO_HOME` can: a POSIX
+        // shell assigns itself a default `PATH` when it starts without one, so
+        // a `#!/bin/sh` probe reports that synthesized default rather than
+        // `<unset>` even though `env_clear` did remove the variable. What the
+        // admission actually promises — and what this asserts — is that the
+        // *ambient* value did not reach the child.
+        let observed = std::fs::read_to_string(home.path().join("path")).unwrap();
+        let ambient = std::env::var("PATH").unwrap_or_default();
+        assert_ne!(
+            observed, ambient,
+            "the ambient PATH must not reach the child"
         );
         assert_eq!(
             std::fs::read_to_string(home.path().join("home")).unwrap(),
@@ -620,11 +628,20 @@ exit 0
             std::fs::read_to_string(home.path().join("node-args")).unwrap(),
             format!("{} mcp add", launcher.display())
         );
-        assert_eq!(
-            std::fs::read_to_string(home.path().join("node-path")).unwrap(),
-            "<unset>",
-            "ambient PATH (including the attacker directory) must not reach the child"
-        );
+        // As above, `<unset>` is not observable through a `#!/bin/sh` probe:
+        // the shell synthesizes a default `PATH` when it inherits none. The
+        // guarantee under test is that neither ambient entry survived — not
+        // the attacker directory, and not even the directory the interpreter
+        // itself was resolved from, because the parent resolves it once and
+        // passes an absolute path rather than letting the child re-resolve.
+        let observed = std::fs::read_to_string(home.path().join("node-path")).unwrap();
+        for ambient_entry in [attacker_dir.path(), node_dir.path()] {
+            assert!(
+                !observed.contains(&*ambient_entry.to_string_lossy()),
+                "ambient PATH entry {} must not reach the child (observed {observed})",
+                ambient_entry.display()
+            );
+        }
         assert!(!home.path().join("attacker-ran").exists());
     }
 }
