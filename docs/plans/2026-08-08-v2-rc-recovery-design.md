@@ -109,8 +109,9 @@ Expose only mounted capabilities:
 - apply one declarative install/update/uninstall/isolation contract across all
   supported hosts; Kiro uses the shared JSON merge/backup/rollback authority
   for both global and workspace `mcp.json` registration rather than a separate
-  `kiro-cli` lifecycle, while retaining only its host-specific steering, agent,
-  and hook artifact shapes;
+  `kiro-cli` lifecycle; its RC integration is MCP-only across Kiro IDE and CLI,
+  with no TraceDecay-owned Kiro Power, OpenVSX extension, managed agent,
+  steering block, or hook artifact;
 - parse and sanitize structured provider metadata before any GitHub, fact, or
   session sink sees it.
 
