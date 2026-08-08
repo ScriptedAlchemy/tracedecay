@@ -297,14 +297,15 @@ where
             false,
             request.observed_at,
         )?;
+        let record = NativeIntegrationRecordV1 {
+            status: candidate_verified,
+            ..record
+        };
         if self.authorization.authorize_apply(request, true)
             != NativeIntegrationAuthorizationOutcomeV1::Authorized
         {
             let receipt = self.finish_from_probe(
-                &NativeIntegrationRecordV1 {
-                    status: candidate_verified,
-                    ..record
-                },
+                &record,
                 NativeIntegrationProbeV1::OldState {
                     tip: request.preview.repository_snapshot.destination_tip.clone(),
                     tree: request.preview.repository_snapshot.destination_tree.clone(),
@@ -318,10 +319,7 @@ where
         }
         if cancellation.is_cancelled() {
             let receipt = self.finish_from_probe(
-                &NativeIntegrationRecordV1 {
-                    status: candidate_verified,
-                    ..record
-                },
+                &record,
                 NativeIntegrationProbeV1::OldState {
                     tip: request.preview.repository_snapshot.destination_tip.clone(),
                     tree: request.preview.repository_snapshot.destination_tree.clone(),
@@ -370,7 +368,7 @@ where
         }
         let commit_started = advance_status(
             self.store.as_ref(),
-            &candidate_verified,
+            &record.status,
             NativeIntegrationPhaseV1::RefCommitStarted,
             false,
             request.observed_at,

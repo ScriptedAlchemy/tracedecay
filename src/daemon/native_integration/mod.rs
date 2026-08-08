@@ -8,4 +8,7 @@
 mod registry;
 mod store;
 
+#[cfg(test)]
+mod journey_tests;
+
 pub(crate) use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
