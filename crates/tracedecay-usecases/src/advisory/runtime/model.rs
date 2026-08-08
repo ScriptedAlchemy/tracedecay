@@ -84,10 +84,25 @@ impl AdvisoryContributionsV1 {
         let mut findings = self.findings.clone();
         findings.sort_by(|left, right| left.finding_id.as_str().cmp(right.finding_id.as_str()));
         Ok(FeedbackCycleAdvisoryV1 {
-            provider_states: self
+            providers: self
                 .providers
                 .iter()
-                .map(|provider| provider.state)
+                .map(|provider| {
+                    tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                        producer: match provider.provider {
+                            AdvisoryProviderV1::GitHub => {
+                                tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::GitHubReview
+                            }
+                            AdvisoryProviderV1::Ci => {
+                                tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::CiLocalization
+                            }
+                            AdvisoryProviderV1::Proximity => {
+                                tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::Proximity
+                            }
+                        },
+                        state: provider.state,
+                    }
+                })
                 .collect(),
             findings,
         })

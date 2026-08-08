@@ -1,18 +1,31 @@
 use super::cycle::*;
 use super::model::*;
 use super::*;
+use tracedecay_domain::feedback::{FeedbackAdvisoryProviderStateV1, FeedbackDiagnosticProducerV1};
 
 #[test]
 fn absent_provider_states_remain_explicit() {
     let advisory = AdvisoryContributionsV1::absent()
         .as_feedback_cycle_advisory()
         .expect("canonical advisory");
+    // Each absent state stays bound to the producer that reported it, so a
+    // reader can name which provider was absent instead of inferring it from
+    // a position in an aggregate list.
     assert_eq!(
-        advisory.provider_states,
+        advisory.providers,
         vec![
-            ProviderEvaluationStateV1::Absent,
-            ProviderEvaluationStateV1::Absent,
-            ProviderEvaluationStateV1::Absent,
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                state: ProviderEvaluationStateV1::Absent,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                state: ProviderEvaluationStateV1::Absent,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::Proximity,
+                state: ProviderEvaluationStateV1::Absent,
+            },
         ]
     );
     assert!(advisory.findings.is_empty());

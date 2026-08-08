@@ -206,15 +206,19 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                             LspRuntimeFailure::new("feedback-cycle-proximity-contribution")
                         })?;
                     let advisory = FeedbackCycleAdvisoryV1 {
-                        // Provider order is the canonical advisory order:
-                        // GitHub, CI, proximity. The LSP/Hook fallback has no
-                        // authenticated remote provider target, so it records
-                        // those providers as explicitly unavailable rather
-                        // than silently omitting them.
-                        provider_states: vec![
-                            tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
-                            tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
-                            batch.provider_state,
+                        providers: vec![
+                            tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                                producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::GitHubReview,
+                                state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                            },
+                            tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                                producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::CiLocalization,
+                                state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                            },
+                            tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                                producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::Proximity,
+                                state: batch.provider_state,
+                            },
                         ],
                         findings: batch.findings,
                     };
@@ -227,10 +231,19 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-denied"))
                 }
                 ProximityRuntimeOutcomeV1::Unavailable => Ok(FeedbackCycleAdvisoryV1 {
-                    provider_states: vec![
-                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
-                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
-                        tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                    providers: vec![
+                        tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                            producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::GitHubReview,
+                            state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                        },
+                        tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                            producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::CiLocalization,
+                            state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                        },
+                        tracedecay_domain::feedback::FeedbackAdvisoryProviderStateV1 {
+                            producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::Proximity,
+                            state: tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
+                        },
                     ],
                     findings: Vec::new(),
                 }),

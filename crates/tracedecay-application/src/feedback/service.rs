@@ -7,9 +7,9 @@ use crate::handlers::ApplicationOperation;
 use crate::result::{ApplicationProblem, ApplicationProblemKind, AuthorityReceipt};
 use crate::storage::findings::truncate_at_char_boundary;
 use tracedecay_domain::feedback::{
-    FeedbackBaselineStateV1, FeedbackContentIdentityV1, FeedbackCycleObservationV1,
-    FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDedupeKeyV1,
-    FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
+    FeedbackAdvisoryProviderStateV1, FeedbackBaselineStateV1, FeedbackContentIdentityV1,
+    FeedbackCycleObservationV1, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
+    FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
     FeedbackEvaluationInputV1, FeedbackEvaluationStageV1, FeedbackFindingLifecycleV1,
     FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1, ProviderEvaluationStateV1,
@@ -71,26 +71,39 @@ impl FeedbackBudgetUsage {
 /// canonical finding projection through its existing dedupe port.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedbackCycleAdvisoryV1 {
-    pub provider_states: Vec<ProviderEvaluationStateV1>,
+    pub providers: Vec<FeedbackAdvisoryProviderStateV1>,
     pub findings: Vec<FeedbackFindingV1>,
 }
 
 impl FeedbackCycleAdvisoryV1 {
     pub fn is_empty(&self) -> bool {
-        self.provider_states.is_empty() && self.findings.is_empty()
+        self.providers.is_empty() && self.findings.is_empty()
     }
 
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if self.is_empty() {
             return Ok(());
         }
-        if self.provider_states.is_empty() {
+        if self.providers.is_empty() {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback advisory coverage",
             });
         }
         if self.findings.iter().any(|finding| {
-            finding.validate().is_err() || !self.provider_states.contains(&finding.provider_state)
+            finding.validate().is_err()
+                || !self
+                    .providers
+                    .iter()
+                    .any(|provider| provider.state == finding.provider_state)
+                || finding
+                    .diagnostic_projection
+                    .as_ref()
+                    .is_some_and(|projection| {
+                        !self.providers.iter().any(|provider| {
+                            provider.producer == projection.producer
+                                && provider.state == finding.provider_state
+                        })
+                    })
         }) {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback advisory finding",
@@ -103,6 +116,15 @@ impl FeedbackCycleAdvisoryV1 {
         }) {
             return Err(ApplicationContractError::Duplicate {
                 field: "feedback advisory finding",
+            });
+        }
+        if self.providers.iter().enumerate().any(|(index, provider)| {
+            self.providers[index.saturating_add(1)..]
+                .iter()
+                .any(|other| other.producer == provider.producer)
+        }) {
+            return Err(ApplicationContractError::Duplicate {
+                field: "feedback advisory provider",
             });
         }
         Ok(())
@@ -166,6 +188,7 @@ struct FeedbackCycleProgress {
     baselines: Vec<FeedbackDiagnosticBaselineV1>,
     diagnostics: Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
     provider_states: Vec<ProviderEvaluationStateV1>,
+    advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
     baseline_states: Vec<FeedbackBaselineStateV1>,
     impact: Option<FeedbackImpactV1>,
     impact_state: Option<FeedbackImpactStateV1>,
@@ -475,6 +498,7 @@ where
                     baselines: Vec::new(),
                     diagnostics: Vec::new(),
                     provider_states: Vec::new(),
+                    advisory_provider_states: Vec::new(),
                     baseline_states: Vec::new(),
                     impact: None,
                     impact_state: None,
@@ -732,7 +756,7 @@ where
             .collect();
         let (mut provider_states, mut findings) =
             collect_diagnostics(request, &progress.diagnostics, &resolved_baselines)?;
-        provider_states.extend(advisory.provider_states.iter().cloned());
+        provider_states.extend(advisory.providers.iter().map(|provider| provider.state));
         findings.extend(advisory.findings.iter().cloned());
         if findings.iter().enumerate().any(|(index, finding)| {
             findings[index.saturating_add(1)..]
@@ -744,6 +768,7 @@ where
             });
         }
         progress.provider_states = provider_states.clone();
+        progress.advisory_provider_states = advisory.providers.clone();
         progress.findings = findings;
         if let Some(termination) =
             terminal_before_impact(&provider_states, &progress.baseline_states)
@@ -840,7 +865,7 @@ where
                 &progress.baselines,
                 &progress.impact,
                 impact_state,
-                &advisory.provider_states,
+                &advisory.providers,
                 &advisory.findings,
             ))?;
             let key = request.input.dedupe_key(&evidence_identity)?;
@@ -938,6 +963,7 @@ where
                 progress.dedupe_key.clone(),
                 termination,
                 progress.provider_states.clone(),
+                progress.advisory_provider_states.clone(),
                 progress.baseline_states.clone(),
                 progress.impact.clone(),
                 Some(impact_state),
@@ -985,6 +1011,9 @@ where
                 None,
             ) => &[][..],
         };
+        let advisory_provider_states = progress.map_or_else(Vec::new, |progress| {
+            progress.advisory_provider_states.clone()
+        });
 
         match terminal.finish_path {
             FeedbackCycleFinishPath::Immediate => self.finish(
@@ -992,6 +1021,7 @@ where
                 terminal.dedupe_key,
                 terminal.termination,
                 terminal.provider_states,
+                advisory_provider_states,
                 terminal.baseline_states,
                 terminal.impact,
                 terminal.impact_state,
@@ -1012,6 +1042,7 @@ where
                     terminal.dedupe_key,
                     terminal.termination,
                     terminal.provider_states,
+                    advisory_provider_states,
                     terminal.baseline_states,
                     terminal.impact,
                     terminal.impact_state,
@@ -1034,6 +1065,7 @@ where
                     terminal.dedupe_key,
                     terminal.termination,
                     terminal.provider_states,
+                    advisory_provider_states,
                     terminal.baseline_states,
                     terminal.impact,
                     terminal.impact_state,
@@ -1112,6 +1144,7 @@ where
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
         provider_states: Vec<ProviderEvaluationStateV1>,
+        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
         baseline_states: Vec<FeedbackBaselineStateV1>,
         impact: Option<FeedbackImpactV1>,
         impact_state: Option<FeedbackImpactStateV1>,
@@ -1126,6 +1159,7 @@ where
             dedupe_key,
             termination,
             provider_states,
+            advisory_provider_states,
             baseline_states,
             impact,
             impact_state,
@@ -1179,6 +1213,7 @@ where
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
         provider_states: Vec<ProviderEvaluationStateV1>,
+        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
         baseline_states: Vec<FeedbackBaselineStateV1>,
         impact: Option<FeedbackImpactV1>,
         impact_state: Option<FeedbackImpactStateV1>,
@@ -1199,6 +1234,7 @@ where
                     None,
                     termination,
                     states,
+                    Vec::new(),
                     Vec::new(),
                     None,
                     None,
@@ -1221,6 +1257,7 @@ where
                 termination,
                 states,
                 Vec::new(),
+                Vec::new(),
                 None,
                 None,
                 Vec::new(),
@@ -1234,6 +1271,7 @@ where
             dedupe_key,
             termination,
             provider_states,
+            advisory_provider_states,
             baseline_states,
             impact,
             impact_state,
@@ -1293,6 +1331,7 @@ where
                 FeedbackCycleTerminationV1::DuplicateNoop,
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 None,
                 None,
                 Vec::new(),
@@ -1303,6 +1342,7 @@ where
                 None,
                 FeedbackCycleTerminationV1::Cancelled,
                 vec![ProviderEvaluationStateV1::Cancelled],
+                Vec::new(),
                 Vec::new(),
                 None,
                 None,
@@ -1315,6 +1355,7 @@ where
                 FeedbackCycleTerminationV1::BudgetExceeded,
                 vec![ProviderEvaluationStateV1::TimedOut],
                 Vec::new(),
+                Vec::new(),
                 None,
                 None,
                 Vec::new(),
@@ -1325,6 +1366,7 @@ where
                 Some(dedupe_key),
                 FeedbackCycleTerminationV1::DaemonUnavailable,
                 vec![ProviderEvaluationStateV1::Unavailable],
+                Vec::new(),
                 Vec::new(),
                 None,
                 None,
@@ -1341,6 +1383,7 @@ where
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
         provider_states: Vec<ProviderEvaluationStateV1>,
+        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
         baseline_states: Vec<FeedbackBaselineStateV1>,
         impact: Option<FeedbackImpactV1>,
         impact_state: Option<FeedbackImpactStateV1>,
@@ -1358,10 +1401,11 @@ where
             .as_ref()
             .map(|impact| impact.affected_tests_state)
             .or(impact_state);
-        let cycle = FeedbackCycleResultV1::new(
+        let cycle = FeedbackCycleResultV1::new_with_advisory_provider_states(
             &request.input.request,
             termination,
             provider_states,
+            advisory_provider_states,
             baseline_states,
             impact,
             impact_state,
@@ -1390,6 +1434,7 @@ where
         dedupe_key: Option<FeedbackDedupeKeyV1>,
         termination: FeedbackCycleTerminationV1,
         provider_states: Vec<ProviderEvaluationStateV1>,
+        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
         baseline_states: Vec<FeedbackBaselineStateV1>,
         impact: Option<FeedbackImpactV1>,
         impact_state: Option<FeedbackImpactStateV1>,
@@ -1401,6 +1446,7 @@ where
             dedupe_key,
             termination,
             provider_states,
+            advisory_provider_states,
             baseline_states,
             impact,
             impact_state,
@@ -2082,26 +2128,74 @@ mod tests {
     }
 
     #[test]
-    fn advisory_coverage_requires_provider_state() {
+    fn projectionless_advisory_findings_require_a_represented_provider_state() {
         assert!(FeedbackCycleAdvisoryV1::default().validate().is_ok());
+        let projectionless_finding = FeedbackFindingV1 {
+            finding_id: tracedecay_domain::feedback::FeedbackFindingId::new(
+                "finding.advisory.projectionless",
+            )
+            .unwrap(),
+            classification: FeedbackDiagnosticClassificationV1::Unknown,
+            lifecycle: FeedbackFindingLifecycleV1::Active,
+            retrieval_anchor_id: None,
+            provider_state: ProviderEvaluationStateV1::Partial,
+            safe_bounded_preview: None,
+            diagnostic_projection: None,
+        };
         assert!(
             FeedbackCycleAdvisoryV1 {
-                provider_states: Vec::new(),
-                findings: vec![FeedbackFindingV1 {
-                    finding_id: tracedecay_domain::feedback::FeedbackFindingId::new(
-                        "finding.advisory.invalid",
-                    )
-                    .unwrap(),
-                    classification: FeedbackDiagnosticClassificationV1::Unknown,
-                    lifecycle: FeedbackFindingLifecycleV1::Active,
-                    retrieval_anchor_id: None,
-                    provider_state: ProviderEvaluationStateV1::Partial,
-                    safe_bounded_preview: None,
-                    diagnostic_projection: None,
-                }],
+                providers: Vec::new(),
+                findings: vec![projectionless_finding.clone()],
             }
             .validate()
             .is_err()
+        );
+        assert!(
+            FeedbackCycleAdvisoryV1 {
+                providers: vec![FeedbackAdvisoryProviderStateV1 {
+                    producer:
+                        tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::GitHubReview,
+                    state: ProviderEvaluationStateV1::Unavailable,
+                }],
+                findings: vec![projectionless_finding.clone()],
+            }
+            .validate()
+            .is_err(),
+            "a projection-less finding cannot claim an unrepresented provider state"
+        );
+        let mut ci_finding = projectionless_finding.clone();
+        ci_finding.finding_id = tracedecay_domain::feedback::FeedbackFindingId::new(
+            "finding.advisory.projectionless-ci",
+        )
+        .unwrap();
+        ci_finding.provider_state = ProviderEvaluationStateV1::Unavailable;
+        let mut proximity_finding = projectionless_finding.clone();
+        proximity_finding.finding_id = tracedecay_domain::feedback::FeedbackFindingId::new(
+            "finding.advisory.projectionless-proximity",
+        )
+        .unwrap();
+        proximity_finding.provider_state = ProviderEvaluationStateV1::Failed;
+        assert!(
+            FeedbackCycleAdvisoryV1 {
+                providers: vec![
+                    FeedbackAdvisoryProviderStateV1 {
+                        producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::GitHubReview,
+                        state: ProviderEvaluationStateV1::Partial,
+                    },
+                    FeedbackAdvisoryProviderStateV1 {
+                        producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::CiLocalization,
+                        state: ProviderEvaluationStateV1::Unavailable,
+                    },
+                    FeedbackAdvisoryProviderStateV1 {
+                        producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::Proximity,
+                        state: ProviderEvaluationStateV1::Failed,
+                    },
+                ],
+                findings: vec![projectionless_finding, ci_finding, proximity_finding],
+            }
+            .validate()
+            .is_ok(),
+            "resolved GitHub, symbol-less CI, and address-less proximity findings retain represented provider state without a diagnostic projection"
         );
     }
 }

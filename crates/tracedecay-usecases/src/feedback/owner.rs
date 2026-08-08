@@ -506,6 +506,7 @@ mod tests {
                 configuration_digest: digest('b'),
                 termination: FeedbackCycleTerminationV1::IncompleteCoverage,
                 provider_states: Vec::new(),
+                advisory_provider_states: Vec::new(),
                 baseline_states: Vec::new(),
                 impact: None,
                 impact_state: Some(FeedbackImpactStateV1::Unavailable),

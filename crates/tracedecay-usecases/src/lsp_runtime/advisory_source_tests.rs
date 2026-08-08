@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use crate::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::diagnostics::{
     DiagnosticProviderDescriptor, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
     DiagnosticProviderResult, DiagnosticProviderState, ProviderCoverage, ProviderDocumentIdentity,
@@ -43,7 +44,6 @@ use tracedecay_lsp::{
     LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
 };
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use tracedecay_store::DiagnosticsStore;
 use tracedecay_tool_catalog::CapabilityId;
 
 use super::{
@@ -643,7 +643,10 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
     };
     let cycle = Arc::new(SequencedCycle {
         steps: Mutex::new(VecDeque::from([
-            Box::new(move || {
+            // The return type is named so the async block coerces to the
+            // trait-object future `CycleStep` holds; the `as CycleStep` cast
+            // on the outer box cannot drive that coercion by itself.
+            Box::new(move || -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
                 let service = active_service.clone();
                 let context = active_context.clone();
                 let request = active_request.clone();
@@ -656,7 +659,7 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
                         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-failed"))
                 })
             }) as CycleStep,
-            Box::new(move || {
+            Box::new(move || -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
                 let service = clean_service.clone();
                 let context = clean_context.clone();
                 let request = clean_request.clone();

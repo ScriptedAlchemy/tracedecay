@@ -949,6 +949,16 @@ pub enum FeedbackDiagnosticProducerV1 {
     Proximity,
 }
 
+/// Exact source-owned state for one advisory producer in a composed feedback
+/// cycle. The producer tag is part of the durable cycle result so consumers
+/// never infer provenance from the position of an aggregate provider state.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryProviderStateV1 {
+    pub producer: FeedbackDiagnosticProducerV1,
+    pub state: ProviderEvaluationStateV1,
+}
+
 /// Reference-only post-edit feedback finding. The safe preview is bounded display framing,
 /// never a source-text copy or a second diagnostic store.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1046,6 +1056,8 @@ pub struct FeedbackCycleResultV1 {
     pub configuration_digest: ManifestDigest,
     pub termination: FeedbackCycleTerminationV1,
     pub provider_states: Vec<ProviderEvaluationStateV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
     pub baseline_states: Vec<FeedbackBaselineStateV1>,
     pub impact: Option<FeedbackImpactV1>,
     pub impact_state: Option<FeedbackImpactStateV1>,
@@ -1072,11 +1084,43 @@ impl FeedbackCycleResultV1 {
         returned_findings: u64,
         omitted_findings: u64,
     ) -> Result<Self, DomainError> {
+        Self::new_with_advisory_provider_states(
+            request,
+            termination,
+            provider_states,
+            Vec::new(),
+            baseline_states,
+            impact,
+            impact_state,
+            affected_tests_state,
+            findings,
+            total_findings,
+            returned_findings,
+            omitted_findings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_advisory_provider_states(
+        request: &FeedbackCycleRequestV1,
+        termination: FeedbackCycleTerminationV1,
+        provider_states: Vec<ProviderEvaluationStateV1>,
+        advisory_provider_states: Vec<FeedbackAdvisoryProviderStateV1>,
+        baseline_states: Vec<FeedbackBaselineStateV1>,
+        impact: Option<FeedbackImpactV1>,
+        impact_state: Option<FeedbackImpactStateV1>,
+        affected_tests_state: Option<FeedbackImpactStateV1>,
+        findings: Vec<FeedbackFindingV1>,
+        total_findings: u64,
+        returned_findings: u64,
+        omitted_findings: u64,
+    ) -> Result<Self, DomainError> {
         request.validate()?;
         let result_id = derive_result_id(
             request,
             termination,
             &provider_states,
+            &advisory_provider_states,
             &baseline_states,
             &impact,
             impact_state,
@@ -1096,6 +1140,7 @@ impl FeedbackCycleResultV1 {
             configuration_digest: request.configuration_digest.clone(),
             termination,
             provider_states,
+            advisory_provider_states,
             baseline_states,
             impact,
             impact_state,
@@ -1124,6 +1169,20 @@ impl FeedbackCycleResultV1 {
         }
         self.policy_digest.validate()?;
         self.configuration_digest.validate()?;
+        if self
+            .advisory_provider_states
+            .iter()
+            .enumerate()
+            .any(|(index, provider)| {
+                self.advisory_provider_states[index.saturating_add(1)..]
+                    .iter()
+                    .any(|other| other.producer == provider.producer)
+            })
+        {
+            return Err(DomainError::NonCanonical {
+                field: "feedback advisory duplicate producer",
+            });
+        }
         if let Some(impact) = &self.impact {
             impact.validate()?;
             if self.impact_state != Some(impact.state) {
@@ -1248,6 +1307,26 @@ impl FeedbackCycleResultV1 {
         }
         for finding in &self.findings {
             finding.validate()?;
+            if !self.provider_states.contains(&finding.provider_state)
+                && !self
+                    .advisory_provider_states
+                    .iter()
+                    .any(|provider| provider.state == finding.provider_state)
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "feedback finding provider state",
+                });
+            }
+            if let Some(projection) = finding.diagnostic_projection.as_ref()
+                && !self.advisory_provider_states.iter().any(|provider| {
+                    provider.producer == projection.producer
+                        && provider.state == finding.provider_state
+                })
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "feedback advisory finding producer state",
+                });
+            }
         }
         if self.findings.iter().enumerate().any(|(index, finding)| {
             self.findings[index.saturating_add(1)..]
@@ -1267,6 +1346,7 @@ fn derive_result_id(
     request: &FeedbackCycleRequestV1,
     termination: FeedbackCycleTerminationV1,
     provider_states: &[ProviderEvaluationStateV1],
+    advisory_provider_states: &[FeedbackAdvisoryProviderStateV1],
     baseline_states: &[FeedbackBaselineStateV1],
     impact: &Option<FeedbackImpactV1>,
     impact_state: Option<FeedbackImpactStateV1>,
@@ -1281,6 +1361,7 @@ fn derive_result_id(
         request,
         termination,
         provider_states,
+        advisory_provider_states,
         baseline_states,
         impact,
         impact_state,
