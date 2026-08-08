@@ -11,13 +11,18 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::{
-    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
-    OpenTaskHandoffResultV1,
+    IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1, OpenInvestigationHandoffRequestV1,
+    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
 };
 
 const HANDOFF_SERVICE_ID: &str = "service.handoff";
 
-pub const HANDOFF_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 2] = [
+pub const HANDOFF_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 3] = [
+    (
+        "issue_task_handoff",
+        "capability.handoff.issue_task_handoff",
+        "use-case.handoff.issue_task_handoff",
+    ),
     (
         "open_investigation_handoff",
         "capability.handoff.open_investigation_handoff",
@@ -33,13 +38,23 @@ pub const HANDOFF_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 2] = [
 pub fn handoff_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(vec![
+        available::<IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1>(
+            "issue_task_handoff",
+            "/application/handoff/issue-task",
+            "tracedecay_application::handoff::IssueTaskHandoffRequestV1",
+            "tracedecay_application::handoff::IssueTaskHandoffResultV1",
+        )?,
         available::<OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1>(
             "open_investigation_handoff",
             "/application/handoff/open-investigation",
+            "tracedecay_application::handoff::OpenInvestigationHandoffRequestV1",
+            "tracedecay_application::handoff::OpenInvestigationHandoffResultV1",
         )?,
         available::<OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1>(
             "open_task_handoff",
             "/application/handoff/open-task",
+            "tracedecay_application::handoff::OpenTaskHandoffRequestV1",
+            "tracedecay_application::handoff::OpenTaskHandoffResultV1",
         )?,
     ])
 }
@@ -47,16 +62,22 @@ pub fn handoff_executable_binding_registry()
 fn available<Request, Output>(
     operation: &str,
     route_path: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
 where
     Request: JsonSchema,
     Output: JsonSchema,
 {
     let manifest = handoff_manifest(operation)?;
-    let request_schema =
-        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
-    let result_schema =
-        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?;
+    let request_schema = SchemaBodyAuthorityV1::for_type_at_path::<Request>(
+        manifest.request_schema().clone(),
+        request_rust_type_path,
+    )?;
+    let result_schema = SchemaBodyAuthorityV1::for_type_at_path::<Output>(
+        manifest.result_schema().clone(),
+        result_rust_type_path,
+    )?;
     let binding = ExecutableBindingV1::direct(
         &manifest,
         identifier(

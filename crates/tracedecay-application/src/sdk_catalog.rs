@@ -16,8 +16,9 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     ApplicationContractError, application_catalog_contributions,
-    configuration_executable_binding_registry, handoff_executable_binding_registry,
-    multi_root::multi_root_executable_binding_registry, work_executable_binding_registry,
+    configuration_executable_binding_registry, context_scout_executable_binding_registry,
+    handoff_executable_binding_registry, multi_root::multi_root_executable_binding_registry,
+    retained_surface_executable_binding_registry, work_executable_binding_registry,
     workflow_executable_binding_registry,
 };
 
@@ -34,6 +35,8 @@ fn mounted_executable_binding_registries()
         work_executable_binding_registry()?,
         workflow_executable_binding_registry()?,
         configuration_executable_binding_registry()?,
+        context_scout_executable_binding_registry()?,
+        retained_surface_executable_binding_registry()?,
         handoff_executable_binding_registry()?,
         multi_root_executable_binding_registry()?,
     ])
@@ -42,9 +45,9 @@ fn mounted_executable_binding_registries()
 /// Canonical SDK state for every current application operation.
 ///
 /// Mounted HTTP registries remain authoritative for executable schemas and
-/// lifecycle semantics. MCP operations are derived from their owning catalog
-/// contributions and remain explicitly unavailable until both canonical Rust
-/// request/result schemas and an official SDK MCP transport are shipped.
+/// lifecycle semantics. MCP operations derive from their owning catalog
+/// contribution: a canonical executable schema projects to the official MCP
+/// transport, while a missing schema remains typed unavailable.
 pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, ApplicationContractError> {
     let mounted = mounted_executable_binding_registries()?;
@@ -233,7 +236,10 @@ mod tests {
         mounted_executable_binding_registries, project_mcp_availability,
         sdk_executable_binding_registry,
     };
-    use crate::{application_catalog_contributions, git_surface_catalog_contribution};
+    use crate::{
+        application_catalog_contributions, context_scout_surface_catalog_contribution,
+        git_surface_catalog_contribution,
+    };
 
     #[derive(JsonSchema)]
     #[allow(dead_code)]
@@ -425,6 +431,48 @@ mod tests {
         }
     }
 
+    /// Regression: every Context Scout operation was cataloged and MCP-routed
+    /// but projected as `schema_unavailable` by both official SDKs.
+    #[test]
+    fn sdk_registry_mounts_every_context_scout_operation() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        let contribution =
+            context_scout_surface_catalog_contribution().expect("Context Scout catalog");
+        let mcp_bindings = contribution
+            .bindings()
+            .iter()
+            .filter(|surface| {
+                surface.surface() == BindingSurface::Mcp
+                    && matches!(
+                        surface.status(),
+                        tracedecay_tool_catalog::BindingStatus::Current
+                    )
+                    && !surface.is_alias()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mcp_bindings.len(), 11, "all shipped Scout operations");
+
+        for surface in mcp_bindings {
+            let operation = surface.operation().as_str();
+            let operation_id = OperationId::new(format!("operation.application.{operation}"))
+                .expect("catalog operation ID");
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} must be SDK-callable"));
+            let schema = contribution
+                .executable_schema(surface.capability_id())
+                .unwrap_or_else(|| panic!("{operation} must own executable schemas"));
+            assert_eq!(binding.request_schema(), schema.request_schema());
+            assert_eq!(binding.result_schema(), schema.result_schema());
+            assert!(matches!(
+                binding.transport(),
+                SdkTransportBindingV1::Http { route_path }
+                    if route_path == &format!("/application/context-scout/{operation}")
+            ));
+        }
+    }
+
     #[test]
     fn sdk_registry_derives_every_canonical_mcp_operation_without_claiming_missing_schemas() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
@@ -508,6 +556,28 @@ mod tests {
     }
 
     #[test]
+    fn sdk_registry_exposes_every_mounted_mcp_operation_with_its_schema() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        let unavailable = registry
+            .iter()
+            .filter_map(|availability| match availability {
+                SdkExecutableBindingAvailabilityV1::Unavailable {
+                    operation_id,
+                    disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+                } => Some(operation_id.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            unavailable,
+            BTreeSet::new(),
+            "every mounted MCP operation needs a Rust-owned request/result schema before the \\
+             SDK advertises it callable"
+        );
+    }
+
+    #[test]
     fn schema_backed_catalog_binding_projects_its_mcp_tool_transport() {
         let contribution = git_surface_catalog_contribution().expect("Git contribution");
         let manifest = contribution
@@ -517,10 +587,14 @@ mod tests {
                 manifest.capability_id().as_str() == "capability.application.git.status"
             })
             .expect("Git status manifest");
-        let authority = tracedecay_tool_catalog::ExecutableSchemaAuthority::for_types::<
+        let authority = tracedecay_tool_catalog::ExecutableSchemaAuthority::for_types_at_paths::<
             TestGitStatusRequest,
             TestGitStatusResult,
-        >(manifest)
+        >(
+            manifest,
+            "tracedecay_application::sdk_catalog::tests::TestGitStatusRequest",
+            "tracedecay_application::sdk_catalog::tests::TestGitStatusResult",
+        )
         .expect("test schema authority");
         let contribution = contribution
             .with_executable_schemas(vec![authority])

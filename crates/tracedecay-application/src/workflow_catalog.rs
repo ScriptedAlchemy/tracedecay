@@ -121,73 +121,125 @@ fn workflow_binding(
     operation: &str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError> {
     match operation {
-        "register_definition" => available::<
-            WorkflowDefinitionRegisterRequest,
-            tracedecay_domain::WorkflowDefinition,
-        >(operation, "/application/workflow/register-definition"),
-        "activate_definition" => available::<
-            WorkflowDefinitionActivateRequest,
-            WorkflowDefinitionDisposition,
-        >(operation, "/application/workflow/activate-definition"),
-        "retire_definition" => available::<
-            WorkflowDefinitionRetireRequest,
-            WorkflowDefinitionDisposition,
-        >(operation, "/application/workflow/retire-definition"),
-        "reject_definition" => available::<
-            WorkflowDefinitionRejectRequest,
-            WorkflowDefinitionDisposition,
-        >(operation, "/application/workflow/reject-definition"),
-        "validate_definition" => available::<
-            WorkflowDefinitionValidateRequest,
-            WorkflowDefinitionValidation,
-        >(operation, "/application/workflow/validate-definition"),
-        "get_definition" => available::<
-            WorkflowDefinitionGetRequest,
-            tracedecay_domain::WorkflowDefinition,
-        >(operation, "/application/workflow/get-definition"),
-        "list_definitions" => available::<
-            WorkflowDefinitionListRequest,
-            Vec<tracedecay_domain::WorkflowDefinition>,
-        >(operation, "/application/workflow/list-definitions"),
-        "definition_history" => available::<
-            WorkflowDefinitionHistoryRequest,
-            Vec<tracedecay_domain::WorkflowDefinition>,
-        >(operation, "/application/workflow/definition-history"),
+        "register_definition" => {
+            available::<WorkflowDefinitionRegisterRequest, tracedecay_domain::WorkflowDefinition>(
+                operation,
+                "/application/workflow/register-definition",
+                "tracedecay_application::WorkflowDefinitionRegisterRequest",
+                "tracedecay_domain::WorkflowDefinition",
+            )
+        }
+        "activate_definition" => {
+            available::<WorkflowDefinitionActivateRequest, WorkflowDefinitionDisposition>(
+                operation,
+                "/application/workflow/activate-definition",
+                "tracedecay_application::WorkflowDefinitionActivateRequest",
+                "tracedecay_application::WorkflowDefinitionDisposition",
+            )
+        }
+        "retire_definition" => {
+            available::<WorkflowDefinitionRetireRequest, WorkflowDefinitionDisposition>(
+                operation,
+                "/application/workflow/retire-definition",
+                "tracedecay_application::WorkflowDefinitionRetireRequest",
+                "tracedecay_application::WorkflowDefinitionDisposition",
+            )
+        }
+        "reject_definition" => {
+            available::<WorkflowDefinitionRejectRequest, WorkflowDefinitionDisposition>(
+                operation,
+                "/application/workflow/reject-definition",
+                "tracedecay_application::WorkflowDefinitionRejectRequest",
+                "tracedecay_application::WorkflowDefinitionDisposition",
+            )
+        }
+        "validate_definition" => {
+            available::<WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation>(
+                operation,
+                "/application/workflow/validate-definition",
+                "tracedecay_application::WorkflowDefinitionValidateRequest",
+                "tracedecay_application::WorkflowDefinitionValidation",
+            )
+        }
+        "get_definition" => {
+            available::<WorkflowDefinitionGetRequest, tracedecay_domain::WorkflowDefinition>(
+                operation,
+                "/application/workflow/get-definition",
+                "tracedecay_application::WorkflowDefinitionGetRequest",
+                "tracedecay_domain::WorkflowDefinition",
+            )
+        }
+        "list_definitions" => {
+            available::<WorkflowDefinitionListRequest, Vec<tracedecay_domain::WorkflowDefinition>>(
+                operation,
+                "/application/workflow/list-definitions",
+                "tracedecay_application::WorkflowDefinitionListRequest",
+                "alloc::vec::Vec<tracedecay_domain::WorkflowDefinition>",
+            )
+        }
+        "definition_history" => {
+            available::<WorkflowDefinitionHistoryRequest, Vec<tracedecay_domain::WorkflowDefinition>>(
+                operation,
+                "/application/workflow/definition-history",
+                "tracedecay_application::WorkflowDefinitionHistoryRequest",
+                "alloc::vec::Vec<tracedecay_domain::WorkflowDefinition>",
+            )
+        }
         "diff_definition" => available::<WorkflowDefinitionDiffRequest, WorkflowDefinitionDiff>(
             operation,
             "/application/workflow/diff-definition",
+            "tracedecay_application::WorkflowDefinitionDiffRequest",
+            "tracedecay_application::WorkflowDefinitionDiff",
         ),
         "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
             operation,
             "/application/workflow/handoff-issue",
+            "tracedecay_application::TaskHandoffIssueRequest",
+            "tracedecay_application::TaskHandoffGrant",
         ),
         "handoff_redeem" => available::<TaskHandoffRedeemRequest, TaskHandoffRedeemed>(
             operation,
             "/application/workflow/handoff-redeem",
+            "tracedecay_application::TaskHandoffRedeemRequest",
+            "tracedecay_application::TaskHandoffRedeemed",
         ),
         "start_run" => {
             available::<WorkflowRunStartRequest, tracedecay_domain::WorkflowRunProjection>(
                 operation,
                 "/application/workflow/start-run",
+                "tracedecay_application::WorkflowRunStartRequest",
+                "tracedecay_domain::WorkflowRunProjection",
             )
         }
         "pause_run" => {
             available::<WorkflowRunPauseRequest, tracedecay_domain::WorkflowRunProjection>(
                 operation,
                 "/application/workflow/pause-run",
+                "tracedecay_application::WorkflowRunPauseRequest",
+                "tracedecay_domain::WorkflowRunProjection",
             )
         }
-        "resume_run" => available::<
-            WorkflowRunResumeRequest,
-            tracedecay_domain::WorkflowRunProjection,
-        >(operation, "/application/workflow/resume-run"),
-        "cancel_run" => available::<
-            WorkflowRunCancelRequest,
-            tracedecay_domain::WorkflowRunProjection,
-        >(operation, "/application/workflow/cancel-run"),
+        "resume_run" => {
+            available::<WorkflowRunResumeRequest, tracedecay_domain::WorkflowRunProjection>(
+                operation,
+                "/application/workflow/resume-run",
+                "tracedecay_application::WorkflowRunResumeRequest",
+                "tracedecay_domain::WorkflowRunProjection",
+            )
+        }
+        "cancel_run" => {
+            available::<WorkflowRunCancelRequest, tracedecay_domain::WorkflowRunProjection>(
+                operation,
+                "/application/workflow/cancel-run",
+                "tracedecay_application::WorkflowRunCancelRequest",
+                "tracedecay_domain::WorkflowRunProjection",
+            )
+        }
         "get_run" => available::<WorkflowRunGetRequest, tracedecay_domain::WorkflowRunProjection>(
             operation,
             "/application/workflow/get-run",
+            "tracedecay_application::WorkflowRunGetRequest",
+            "tracedecay_domain::WorkflowRunProjection",
         ),
         _ => Err(invalid_catalog_value(
             "workflow operation",
@@ -199,16 +251,22 @@ fn workflow_binding(
 fn available<Request, Output>(
     operation: &str,
     route_path: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
 where
     Request: JsonSchema,
     Output: JsonSchema,
 {
     let manifest = workflow_manifest(operation)?;
-    let request_schema =
-        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
-    let result_schema =
-        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?;
+    let request_schema = SchemaBodyAuthorityV1::for_type_at_path::<Request>(
+        manifest.request_schema().clone(),
+        request_rust_type_path,
+    )?;
+    let result_schema = SchemaBodyAuthorityV1::for_type_at_path::<Output>(
+        manifest.result_schema().clone(),
+        result_rust_type_path,
+    )?;
     let binding = ExecutableBindingV1::direct(
         &manifest,
         OperationId::new(format!("operation.workflow.{operation}"))

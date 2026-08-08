@@ -175,10 +175,31 @@ fn git_executable_schemas(
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     let mut schemas = Vec::with_capacity(SURFACE_SPECS.len());
     macro_rules! add {
+        ($operation:literal, $request:ty, GitIndexPreviewV1) => {
+            schemas.push(git_executable_schema::<$request, GitIndexPreviewV1>(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                "tracedecay_domain::GitIndexPreviewV1",
+            )?)
+        };
+        ($operation:literal, $request:ty, GitIndexTransactionReceiptV1) => {
+            schemas.push(git_executable_schema::<
+                $request,
+                GitIndexTransactionReceiptV1,
+            >(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                "tracedecay_domain::GitIndexTransactionReceiptV1",
+            )?)
+        };
         ($operation:literal, $request:ty, $result:ty) => {
             schemas.push(git_executable_schema::<$request, $result>(
                 contribution,
                 $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                concat!("tracedecay_application::git::", stringify!($result)),
             )?)
         };
     }
@@ -199,6 +220,8 @@ fn git_executable_schemas(
 fn git_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -218,8 +241,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "git schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 

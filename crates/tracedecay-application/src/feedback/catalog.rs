@@ -26,7 +26,8 @@ use crate::retrieval::catalog::{
 use super::read::{
     CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
     FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackGetResultV1,
-    FeedbackHandleRequestV1, FeedbackListResultV1,
+    FeedbackHandleRequestV1, FeedbackListResultV1, TestResultsResultV1,
+    TestResultsSurfaceRequestV1,
 };
 use super::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
@@ -37,6 +38,7 @@ use super::{
     FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackReadOperationsV1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
 };
+use super::{FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackAdvisoryCycleSurfaceResultV1};
 
 struct FeedbackSurfaceSpec {
     capability: &'static str,
@@ -266,41 +268,64 @@ fn feedback_surface_catalog_contribution_for_handlers(
 /// Rust-owned request/result schema bodies for the four canonical feedback
 /// reads.
 ///
-/// Every read admits the same daemon-minted opaque handle
-/// ([`FeedbackHandleRequestV1`]) — the post-resolution internal request types
-/// are deliberately NOT registered because they are not the wire — and each
-/// result pair is the exact payload type the read service returns. The
-/// canonical impact and affected-tests projections bind the same handle
-/// request against the projection types the daemon owner serializes. The
-/// remaining feedback operations keep truthful `schema_unavailable`
-/// dispositions: their results are ad-hoc composites with no wire type in
-/// this crate.
+/// Handle-based reads admit one daemon-minted opaque handle
+/// ([`FeedbackHandleRequestV1`]); `test_results` has its own exact empty wire
+/// request because the admitted project scope selects the retained run. Each
+/// registered pair is the exact payload type that its mounted runtime
+/// serializes.
 fn feedback_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     let mut schemas = Vec::new();
     macro_rules! add {
-        ($capability:expr, $result:ty) => {
-            schemas.push(feedback_executable_schema::<
-                FeedbackHandleRequestV1,
-                $result,
-            >(contribution, $capability)?)
+        ($capability:expr, $request:ty, $result:ty) => {
+            schemas.push(feedback_executable_schema::<$request, $result>(
+                contribution,
+                $capability,
+                concat!("tracedecay_application::feedback::", stringify!($request)),
+                concat!("tracedecay_application::feedback::", stringify!($result)),
+            )?)
         };
     }
     add!(
         FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
+        FeedbackHandleRequestV1,
         FeedbackDiagnosticsReadResultV1
     );
-    add!(FEEDBACK_GET_CAPABILITY_ID_V1, FeedbackGetResultV1);
-    add!(FEEDBACK_EXPAND_CAPABILITY_ID_V1, FeedbackExpandResultV1);
-    add!(FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackListResultV1);
+    add!(
+        FEEDBACK_GET_CAPABILITY_ID_V1,
+        FeedbackHandleRequestV1,
+        FeedbackGetResultV1
+    );
+    add!(
+        FEEDBACK_EXPAND_CAPABILITY_ID_V1,
+        FeedbackHandleRequestV1,
+        FeedbackExpandResultV1
+    );
+    add!(
+        FEEDBACK_LIST_CAPABILITY_ID_V1,
+        FeedbackHandleRequestV1,
+        FeedbackListResultV1
+    );
     add!(
         "capability.application.feedback.impact",
+        FeedbackHandleRequestV1,
         CanonicalFeedbackImpactProjectionV1
     );
     add!(
         "capability.application.feedback.affected-tests",
+        FeedbackHandleRequestV1,
         CanonicalAffectedTestsProjectionV1
+    );
+    add!(
+        "capability.application.feedback.test-results",
+        TestResultsSurfaceRequestV1,
+        TestResultsResultV1
+    );
+    add!(
+        ADVISORY_CYCLE_CAPABILITY_ID_V1,
+        FeedbackAdvisoryCycleSurfaceRequestV1,
+        FeedbackAdvisoryCycleSurfaceResultV1
     );
     Ok(schemas)
 }
@@ -308,6 +333,8 @@ fn feedback_executable_schemas(
 fn feedback_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     capability: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -321,8 +348,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "feedback schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 
@@ -486,6 +516,21 @@ mod tests {
             .collect::<Vec<_>>();
         expected.sort();
         assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn mounted_test_results_and_advisory_cycle_have_exact_executable_schemas() {
+        let contribution = feedback_surface_catalog_contribution().expect("contribution");
+        for capability in [
+            "capability.application.feedback.test-results",
+            ADVISORY_CYCLE_CAPABILITY_ID_V1,
+        ] {
+            let capability = CapabilityId::new(capability).expect("capability ID");
+            assert!(
+                contribution.executable_schema(&capability).is_some(),
+                "{capability} requires the exact mounted wire schema"
+            );
+        }
     }
 
     #[test]

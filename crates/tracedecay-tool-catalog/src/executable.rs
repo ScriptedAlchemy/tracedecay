@@ -17,11 +17,42 @@ use crate::validation::CatalogValidationError;
 pub struct SchemaBodyAuthorityV1 {
     schema_ref: SchemaRef,
     body: Value,
+    rust_type_path: RustTypePathV1,
     digest: CatalogDigest,
 }
 
+/// The concrete Rust type that owns a reviewed schema body.
+///
+/// A JSON Schema title describes its wire shape but cannot preserve generic
+/// composition or which crate owns the DTO. SDK generators consume this path
+/// to alias the exact request/result type instead of reconstructing a second
+/// Rust model from that lossy title.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct RustTypePathV1(String);
+
+impl RustTypePathV1 {
+    fn new(path: impl Into<String>) -> Result<Self, CatalogValidationError> {
+        let path = path.into();
+        if path.trim().is_empty() {
+            return Err(CatalogValidationError::InvalidValue {
+                field: "Rust schema type path",
+                reason: "path must not be empty",
+            });
+        }
+        Ok(Self(path))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl SchemaBodyAuthorityV1 {
-    pub fn for_type<T: JsonSchema>(schema_ref: SchemaRef) -> Result<Self, CatalogValidationError> {
+    pub fn for_type_at_path<T: JsonSchema>(
+        schema_ref: SchemaRef,
+        rust_type_path: impl Into<String>,
+    ) -> Result<Self, CatalogValidationError> {
         let body = serde_json::to_value(schemars::schema_for!(T)).map_err(|_| {
             CatalogValidationError::InvalidValue {
                 field: "schema body",
@@ -37,6 +68,7 @@ impl SchemaBodyAuthorityV1 {
         Ok(Self {
             schema_ref,
             body,
+            rust_type_path: RustTypePathV1::new(rust_type_path)?,
             digest: CatalogDigest::sha256(bytes),
         })
     }
@@ -47,6 +79,11 @@ impl SchemaBodyAuthorityV1 {
 
     pub fn body(&self) -> &Value {
         &self.body
+    }
+
+    /// Concrete Rust type path for the DTO that generated [`Self::body`].
+    pub fn rust_type_path(&self) -> &str {
+        self.rust_type_path.as_str()
     }
 
     pub const fn digest(&self) -> CatalogDigest {
@@ -68,8 +105,10 @@ pub struct ExecutableSchemaAuthority {
 }
 
 impl ExecutableSchemaAuthority {
-    pub fn for_types<Request, Output>(
+    pub fn for_types_at_paths<Request, Output>(
         manifest: &CapabilityManifestV1,
+        request_rust_type_path: impl Into<String>,
+        result_rust_type_path: impl Into<String>,
     ) -> Result<Self, CatalogValidationError>
     where
         Request: JsonSchema,
@@ -77,8 +116,14 @@ impl ExecutableSchemaAuthority {
     {
         Self::new(
             manifest,
-            SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?,
-            SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?,
+            SchemaBodyAuthorityV1::for_type_at_path::<Request>(
+                manifest.request_schema().clone(),
+                request_rust_type_path,
+            )?,
+            SchemaBodyAuthorityV1::for_type_at_path::<Output>(
+                manifest.result_schema().clone(),
+                result_rust_type_path,
+            )?,
         )
     }
 

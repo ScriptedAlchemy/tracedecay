@@ -23,6 +23,12 @@ struct ReadResult {
     contents: String,
 }
 
+fn typed_schema<T: JsonSchema>(
+    schema_ref: tracedecay_tool_catalog::SchemaRef,
+) -> Result<SchemaBodyAuthorityV1, tracedecay_tool_catalog::CatalogValidationError> {
+    SchemaBodyAuthorityV1::for_type_at_path::<T>(schema_ref, std::any::type_name::<T>())
+}
+
 fn binding() -> ExecutableBindingV1 {
     let binding_id = BindingId::new("binding.http.source-read").unwrap();
     let manifest = read_manifest(
@@ -33,10 +39,8 @@ fn binding() -> ExecutableBindingV1 {
         vec![binding_id.clone()],
         vec![profile_id("profile.default")],
     );
-    let request_schema =
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(manifest.request_schema().clone()).unwrap();
-    let result_schema =
-        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap();
+    let request_schema = typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap();
+    let result_schema = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
 
     ExecutableBindingV1::direct(
         &manifest,
@@ -71,12 +75,53 @@ fn schema_bodies_are_derived_from_rust_type_authority() {
     );
     assert_eq!(
         binding.request_schema().digest(),
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(
-            binding.request_schema().schema_ref().clone()
-        )
-        .unwrap()
-        .digest()
+        typed_schema::<ReadRequest>(binding.request_schema().schema_ref().clone())
+            .unwrap()
+            .digest()
     );
+}
+
+#[test]
+fn schema_body_retains_the_concrete_rust_type_path_for_generic_roots() {
+    let nullable = SchemaBodyAuthorityV1::for_type_at_path::<Option<ReadResult>>(
+        schema("schema.source.read.nullable-result"),
+        "core::option::Option<executable_binding_contract::ReadResult>",
+    )
+    .expect("nullable schema authority");
+    let list = SchemaBodyAuthorityV1::for_type_at_path::<Vec<ReadResult>>(
+        schema("schema.source.read.result-list"),
+        "alloc::vec::Vec<executable_binding_contract::ReadResult>",
+    )
+    .expect("list schema authority");
+
+    let nullable = serde_json::to_value(nullable).expect("serializable nullable authority");
+    let list = serde_json::to_value(list).expect("serializable list authority");
+
+    assert_eq!(
+        nullable["rust_type_path"],
+        "core::option::Option<executable_binding_contract::ReadResult>"
+    );
+    assert_eq!(
+        list["rust_type_path"],
+        "alloc::vec::Vec<executable_binding_contract::ReadResult>"
+    );
+}
+
+#[test]
+fn schema_body_rejects_an_empty_rust_type_path() {
+    let error = SchemaBodyAuthorityV1::for_type_at_path::<ReadResult>(
+        schema("schema.source.read.result"),
+        "   ",
+    )
+    .expect_err("empty type paths must not become SDK aliases");
+
+    assert!(matches!(
+        error,
+        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
+            field: "Rust schema type path",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -89,8 +134,12 @@ fn contribution_retains_schema_bodies_beside_the_owning_manifest() {
         Vec::new(),
         vec![profile_id("profile.default")],
     );
-    let authority = ExecutableSchemaAuthority::for_types::<ReadRequest, ReadResult>(&manifest)
-        .expect("schema authority");
+    let authority = ExecutableSchemaAuthority::for_types_at_paths::<ReadRequest, ReadResult>(
+        &manifest,
+        "executable_binding_contract::ReadRequest",
+        "executable_binding_contract::ReadResult",
+    )
+    .expect("schema authority");
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.source").unwrap(),
         depends_on: Vec::new(),
@@ -138,8 +187,12 @@ fn contribution_rejects_schema_bodies_without_their_owning_manifest() {
         vec![profile_id("profile.default")],
     );
     let foreign_authority =
-        ExecutableSchemaAuthority::for_types::<ReadRequest, ReadResult>(&foreign_manifest)
-            .expect("schema authority");
+        ExecutableSchemaAuthority::for_types_at_paths::<ReadRequest, ReadResult>(
+            &foreign_manifest,
+            "executable_binding_contract::ReadRequest",
+            "executable_binding_contract::ReadResult",
+        )
+        .expect("schema authority");
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.source").unwrap(),
         depends_on: Vec::new(),
@@ -200,10 +253,8 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
         Vec::new(),
         vec![profile_id("profile.default")],
     );
-    let wrong_request =
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(schema("schema.other.request")).unwrap();
-    let result =
-        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap();
+    let wrong_request = typed_schema::<ReadRequest>(schema("schema.other.request")).unwrap();
+    let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
 
     assert!(
         ExecutableBindingV1::daemon_owned(
@@ -218,10 +269,8 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
         .is_err()
     );
 
-    let request =
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(manifest.request_schema().clone()).unwrap();
-    let result =
-        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap();
+    let request = typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap();
+    let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
     assert!(
         ExecutableBindingV1::direct(
             &manifest,
@@ -249,10 +298,8 @@ fn daemon_owned_binding_retains_its_service_owner() {
         Vec::new(),
         vec![profile_id("profile.default")],
     );
-    let request =
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(manifest.request_schema().clone()).unwrap();
-    let result =
-        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap();
+    let request = typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap();
+    let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
     let binding = ExecutableBindingV1::daemon_owned(
         &manifest,
         OperationId::new("operation.source.read").unwrap(),
@@ -318,8 +365,8 @@ fn sdk_binding_keeps_the_named_mcp_transport_without_inventing_an_http_route() {
         &manifest,
         OperationId::new("operation.source.read").unwrap(),
         ServiceId::new("service.source-read").unwrap(),
-        SchemaBodyAuthorityV1::for_type::<ReadRequest>(manifest.request_schema().clone()).unwrap(),
-        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap(),
+        typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap(),
+        typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap(),
         CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
         RouteExposureV1::Internal,
     )

@@ -4,25 +4,28 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand, AuthorizedScopeSet,
-    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkCommand,
+    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkCommand,
     ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
     GenerateProposalRequest, GeneratedWorkProposal, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
     ObservatoryReadModelV1, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
     ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    ReviewProposalCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    RetryWorkAttemptCommandV1, ReviewProposalCommand, ReviewProposalRequestV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1,
+    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1,
+    WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkRetryAttemptOutcomeV1, WorkRetryTestBindingTokenOutcomeV1,
+    WorkRetryTestBindingTokenRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
     WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
-    WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
-    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
 };
 
 use super::analytics_api::{
@@ -126,12 +129,18 @@ struct DashboardContractCatalogV1 {
     work_attempt_status_request: WorkAttemptStatusRequestV1,
     work_cancel_attempt_command: CancelWorkAttemptCommand,
     work_resume_attempts_command: ResumeWorkAttemptsCommand,
+    work_retry_attempt_command: RetryWorkAttemptCommandV1,
+    work_retry_attempt_outcome: WorkRetryAttemptOutcomeV1,
+    work_retry_test_binding_request: WorkRetryTestBindingTokenRequestV1,
+    work_retry_test_binding_outcome: WorkRetryTestBindingTokenOutcomeV1,
     work_attempt: WorkAttemptV1,
     work_attempt_recovery_report: WorkAttemptRecoveryReportV1,
     work_attempt_list_request: WorkAttemptListRequestV1,
     work_attempt_list: WorkAttemptListV1,
     work_graph_read_request: WorkGraphReadRequestV1,
     work_graph_read: WorkGraphReadV1,
+    work_product_mutation_request: WorkProductMutationRequestV1,
+    work_product_mutation_receipt: WorkProductMutationReceiptV1,
     work_artifact_hydration_request: WorkArtifactHydrationRequestV1,
     work_artifact_hydration: WorkArtifactHydrationV1,
     work_pause_run_command: PauseWorkRunCommand,
@@ -150,6 +159,10 @@ struct DashboardContractCatalogV1 {
     work_topology_view: ExecutionTopologyViewV1,
     work_topology_metrics_request: ExecutionTopologyMetricsRequestV1,
     work_topology_metrics: ExecutionTopologyMetricsV1,
+    work_duplicate_adjudication_command: WorkDuplicateAdjudicationCommandV1,
+    work_duplicate_adjudication_result: WorkDuplicateAdjudicationAppendOutcomeV1,
+    work_leak_adjudication_command: AdjudicateWorkLeakCommandV1,
+    work_leak_adjudication_result: WorkLeakAdjudicationOutcomeV1,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -216,6 +229,17 @@ mod tests {
     use super::render_dashboard_contract_schema;
 
     #[test]
+    #[ignore = "invoked by dashboard contracts:generate/check"]
+    fn writes_dashboard_contract_schema() {
+        let output = std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT")
+            .map(std::path::PathBuf::from)
+            .expect("contract codegen must provide an output path");
+        let schema =
+            render_dashboard_contract_schema().expect("serialize dashboard contract schema");
+        std::fs::write(output, schema).expect("write dashboard contract schema");
+    }
+
+    #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
     }
@@ -269,6 +293,16 @@ mod tests {
             ("work_attempt_status_request", "WorkAttemptStatusRequestV1"),
             ("work_cancel_attempt_command", "CancelWorkAttemptCommand"),
             ("work_resume_attempts_command", "ResumeWorkAttemptsCommand"),
+            ("work_retry_attempt_command", "RetryWorkAttemptCommandV1"),
+            ("work_retry_attempt_outcome", "WorkRetryAttemptOutcomeV1"),
+            (
+                "work_retry_test_binding_request",
+                "WorkRetryTestBindingTokenRequestV1",
+            ),
+            (
+                "work_retry_test_binding_outcome",
+                "WorkRetryTestBindingTokenOutcomeV1",
+            ),
             ("work_attempt", "WorkAttemptV1"),
             (
                 "work_attempt_recovery_report",
@@ -278,6 +312,14 @@ mod tests {
             ("work_attempt_list", "WorkAttemptListV1"),
             ("work_graph_read_request", "WorkGraphReadRequestV1"),
             ("work_graph_read", "WorkGraphReadV1"),
+            (
+                "work_product_mutation_request",
+                "WorkProductMutationRequestV1",
+            ),
+            (
+                "work_product_mutation_receipt",
+                "WorkProductMutationReceiptV1",
+            ),
             (
                 "work_artifact_hydration_request",
                 "WorkArtifactHydrationRequestV1",
@@ -311,6 +353,22 @@ mod tests {
                 "ExecutionTopologyMetricsRequestV1",
             ),
             ("work_topology_metrics", "ExecutionTopologyMetricsV1"),
+            (
+                "work_duplicate_adjudication_command",
+                "WorkDuplicateAdjudicationCommandV1",
+            ),
+            (
+                "work_duplicate_adjudication_result",
+                "WorkDuplicateAdjudicationAppendOutcomeV1",
+            ),
+            (
+                "work_leak_adjudication_command",
+                "AdjudicateWorkLeakCommandV1",
+            ),
+            (
+                "work_leak_adjudication_result",
+                "WorkLeakAdjudicationOutcomeV1",
+            ),
         ] {
             assert!(
                 definitions.contains_key(contract),

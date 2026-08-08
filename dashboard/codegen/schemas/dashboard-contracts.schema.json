@@ -38,9 +38,72 @@
       ],
       "type": "object"
     },
+    "AcceptWorkTaskRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_by_criterion": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "selection",
+        "task_id",
+        "evidence_by_criterion",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "ActorId": {
       "description": "Strongly typed canonical identity: `ActorId`.",
       "type": "string"
+    },
+    "AdjudicateWorkLeakCommandV1": {
+      "additionalProperties": false,
+      "properties": {
+        "adjudication_id": {
+          "type": "string"
+        },
+        "attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "detection_horizon_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "adjudication_id",
+        "expected_revision",
+        "attempt",
+        "detection_horizon_micros",
+        "command_id"
+      ],
+      "title": "AdjudicateWorkLeakCommandV1",
+      "type": "object"
     },
     "AdmitExecutionCommand": {
       "additionalProperties": false,
@@ -560,6 +623,50 @@
       ],
       "type": "object"
     },
+    "AnalyticsModeReadModelV1": {
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsModeV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transition_watermark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "current",
+        "transition_watermark",
+        "coverage",
+        "unavailable_reason"
+      ],
+      "type": "object"
+    },
+    "AnalyticsModeV1": {
+      "enum": [
+        "off",
+        "local_only",
+        "aggregate_share"
+      ],
+      "type": "string"
+    },
     "AnalyticsOutcomeCountV1": {
       "properties": {
         "count": {
@@ -855,6 +962,26 @@
       ],
       "type": "object"
     },
+    "ApplyWorkRelationReplanRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal_id",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "AttachRuntimeEvidenceCommand": {
       "additionalProperties": false,
       "properties": {
@@ -965,6 +1092,47 @@
         "selection"
       ],
       "type": "object"
+    },
+    "AutomaticWorktreeGcV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "disabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "eligible_only",
+              "type": "string"
+            },
+            "maximum_per_run": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "minimum_idle_seconds": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "minimum_idle_seconds",
+            "maximum_per_run"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "AutomationPendingReviewCountV1": {
       "description": "One human-review queue: a count, or the reason there is no count.\n\nKept as a tagged reading rather than a bare number because these two queues\nare the entire human-approval step of the automation pipeline. A queue whose\nauthority is unmounted must not report `0`, which reads as \"checked, nothing\nwaiting\" — the precise false zero this shape exists to prevent.",
@@ -1200,6 +1368,142 @@
       "description": "Strongly typed canonical identity: `BrainId`.",
       "type": "string"
     },
+    "BranchCollisionPolicyV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "reject",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "append_monotonic_ordinal",
+              "type": "string"
+            },
+            "maximum_attempts": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "maximum_attempts"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchNameComponentV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "bytes": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "task_id_digest_prefix",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "repository_slug",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "work_class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "monotonic_collision_ordinal",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchNameSeparatorV1": {
+      "enum": [
+        "hyphen",
+        "underscore",
+        "slash"
+      ],
+      "type": "string"
+    },
+    "BranchNamingPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "collision": {
+          "$ref": "#/$defs/BranchCollisionPolicyV1"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/BranchNameComponentV1"
+          },
+          "type": "array"
+        },
+        "maximum_bytes": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prefix": {
+          "$ref": "#/$defs/CanonicalGitRefPrefix"
+        },
+        "separator": {
+          "$ref": "#/$defs/BranchNameSeparatorV1"
+        }
+      },
+      "required": [
+        "prefix",
+        "components",
+        "separator",
+        "maximum_bytes",
+        "collision"
+      ],
+      "type": "object"
+    },
     "BranchTopologyKindV1": {
       "enum": [
         "no_branches",
@@ -1340,6 +1644,14 @@
       "description": "Strongly typed canonical identity: `CapabilityId`.",
       "type": "string"
     },
+    "CatalogGenerationId": {
+      "description": "Strongly typed canonical identity: `CatalogGenerationId`.",
+      "type": "string"
+    },
+    "CodeGenerationId": {
+      "description": "Strongly typed canonical identity: `CodeGenerationId`.",
+      "type": "string"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -1454,6 +1766,14 @@
     },
     "CommitId": {
       "description": "Strongly typed canonical identity: `CommitId`.",
+      "type": "string"
+    },
+    "ComparisonDispositionV1": {
+      "enum": [
+        "promote",
+        "reject",
+        "insufficient_evidence"
+      ],
       "type": "string"
     },
     "ConfigurationRevisionId": {
@@ -1583,6 +1903,26 @@
         "dependencies",
         "command_id",
         "occurred_at"
+      ],
+      "type": "object"
+    },
+    "CreateWorkProductRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_graph": {
+          "$ref": "#/$defs/WorkProductGraphV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "initial_graph",
+        "mutation"
       ],
       "type": "object"
     },
@@ -3784,6 +4124,54 @@
       ],
       "type": "object"
     },
+    "DecideWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/WorkProposalDispositionV12"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
+    "DecideWorkRelationReplanRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/WorkProposalDispositionV12"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkRelationReplanProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "DeliveryCiTimelineV1": {
       "properties": {
         "items": {
@@ -4955,6 +5343,27 @@
         }
       ]
     },
+    "DuplicateEffectOutcomeV1": {
+      "enum": [
+        "prevented",
+        "committed",
+        "unknown",
+        "not_applicable"
+      ],
+      "type": "string"
+    },
+    "DuplicateEffortKindV1": {
+      "enum": [
+        "exact_duplicate",
+        "superseded_overlap",
+        "repeated_investigation",
+        "duplicate_effect",
+        "not_duplicate",
+        "censored",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "EnvironmentSettingsPayloadV1": {
       "properties": {
         "global_accounting_enabled": {
@@ -5005,6 +5414,791 @@
         "value",
         "description"
       ],
+      "type": "object"
+    },
+    "ExecutionBlockedCauseV1": {
+      "description": "Cause a work item was blocked for.",
+      "enum": [
+        "dependency",
+        "needs_input",
+        "capability",
+        "policy",
+        "scope",
+        "conflict",
+        "lease",
+        "backpressure",
+        "test",
+        "ci",
+        "review",
+        "effect_unknown",
+        "other",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionConcurrencyPhaseV1": {
+      "description": "Concurrency-width phase. `Useful` counts only distinct admitted\nattempts that advanced a committed progress frontier; heartbeats,\nqueued work, child processes, and transport fanout never reach it.",
+      "enum": [
+        "requested",
+        "accepted",
+        "admitted",
+        "active",
+        "useful"
+      ],
+      "type": "string"
+    },
+    "ExecutionConflictKindV1": {
+      "description": "Conflict prediction kind. Mechanical and semantic keep separate\ndenominators because their adjudicators are not interchangeable.",
+      "enum": [
+        "mechanical",
+        "semantic",
+        "combined"
+      ],
+      "type": "string"
+    },
+    "ExecutionConflictOutcomeV1": {
+      "description": "Independently observed conflict outcome. `Censored` and `Unknown`\nnever enter a confusion-matrix denominator.",
+      "enum": [
+        "conflict",
+        "no_conflict",
+        "censored",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionDeliveryOutcomeV1": {
+      "description": "Per-surface delivery outcome. A multi-surface delivery is never a\nduplicate of product work; only `Deduplicated` is.",
+      "enum": [
+        "delivered",
+        "deduplicated",
+        "dropped",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionDuplicateKindV1": {
+      "description": "Adjudicated duplicate-work relation. Similarity, proximity, shared\npaths, and concurrency never produce one of these.",
+      "enum": [
+        "exact_duplicate",
+        "superseded_overlap",
+        "repeated_investigation",
+        "duplicate_effect",
+        "not_duplicate",
+        "censored",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionDuplicateOutcomeV1": {
+      "description": "Whether a duplicate effect was prevented or actually committed. The\ntwo never collapse into one count.",
+      "enum": [
+        "prevented",
+        "committed",
+        "unknown",
+        "not_applicable"
+      ],
+      "type": "string"
+    },
+    "ExecutionDurationBucketV1": {
+      "description": "Fixed duration buckets shared by stale stack age, blocked time, and\nrerun latency. Raw timestamps and exact durations stay authorized\nlocal detail.",
+      "enum": [
+        "under1m",
+        "from1m_to5m",
+        "from5m_to15m",
+        "from15m_to1h",
+        "from1h_to4h",
+        "from4h_to24h",
+        "from1d_to7d",
+        "over7d"
+      ],
+      "type": "string"
+    },
+    "ExecutionFanoutPhaseV1": {
+      "description": "Fan-out width phase. `PeakActive` is the sampled active width; the\nfan-out distribution is unweighted so serialized and blocked samples,\nwhich carry no interval, are preserved rather than dropped.",
+      "enum": [
+        "requested",
+        "accepted",
+        "admitted",
+        "peak_active",
+        "useful"
+      ],
+      "type": "string"
+    },
+    "ExecutionGitHubStackCapabilityReadingV1": {
+      "additionalProperties": false,
+      "description": "Latest trustworthy GitHub stacked-PR capability observation in the\nhorizon. It is a typed operational state, not a metric or success claim.",
+      "properties": {
+        "capability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionGitHubStackCapabilityV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1"
+        },
+        "other_forge_fallback_available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "standard_git_fallback_available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unavailable": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMetricUnavailableV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "standard_git_fallback_available",
+        "other_forge_fallback_available",
+        "coverage",
+        "unavailable"
+      ],
+      "title": "ExecutionGitHubStackCapabilityReadingV1",
+      "type": "object"
+    },
+    "ExecutionGitHubStackCapabilityV1": {
+      "description": "Last bounded GitHub stacked-PR capability state observed in the\nhorizon. This remains orthogonal to GitHub ingress and item lifecycle.",
+      "enum": [
+        "unavailable",
+        "private_preview_disabled",
+        "enabled",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "ExecutionIntegrationKindV1": {
+      "description": "Integration operation kind. Rebase remains external observation only.",
+      "enum": [
+        "fast_forward",
+        "merge_commit",
+        "rebase",
+        "cherry_pick",
+        "stack_retarget",
+        "graph_only",
+        "external_observed",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionIntegrationOutcomeV1": {
+      "description": "Terminal result of an observed native integration.",
+      "enum": [
+        "succeeded",
+        "conflicted",
+        "rejected",
+        "denied",
+        "stale",
+        "locked",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "partial",
+        "effect_unknown",
+        "unsupported",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionLeakKindV1": {
+      "description": "Independently proved execution-leak class.",
+      "enum": [
+        "lease_after_terminal",
+        "attempt_without_live_owner",
+        "effect_unknown_past_deadline",
+        "missing_worktree_binding",
+        "unbounded_delivery",
+        "none",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionLeakOutcomeV1": {
+      "description": "Recovery state a proved leak reached.",
+      "enum": [
+        "not_required",
+        "pending",
+        "recovered",
+        "failed",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionMetricUnavailableV1": {
+      "description": "Why a measurement carries no value. Absence is always one of these typed\nreasons; it is never an empty string, a zero, or a silently dropped row.",
+      "oneOf": [
+        {
+          "const": "store_unavailable",
+          "description": "The observation store could not be read at all for this horizon.",
+          "type": "string"
+        },
+        {
+          "const": "event_budget_exceeded",
+          "description": "The horizon holds more events than one read may draw, so every\ndenominator here would be a partial count presented as a total.",
+          "type": "string"
+        },
+        {
+          "const": "cell_budget_exceeded",
+          "description": "The bounded projection would exceed the Plan 26 result-cell ceiling.\nThe whole read refuses rather than returning a misleading subset.",
+          "type": "string"
+        },
+        {
+          "const": "no_eligible_evidence",
+          "description": "No recorded event in the family supplies this metric's numerator or\ndenominator.",
+          "type": "string"
+        },
+        {
+          "const": "support_floor_unmet",
+          "description": "Eligible cases exist but fall below the metric's support floor.",
+          "type": "string"
+        },
+        {
+          "const": "coverage_floor_unmet",
+          "description": "Observed cases cover less of the eligible population than the metric's\ncoverage floor allows.",
+          "type": "string"
+        },
+        {
+          "const": "censoring_ceiling_exceeded",
+          "description": "More of the eligible population is censored than the metric admits.",
+          "type": "string"
+        },
+        {
+          "const": "unbounded_interval",
+          "description": "The interval this metric integrates over has no proved upper bound, so\nits duration cannot be measured without inventing a terminal.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionQuantityUnitV1": {
+      "description": "Quantity unit for duplicate-effort accounting. Each unit is reported\nseparately: wall time, tokens, cost, tests, and effects are never\nsummed into one number.",
+      "enum": [
+        "wall_micros",
+        "tokens",
+        "cost_micros",
+        "tests",
+        "effects"
+      ],
+      "type": "string"
+    },
+    "ExecutionRerunCauseV1": {
+      "description": "Typed rerun cause. Repeated logs and transport redelivery are not\nreruns and never carry one of these.",
+      "enum": [
+        "runtime_retry",
+        "runtime_fallback",
+        "test_rerun",
+        "ci_rerun",
+        "recovery",
+        "human_requested",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExecutionRerunSourceV1": {
+      "description": "Which independent system observed the rerun.",
+      "enum": [
+        "runtime",
+        "test",
+        "ci"
+      ],
+      "type": "string"
+    },
+    "ExecutionSurfaceFamilyV1": {
+      "description": "Delivery surface family. Addresses, payloads, principals, and\nrecipients are never observed, so the family is the whole label.",
+      "enum": [
+        "hook",
+        "mcp",
+        "lsp",
+        "dashboard",
+        "cli",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ExecutionTopologyDimensionV1": {
+      "description": "One allowed local grouping dimension. The set is closed by construction:\nevery value is produced by an exhaustive match over a bounded domain class,\nso no person, agent, task, project, repository, worktree, branch, ref,\ncommit, model version, or route can ever appear as a label.",
+      "oneOf": [
+        {
+          "properties": {
+            "dimension": {
+              "const": "concurrency_phase",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionConcurrencyPhaseV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "fanout_phase",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionFanoutPhaseV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "width_bucket",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionWidthBucketV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "duration_bucket",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionDurationBucketV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "duplicate_kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionDuplicateKindV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "unit",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionQuantityUnitV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "duplicate_outcome",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionDuplicateOutcomeV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "conflict_kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionConflictKindV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "conflict_outcome",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionConflictOutcomeV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "integration_kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionIntegrationKindV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "integration_outcome",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionIntegrationOutcomeV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "blocked_cause",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionBlockedCauseV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "rerun_source",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionRerunSourceV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "rerun_cause",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionRerunCauseV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "leak_kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionLeakKindV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "leak_outcome",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionLeakOutcomeV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "surface",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionSurfaceFamilyV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "dimension": {
+              "const": "delivery_outcome",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ExecutionDeliveryOutcomeV1"
+            }
+          },
+          "required": [
+            "dimension",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExecutionTopologyDrillAnchorV1": {
+      "additionalProperties": false,
+      "description": "An opaque cursor minted by the registered observation authority. It can be\nresolved only through that same authorized local query boundary and is not\na metric dimension or exportable identity.",
+      "properties": {
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursor"
+      ],
+      "title": "ExecutionTopologyDrillAnchorV1",
+      "type": "object"
+    },
+    "ExecutionTopologyEmissionCoverageV1": {
+      "additionalProperties": false,
+      "description": "Envelope-level delivery evidence for this read. `None` means the store did\nnot answer, so no zero may be inferred. `dropped` is the proved lower bound\nfrom the bound producer scope, deduplicated across explicit loss receipts\nand their next-envelope carriers; it is not attributed to a topology\nfamily. Sampling stays a count of sampled topology envelopes and is never\nexpanded into a fabricated population estimate.",
+      "properties": {
+        "delayed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dropped": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "emitted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampled_events": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "emitted",
+        "delayed",
+        "dropped",
+        "sampled_events"
+      ],
+      "title": "ExecutionTopologyEmissionCoverageV1",
+      "type": "object"
+    },
+    "ExecutionTopologyMeasurementV1": {
+      "additionalProperties": false,
+      "description": "One descriptor cell: the Plan 26 descriptor name, its grouping dimensions,\nand the landed metric envelope carrying value, denominator, coverage, and\nprovenance.",
+      "properties": {
+        "dimensions": {
+          "description": "Allowed local grouping dimensions, at most\n[`MAX_METRIC_DIMENSIONS_V1`], in a fixed order per descriptor.",
+          "items": {
+            "$ref": "#/$defs/ExecutionTopologyDimensionV1"
+          },
+          "type": "array"
+        },
+        "unavailable": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMetricUnavailableV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed absence reason. It is `Some` exactly when `value.value` is\n`None`, so a reader can never mistake a refused metric for a zero."
+        },
+        "value": {
+          "$ref": "#/$defs/MetricValueV1"
+        }
+      },
+      "required": [
+        "dimensions",
+        "unavailable",
+        "value"
+      ],
+      "title": "ExecutionTopologyMeasurementV1",
+      "type": "object"
+    },
+    "ExecutionTopologyMetricsRequestV1": {
+      "additionalProperties": false,
+      "description": "One horizon-bounded execution-topology metrics read. The authorized scope\nis taken from the request context, not from the request, so a caller can\nnever widen the population it reads.",
+      "properties": {
+        "horizon": {
+          "$ref": "#/$defs/ObservabilityHorizonV1"
+        },
+        "max_events": {
+          "description": "Event budget for this read, at most\n[`MAX_EXECUTION_TOPOLOGY_EVENTS_V1`].",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "horizon",
+        "max_events"
+      ],
+      "title": "ExecutionTopologyMetricsRequestV1",
+      "type": "object"
+    },
+    "ExecutionTopologyMetricsV1": {
+      "additionalProperties": false,
+      "description": "The canonical execution-topology read model. Observatory and Costs render\nthis without local formulas; CLI, MCP, and HTTP return the same bytes.",
+      "properties": {
+        "authorized_scope_ref": {
+          "description": "Local authorization anchor the read was admitted under. It is derived\nfrom the resolved scope, never from a caller-supplied string.",
+          "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1",
+          "description": "Family-level coverage over the event population, independent of any\nsingle descriptor's denominator."
+        },
+        "current": {
+          "description": "True only when the whole family was read with `Known` coverage. A\nfalse value means at least one descriptor below is a typed absence.",
+          "type": "boolean"
+        },
+        "drill_anchors": {
+          "description": "Bounded registered source cursors for authorized local drill-down.\nPayload anchors, traces, and scope identifiers never enter this list.",
+          "items": {
+            "$ref": "#/$defs/ExecutionTopologyDrillAnchorV1"
+          },
+          "type": "array"
+        },
+        "emission_coverage": {
+          "$ref": "#/$defs/ExecutionTopologyEmissionCoverageV1"
+        },
+        "github_stack_capability": {
+          "$ref": "#/$defs/ExecutionGitHubStackCapabilityReadingV1"
+        },
+        "horizon": {
+          "$ref": "#/$defs/ObservabilityHorizonV1"
+        },
+        "measurements": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTopologyMeasurementV1"
+          },
+          "type": "array"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "watermark": {
+          "description": "Watermark of the last event this projection consumed. A rebuild at the\nsame watermark yields the same values.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorized_scope_ref",
+        "horizon",
+        "watermark",
+        "observed_at_micros",
+        "current",
+        "coverage",
+        "emission_coverage",
+        "github_stack_capability",
+        "drill_anchors",
+        "measurements"
+      ],
+      "title": "ExecutionTopologyMetricsV1",
       "type": "object"
     },
     "ExecutionTopologyViewV1": {
@@ -5064,6 +6258,21 @@
         }
       ],
       "title": "ExecutionTopologyViewV1"
+    },
+    "ExecutionWidthBucketV1": {
+      "description": "Fixed width buckets. Raw widths stay authorized local detail; only\nbucket counts leave the projection.",
+      "enum": [
+        "zero",
+        "one",
+        "two",
+        "from3_to4",
+        "from5_to8",
+        "from9_to16",
+        "from17_to32",
+        "from33_to64",
+        "over64"
+      ],
+      "type": "string"
     },
     "ExplorerFinalityV1": {
       "enum": [
@@ -6560,6 +7769,12 @@
       ],
       "type": "object"
     },
+    "HistoryRewritePolicyV1": {
+      "enum": [
+        "forbid_force_and_rebase"
+      ],
+      "type": "string"
+    },
     "IncomingCallEdgeV1": {
       "properties": {
         "kind": {
@@ -7463,6 +8678,54 @@
         "o200k_approximate",
         "unavailable"
       ],
+      "type": "string"
+    },
+    "LeakOwnerClassV1": {
+      "enum": [
+        "work",
+        "workflow",
+        "git",
+        "delivery",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "LinkAcceptedWorkAttemptRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "based_on_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence": {
+          "$ref": "#/$defs/TaskEvidenceLinkV1"
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "selection",
+        "task_id",
+        "based_on_version",
+        "identity",
+        "evidence",
+        "mutation"
+      ],
+      "type": "object"
+    },
+    "LocatorDigest": {
+      "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
       "type": "string"
     },
     "LoomBranchSpanV1": {
@@ -9359,8 +10622,14 @@
     },
     "ObservatoryReadModelV1": {
       "properties": {
+        "analytics_mode": {
+          "$ref": "#/$defs/AnalyticsModeReadModelV1"
+        },
         "authorized_scope_ref": {
           "type": "string"
+        },
+        "comparison": {
+          "$ref": "#/$defs/PerformanceComparisonReadModelV1"
         },
         "current": {
           "type": "boolean"
@@ -9388,7 +10657,9 @@
         "watermark",
         "observed_at_micros",
         "current",
-        "metrics"
+        "metrics",
+        "analytics_mode",
+        "comparison"
       ],
       "type": "object"
     },
@@ -9426,6 +10697,116 @@
         "occurred_at"
       ],
       "title": "PauseWorkRunCommand",
+      "type": "object"
+    },
+    "PerformanceComparisonReadModelV1": {
+      "properties": {
+        "baseline_build": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "candidate_build": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "corpus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1"
+        },
+        "disposition": {
+          "$ref": "#/$defs/ComparisonDispositionV1"
+        },
+        "eligible_outcomes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oracle": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paired_outcomes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "platform": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "regression_observed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rollback_profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workload": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "baseline_build",
+        "candidate_build",
+        "workload",
+        "corpus",
+        "environment",
+        "oracle",
+        "configuration",
+        "platform",
+        "rollback_profile",
+        "eligible_outcomes",
+        "paired_outcomes",
+        "regression_observed",
+        "disposition",
+        "coverage",
+        "unavailable_reason"
+      ],
       "type": "object"
     },
     "PolicyIdentifierV1": {
@@ -10104,6 +11485,35 @@
       ],
       "type": "object"
     },
+    "QuantityEvidenceClassV1": {
+      "enum": [
+        "owner_receipt",
+        "locally_measured",
+        "estimated",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RecordWorkHandoffRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "handoff": {
+          "$ref": "#/$defs/WorkHandoffV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "handoff",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "RefId": {
       "description": "Strongly typed canonical identity: `RefId`.",
       "type": "string"
@@ -10211,6 +11621,42 @@
     "RepositoryId": {
       "description": "Strongly typed canonical identity: `RepositoryId`.",
       "type": "string"
+    },
+    "RepositoryPlacementScopeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all_authorized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "allowlist",
+              "type": "string"
+            },
+            "repositories": {
+              "items": {
+                "$ref": "#/$defs/RepositoryId"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "kind",
+            "repositories"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RequiredCheckExpectationV1": {
       "enum": [
@@ -10322,6 +11768,31 @@
     "RetrievalAnchorId": {
       "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
       "type": "string"
+    },
+    "RetryWorkAttemptCommandV1": {
+      "additionalProperties": false,
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "failure": {
+          "$ref": "#/$defs/WorkRetryFailureSelectorV1"
+        },
+        "new_attempt_id": {
+          "$ref": "#/$defs/AttemptId"
+        },
+        "original_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        }
+      },
+      "required": [
+        "original_attempt",
+        "new_attempt_id",
+        "failure",
+        "command_id"
+      ],
+      "title": "RetryWorkAttemptCommandV1",
+      "type": "object"
     },
     "ReviewProposalCommand": {
       "additionalProperties": false,
@@ -11264,6 +12735,23 @@
       ],
       "type": "string"
     },
+    "SensitiveFilesystemLocatorV1": {
+      "additionalProperties": false,
+      "description": "Reference-only filesystem locator. The raw path is sealed outside this\ncontract; only the privacy-bound locator digest and sealed-value digest are\nrepresentable here.",
+      "properties": {
+        "locator_digest": {
+          "$ref": "#/$defs/LocatorDigest"
+        },
+        "sealed_value_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "locator_digest",
+        "sealed_value_digest"
+      ],
+      "type": "object"
+    },
     "SettingsAvailabilityV1": {
       "properties": {
         "available": {
@@ -11386,6 +12874,10 @@
         "current_observed_at"
       ],
       "type": "object"
+    },
+    "SourceStoreId": {
+      "description": "Strongly typed canonical identity: `SourceStoreId`.",
+      "type": "string"
     },
     "StartWorkAttemptCommand": {
       "additionalProperties": false,
@@ -12946,6 +14438,50 @@
       ],
       "type": "object"
     },
+    "TopologyConcurrencyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_active_per_repository": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_global_active": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_parallel_per_task": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_stack_depth": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_active_per_repository",
+        "maximum_parallel_per_task",
+        "maximum_global_active",
+        "maximum_stack_depth"
+      ],
+      "type": "object"
+    },
+    "TopologyEscalationPolicyV1": {
+      "enum": [
+        "reject",
+        "require_explicit_human_approval",
+        "require_human_approval_and_independent_review"
+      ],
+      "type": "string"
+    },
     "TopologyGatePolicyV1": {
       "additionalProperties": false,
       "properties": {
@@ -12978,6 +14514,14 @@
         "maximum_preflight_age_seconds"
       ],
       "type": "object"
+    },
+    "TopologyNotificationLevelV1": {
+      "enum": [
+        "critical_only",
+        "lifecycle",
+        "verbose"
+      ],
+      "type": "string"
     },
     "UserProfileId": {
       "description": "Strongly typed canonical identity: `UserProfileId`.",
@@ -13100,6 +14644,77 @@
         "event_sequence",
         "source_watermark",
         "recovered_graph_digest"
+      ],
+      "type": "object"
+    },
+    "VerifiedWorkLeakEvidenceV1": {
+      "additionalProperties": false,
+      "description": "Exact result of one scan by the canonical lease/process/effect/placement/\ndelivery evidence owner. Evidence references are opaque local anchors;\ntheir owning records remain behind normal authorization.",
+      "properties": {
+        "attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/CoverageStateV1"
+        },
+        "detection_horizon_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkExecutionLeakKindV1"
+        },
+        "owner_class": {
+          "$ref": "#/$defs/LeakOwnerClassV1"
+        },
+        "recovery": {
+          "$ref": "#/$defs/WorkExecutionLeakRecoveryV1"
+        },
+        "scan_completed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "scan_started_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "attempt",
+        "kind",
+        "recovery",
+        "owner_class",
+        "coverage",
+        "detection_horizon_micros",
+        "scan_started_at",
+        "scan_completed_at",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "VerifiedWorkRetryFailureV1": {
+      "additionalProperties": false,
+      "description": "Failure fact returned by a canonical evidence authority.",
+      "properties": {
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "selector": {
+          "$ref": "#/$defs/WorkRetryFailureSelectorV1"
+        }
+      },
+      "required": [
+        "selector",
+        "evidence_digest",
+        "observed_at"
       ],
       "type": "object"
     },
@@ -14223,6 +15838,217 @@
       ],
       "type": "object"
     },
+    "WorkDuplicateAdjudicationAppendOutcomeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "appended",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkDuplicateAdjudicationReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "replayed",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkDuplicateAdjudicationReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkDuplicateAdjudicationCommandV1": {
+      "additionalProperties": false,
+      "properties": {
+        "adjudication_id": {
+          "type": "string"
+        },
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "evidence": {
+          "$ref": "#/$defs/WorkDuplicateAdjudicationEvidenceV1"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "first_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "quantities": {
+          "$ref": "#/$defs/WorkDuplicateAdjudicationQuantitiesV1"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "second_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "verdict": {
+          "$ref": "#/$defs/DuplicateEffortKindV1"
+        }
+      },
+      "required": [
+        "adjudication_id",
+        "expected_revision",
+        "first_attempt",
+        "second_attempt",
+        "evidence",
+        "verdict",
+        "quantities",
+        "reason",
+        "command_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
+    "WorkDuplicateAdjudicationEvidenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_generation": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "file_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        },
+        "local_anchor_refs": {
+          "items": {
+            "$ref": "#/$defs/RetrievalAnchorId"
+          },
+          "type": "array"
+        },
+        "symbol_generation": {
+          "$ref": "#/$defs/CodeGenerationId"
+        },
+        "topology_generation": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        }
+      },
+      "required": [
+        "evidence_generation",
+        "file_generation",
+        "symbol_generation",
+        "topology_generation",
+        "local_anchor_refs"
+      ],
+      "type": "object"
+    },
+    "WorkDuplicateAdjudicationQuantitiesV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/CoverageStateV1"
+        },
+        "effect_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "effect_outcome": {
+          "$ref": "#/$defs/DuplicateEffectOutcomeV1"
+        },
+        "evidence": {
+          "$ref": "#/$defs/QuantityEvidenceClassV1"
+        },
+        "test_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wall_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "wall_micros",
+        "token_count",
+        "cost_micros",
+        "test_count",
+        "effect_count",
+        "evidence",
+        "effect_outcome",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "WorkDuplicateAdjudicationReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "canonical_input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "command": {
+          "$ref": "#/$defs/WorkDuplicateAdjudicationCommandV1"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command",
+        "revision",
+        "actor_id",
+        "canonical_input_digest"
+      ],
+      "type": "object"
+    },
     "WorkEffectStateV1": {
       "description": "Effect semantics admitted for one provider attempt.",
       "enum": [
@@ -14343,6 +16169,28 @@
       ],
       "type": "object"
     },
+    "WorkExecutionLeakKindV1": {
+      "enum": [
+        "lease_after_terminal",
+        "attempt_without_live_owner",
+        "effect_unknown_past_deadline",
+        "missing_worktree_binding",
+        "unbounded_delivery",
+        "none",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "WorkExecutionLeakRecoveryV1": {
+      "enum": [
+        "not_required",
+        "pending",
+        "recovered",
+        "failed",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "WorkExecutionLimits": {
       "additionalProperties": false,
       "properties": {
@@ -14389,6 +16237,7 @@
     },
     "WorkExecutionSnapshot": {
       "additionalProperties": false,
+      "description": "Immutable provider and topology authority pinned for exactly one Work\nexecution. Every constraint the execution is governed by is named here;\nnothing in this value is an opaque stand-in that a reader must resolve\nagainst a mutable store.",
       "properties": {
         "approval": {
           "$ref": "#/$defs/WorkApprovalPolicy"
@@ -14452,8 +16301,9 @@
         "sandbox": {
           "$ref": "#/$defs/WorkSandboxPolicy"
         },
-        "topology_policy_digest": {
-          "$ref": "#/$defs/ManifestDigest"
+        "topology": {
+          "$ref": "#/$defs/WorkTopologyPolicyV1",
+          "description": "See [`WorkExecutionSnapshotInput::topology`]. Validated on construction,\nso an admitted snapshot can never pin a topology that weakens the\nprotected-ref floor or permits a native integration without its gates."
         }
       },
       "required": [
@@ -14475,7 +16325,7 @@
         "limits",
         "deadline",
         "fallback",
-        "topology_policy_digest"
+        "topology"
       ],
       "type": "object"
     },
@@ -14538,6 +16388,220 @@
         "incomparable"
       ],
       "type": "string"
+    },
+    "WorkGraphChangeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/WorkItemV1"
+            },
+            "kind": {
+              "const": "task_added",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "decided_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "disposition": {
+              "$ref": "#/$defs/WorkProposalDispositionV12"
+            },
+            "kind": {
+              "const": "relation_replan_decided",
+              "type": "string"
+            },
+            "proposal": {
+              "$ref": "#/$defs/WorkRelationReplanProposalV1"
+            }
+          },
+          "required": [
+            "kind",
+            "proposal",
+            "disposition",
+            "decided_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "kind": {
+              "const": "task_relations_replanned",
+              "type": "string"
+            },
+            "proposal_id": {
+              "$ref": "#/$defs/ProposalId"
+            }
+          },
+          "required": [
+            "kind",
+            "proposal_id",
+            "applied_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "$ref": "#/$defs/TaskEvidenceLinkV1"
+            },
+            "kind": {
+              "const": "evidence_linked",
+              "type": "string"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "decided_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "disposition": {
+              "$ref": "#/$defs/WorkProposalDispositionV12"
+            },
+            "kind": {
+              "const": "proposal_decided",
+              "type": "string"
+            },
+            "proposal": {
+              "$ref": "#/$defs/WorkProposalV1"
+            }
+          },
+          "required": [
+            "kind",
+            "proposal",
+            "disposition",
+            "decided_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accepted_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "kind": {
+              "const": "proposal_accepted",
+              "type": "string"
+            },
+            "proposal": {
+              "$ref": "#/$defs/WorkProposalV1"
+            }
+          },
+          "required": [
+            "kind",
+            "proposal",
+            "accepted_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "based_on_version": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "evidence": {
+              "$ref": "#/$defs/TaskEvidenceLinkV1"
+            },
+            "identity": {
+              "$ref": "#/$defs/WorkAttemptIdentityV1"
+            },
+            "kind": {
+              "const": "accepted_attempt_linked",
+              "type": "string"
+            },
+            "linked_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "based_on_version",
+            "identity",
+            "evidence",
+            "linked_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accepted_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "evidence_by_criterion": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "const": "task_accepted",
+              "type": "string"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "evidence_by_criterion",
+            "accepted_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "handoff": {
+              "$ref": "#/$defs/WorkHandoffV1"
+            },
+            "kind": {
+              "const": "handoff_recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "handoff"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "WorkGraphReadModeV1": {
       "oneOf": [
@@ -15129,6 +17193,73 @@
       ],
       "type": "object"
     },
+    "WorkLeakAdjudicationOutcomeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "appended",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkLeakAdjudicationReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "replayed",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkLeakAdjudicationReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkLeakAdjudicationReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "command": {
+          "$ref": "#/$defs/AdjudicateWorkLeakCommandV1"
+        },
+        "evidence": {
+          "$ref": "#/$defs/VerifiedWorkLeakEvidenceV1"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scan_deadline": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "Daemon/request-owned deadline that bounded the source scan."
+        }
+      },
+      "required": [
+        "command",
+        "revision",
+        "evidence",
+        "scan_deadline",
+        "canonical_input_digest"
+      ],
+      "type": "object"
+    },
     "WorkLeaseFenceV1": {
       "additionalProperties": false,
       "properties": {
@@ -15645,6 +17776,197 @@
         }
       ]
     },
+    "WorkProductEventEvidenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor_id": {
+          "$ref": "#/$defs/RetrievalAnchorId"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "source_store_id": {
+          "$ref": "#/$defs/SourceStoreId"
+        }
+      },
+      "required": [
+        "source_store_id",
+        "anchor_id",
+        "evidence_digest"
+      ],
+      "type": "object"
+    },
+    "WorkProductEventPayloadV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "graph": {
+              "$ref": "#/$defs/WorkProductGraphV1"
+            },
+            "kind": {
+              "const": "created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "graph"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "change": {
+              "$ref": "#/$defs/WorkGraphChangeV1"
+            },
+            "kind": {
+              "const": "changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "change"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkProductEventV1": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "authorized_relation_scopes": {
+          "items": {
+            "$ref": "#/$defs/WorkProductAuthorizedRelationScopeV1"
+          },
+          "type": "array"
+        },
+        "canonical_input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "catalog_generation_id": {
+          "$ref": "#/$defs/CatalogGenerationId"
+        },
+        "causation_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "configuration_revision_id": {
+          "$ref": "#/$defs/ConfigurationRevisionId"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/WorkProductEventEvidenceV1"
+          },
+          "type": "array"
+        },
+        "expected_graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "owner_scope": {
+          "$ref": "#/$defs/WorkProductProfileScopeV1"
+        },
+        "payload": {
+          "$ref": "#/$defs/WorkProductEventPayloadV1"
+        },
+        "policy_revision_id": {
+          "type": "string"
+        },
+        "result_graph_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_watermark": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "event_id",
+        "sequence",
+        "actor_id",
+        "owner_scope",
+        "authorized_relation_scopes",
+        "expected_graph_version",
+        "result_graph_version",
+        "command_id",
+        "canonical_input_digest",
+        "causation_event_id",
+        "evidence",
+        "source_watermark",
+        "occurred_at",
+        "policy_revision_id",
+        "configuration_revision_id",
+        "catalog_generation_id",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "WorkProductExpectedAuthorityV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authority": {
+              "const": "no_prior_graph",
+              "type": "string"
+            }
+          },
+          "required": [
+            "authority"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authority": {
+              "const": "verified",
+              "type": "string"
+            },
+            "verified_version": {
+              "$ref": "#/$defs/VerifiedWorkGraphVersionV1"
+            }
+          },
+          "required": [
+            "authority",
+            "verified_version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "WorkProductGraphV1": {
       "additionalProperties": false,
       "properties": {
@@ -15708,6 +18030,197 @@
       ],
       "type": "object"
     },
+    "WorkProductMutationIdentityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "causation_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_id": {
+          "$ref": "#/$defs/WorkCommandId"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/WorkProductEventEvidenceV1"
+          },
+          "type": "array"
+        },
+        "expected_authority": {
+          "$ref": "#/$defs/WorkProductExpectedAuthorityV1"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "revisions": {
+          "$ref": "#/$defs/WorkProductRevisionPinsV1"
+        }
+      },
+      "required": [
+        "expected_authority",
+        "command_id",
+        "causation_event_id",
+        "evidence",
+        "occurred_at",
+        "revisions"
+      ],
+      "type": "object"
+    },
+    "WorkProductMutationReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/WorkProductEventV1"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "verified_graph_version": {
+          "$ref": "#/$defs/VerifiedWorkGraphVersionV1"
+        }
+      },
+      "required": [
+        "event",
+        "verified_graph_version",
+        "replayed"
+      ],
+      "type": "object"
+    },
+    "WorkProductMutationRequestV1": {
+      "description": "Closed public mutation surface for the Work-product graph authority.",
+      "oneOf": [
+        {
+          "properties": {
+            "mutation": {
+              "const": "create",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/CreateWorkProductRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "decide_proposal",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/DecideWorkProposalRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "decide_relation_replan",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/DecideWorkRelationReplanRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "apply_relation_replan",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/ApplyWorkRelationReplanRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "accept_task",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/AcceptWorkTaskRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "link_accepted_attempt",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/LinkAcceptedWorkAttemptRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mutation": {
+              "const": "record_handoff",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/RecordWorkHandoffRequestV1"
+            }
+          },
+          "required": [
+            "mutation",
+            "request"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkProductProfileScopeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "brain_id": {
+          "$ref": "#/$defs/BrainId"
+        },
+        "profile_id": {
+          "$ref": "#/$defs/UserProfileId"
+        }
+      },
+      "required": [
+        "brain_id",
+        "profile_id"
+      ],
+      "type": "object"
+    },
     "WorkProductProjectionBundleV1": {
       "additionalProperties": false,
       "properties": {
@@ -15747,6 +18260,26 @@
         "causal",
         "critical_path",
         "workload"
+      ],
+      "type": "object"
+    },
+    "WorkProductRevisionPinsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_generation_id": {
+          "$ref": "#/$defs/CatalogGenerationId"
+        },
+        "configuration_revision_id": {
+          "$ref": "#/$defs/ConfigurationRevisionId"
+        },
+        "policy_revision_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_revision_id",
+        "configuration_revision_id",
+        "catalog_generation_id"
       ],
       "type": "object"
     },
@@ -16712,8 +19245,157 @@
         "lease_lost",
         "provider_unavailable",
         "process_lost",
-        "checkpoint_rejected"
+        "failure_observed"
       ],
+      "type": "string"
+    },
+    "WorkRetryAttemptOutcomeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "$ref": "#/$defs/WorkAttemptV1"
+            },
+            "outcome": {
+              "const": "created",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkRetryReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt",
+            "attempt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "$ref": "#/$defs/WorkAttemptV1"
+            },
+            "outcome": {
+              "const": "replayed",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/WorkRetryReceiptV1"
+            }
+          },
+          "required": [
+            "outcome",
+            "receipt",
+            "attempt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRetryCauseV1": {
+      "enum": [
+        "runtime_failure",
+        "test_failure"
+      ],
+      "type": "string"
+    },
+    "WorkRetryFailureSelectorV1": {
+      "additionalProperties": false,
+      "description": "A selector into an owning runtime or managed-Test evidence authority.\n\n`evidence_ref` is an opaque local reference. The Work retry owner resolves\nit through [`WorkRetryEvidencePortV1`]; callers never submit the evidence\ndigest, outcome, or observation time that decides eligibility.",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/WorkRetryCauseV1"
+        },
+        "evidence_ref": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/WorkRetrySourceV1"
+        }
+      },
+      "required": [
+        "source",
+        "cause",
+        "evidence_ref"
+      ],
+      "type": "object"
+    },
+    "WorkRetryReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "command": {
+          "$ref": "#/$defs/RetryWorkAttemptCommandV1"
+        },
+        "failure": {
+          "$ref": "#/$defs/VerifiedWorkRetryFailureV1"
+        },
+        "new_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "owner_receipt_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "restarted_at": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "Daemon-owned admission time at which the new attempt was created."
+        },
+        "retry_required_at": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "Exact source-owned time at which the failure made a retry necessary."
+        }
+      },
+      "required": [
+        "command",
+        "failure",
+        "new_attempt",
+        "retry_required_at",
+        "restarted_at",
+        "canonical_input_digest",
+        "owner_receipt_digest"
+      ],
+      "type": "object"
+    },
+    "WorkRetrySourceV1": {
+      "enum": [
+        "runtime",
+        "test"
+      ],
+      "type": "string"
+    },
+    "WorkRetryTestBindingTokenOutcomeV1": {
+      "additionalProperties": false,
+      "description": "Public opaque capability returned by Work. The managed-Test tool accepts it\nas `work_retry_test_binding_token`, then resolves its authority only from\nthe registered Work store.",
+      "properties": {
+        "token": {
+          "$ref": "#/$defs/WorkRetryTestBindingTokenV1"
+        }
+      },
+      "required": [
+        "token"
+      ],
+      "type": "object"
+    },
+    "WorkRetryTestBindingTokenRequestV1": {
+      "additionalProperties": false,
+      "description": "Work's request to launch managed Tests for an exact prior attempt. It has\nno caller-supplied test outcome, digest, scope, or timestamp.",
+      "properties": {
+        "original_attempt": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        }
+      },
+      "required": [
+        "original_attempt"
+      ],
+      "type": "object"
+    },
+    "WorkRetryTestBindingTokenV1": {
+      "description": "Opaque, Work-minted token that a trusted managed-Test launch carries into\nits terminal journal entry. The database, not syntax, proves ownership.",
       "type": "string"
     },
     "WorkRouteDecisionV1": {
@@ -17776,6 +20458,80 @@
       "title": "WorkTopologyPlacementLaneV1",
       "type": "object"
     },
+    "WorkTopologyPolicyV1": {
+      "additionalProperties": false,
+      "description": "Complete V1 policy. Partial values are intentionally impossible: callers\nmust provide the entire policy and validation rejects adapter-local defaults.",
+      "properties": {
+        "branch_naming": {
+          "$ref": "#/$defs/BranchNamingPolicyV1"
+        },
+        "branch_topology": {
+          "$ref": "#/$defs/BranchTopologyPolicyV1"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/TopologyConcurrencyPolicyV1"
+        },
+        "cross_merge": {
+          "$ref": "#/$defs/CrossMergePolicyV1"
+        },
+        "escalation": {
+          "$ref": "#/$defs/TopologyEscalationPolicyV1"
+        },
+        "gates": {
+          "$ref": "#/$defs/TopologyGatePolicyV1"
+        },
+        "history_rewrite": {
+          "$ref": "#/$defs/HistoryRewritePolicyV1"
+        },
+        "notifications": {
+          "$ref": "#/$defs/TopologyNotificationLevelV1"
+        },
+        "placement": {
+          "$ref": "#/$defs/WorktreePlacementModeV1"
+        },
+        "protected_refs": {
+          "items": {
+            "$ref": "#/$defs/ProtectedRefRuleV1"
+          },
+          "type": "array"
+        },
+        "retention": {
+          "$ref": "#/$defs/WorktreeRetentionPolicyV1"
+        },
+        "review_topology": {
+          "$ref": "#/$defs/ReviewTopologyPolicyV1"
+        },
+        "roots": {
+          "items": {
+            "$ref": "#/$defs/WorktreeRootPolicyV1"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "placement",
+        "roots",
+        "branch_topology",
+        "review_topology",
+        "branch_naming",
+        "concurrency",
+        "cross_merge",
+        "gates",
+        "protected_refs",
+        "history_rewrite",
+        "escalation",
+        "retention",
+        "notifications"
+      ],
+      "type": "object"
+    },
     "WorkTopologyViewRequestV1": {
       "additionalProperties": false,
       "description": "One page-bounded topology view read. The cursor vocabulary is the attempt\nlist's: a cursor minted under a superseded topology generation is a typed\nstaleness refusal, never a silently different page.",
@@ -17972,6 +20728,73 @@
           "type": "object"
         }
       ]
+    },
+    "WorktreeRetentionPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "abandoned_retention_seconds": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "automatic_gc": {
+          "$ref": "#/$defs/AutomaticWorktreeGcV1"
+        },
+        "maximum_retained_per_repository": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminal_retention_seconds": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "terminal_retention_seconds",
+        "abandoned_retention_seconds",
+        "maximum_retained_per_repository",
+        "automatic_gc"
+      ],
+      "type": "object"
+    },
+    "WorktreeRootPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "$ref": "#/$defs/SensitiveFilesystemLocatorV1"
+        },
+        "maximum_active_worktrees": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repository_scope": {
+          "$ref": "#/$defs/RepositoryPlacementScopeV1"
+        },
+        "root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_id",
+        "locator",
+        "repository_scope",
+        "maximum_active_worktrees"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18185,6 +21008,12 @@
     "work_create_command": {
       "$ref": "#/$defs/CreateWorkCommand"
     },
+    "work_duplicate_adjudication_command": {
+      "$ref": "#/$defs/WorkDuplicateAdjudicationCommandV1"
+    },
+    "work_duplicate_adjudication_result": {
+      "$ref": "#/$defs/WorkDuplicateAdjudicationAppendOutcomeV1"
+    },
     "work_generate_proposal_request": {
       "$ref": "#/$defs/GenerateProposalRequest"
     },
@@ -18196,6 +21025,12 @@
     },
     "work_graph_read_request": {
       "$ref": "#/$defs/WorkGraphReadRequestV1"
+    },
+    "work_leak_adjudication_command": {
+      "$ref": "#/$defs/AdjudicateWorkLeakCommandV1"
+    },
+    "work_leak_adjudication_result": {
+      "$ref": "#/$defs/WorkLeakAdjudicationOutcomeV1"
     },
     "work_pause_run_command": {
       "$ref": "#/$defs/PauseWorkRunCommand"
@@ -18214,6 +21049,12 @@
     },
     "work_placement_status_request": {
       "$ref": "#/$defs/WorkPlacementStatusRequestV1"
+    },
+    "work_product_mutation_receipt": {
+      "$ref": "#/$defs/WorkProductMutationReceiptV1"
+    },
+    "work_product_mutation_request": {
+      "$ref": "#/$defs/WorkProductMutationRequestV1"
     },
     "work_projection": {
       "$ref": "#/$defs/WorkProjection"
@@ -18242,6 +21083,18 @@
     "work_resume_run_command": {
       "$ref": "#/$defs/ResumeWorkRunCommand"
     },
+    "work_retry_attempt_command": {
+      "$ref": "#/$defs/RetryWorkAttemptCommandV1"
+    },
+    "work_retry_attempt_outcome": {
+      "$ref": "#/$defs/WorkRetryAttemptOutcomeV1"
+    },
+    "work_retry_test_binding_outcome": {
+      "$ref": "#/$defs/WorkRetryTestBindingTokenOutcomeV1"
+    },
+    "work_retry_test_binding_request": {
+      "$ref": "#/$defs/WorkRetryTestBindingTokenRequestV1"
+    },
     "work_review_proposal_command": {
       "$ref": "#/$defs/ReviewProposalCommand"
     },
@@ -18262,6 +21115,12 @@
     },
     "work_synthesis_attempt": {
       "$ref": "#/$defs/WorkSynthesisAttemptV1"
+    },
+    "work_topology_metrics": {
+      "$ref": "#/$defs/ExecutionTopologyMetricsV1"
+    },
+    "work_topology_metrics_request": {
+      "$ref": "#/$defs/ExecutionTopologyMetricsRequestV1"
     },
     "work_topology_view": {
       "$ref": "#/$defs/ExecutionTopologyViewV1"
@@ -18336,12 +21195,18 @@
     "work_attempt_status_request",
     "work_cancel_attempt_command",
     "work_resume_attempts_command",
+    "work_retry_attempt_command",
+    "work_retry_attempt_outcome",
+    "work_retry_test_binding_request",
+    "work_retry_test_binding_outcome",
     "work_attempt",
     "work_attempt_recovery_report",
     "work_attempt_list_request",
     "work_attempt_list",
     "work_graph_read_request",
     "work_graph_read",
+    "work_product_mutation_request",
+    "work_product_mutation_receipt",
     "work_artifact_hydration_request",
     "work_artifact_hydration",
     "work_pause_run_command",
@@ -18358,6 +21223,12 @@
     "work_placement_reading",
     "work_topology_view_request",
     "work_topology_view",
+    "work_topology_metrics_request",
+    "work_topology_metrics",
+    "work_duplicate_adjudication_command",
+    "work_duplicate_adjudication_result",
+    "work_leak_adjudication_command",
+    "work_leak_adjudication_result",
     "multi_root_capability",
     "multi_root_scope_set_read_request",
     "multi_root_scope_set",

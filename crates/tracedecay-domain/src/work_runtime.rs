@@ -805,7 +805,7 @@ pub enum WorkRestartReasonV1 {
     LeaseLost,
     ProviderUnavailable,
     ProcessLost,
-    CheckpointRejected,
+    FailureObserved,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -954,6 +954,19 @@ impl WorkTerminalEvidenceV1 {
         };
         RuntimeEvidenceRef::new(run_id, evidence_digest, true)
             .map_err(|_| WorkRuntimeContractError::InconsistentAttemptState)
+    }
+
+    /// The durable instant at which the provider terminal was observed.
+    ///
+    /// Run-control closes an open blocked interval at this owner fact rather
+    /// than reading a new clock while replaying the attempt's terminal CAS.
+    pub const fn observed_at(&self) -> UtcMicros {
+        match self {
+            Self::Succeeded { observed_at, .. }
+            | Self::Failed { observed_at, .. }
+            | Self::TimedOut { observed_at, .. }
+            | Self::Cancelled { observed_at, .. } => *observed_at,
+        }
     }
 
     fn matches_state(&self, state: WorkAttemptStateV1) -> bool {
@@ -1170,18 +1183,15 @@ impl WorkAttemptV1 {
                     && self.terminal.is_none()
             }
             WorkAttemptStateV1::CancellationRequested => {
-                self.actual_route.is_some()
-                    && matches!(self.cancellation, WorkCancellationStateV1::Requested(_))
+                matches!(self.cancellation, WorkCancellationStateV1::Requested(_))
                     && self.terminal.is_none()
             }
             WorkAttemptStateV1::CancellationAcknowledged => {
-                self.actual_route.is_some()
-                    && matches!(self.cancellation, WorkCancellationStateV1::Acknowledged(_))
+                matches!(self.cancellation, WorkCancellationStateV1::Acknowledged(_))
                     && self.terminal.is_none()
             }
             WorkAttemptStateV1::CancellationEscalated => {
-                self.actual_route.is_some()
-                    && matches!(self.cancellation, WorkCancellationStateV1::Escalated(_))
+                matches!(self.cancellation, WorkCancellationStateV1::Escalated(_))
                     && self.terminal.is_none()
             }
             WorkAttemptStateV1::RecoveryRequired => {
@@ -1199,16 +1209,14 @@ impl WorkAttemptV1 {
                         .is_some_and(|terminal| terminal.matches_state(self.state))
             }
             WorkAttemptStateV1::Cancelled => {
-                self.actual_route.is_some()
-                    && matches!(
-                        self.cancellation,
-                        WorkCancellationStateV1::Acknowledged(_)
-                            | WorkCancellationStateV1::Escalated(_)
-                    )
-                    && self
-                        .terminal
-                        .as_ref()
-                        .is_some_and(|terminal| terminal.matches_state(self.state))
+                matches!(
+                    self.cancellation,
+                    WorkCancellationStateV1::Acknowledged(_)
+                        | WorkCancellationStateV1::Escalated(_)
+                ) && self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.matches_state(self.state))
             }
         };
         if !valid {
@@ -1283,7 +1291,7 @@ fn valid_transition(from: WorkAttemptStateV1, to: WorkAttemptStateV1) -> bool {
     };
     matches!(
         (from, to),
-        (Leased, Running | RecoveryRequired)
+        (Leased, Running | CancellationRequested | RecoveryRequired)
             | (
                 Running,
                 Running | CancellationRequested | RecoveryRequired | Succeeded | Failed | TimedOut
@@ -1294,7 +1302,7 @@ fn valid_transition(from: WorkAttemptStateV1, to: WorkAttemptStateV1) -> bool {
             )
             | (CancellationAcknowledged, CancellationEscalated | Cancelled)
             | (CancellationEscalated, Cancelled | Failed)
-            | (RecoveryRequired, Running | Failed)
+            | (RecoveryRequired, Running | CancellationRequested | Failed)
     )
 }
 

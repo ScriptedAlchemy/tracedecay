@@ -36,6 +36,9 @@ use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
 
+mod semantic_lifecycle;
+pub use semantic_lifecycle::*;
+
 /// Typed input for the first configuration read migrated through the daemon
 /// invocation boundary.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -209,6 +212,14 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationRollbackApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
+    SemanticModelRetry(SemanticLifecycleControlRequestV1),
+    SemanticModelRemove(SemanticLifecycleControlRequestV1),
+    SemanticModelRollback(SemanticLifecycleControlRequestV1),
+    SemanticEmbeddingImportLocal(SemanticEmbeddingLocalImportRequestV1),
+    SemanticEmbeddingImportConfiguredHttps(SemanticEmbeddingConfiguredHttpsImportRequestV1),
+    SemanticRerankerImportLocal(SemanticRerankerLocalImportRequestV1),
+    SemanticRerankerImportConfiguredHttps(SemanticRerankerConfiguredHttpsImportRequestV1),
+    SemanticRerankerRollback(SemanticRerankerRollbackRequestV1),
 }
 
 struct ConfigurationSurfaceSpec {
@@ -218,6 +229,7 @@ struct ConfigurationSurfaceSpec {
     example: &'static str,
     effect: EffectClass,
     paginated: bool,
+    maximum_deadline_millis: u64,
     surfaces: &'static [BindingSurface],
 }
 
@@ -228,7 +240,7 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 21] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
@@ -236,6 +248,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "List project configuration settings",
         effect: EffectClass::Read,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -245,6 +258,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Explain this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -254,6 +268,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Get this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -263,6 +278,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Set this project configuration value",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -272,6 +288,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Unset this project configuration value",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -281,6 +298,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply these project configuration changes together",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -290,6 +308,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Rotate this configuration credential reference",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -299,6 +318,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Show configuration activation drift",
         effect: EffectClass::Read,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -308,6 +328,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Preview this protected configuration change",
         effect: EffectClass::Preview,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -317,6 +338,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply this approved protected configuration change",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -326,6 +348,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Preview rollback to this configuration revision",
         effect: EffectClass::Preview,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -335,6 +358,7 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Apply this approved configuration rollback",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
     ConfigurationSurfaceSpec {
@@ -344,11 +368,92 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         example: "Show configuration audit history",
         effect: EffectClass::Read,
         paginated: true,
+        maximum_deadline_millis: 15_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_model_retry",
+        summary: "Retry semantic model lifecycle",
+        description: "Retry the selected semantic model through the daemon-owned lifecycle owner.",
+        example: "Retry the selected semantic model",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 15_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_model_remove",
+        summary: "Remove semantic model installation",
+        description: "Remove the selected semantic installation through the daemon-owned lifecycle owner.",
+        example: "Remove the selected semantic model installation",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 15_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_model_rollback",
+        summary: "Rollback semantic model",
+        description: "Restore the prior verified semantic model through the daemon-owned lifecycle owner.",
+        example: "Rollback the semantic model to its verified predecessor",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 15_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_embedding_import_local",
+        summary: "Import local embedding artifact",
+        description: "Verify and install an explicitly selected local embedding artifact.",
+        example: "Import this local embedding artifact",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 900_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_embedding_import_configured_https",
+        summary: "Import configured HTTPS embedding artifact",
+        description: "Verify and install an explicitly configured immutable HTTPS embedding artifact.",
+        example: "Import this configured HTTPS embedding artifact",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 900_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_reranker_import_local",
+        summary: "Import local reranker artifact",
+        description: "Verify and install an explicitly selected local reranker artifact.",
+        example: "Import this local reranker artifact",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 900_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_reranker_import_configured_https",
+        summary: "Import configured HTTPS reranker artifact",
+        description: "Verify and install an explicitly configured immutable HTTPS reranker artifact.",
+        example: "Import this configured HTTPS reranker artifact",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 900_000,
+        surfaces: &CONFIGURATION_SURFACES,
+    },
+    ConfigurationSurfaceSpec {
+        name: "semantic_reranker_rollback",
+        summary: "Rollback reranker artifact",
+        description: "Restore the prior verified reranker artifact through the daemon-owned lifecycle owner.",
+        example: "Rollback the reranker artifact to its verified predecessor",
+        effect: EffectClass::ConfigurationWrite,
+        paginated: false,
+        maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
 ];
 
-pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
+pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 21] = [
     "configuration_list",
     "configuration_explain",
     "configuration_get",
@@ -362,6 +467,14 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_rollback_preview",
     "configuration_rollback_apply",
     "configuration_audit",
+    "semantic_model_retry",
+    "semantic_model_remove",
+    "semantic_model_rollback",
+    "semantic_embedding_import_local",
+    "semantic_embedding_import_configured_https",
+    "semantic_reranker_import_local",
+    "semantic_reranker_import_configured_https",
+    "semantic_reranker_rollback",
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -448,10 +561,47 @@ fn configuration_executable_schemas(
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     let mut schemas = Vec::with_capacity(CONFIGURATION_SPECS.len());
     macro_rules! add {
+        ($operation:literal, $request:ty, Vec<$result:ident>) => {
+            schemas.push(configuration_executable_schema::<$request, Vec<$result>>(
+                contribution,
+                $operation,
+                concat!(
+                    "tracedecay_application::configuration::",
+                    stringify!($request)
+                ),
+                concat!(
+                    "alloc::vec::Vec<tracedecay_application::configuration::",
+                    stringify!($result),
+                    ">"
+                ),
+            )?)
+        };
+        ($operation:literal, $request:ty, tracedecay_domain::configuration::$result:ident) => {
+            schemas.push(configuration_executable_schema::<
+                $request,
+                tracedecay_domain::configuration::$result,
+            >(
+                contribution,
+                $operation,
+                concat!(
+                    "tracedecay_application::configuration::",
+                    stringify!($request)
+                ),
+                concat!("tracedecay_domain::configuration::", stringify!($result)),
+            )?)
+        };
         ($operation:literal, $request:ty, $result:ty) => {
             schemas.push(configuration_executable_schema::<$request, $result>(
                 contribution,
                 $operation,
+                concat!(
+                    "tracedecay_application::configuration::",
+                    stringify!($request)
+                ),
+                concat!(
+                    "tracedecay_application::configuration::",
+                    stringify!($result)
+                ),
             )?)
         };
     }
@@ -520,12 +670,54 @@ fn configuration_executable_schemas(
         ConfigurationAuditRequestV1,
         ConfigurationAuditPage
     );
+    add!(
+        "semantic_model_retry",
+        SemanticLifecycleControlRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_model_remove",
+        SemanticLifecycleControlRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_model_rollback",
+        SemanticLifecycleControlRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_embedding_import_local",
+        SemanticEmbeddingLocalImportRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_embedding_import_configured_https",
+        SemanticEmbeddingConfiguredHttpsImportRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_reranker_import_local",
+        SemanticRerankerLocalImportRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_reranker_import_configured_https",
+        SemanticRerankerConfiguredHttpsImportRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
+    add!(
+        "semantic_reranker_rollback",
+        SemanticRerankerRollbackRequestV1,
+        SemanticLifecycleOperationResultV1
+    );
     Ok(schemas)
 }
 
 fn configuration_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -540,8 +732,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "configuration schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 
@@ -567,6 +762,13 @@ fn capability(
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
     let effect = spec.effect;
     let is_effect = effect.is_effect();
+    let is_semantic_import = matches!(
+        spec.name,
+        "semantic_embedding_import_local"
+            | "semantic_embedding_import_configured_https"
+            | "semantic_reranker_import_local"
+            | "semantic_reranker_import_configured_https"
+    );
     Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id,
         use_case_id: UseCaseId::new(use_case_id(spec.name))?,
@@ -588,7 +790,13 @@ fn capability(
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Resumable,
         streaming: StreamingContract::Unsupported,
-        cancellation: if is_effect {
+        cancellation: if is_semantic_import {
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeEffect,
+                CancellationPoint::EffectInFlight,
+            ])?
+        } else if is_effect {
             CancellationContract::NotCancellable
         } else {
             CancellationContract::cooperative(vec![
@@ -598,7 +806,7 @@ fn capability(
             ])?
         },
         deadline: DeadlineContract::new(
-            15_000,
+            spec.maximum_deadline_millis,
             if is_effect {
                 DeadlineBehavior::ReturnEffectReceipt
             } else {
@@ -639,13 +847,17 @@ fn capability(
             ReceiptContract::Operation
         },
         terminal_states: TerminalStateContract::new(if is_effect {
-            vec![
+            let mut states = vec![
                 TerminalState::Completed,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
                 TerminalState::EffectUnknown,
                 TerminalState::Partial,
-            ]
+            ];
+            if is_semantic_import {
+                states.push(TerminalState::Cancelled);
+            }
+            states
         } else {
             vec![
                 TerminalState::Completed,
@@ -751,180 +963,4 @@ fn operation_suffix(operation: &str) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn configuration_surface_keeps_every_retained_operation_callable() {
-        let contribution = configuration_surface_catalog_contribution().expect("contribution");
-        assert_eq!(contribution.capabilities().len(), CONFIGURATION_SPECS.len());
-        assert_eq!(
-            contribution.executable_schemas().len(),
-            CONFIGURATION_SPECS.len()
-        );
-        assert_eq!(
-            contribution.bindings().len(),
-            CONFIGURATION_SPECS.len() * CONFIGURATION_SURFACES.len()
-        );
-        assert!(
-            contribution
-                .capabilities()
-                .iter()
-                .all(|capability| capability.availability().is_callable())
-        );
-    }
-
-    #[test]
-    fn configuration_executable_registry_binds_every_public_http_schema() {
-        let contribution = configuration_surface_catalog_contribution().expect("contribution");
-        let registry = configuration_executable_binding_registry().expect("registry");
-
-        assert_eq!(registry.iter().count(), CONFIGURATION_SPECS.len());
-        for spec in &CONFIGURATION_SPECS {
-            let operation_id =
-                OperationId::new(format!("operation.application.{}", spec.name)).unwrap();
-            let binding = registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .expect("available configuration binding");
-            let manifest = contribution
-                .capabilities()
-                .iter()
-                .find(|manifest| manifest.capability_id() == binding.capability_id())
-                .unwrap();
-            assert_eq!(
-                binding.request_schema().schema_ref(),
-                manifest.request_schema()
-            );
-            assert_eq!(
-                binding.result_schema().schema_ref(),
-                manifest.result_schema()
-            );
-            assert_eq!(binding.terminal_states(), manifest.terminal_states());
-            let requires_idempotency = binding
-                .request_schema()
-                .body()
-                .get("required")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|required| {
-                    required
-                        .iter()
-                        .any(|field| field.as_str() == Some("idempotency_key"))
-                });
-            assert_eq!(
-                requires_idempotency,
-                spec.effect.is_effect(),
-                "{} must expose caller idempotency exactly when it admits an effect",
-                spec.name
-            );
-            assert!(matches!(
-                binding.exposure(),
-                RouteExposureV1::Public {
-                    binding_id,
-                    route_path,
-                } if binding_id.as_str() == format!("binding.http.{}.v1", spec.name)
-                    && route_path == &format!("/application/configuration/{}", spec.name)
-            ));
-        }
-    }
-
-    #[test]
-    fn configuration_surface_exposes_the_dashboard_transport() {
-        let contribution = configuration_surface_catalog_contribution().expect("contribution");
-        let surfaces = contribution
-            .bindings()
-            .iter()
-            .map(|binding| binding.surface())
-            .collect::<std::collections::BTreeSet<_>>();
-
-        assert_eq!(
-            surfaces,
-            std::collections::BTreeSet::from([
-                BindingSurface::Cli,
-                BindingSurface::Mcp,
-                BindingSurface::Http,
-                BindingSurface::Dashboard,
-            ])
-        );
-    }
-
-    #[test]
-    fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
-        let contribution = configuration_surface_catalog_contribution().expect("contribution");
-
-        for capability in contribution.capabilities() {
-            assert!(
-                capability.scope().requires(ScopeDimension::Project),
-                "{} must not advertise a nonexistent projectless profile route",
-                capability.capability_id()
-            );
-            assert!(
-                capability
-                    .scope()
-                    .requires(ScopeDimension::ConfigurationLayer),
-                "{} must route through an exact configuration-layer authority",
-                capability.capability_id()
-            );
-        }
-    }
-
-    #[test]
-    fn exported_configuration_operation_names_match_the_catalog_specs() {
-        assert_eq!(
-            CONFIGURATION_SPECS
-                .iter()
-                .map(|spec| spec.name)
-                .collect::<Vec<_>>(),
-            CONFIGURATION_SURFACE_OPERATION_NAMES
-        );
-    }
-
-    #[test]
-    fn invocation_requests_keep_configuration_read_and_cas_inputs_typed() {
-        let get = ConfigurationGetRequestV1 {
-            key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
-        };
-        let set = ConfigurationSetRequestV1 {
-            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
-            key: get.key.clone(),
-            value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
-            expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
-                "revision.configuration-test",
-            )
-            .unwrap(),
-            idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
-                "configuration.idempotency.test",
-            )
-            .unwrap(),
-        };
-
-        assert_eq!(get.key, set.key);
-        assert!(matches!(
-            set.value,
-            tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true)
-        ));
-    }
-
-    #[test]
-    fn empty_configuration_requests_reject_transport_arguments() {
-        assert!(
-            serde_json::from_value::<ConfigurationListRequestV1>(
-                serde_json::json!({"format": "json"})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<ConfigurationObservedStateRequestV1>(
-                serde_json::json!({"page_size": 10})
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn configuration_schema_refs_reject_unknown_operations() {
-        assert!(configuration_surface_request_schema("configuration_get").is_ok());
-        assert!(configuration_surface_result_schema("configuration_get").is_ok());
-        assert!(configuration_surface_request_schema("configuration_unknown").is_err());
-    }
-}
+mod tests;

@@ -1,7 +1,8 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{
-    ManifestDigest, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
-    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1, canonical_sha256,
+    ManifestDigest, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
@@ -17,22 +18,28 @@ use tracedecay_tool_catalog::{
 
 use tracedecay_domain::WorkAttemptV1;
 
+use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand,
-    CreateWorkCommand, ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal,
-    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, ReviewProposalRequestV1,
-    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
-    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand,
+    CancelWorkAttemptCommand, CreateWorkCommand, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
+    ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    ReviewProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+    WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkProductMutationRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkRetryTestBindingTokenOutcomeV1, WorkRetryTestBindingTokenRequestV1,
+    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
+    WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 26] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -101,6 +108,16 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 26] = [
         "use-case.work.resume_attempts",
     ),
     (
+        "retry_attempt",
+        "capability.work.retry_attempt",
+        "use-case.work.retry_attempt",
+    ),
+    (
+        "mint_retry_test_binding",
+        "capability.work.mint_retry_test_binding",
+        "use-case.work.mint_retry_test_binding",
+    ),
+    (
         "list_attempts",
         "capability.work.list_attempts",
         "use-case.work.list_attempts",
@@ -112,9 +129,29 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 26] = [
     ),
     ("views", "capability.work.views", "use-case.work.views"),
     (
+        "mutate_graph",
+        "capability.work.mutate_graph",
+        "use-case.work.mutate_graph",
+    ),
+    (
         "topology",
         "capability.work.topology",
         "use-case.work.topology",
+    ),
+    (
+        "topology_metrics",
+        "capability.work.topology_metrics",
+        "use-case.work.topology_metrics",
+    ),
+    (
+        "adjudicate_duplicate",
+        "capability.work.adjudicate_duplicate",
+        "use-case.work.adjudicate_duplicate",
+    ),
+    (
+        "adjudicate_leak",
+        "capability.work.adjudicate_leak",
+        "use-case.work.adjudicate_leak",
     ),
     (
         "pause_run",
@@ -160,131 +197,225 @@ pub fn work_executable_binding_registry()
             "snapshot",
             "/application/work/snapshot",
             EffectClass::Read,
+            "tracedecay_application::WorkProjectionSnapshotRequestV1",
+            "tracedecay_domain::WorkProjectionSnapshotV1",
         )?,
         available::<WorkProjectionDeltaRequestV1, WorkProjectionDeltaV1>(
             "delta",
             "/application/work/delta",
             EffectClass::Read,
+            "tracedecay_application::WorkProjectionDeltaRequestV1",
+            "tracedecay_domain::WorkProjectionDeltaV1",
         )?,
         available::<GenerateProposalRequest, GeneratedWorkProposal>(
             "generate_proposal",
             "/application/work/generate-proposal",
             EffectClass::Read,
+            "tracedecay_application::GenerateProposalRequest",
+            "tracedecay_application::GeneratedWorkProposal",
         )?,
         available::<CreateWorkCommand, WorkProjection>(
             "create",
             "/application/work/create",
             EffectClass::Administrative,
+            "tracedecay_application::CreateWorkCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<ReplanDependenciesCommand, WorkProjection>(
             "replan_dependencies",
             "/application/work/replan-dependencies",
             EffectClass::Administrative,
+            "tracedecay_application::ReplanDependenciesCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<ReviewProposalRequestV1, WorkProjection>(
             "review_proposal",
             "/application/work/review-proposal",
             EffectClass::Administrative,
+            "tracedecay_application::ReviewProposalRequestV1",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<AcceptProposalCommand, WorkProjection>(
             "accept_proposal",
             "/application/work/accept-proposal",
             EffectClass::Administrative,
+            "tracedecay_application::AcceptProposalCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<AdmitExecutionCommand, WorkProjection>(
             "admit_execution",
             "/application/work/admit-execution",
             EffectClass::Administrative,
+            "tracedecay_application::AdmitExecutionCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<AttachRuntimeEvidenceCommand, WorkProjection>(
             "attach_runtime_evidence",
             "/application/work/attach-runtime-evidence",
             EffectClass::Administrative,
+            "tracedecay_application::AttachRuntimeEvidenceCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
             "/application/work/accept-task",
             EffectClass::Administrative,
+            "tracedecay_application::AcceptTaskCommand",
+            "tracedecay_domain::WorkProjection",
         )?,
         available::<StartWorkAttemptCommand, WorkAttemptV1>(
             "start_attempt",
             "/application/work/start-attempt",
             EffectClass::Administrative,
+            "tracedecay_application::StartWorkAttemptCommand",
+            "tracedecay_domain::WorkAttemptV1",
         )?,
         available::<AdmitWorkSynthesisCommand, WorkSynthesisAttemptV1>(
             "synthesize",
             "/application/work/synthesize",
             EffectClass::Administrative,
+            "tracedecay_application::AdmitWorkSynthesisCommand",
+            "tracedecay_application::WorkSynthesisAttemptV1",
         )?,
         available::<WorkAttemptStatusRequestV1, WorkAttemptV1>(
             "attempt_status",
             "/application/work/attempt-status",
             EffectClass::Read,
+            "tracedecay_application::WorkAttemptStatusRequestV1",
+            "tracedecay_domain::WorkAttemptV1",
         )?,
         available::<CancelWorkAttemptCommand, WorkAttemptV1>(
             "cancel_attempt",
             "/application/work/cancel-attempt",
             EffectClass::Administrative,
+            "tracedecay_application::CancelWorkAttemptCommand",
+            "tracedecay_domain::WorkAttemptV1",
         )?,
         available::<ResumeWorkAttemptsCommand, WorkAttemptRecoveryReportV1>(
             "resume_attempts",
             "/application/work/resume-attempts",
             EffectClass::Administrative,
+            "tracedecay_application::ResumeWorkAttemptsCommand",
+            "tracedecay_application::WorkAttemptRecoveryReportV1",
+        )?,
+        available::<RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1>(
+            "retry_attempt",
+            "/application/work/retry-attempt",
+            EffectClass::Administrative,
+            "tracedecay_application::RetryWorkAttemptCommandV1",
+            "tracedecay_application::WorkRetryAttemptOutcomeV1",
+        )?,
+        available::<WorkRetryTestBindingTokenRequestV1, WorkRetryTestBindingTokenOutcomeV1>(
+            "mint_retry_test_binding",
+            "/application/work/mint-retry-test-binding",
+            EffectClass::Administrative,
+            "tracedecay_application::WorkRetryTestBindingTokenRequestV1",
+            "tracedecay_application::WorkRetryTestBindingTokenOutcomeV1",
         )?,
         available::<WorkAttemptListRequestV1, WorkAttemptListV1>(
             "list_attempts",
             "/application/work/list-attempts",
             EffectClass::Read,
+            "tracedecay_application::WorkAttemptListRequestV1",
+            "tracedecay_application::WorkAttemptListV1",
         )?,
         available::<WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1>(
             "hydrate_artifacts",
             "/application/work/hydrate-artifacts",
             EffectClass::Read,
+            "tracedecay_application::WorkArtifactHydrationRequestV1",
+            "tracedecay_application::WorkArtifactHydrationV1",
         )?,
         available::<WorkGraphReadRequestV1, WorkGraphReadV1>(
             "views",
             "/application/work/views",
             EffectClass::Read,
+            "tracedecay_application::WorkGraphReadRequestV1",
+            "tracedecay_application::WorkGraphReadV1",
+        )?,
+        available::<WorkProductMutationRequestV1, WorkProductMutationReceiptV1>(
+            "mutate_graph",
+            "/application/work/mutate-graph",
+            EffectClass::Administrative,
+            "tracedecay_application::WorkProductMutationRequestV1",
+            "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
         available::<WorkTopologyViewRequestV1, ExecutionTopologyViewV1>(
             "topology",
             "/application/work/topology",
             EffectClass::Read,
+            "tracedecay_application::WorkTopologyViewRequestV1",
+            "tracedecay_application::ExecutionTopologyViewV1",
+        )?,
+        available::<ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1>(
+            "topology_metrics",
+            "/application/work/topology-metrics",
+            EffectClass::Read,
+            "tracedecay_application::ExecutionTopologyMetricsRequestV1",
+            "tracedecay_application::ExecutionTopologyMetricsV1",
+        )?,
+        available::<WorkDuplicateAdjudicationCommandV1, WorkDuplicateAdjudicationAppendOutcomeV1>(
+            "adjudicate_duplicate",
+            "/application/work/adjudicate-duplicate",
+            EffectClass::Administrative,
+            "tracedecay_domain::WorkDuplicateAdjudicationCommandV1",
+            "tracedecay_application::WorkDuplicateAdjudicationAppendOutcomeV1",
+        )?,
+        available::<AdjudicateWorkLeakCommandV1, WorkLeakAdjudicationOutcomeV1>(
+            "adjudicate_leak",
+            "/application/work/adjudicate-leak",
+            EffectClass::Administrative,
+            "tracedecay_application::AdjudicateWorkLeakCommandV1",
+            "tracedecay_application::WorkLeakAdjudicationOutcomeV1",
         )?,
         available::<PauseWorkRunCommand, WorkRunControlV1>(
             "pause_run",
             "/application/work/pause-run",
             EffectClass::Administrative,
+            "tracedecay_application::PauseWorkRunCommand",
+            "tracedecay_domain::WorkRunControlV1",
         )?,
         available::<ResumeWorkRunCommand, WorkRunControlV1>(
             "resume_run",
             "/application/work/resume-run",
             EffectClass::Administrative,
+            "tracedecay_application::ResumeWorkRunCommand",
+            "tracedecay_domain::WorkRunControlV1",
         )?,
         available::<WorkRunControlRequestV1, WorkRunControlReadingV1>(
             "run_control",
             "/application/work/run-control",
             EffectClass::Read,
+            "tracedecay_application::WorkRunControlRequestV1",
+            "tracedecay_application::WorkRunControlReadingV1",
         )?,
         available::<WorkPlacementPreflightRequestV1, WorkPlacementPreflightV1>(
             "placement_preflight",
             "/application/work/placement-preflight",
             EffectClass::Read,
+            "tracedecay_application::WorkPlacementPreflightRequestV1",
+            "tracedecay_domain::WorkPlacementPreflightV1",
         )?,
         available::<AdmitWorkPlacementCommand, WorkPlacementV1>(
             "admit_placement",
             "/application/work/admit-placement",
             EffectClass::Administrative,
+            "tracedecay_application::AdmitWorkPlacementCommand",
+            "tracedecay_domain::WorkPlacementV1",
         )?,
         available::<WorkPlacementStatusRequestV1, WorkPlacementReadingV1>(
             "placement_status",
             "/application/work/placement-status",
             EffectClass::Read,
+            "tracedecay_application::WorkPlacementStatusRequestV1",
+            "tracedecay_application::WorkPlacementReadingV1",
         )?,
         available::<ReleaseWorkPlacementCommand, WorkPlacementV1>(
             "release_placement",
             "/application/work/release-placement",
             EffectClass::Administrative,
+            "tracedecay_application::ReleaseWorkPlacementCommand",
+            "tracedecay_domain::WorkPlacementV1",
         )?,
     ];
     ExecutableBindingRegistryV1::new(bindings)
@@ -320,16 +451,22 @@ pub(crate) fn available<Request, Output>(
     operation: &str,
     route_path: &str,
     effect: EffectClass,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
 where
     Request: JsonSchema,
     Output: JsonSchema,
 {
     let manifest = work_manifest(operation, effect)?;
-    let request_schema =
-        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
-    let result_schema =
-        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?;
+    let request_schema = SchemaBodyAuthorityV1::for_type_at_path::<Request>(
+        manifest.request_schema().clone(),
+        request_rust_type_path,
+    )?;
+    let result_schema = SchemaBodyAuthorityV1::for_type_at_path::<Output>(
+        manifest.result_schema().clone(),
+        result_rust_type_path,
+    )?;
     let binding = ExecutableBindingV1::direct(
         &manifest,
         OperationId::new(format!("operation.work.{operation}"))
@@ -466,7 +603,10 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 mod tests {
     use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
 
-    use super::{work_executable_binding, work_executable_binding_registry};
+    use super::{
+        WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding,
+        work_executable_binding_registry,
+    };
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {
@@ -475,14 +615,15 @@ mod tests {
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 26);
-        assert_eq!(
-            advertised
-                .iter()
-                .filter(|binding| binding.effect().is_read_only())
-                .count(),
-            11
-        );
+        let expected = WORK_APPLICATION_OPERATION_IDS_V1
+            .iter()
+            .map(|(operation, _, _)| format!("operation.work.{operation}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = advertised
+            .iter()
+            .map(|binding| binding.operation_id().as_str().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
         for binding in advertised {
             let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
                 panic!("available Work binding must have a public route");
@@ -530,6 +671,28 @@ mod tests {
     }
 
     #[test]
+    fn topology_metrics_binding_returns_the_canonical_read_model() {
+        let operation =
+            tracedecay_tool_catalog::OperationId::new("operation.work.topology_metrics").unwrap();
+        let binding = work_executable_binding(&operation)
+            .unwrap()
+            .expect("topology metrics is an executable Work operation");
+
+        assert_eq!(
+            binding.request_schema().body()["title"],
+            "ExecutionTopologyMetricsRequestV1"
+        );
+        assert_eq!(
+            binding.result_schema().body()["title"],
+            "ExecutionTopologyMetricsV1"
+        );
+        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
+            panic!("topology metrics must be publicly exposed");
+        };
+        assert_eq!(route_path, "/application/work/topology-metrics");
+    }
+
+    #[test]
     fn the_graph_views_binding_reads_the_work_product_graph_contract() {
         let registry = work_executable_binding_registry().unwrap();
         let views = registry
@@ -550,5 +713,36 @@ mod tests {
         };
         assert_eq!(route_path, "/application/work/views");
         assert!(views.effect().is_read_only());
+    }
+
+    #[test]
+    fn graph_mutation_binding_is_public_typed_and_effectful() {
+        let registry = work_executable_binding_registry().unwrap();
+        let mutation = registry
+            .get(&tracedecay_tool_catalog::OperationId::new("operation.work.mutate_graph").unwrap())
+            .unwrap()
+            .binding()
+            .unwrap();
+        assert_eq!(
+            mutation.request_schema().body()["title"],
+            "WorkProductMutationRequestV1"
+        );
+        assert_eq!(
+            mutation.result_schema().body()["title"],
+            "WorkProductMutationReceiptV1"
+        );
+        assert_eq!(
+            mutation.request_schema().rust_type_path(),
+            "tracedecay_application::WorkProductMutationRequestV1"
+        );
+        assert_eq!(
+            mutation.result_schema().rust_type_path(),
+            "tracedecay_application::WorkProductMutationReceiptV1"
+        );
+        let RouteExposureV1::Public { route_path, .. } = mutation.exposure() else {
+            panic!("the Work graph mutation binding must be publicly routed");
+        };
+        assert_eq!(route_path, "/application/work/mutate-graph");
+        assert!(!mutation.effect().is_read_only());
     }
 }

@@ -161,7 +161,16 @@ fn callable_code_executable_schemas(
             schemas.push(callable_code_executable_schema::<
                 $request,
                 CodeQueryPage<$item>,
-            >(contribution, CallableCodeOperationKind::$kind)?)
+            >(
+                contribution,
+                CallableCodeOperationKind::$kind,
+                concat!("tracedecay_application::retrieval::", stringify!($request)),
+                concat!(
+                    "tracedecay_application::retrieval::CodeQueryPage<tracedecay_application::retrieval::",
+                    stringify!($item),
+                    ">"
+                ),
+            )?)
         };
     }
     add!(
@@ -187,6 +196,8 @@ fn callable_code_executable_schemas(
 fn callable_code_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     kind: CallableCodeOperationKind,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -200,8 +211,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "callable code schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 

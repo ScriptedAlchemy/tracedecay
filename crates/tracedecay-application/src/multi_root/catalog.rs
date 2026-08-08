@@ -91,28 +91,40 @@ pub fn multi_root_executable_binding_registry()
     ExecutableBindingRegistryV1::new(vec![
         available::<MultiRootScopeSetReadRequestV1, Option<AuthorizedScopeSet>>(
             MultiRootApplicationOperation::ScopeSetRead,
+            "tracedecay_application::multi_root::MultiRootScopeSetReadRequestV1",
+            "core::option::Option<tracedecay_application::multi_root::AuthorizedScopeSet>",
         )?,
         available::<MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1>(
             MultiRootApplicationOperation::ScopeSetCompareAndSwap,
+            "tracedecay_application::multi_root::MultiRootScopeSetCasRequestV1",
+            "tracedecay_application::multi_root::MultiRootScopeSetCasResultV1",
         )?,
         available::<MultiRootExecuteRequestV1, MultiRootQueryPageV1<serde_json::Value>>(
             MultiRootApplicationOperation::Execute,
+            "tracedecay_application::multi_root::MultiRootExecuteRequestV1",
+            "tracedecay_application::multi_root::MultiRootQueryPageV1<serde_json::Value>",
         )?,
     ])
 }
 
 fn available<Request, Output>(
     operation: MultiRootApplicationOperation,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
 where
     Request: JsonSchema,
     Output: JsonSchema,
 {
     let manifest = manifest(operation)?;
-    let request_schema =
-        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
-    let result_schema =
-        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?;
+    let request_schema = SchemaBodyAuthorityV1::for_type_at_path::<Request>(
+        manifest.request_schema().clone(),
+        request_rust_type_path,
+    )?;
+    let result_schema = SchemaBodyAuthorityV1::for_type_at_path::<Output>(
+        manifest.result_schema().clone(),
+        result_rust_type_path,
+    )?;
     let binding = ExecutableBindingV1::daemon_owned(
         &manifest,
         operation_id(operation)?,

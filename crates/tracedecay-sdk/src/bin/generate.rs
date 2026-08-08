@@ -5,8 +5,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use quote::ToTokens;
-use schemars::schema::RootSchema;
 use serde_json::Value;
 use tracedecay_application::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{
@@ -63,6 +61,7 @@ struct Schema {
     id: String,
     revision: u32,
     body: Value,
+    rust_type_path: String,
 }
 
 struct UnavailableOperation {
@@ -80,22 +79,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let operations = canonical_operations(&registry)?;
     let unavailable = canonical_unavailable_operations(&registry);
     let destination = root.join("sdks/typescript/src");
-    write(&destination.join("types.ts"), &render_types())?;
-    write(
-        &destination.join("operations.ts"),
-        &render_operations(&operations, &unavailable)?,
-    )?;
+    // Render every artifact before changing the checkout. Rust rendering used
+    // to be the expensive final step, which left a new TypeScript file behind
+    // when typify exhausted memory before the Rust operation file existed.
+    let types = render_types();
+    let typescript_operations = render_operations(&operations, &unavailable)?;
+    let index = render_index();
+    let rust_operations = rustfmt(&render_rust_operations(&operations, &unavailable)?)?;
+
+    write(&destination.join("types.ts"), &types)?;
+    write(&destination.join("operations.ts"), &typescript_operations)?;
     let server_operations = destination.join("server-operations.ts");
     if server_operations.exists() {
         fs::remove_file(server_operations)?;
     }
-    write(&destination.join("index.ts"), &render_index())?;
+    write(&destination.join("index.ts"), &index)?;
     write(
         &root.join("crates/tracedecay-sdk/src/operations.rs"),
-        // rustfmt the emitted Rust so `cargo fmt --check` and the codegen
-        // drift check agree on one canonical byte form (the pinned toolchain
-        // makes the formatting deterministic across machines and CI).
-        &rustfmt(&render_rust_operations(&operations, &unavailable)?)?,
+        &rust_operations,
     )?;
     Ok(())
 }
@@ -174,6 +175,7 @@ fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation,
                 .to_owned(),
             revision: binding.request_schema().schema_ref().revision(),
             body: binding.request_schema().body().clone(),
+            rust_type_path: binding.request_schema().rust_type_path().to_owned(),
         },
         result_schema: Schema {
             id: binding
@@ -184,6 +186,7 @@ fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation,
                 .to_owned(),
             revision: binding.result_schema().schema_ref().revision(),
             body: binding.result_schema().body().clone(),
+            rust_type_path: binding.result_schema().rust_type_path().to_owned(),
         },
         cancellation: serde_json::to_value(binding.cancellation())?,
         cancellable: matches!(
@@ -717,8 +720,13 @@ fn render_rust_operations(
     out.push_str("];\n\n");
     for operation in operations {
         let module = operation.name.clone();
-        let (request_source, request_type) = typify_schema(&operation.request_schema.body)?;
-        let (result_source, result_type) = typify_schema(&operation.result_schema.body)?;
+        let request_type = &operation.request_schema.rust_type_path;
+        let result_type = &operation.result_schema.rust_type_path;
+        let alloc_import = if request_type.contains("alloc::") || result_type.contains("alloc::") {
+            "    extern crate alloc;\n"
+        } else {
+            ""
+        };
         let cancellation_points = operation
             .cancellation_points
             .iter()
@@ -741,17 +749,16 @@ fn render_rust_operations(
         };
         emit!(
             out,
-            "#[allow(clippy::all)]\n\
-             pub mod {module} {{\n\
-             \x20   pub mod request {{ {request_source} }}\n\
-             \x20   pub mod result {{ {result_source} }}\n\
-             \x20   pub type Request = request::{request_type};\n\
-             \x20   pub type Result = result::{result_type};\n\
+            "pub mod {module} {{\n\
+             {alloc_import}\
+             \x20   pub type Request = {request_type};\n\
+             \x20   pub type Result = {result_type};\n\
              }}\n\
              typed_operation!(\n\
              \x20   {marker}, {module}, {operation_id:?}, {transport}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
              );\n",
             marker = type_name(&operation.name),
+            alloc_import = alloc_import,
             operation_id = operation.operation_id,
             transport = transport,
             binding = operation.binding,
@@ -768,46 +775,7 @@ fn render_rust_operations(
             revision = operation.result_schema.revision,
         );
     }
-    let syntax = syn::parse_file(&out)?;
-    Ok(prettyplease::unparse(&syntax))
-}
-
-fn typify_schema(schema: &Value) -> Result<(String, String), Box<dyn Error>> {
-    let title = schema
-        .get("title")
-        .and_then(Value::as_str)
-        .ok_or("canonical schema body has no root title")?;
-    let schema: RootSchema = serde_json::from_value(schema_for_typify(schema.clone()))?;
-    let settings = typify::TypeSpaceSettings::default();
-    let mut type_space = typify::TypeSpace::new(&settings);
-    type_space.add_root_schema(schema)?;
-    Ok((type_space.to_token_stream().to_string(), type_name(title)))
-}
-
-fn schema_for_typify(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(schema_for_typify).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = if key == "$defs" {
-                        "definitions".to_owned()
-                    } else {
-                        key
-                    };
-                    let value = match value {
-                        Value::String(reference) if reference.starts_with("#/$defs/") => {
-                            Value::String(reference.replacen("#/$defs/", "#/definitions/", 1))
-                        }
-                        value => schema_for_typify(value),
-                    };
-                    (key, value)
-                })
-                .collect(),
-        ),
-        value => value,
-    }
+    Ok(out)
 }
 
 fn render_types() -> String {
@@ -929,9 +897,9 @@ mod tests {
     };
 
     use super::{
-        OperationTransport, canonical_application_registry, canonical_operations,
-        canonical_unavailable_operations, render_operations, render_rust_operations,
-        render_schema_type,
+        Operation, OperationTransport, Schema, canonical_application_registry,
+        canonical_operations, canonical_unavailable_operations, render_operations,
+        render_rust_operations, render_schema_type,
     };
 
     fn http_route(operation: &super::Operation) -> Option<&str> {
@@ -958,6 +926,65 @@ mod tests {
             render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
             "{ readonly name: string; readonly state: \"available\" | \"partial\" | \"unavailable\"; readonly tags?: readonly string[] }"
         );
+    }
+
+    #[test]
+    fn rust_operations_alias_the_schema_authoritys_exact_rust_type_path() {
+        let operation = Operation {
+            name: "scope_set_read".to_owned(),
+            operation_id: "operation.multi_root.scope_set_read".to_owned(),
+            type_name: "MultiRootScopeSetRead".to_owned(),
+            transport: OperationTransport::Http {
+                route: "/application/multi-root/scope-set".to_owned(),
+            },
+            binding: "binding.http.multi-root.scope-set-read".to_owned(),
+            effect: EffectClass::Read,
+            idempotency: IdempotencyContract::NotRequired,
+            request_schema: Schema {
+                id: "schema.multi-root.scope-set-read.request".to_owned(),
+                revision: 1,
+                body: json!({
+                    "title": "ScopeSetReadRequestWire",
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+                rust_type_path:
+                    "core::option::Option<tracedecay_application::multi_root::AuthorizedScopeSet>"
+                        .to_owned(),
+            },
+            result_schema: Schema {
+                id: "schema.multi-root.scope-set-read.result".to_owned(),
+                revision: 1,
+                body: json!({
+                    "title": "ScopeSetReadResultWire",
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+                rust_type_path: "alloc::vec::Vec<tracedecay_domain::workflow::WorkflowDefinition>"
+                    .to_owned(),
+            },
+            cancellation: json!({ "mode": "not_cancellable" }),
+            cancellable: false,
+            cancellation_points: Vec::new(),
+            deadline: json!({}),
+            maximum_deadline_millis: 1,
+            deadline_behavior: DeadlineBehavior::RejectBeforeAdmission,
+            reconciliation: ReconciliationContract::NotRequired,
+            receipt: ReceiptContract::Operation,
+            terminal_states: vec![TerminalState::Completed],
+        };
+
+        let generated = render_rust_operations(&[operation], &[]).expect("rendered Rust SDK");
+
+        assert!(generated.contains(
+            "pub type Request = core::option::Option<tracedecay_application::multi_root::AuthorizedScopeSet>;"
+        ));
+        assert!(generated.contains(
+            "pub type Result = alloc::vec::Vec<tracedecay_domain::workflow::WorkflowDefinition>;"
+        ));
+        assert!(generated.contains("pub mod scope_set_read {\n    extern crate alloc;"));
+        assert!(!generated.contains("pub mod request"));
+        assert!(!generated.contains("pub mod result"));
     }
 
     #[test]
@@ -1039,14 +1066,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!workflows.is_empty());
         assert!(workflows.iter().all(|operation| {
-            http_route(operation)
-                .is_some_and(|route| route.starts_with("/application/workflow/"))
+            http_route(operation).is_some_and(|route| route.starts_with("/application/workflow/"))
                 && operation.binding.starts_with("binding.http.workflow.")
         }));
-        assert!(operations.iter().all(|operation| match &operation.transport {
-            OperationTransport::Http { route } => !route.is_empty(),
-            OperationTransport::McpTool { tool_name } => !tool_name.is_empty(),
-        }));
+        assert!(
+            operations
+                .iter()
+                .all(|operation| match &operation.transport {
+                    OperationTransport::Http { route } => !route.is_empty(),
+                    OperationTransport::McpTool { tool_name } => !tool_name.is_empty(),
+                })
+        );
     }
 
     #[test]
@@ -1063,7 +1093,14 @@ mod tests {
             &git_status.transport,
             OperationTransport::McpTool { tool_name } if tool_name == "tracedecay_git_status"
         ));
-        for operation in ["git_diff", "git_history", "git_blame", "git_hunks", "git_preview", "git_apply"] {
+        for operation in [
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+            "git_preview",
+            "git_apply",
+        ] {
             let operation_id = format!("operation.application.{operation}");
             assert!(
                 operations.iter().any(|candidate| {
@@ -1096,11 +1133,9 @@ mod tests {
                 .starts_with("operation.application.configuration_")
         }));
         for operation in configuration {
-            assert!(
-                http_route(operation).is_some_and(
-                    |route| route.starts_with("/application/configuration/configuration_")
-                )
-            );
+            assert!(http_route(operation).is_some_and(|route| {
+                route.starts_with("/application/configuration/configuration_")
+            }));
             assert!(operation.binding.starts_with("binding.http.configuration_"));
             assert_eq!(operation.maximum_deadline_millis, 15_000);
             if operation.effect == EffectClass::ConfigurationWrite {

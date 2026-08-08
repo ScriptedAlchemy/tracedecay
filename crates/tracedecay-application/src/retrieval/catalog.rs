@@ -30,12 +30,13 @@ use crate::retrieval::requests::{
     StorageStatusPrimitiveResult,
 };
 use crate::retrieval::symbol_graph::{
-    GraphRelationRequest, ImplementationsRequest, SignatureSearchRequest, SymbolGraphPage,
-    SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord, TypeHierarchyRequest,
+    CodeSymbolSearchSurfaceRequestV1, GraphRelationRequest, ImplementationsRequest,
+    SignatureSearchRequest, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
+    TypeHierarchyRecord, TypeHierarchyRequest,
 };
 
-const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
-const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
+const SYMBOL_SEARCH_CAPABILITY: &str = "capability.application.symbol-search";
+const SYMBOL_SEARCH_USE_CASE: &str = "use-case.application.symbol-search";
 pub const APPLICATION_DEFAULT_PROFILE_ID: &str = "profile.default";
 pub const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
 pub const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
@@ -337,10 +338,24 @@ fn primitive_executable_schemas(
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     let mut schemas = Vec::new();
     macro_rules! add {
+        ($operation:literal, $request:ty, SymbolGraphPage<$item:ident>) => {
+            schemas.push(primitive_executable_schema::<$request, SymbolGraphPage<$item>>(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::retrieval::", stringify!($request)),
+                concat!(
+                    "tracedecay_application::retrieval::SymbolGraphPage<tracedecay_application::retrieval::",
+                    stringify!($item),
+                    ">"
+                ),
+            )?)
+        };
         ($operation:literal, $request:ty, $result:ty) => {
             schemas.push(primitive_executable_schema::<$request, $result>(
                 contribution,
                 $operation,
+                concat!("tracedecay_application::retrieval::", stringify!($request)),
+                concat!("tracedecay_application::retrieval::", stringify!($result)),
             )?)
         };
     }
@@ -419,6 +434,8 @@ fn primitive_executable_schemas(
 fn primitive_executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -435,8 +452,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "primitive schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 
@@ -590,20 +610,27 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ],
         deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
     })?;
-    // `code_symbol_search` stays `schema_unavailable` for now: this capability
-    // is the one legacy id not rooted at `capability.application.`, and the
-    // SDK MCP service-family projection refuses executable schemas whose
-    // capability cannot form a `service.application.*` id
-    // (`crate::sdk_catalog::mcp_service_id`). Binding it requires the in-place
-    // capability-id migration posted to the decision queue, not a schema-side
-    // workaround.
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.symbol-search")?,
         depends_on: Vec::new(),
         capabilities: vec![capability],
         retrieval_primitives: vec![primitive],
         bindings,
-    })?)
+    })?;
+    let manifest = contribution.capabilities().first().cloned().ok_or(
+        ApplicationContractError::Inconsistent {
+            field: "symbol-search capability",
+        },
+    )?;
+    let schemas = vec![ExecutableSchemaAuthority::for_types_at_paths::<
+        CodeSymbolSearchSurfaceRequestV1,
+        SymbolGraphPage<SymbolPrimitiveRecord>,
+    >(
+        &manifest,
+        "tracedecay_application::retrieval::CodeSymbolSearchSurfaceRequestV1",
+        "tracedecay_application::retrieval::SymbolGraphPage<tracedecay_application::retrieval::SymbolPrimitiveRecord>",
+    )?];
+    Ok(contribution.with_executable_schemas(schemas)?)
 }
 
 fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {

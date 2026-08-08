@@ -1,36 +1,22 @@
-use std::future::Future;
-use std::pin::Pin;
-
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_domain::{
-    ManifestDigest, PrivacyDomainId, RetrievalAnchorId, UtcMicros, canonical_sha256,
-};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
-    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
-    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    IdempotencyContract, LifecycleClass, PrivacyClass, ProfileId, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
+    TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
-use crate::result::{
-    ApplicationProblem, AuthorityReceipt, EffectId, IdempotencyKey, ResultContractRef,
-};
+use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::source_edit_rollback::{source_edit_rollback_operation, source_edit_rollback_schema};
-use crate::{
-    RequestAdmission, RequestContext, ResolvedScope, current_bindings, current_bindings_with_slug,
-};
-
-const SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1: &str =
-    "tracedecay.application.source-edit-effect-request.v1";
-const SOURCE_EDIT_RECONCILIATION_ATTEMPT_DIGEST_DOMAIN_V1: &str =
-    "tracedecay.application.source-edit-reconciliation-attempt.v1";
+use crate::{current_bindings, current_bindings_with_slug};
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -39,7 +25,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Result of a single string replacement edit.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct EditResult {
     pub success: bool,
     pub file_path: String,
@@ -64,7 +50,7 @@ pub struct EditResult {
 }
 
 /// Result of a multi-string replacement edit.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MultiEditResult {
     pub success: bool,
     pub file_path: String,
@@ -81,7 +67,7 @@ pub struct MultiEditResult {
 }
 
 /// Result of an insert-at operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct InsertResult {
     pub success: bool,
     pub file_path: String,
@@ -100,7 +86,7 @@ pub struct InsertResult {
 }
 
 /// Result of an ast-grep rewrite operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct AstGrepResult {
     pub success: bool,
     pub file_path: String,
@@ -122,7 +108,7 @@ pub struct AstGrepResult {
 /// the caller (or a follow-up refactor) can act on. Hints are derived from graph
 /// edges (callers/callees) and parse-level facts (identifiers, `use` lines,
 /// module declarations) — never speculative noise.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MoveHint {
     /// Taxonomy tag: `caller_reference`, `dependency_broken`, `import_needed`,
     /// `visibility_required`, `collision`, `module_missing`, `cycle_risk`,
@@ -145,7 +131,7 @@ pub struct MoveHint {
 /// Result of a `move_symbol` operation: the moved span, a dry-run diff of the
 /// source + destination files, and — the centerpiece — the impact report of
 /// everything the move breaks or that needs attention.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MoveResult {
     pub success: bool,
     /// The resolved symbol that was (or would be) moved, `name (kind)`.
@@ -178,7 +164,7 @@ pub struct MoveResult {
 
 /// One file a rename touched (or would touch), with how many bound
 /// whole-identifier occurrences were rewritten in it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RenameFileEditV1 {
     pub file: String,
     pub replaced_count: usize,
@@ -187,14 +173,14 @@ pub struct RenameFileEditV1 {
 /// Literal identifier occurrences of the old name in a touched file that are
 /// NOT backed by graph evidence. A rename never rewrites these; they are
 /// reported for manual review, exactly like the read-only preview does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RenameTextOnlyMatchV1 {
     pub file: String,
     pub text_only_count: usize,
 }
 
 /// Result of an apply-grade symbol rename (or its dry run).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct RenameResult {
     pub success: bool,
     /// Qualified name of the renamed symbol at plan time.
@@ -220,7 +206,7 @@ pub struct RenameResult {
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceEditKind {
     StrReplace,
@@ -251,7 +237,7 @@ impl SourceEditKind {
 /// Exact symbol identity a rename apply is bound to. A bare spelling is never
 /// sufficient: the apply revalidates every field against the live graph and
 /// refuses when any of them drifted since the preview was computed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RenameSymbolBindingV1 {
     pub node_id: String,
@@ -374,260 +360,35 @@ impl SourceEditRequest {
     }
 }
 
-/// Current sink evidence carried into a durable source-edit receipt.
-///
-/// The authority receipt is validated separately because it is refreshed at
-/// admission and immediately before the effect. These digests bind the other
-/// current authorities without persisting credentials or source text.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditEffectProofV1 {
-    pub policy_digest: ManifestDigest,
-    pub configuration_revision_id: ConfigurationRevisionId,
-    pub configuration_digest: ManifestDigest,
-    pub catalog_revision: u32,
-    pub catalog_digest: ManifestDigest,
-    pub privacy_domain_id: PrivacyDomainId,
-    pub privacy_key_epoch: u64,
-    pub privacy_digest: ManifestDigest,
-    pub external_proof: Option<RetrievalAnchorId>,
-}
+mod effect_authorization;
+mod output;
+mod surface_request;
 
-impl SourceEditEffectProofV1 {
-    pub fn validate_for(
-        &self,
-        authority: &AuthorityReceipt,
-    ) -> Result<(), ApplicationContractError> {
-        self.policy_digest.validate()?;
-        self.configuration_revision_id.validate()?;
-        self.configuration_digest.validate()?;
-        if self.catalog_revision == 0 {
-            return Err(ApplicationContractError::ZeroValue {
-                field: "source edit effect proof catalog revision",
-            });
-        }
-        self.catalog_digest.validate()?;
-        self.privacy_domain_id.validate()?;
-        if self.privacy_key_epoch == 0 {
-            return Err(ApplicationContractError::ZeroValue {
-                field: "source edit effect proof privacy key epoch",
-            });
-        }
-        self.privacy_digest.validate()?;
-        self.external_proof
-            .as_ref()
-            .map_or(Ok(()), RetrievalAnchorId::validate)?;
-        if self.policy_digest != authority.policy.digest {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit effect proof policy digest",
-            });
-        }
-        Ok(())
-    }
-}
+pub use effect_authorization::{
+    SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
+    SourceEditReconciliationRequestV1,
+};
+pub use output::{
+    SourceEditCancelledResultV1, SourceEditDurableEffectPayloadV1, SourceEditEffectUnknownResultV1,
+    SourceEditFailedResultV1, SourceEditReconciledResultV1, SourceEditSurfaceOutcomeV1,
+    SourceEditSurfaceResultV1, SourceEditTimedOutResultV1,
+};
+pub use surface_request::{
+    AstGrepRewriteSurfaceRequestV1, InsertAtSurfaceRequestV1, InsertAtSymbolSurfaceRequestV1,
+    MoveSymbolSurfaceRequestV1, MultiStrReplaceSurfaceRequestV1, RenameSymbolSurfaceRequestV1,
+    ReplaceSymbolSurfaceRequestV1, SourceEditApplyControlV1, SourceEditReconcileSurfaceRequestV1,
+    SourceEditRollbackSurfaceRequestV1, StrReplaceSurfaceRequestV1,
+};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SourceEditAuthorizationAdmissionV1 {
-    pub receipt: AuthorityReceipt,
-    pub proof: SourceEditEffectProofV1,
-}
-
-impl SourceEditAuthorizationAdmissionV1 {
-    pub fn new(
-        receipt: AuthorityReceipt,
-        proof: SourceEditEffectProofV1,
-        scope: &ResolvedScope,
-    ) -> Result<Self, ApplicationContractError> {
-        let admission = Self { receipt, proof };
-        admission.validate_for(scope)?;
-        Ok(admission)
-    }
-
-    pub fn validate_for(&self, scope: &ResolvedScope) -> Result<(), ApplicationContractError> {
-        self.receipt.validate_for(scope)?;
-        self.proof.validate_for(&self.receipt)
-    }
-}
-
-/// Immutable, transport-neutral request for one preview or journaled edit.
-///
-/// `expected_state` is the caller-observed digest of every file the edit may
-/// touch. The concrete edit authority independently captures those files and
-/// rejects a mismatch before publishing its durable prepared journal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditEffectRequestV1 {
-    pub context: RequestContext,
-    pub authority: AuthorityReceipt,
-    pub edit: SourceEditRequest,
-    pub idempotency_key: IdempotencyKey,
-    pub expected_state: ManifestDigest,
-    pub proof: SourceEditEffectProofV1,
-    pub observed_at: UtcMicros,
-}
-
-impl SourceEditEffectRequestV1 {
-    pub fn input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
-        self.validate()?;
-        Ok(canonical_sha256(&(
-            SOURCE_EDIT_EFFECT_REQUEST_DIGEST_DOMAIN_V1,
-            self.context.actor(),
-            self.context.scope(),
-            &self.edit,
-            &self.idempotency_key,
-            &self.expected_state,
-            &self.proof.external_proof,
-        ))?)
-    }
-
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        self.context.validate()?;
-        self.authority.validate_for(self.context.scope())?;
-        self.expected_state.validate()?;
-        self.proof.validate_for(&self.authority)?;
-        let operation = source_edit_operation(self.edit.kind())?;
-        if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit request admission",
-            });
-        }
-        if !self
-            .context
-            .allows(operation.capability_id(), operation.use_case_id())
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit request capability binding",
-            });
-        }
-        let grant = self.context.grant();
-        if self.authority.grant_id != grant.grant_id
-            || self.authority.grant_revision != grant.revision
-            || self.authority.grant_digest != grant.digest
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit request current grant",
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Explicit conclusion supplied by an authorized reconciliation/inspection
-/// operation. The concrete authority independently recaptures every candidate
-/// file and accepts only an exact matching state digest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "disposition")]
-pub enum SourceEditReconciliationDispositionV1 {
-    ConfirmCommitted { committed_state: ManifestDigest },
-    ConfirmRolledBack,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceEditReconciliationRequestV1 {
-    pub context: RequestContext,
-    pub authority: AuthorityReceipt,
-    pub kind: SourceEditKind,
-    pub effect_id: EffectId,
-    pub idempotency_key: IdempotencyKey,
-    pub attempt_idempotency_key: IdempotencyKey,
-    pub input_digest: ManifestDigest,
-    pub disposition: SourceEditReconciliationDispositionV1,
-    pub proof: SourceEditEffectProofV1,
-    pub observed_at: UtcMicros,
-}
-
-impl SourceEditReconciliationRequestV1 {
-    pub fn attempt_input_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
-        self.validate()?;
-        Ok(canonical_sha256(&(
-            SOURCE_EDIT_RECONCILIATION_ATTEMPT_DIGEST_DOMAIN_V1,
-            self.context.actor(),
-            self.context.scope(),
-            self.kind,
-            &self.effect_id,
-            &self.idempotency_key,
-            &self.attempt_idempotency_key,
-            &self.input_digest,
-            &self.disposition,
-            &self.proof.external_proof,
-        ))?)
-    }
-
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        self.context.validate()?;
-        self.authority.validate_for(self.context.scope())?;
-        self.input_digest.validate()?;
-        if self.attempt_idempotency_key == self.idempotency_key {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit reconciliation attempt idempotency key",
-            });
-        }
-        self.proof.validate_for(&self.authority)?;
-        if let SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } =
-            &self.disposition
-        {
-            committed_state.validate()?;
-        }
-        let operation = source_edit_reconciliation_operation()?;
-        if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted
-            || !self
-                .context
-                .allows(operation.capability_id(), operation.use_case_id())
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit reconciliation admission",
-            });
-        }
-        let grant = self.context.grant();
-        if self.authority.grant_id != grant.grant_id
-            || self.authority.grant_revision != grant.revision
-            || self.authority.grant_digest != grant.digest
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "source edit reconciliation current grant",
-            });
-        }
-        Ok(())
-    }
-}
-
-pub type SourceEditAuthorizationFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<SourceEditAuthorizationAdmissionV1, ApplicationProblem>>
-            + Send
-            + 'a,
-    >,
->;
-
-/// Current source-edit authorization. Production adapters must reload their
-/// policy/configuration authority for `recheck_effect`; retaining the
-/// admission receipt alone is not a recheck.
-pub trait SourceEditAuthorizationPort: Send + Sync {
-    fn admit<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a ApplicationOperation,
-        observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a>;
-
-    fn recheck_effect<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a ApplicationOperation,
-        admission: &'a SourceEditAuthorizationAdmissionV1,
-        observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a>;
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceEditDiagnosticV1 {
     pub line: u32,
     pub code: String,
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceEditVerificationStateV1 {
     Clean,
@@ -637,7 +398,7 @@ pub enum SourceEditVerificationStateV1 {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SourceEditVerificationV1 {
     pub state: SourceEditVerificationStateV1,
     pub verdict: String,
@@ -913,13 +674,115 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
     })?);
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.source-edit")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = source_edit_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// SDK schemas are paired with the exact request accepted by each mounted MCP
+/// operation and the exact typed result its daemon-owned use case serializes.
+fn source_edit_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    macro_rules! schema {
+        ($capability:expr, $request:ty, $result:ty) => {
+            source_edit_executable_schema::<$request, $result>(
+                contribution,
+                $capability,
+                concat!(
+                    "tracedecay_application::source_edit::",
+                    stringify!($request)
+                ),
+                concat!("tracedecay_application::source_edit::", stringify!($result)),
+            )?
+        };
+    }
+
+    let reconciliation = source_edit_reconciliation_operation()?;
+    let rollback = source_edit_rollback_operation()?;
+    Ok(vec![
+        schema!(
+            source_edit_operation(SourceEditKind::StrReplace)?.capability_id(),
+            StrReplaceSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::MultiStrReplace)?.capability_id(),
+            MultiStrReplaceSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::InsertAt)?.capability_id(),
+            InsertAtSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::AstGrepRewrite)?.capability_id(),
+            AstGrepRewriteSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::ReplaceSymbol)?.capability_id(),
+            ReplaceSymbolSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::InsertAtSymbol)?.capability_id(),
+            InsertAtSymbolSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::MoveSymbol)?.capability_id(),
+            MoveSymbolSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            source_edit_operation(SourceEditKind::RenameSymbol)?.capability_id(),
+            RenameSymbolSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            reconciliation.capability_id(),
+            SourceEditReconcileSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+        schema!(
+            rollback.capability_id(),
+            SourceEditRollbackSurfaceRequestV1,
+            SourceEditSurfaceResultV1
+        ),
+    ])
+}
+
+fn source_edit_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    capability_id: &CapabilityId,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "source edit executable schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
+    )?)
 }
 
 pub fn source_edit_reconciliation_operation()
@@ -969,6 +832,15 @@ mod tests {
             contribution.bindings().len(),
             (SOURCE_EDIT_KINDS.len() + 2) * SOURCE_EDIT_SURFACES.len()
         );
+        for capability in contribution.capabilities() {
+            assert!(
+                contribution
+                    .executable_schema(capability.capability_id())
+                    .is_some(),
+                "{} must have its mounted typed schema",
+                capability.capability_id().as_str()
+            );
+        }
         for kind in SOURCE_EDIT_KINDS {
             let operation = source_edit_operation(kind).unwrap();
             assert_eq!(

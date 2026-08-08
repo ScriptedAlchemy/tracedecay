@@ -816,7 +816,12 @@ fn native_integration_executable_schemas(
             schemas.push(executable_schema::<
                 $request,
                 NativeIntegrationSurfaceResultV1,
-            >(contribution, $operation)?)
+            >(
+                contribution,
+                $operation,
+                concat!("tracedecay_application::git::", stringify!($request)),
+                "tracedecay_application::git::NativeIntegrationSurfaceResultV1",
+            )?)
         };
     }
     add!(
@@ -869,6 +874,8 @@ fn native_integration_executable_schemas(
 fn executable_schema<Request, Response>(
     contribution: &CatalogContributionV1,
     operation: &str,
+    request_rust_type_path: &'static str,
+    result_rust_type_path: &'static str,
 ) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
 where
     Request: JsonSchema,
@@ -883,8 +890,11 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "native integration schema capability",
         })?;
-    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
-        manifest,
+    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
+        Request,
+        Response,
+    >(
+        manifest, request_rust_type_path, result_rust_type_path
     )?)
 }
 
