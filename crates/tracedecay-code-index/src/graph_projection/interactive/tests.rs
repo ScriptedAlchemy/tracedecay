@@ -317,6 +317,48 @@ fn file_and_page_listings_cover_the_generation_exactly_once() {
 }
 
 #[test]
+fn logical_path_resolution_matches_the_bound_file_occurrence() {
+    let reader = reader(&store_for(production_manifest()));
+    let hits = reader
+        .symbols_in_logical_file("src/beta.rs", 8, request())
+        .expect("logical path listing");
+    assert_eq!(
+        occurrences(&hits),
+        vec!["sym.beta.run".to_owned(), "sym.beta.runner".to_owned()]
+    );
+}
+
+#[test]
+fn logical_path_resolution_reports_an_unknown_path_as_empty_not_an_error() {
+    let reader = reader(&store_for(production_manifest()));
+    let hits = reader
+        .symbols_in_logical_file("src/absent.rs", 8, request())
+        .expect("an unpublished logical path must not be an error");
+    assert!(
+        hits.is_empty(),
+        "no file at this path in the generation means no symbols, not a refusal"
+    );
+}
+
+#[test]
+fn logical_path_resolution_honors_the_listing_limit() {
+    let reader = reader(&store_for(production_manifest()));
+    let hits = reader
+        .symbols_in_logical_file("src/beta.rs", 1, request())
+        .expect("limited logical path listing");
+    assert_eq!(hits.len(), 1, "the limit caps the returned symbols");
+}
+
+#[test]
+fn logical_path_resolution_denies_a_cancelled_read() {
+    let reader = reader(&store_for(production_manifest()));
+    let error = reader
+        .symbols_in_logical_file("src/beta.rs", 8, Arc::new(CancelledNow))
+        .expect_err("cancelled logical path listing must be refused");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
+}
+
+#[test]
 fn adjacency_reads_are_kind_filtered_and_endpoint_checked() {
     let reader = reader(&store_for(production_manifest()));
     let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];

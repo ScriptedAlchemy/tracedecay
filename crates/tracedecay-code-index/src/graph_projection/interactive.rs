@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
-    SymbolOccurrenceId,
+    SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity,
@@ -32,9 +32,10 @@ use tracedecay_graph_db::{
 
 use super::{
     CodeGraphProjectionError, CodeGraphReadCancellation, CodeGraphSymbolBindingV1, EDGE_LABEL,
-    EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, SymbolRecordV1,
-    TARGET_EDGE_KIND, compare_edges, deserialize_property, edge_entity_id, has_label,
-    load_symbol_record, symbol_entity_id, validate_edge, validate_symbol_record,
+    EDGE_RECORD_PROPERTY, FILE_LABEL, FILE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SYMBOL_LABEL,
+    SYMBOL_RECORD_PROPERTY, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges, deserialize_property,
+    edge_entity_id, file_entity_id, has_label, load_symbol_record, symbol_entity_id, validate_edge,
+    validate_symbol_record,
 };
 use crate::lineage::LineageSymbolRecordV1;
 
@@ -140,6 +141,12 @@ pub(super) struct SymbolCatalog {
     /// name, so this derivation is the documented lookup semantic.
     by_simple_name: BTreeMap<String, Vec<SymbolOccurrenceId>>,
     by_file: BTreeMap<FileOccurrenceId, Vec<SymbolOccurrenceId>>,
+    /// Logical path (as published on each file entity's `SanitizedCodeFileV1`
+    /// payload) to the file occurrence it names. Built from the projection's
+    /// `FILE_LABEL` entities; two distinct file occurrences claiming the same
+    /// logical path in one generation is a corrupt projection, refused while
+    /// the catalog is built rather than resolved by picking a winner.
+    by_logical_path: BTreeMap<String, FileOccurrenceId>,
 }
 
 impl SymbolCatalog {
@@ -283,6 +290,34 @@ impl CodeGraphInteractiveReader {
         file.validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         let catalog = self.catalog(cancellation)?;
+        Ok(resolve_from_index(
+            &catalog,
+            catalog.by_file.get(file),
+            None,
+            limit,
+        ))
+    }
+
+    /// Lists the symbols bound to the file published under logical path
+    /// `path`, resolving the path through the catalog rather than requiring
+    /// the caller to already hold a [`FileOccurrenceId`].
+    ///
+    /// Unlike [`Self::symbols_in_file`], a path this generation never
+    /// published is not an error: it truthfully reports "no such file in
+    /// this generation" as an empty vector, because the caller had no
+    /// occurrence identity to assert existence against in the first place.
+    pub fn symbols_in_logical_file(
+        &self,
+        path: &str,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(limit, "code graph logical file listing limit")?;
+        let catalog = self.catalog(cancellation)?;
+        let Some(file) = catalog.by_logical_path.get(path) else {
+            return Ok(Vec::new());
+        };
         Ok(resolve_from_index(
             &catalog,
             catalog.by_file.get(file),
@@ -742,6 +777,7 @@ impl CodeGraphInteractiveReader {
             by_qualified_name: BTreeMap::new(),
             by_simple_name: BTreeMap::new(),
             by_file: BTreeMap::new(),
+            by_logical_path: BTreeMap::new(),
         };
         let mut after: Option<GraphEntityId> = None;
         let mut scanned = 0_usize;
@@ -765,6 +801,31 @@ impl CodeGraphInteractiveReader {
                 ));
             }
             for entity in &page.entities {
+                if has_label(entity, FILE_LABEL) {
+                    let record: SanitizedCodeFileV1 =
+                        deserialize_property(entity, FILE_RECORD_PROPERTY)?;
+                    record
+                        .validate()
+                        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+                    if file_entity_id(&record.file_occurrence_id)? != entity.identity {
+                        return Err(CodeGraphProjectionError::Corrupt(
+                            "code graph file identity does not match its payload".to_owned(),
+                        ));
+                    }
+                    let previous = catalog.by_logical_path.insert(
+                        record.logical_path.clone(),
+                        record.file_occurrence_id.clone(),
+                    );
+                    if let Some(existing) = previous {
+                        if existing != record.file_occurrence_id {
+                            return Err(CodeGraphProjectionError::Corrupt(format!(
+                                "code graph logical path `{}` is claimed by more than one file occurrence",
+                                record.logical_path
+                            )));
+                        }
+                    }
+                    continue;
+                }
                 if !has_label(entity, SYMBOL_LABEL) {
                     continue;
                 }

@@ -729,6 +729,10 @@ fn symbol_entity_id(
     GraphEntityId::new(stable_identity("symbol", occurrence.as_str())).map_err(Into::into)
 }
 
+fn file_entity_id(file: &FileOccurrenceId) -> Result<GraphEntityId, CodeGraphProjectionError> {
+    GraphEntityId::new(stable_identity("file", file.as_str())).map_err(Into::into)
+}
+
 fn edge_entity_id(
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {

@@ -19,8 +19,8 @@ use super::{
     CHUNK_LABEL, CHUNK_RECORD_PROPERTY, CHUNK_SYMBOL_EDGE_KIND, CodeGraphProjectionError,
     CodeGraphSymbolBindingV1, FILE_LABEL, FILE_RECORD_PROPERTY, FILE_SYMBOL_EDGE_KIND,
     SymbolRecordV1, build_code_graph_manifest_inputs_checked, compare_edges,
-    current_generation_entity, edge_entity, serialize, source_relation, stable_identity,
-    symbol_entity, symbol_entity_id, target_relation, validate_edge,
+    current_generation_entity, edge_entity, file_entity_id, serialize, source_relation,
+    stable_identity, symbol_entity, symbol_entity_id, target_relation, validate_edge,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -300,10 +300,6 @@ fn chunk_symbol_relation(
         BTreeMap::new(),
     )
     .map_err(Into::into)
-}
-
-fn file_entity_id(file: &FileOccurrenceId) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("file", file.as_str())).map_err(Into::into)
 }
 
 fn chunk_entity_id(chunk: &CodeSearchChunkId) -> Result<GraphEntityId, CodeGraphProjectionError> {
