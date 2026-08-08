@@ -103,6 +103,9 @@ impl From<crate::store::vector_generations::VectorGenerationStoreErrorV1>
             VectorGenerationStoreErrorV1::ResetRequired(message) => Self::ResetRequired(message),
             VectorGenerationStoreErrorV1::Corrupt(message) => Self::Corrupt(message),
             VectorGenerationStoreErrorV1::InvalidPlan(message) => Self::Denied(message),
+            // Preserve the typed reason exactly; the Display form would wrap it
+            // in the enum's descriptive prefix and break reason equality.
+            VectorGenerationStoreErrorV1::Unavailable(message) => Self::Unavailable(message),
             other => Self::Unavailable(other.to_string()),
         }
     }
