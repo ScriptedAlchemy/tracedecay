@@ -237,9 +237,18 @@ pub fn atomic_write_prepared(
     let result = (|| {
         output.write_all(bytes)?;
         output.sync_all()?;
-        drop(output);
         prepare(&temporary)?;
-        File::open(&temporary)?.sync_all()?;
+        // The staging file is flushed a second time through the handle that
+        // created it, never a fresh `File::open`. A reopen would be read-only,
+        // and Windows `FlushFileBuffers` requires the handle to carry write
+        // access: it answers a read-only handle with `ERROR_ACCESS_DENIED`
+        // (os error 5) on every call, where Unix `fsync` accepts a read-only
+        // descriptor. `prepare` may also have applied the destination's
+        // permissions to the staging file, so reopening it for write is not
+        // available either -- the handle opened before those permissions
+        // existed is the only one that can flush them.
+        output.sync_all()?;
+        drop(output);
         replace_via_rename(&temporary, destination)?;
         sync_parent_directory(destination, directory_policy)
     })();
@@ -285,7 +294,102 @@ pub fn truncate_file(
 
 #[cfg(test)]
 mod tests {
-    use super::checksum;
+    use std::fs;
+    use std::path::Path;
+
+    use super::{DirectorySyncPolicy, atomic_write_prepared, checksum};
+
+    /// Marks `path` unwritable in the way each host expresses it: a mode on
+    /// Unix, the read-only attribute on Windows. Host config publishes reach
+    /// this state legitimately -- the staging file inherits the destination's
+    /// permissions before it is renamed into place.
+    fn deny_writes(path: &Path) {
+        let mut permissions = fs::metadata(path).expect("staging metadata").permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o400);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).expect("deny staging writes");
+    }
+
+    fn restore_writes(path: &Path) {
+        let mut permissions = fs::metadata(path)
+            .expect("published metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        let _ = fs::set_permissions(path, permissions);
+    }
+
+    #[test]
+    fn a_prepared_publish_reaches_the_destination() {
+        let root = tempfile::tempdir().expect("publish fixture root");
+        let destination = root.path().join("config.json");
+        let mut prepared = 0_u32;
+
+        atomic_write_prepared(
+            &destination,
+            "fixture",
+            b"published",
+            |temporary| {
+                prepared += 1;
+                assert!(temporary.exists(), "prepare observes the staging file");
+                Ok(())
+            },
+            DirectorySyncPolicy::TolerateUnsupported,
+        )
+        .expect("prepared publish");
+
+        assert_eq!(prepared, 1);
+        assert_eq!(
+            fs::read(&destination).expect("published bytes"),
+            b"published"
+        );
+    }
+
+    /// The publish must not depend on reopening the staging file, because the
+    /// reopen is read-only and Windows refuses to flush a read-only handle
+    /// (`ERROR_ACCESS_DENIED`, os error 5) while a `prepare` that copied the
+    /// destination's permissions can refuse a writable reopen outright. This
+    /// shape is portable: every host can express "the staging file is no
+    /// longer writable by path".
+    #[test]
+    fn a_prepared_publish_survives_a_staging_file_that_denies_writes() {
+        let root = tempfile::tempdir().expect("publish fixture root");
+        let destination = root.path().join("config.json");
+
+        atomic_write_prepared(
+            &destination,
+            "fixture",
+            b"published",
+            |temporary| {
+                deny_writes(temporary);
+                Ok(())
+            },
+            DirectorySyncPolicy::TolerateUnsupported,
+        )
+        .expect("prepared publish over a write-denied staging file");
+
+        assert_eq!(
+            fs::read(&destination).expect("published bytes"),
+            b"published"
+        );
+        let leftovers = fs::read_dir(root.path())
+            .expect("publish directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path() != destination)
+            .count();
+        restore_writes(&destination);
+        assert_eq!(leftovers, 0, "the staging file is consumed by the rename");
+    }
 
     #[test]
     fn checksum_matches_sha256() {
