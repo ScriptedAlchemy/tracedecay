@@ -17,10 +17,8 @@ use crate::retrieval::evidence_lanes::score_diagnostic;
 use crate::retrieval::evidence_lanes::{
     DiagnosticCandidateReadPortV1, DiagnosticLaneEvidenceV1, DiagnosticLaneRequestV1,
     DiagnosticLaneRetrieverV1, DiagnosticMatchReasonV1, EvidenceLaneExecutionControlV1,
-    TaskSessionCandidateReadPortV1, TaskSessionLaneEvidenceV1, TaskSessionLaneRequestV1,
-    TaskSessionLaneRetrieverV1, TemporalCandidateChannelV1, TemporalCandidateContributionV1,
-    TemporalCandidateExportPortV1, TemporalLaneEvidenceV1, TemporalLaneRequestV1,
-    TemporalLaneRetrieverV1,
+    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalCandidateExportPortV1,
+    TemporalLaneEvidenceV1, TemporalLaneRequestV1, TemporalLaneRetrieverV1,
 };
 use crate::retrieval::ports::RetrievalPortError;
 use crate::retrieval::request::RawRetrievalRequestV1;
@@ -45,17 +43,6 @@ impl TemporalCandidateExportPortV1 for CountingEvidencePort {
         &self,
         _request: &TemporalLaneRequestV1<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<TemporalLaneEvidenceV1>>, RetrievalPortError> {
-        self.calls.fetch_add(1, Ordering::AcqRel);
-        empty()
-    }
-}
-
-impl TaskSessionCandidateReadPortV1 for CountingEvidencePort {
-    fn read_task_session_candidates(
-        &self,
-        _request: &TaskSessionLaneRequestV1<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<TaskSessionLaneEvidenceV1>>, RetrievalPortError>
-    {
         self.calls.fetch_add(1, Ordering::AcqRel);
         empty()
     }
@@ -154,7 +141,7 @@ impl DiagnosticCandidateReadPortV1 for FixedDiagnosticPort {
 }
 
 #[test]
-fn deadline_and_cancellation_stop_every_evidence_lane_before_source_reads() {
+fn deadline_and_cancellation_stop_mounted_evidence_lanes_before_source_reads() {
     let calls = Arc::new(AtomicUsize::new(0));
     let cancelled = CancellationSignal::active("cancel.evidence-lanes").expect("signal");
     cancelled.cancel(UtcMicros(5));
@@ -170,7 +157,6 @@ fn deadline_and_cancellation_stop_every_evidence_lane_before_source_reads() {
         .sanitize(id("sanitizer.fixture.v1"), id("normalization.fixture.v1"))
         .expect("sanitized request");
     let temporal = TemporalLaneRetrieverV1::new(&port);
-    let task_session = TaskSessionLaneRetrieverV1::new(&port);
     let diagnostic = DiagnosticLaneRetrieverV1::new(&port);
 
     assert!(matches!(
@@ -182,18 +168,6 @@ fn deadline_and_cancellation_stop_every_evidence_lane_before_source_reads() {
                 &cancelled_control,
             ))
             .expect("typed temporal outcome"),
-        RetrieverOutcome::Cancelled
-    ));
-    assert!(matches!(
-        task_session
-            .execute(&TaskSessionLaneRequestV1::new(
-                raw.request(),
-                raw.query_view(),
-                id("task.fixture"),
-                id("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                &cancelled_control,
-            ))
-            .expect("typed task outcome"),
         RetrieverOutcome::Cancelled
     ));
     assert!(matches!(
@@ -213,13 +187,8 @@ fn deadline_and_cancellation_stop_every_evidence_lane_before_source_reads() {
 #[test]
 fn canonical_evidence_lanes_are_independent_from_the_query_fallback_set() {
     assert_eq!(RetrieverKind::Temporal.as_str(), "temporal");
-    assert_eq!(RetrieverKind::TaskSession.as_str(), "task_session");
     assert_eq!(RetrieverKind::Diagnostic.as_str(), "diagnostic");
-    for lane in [
-        RetrieverKind::Temporal,
-        RetrieverKind::TaskSession,
-        RetrieverKind::Diagnostic,
-    ] {
+    for lane in [RetrieverKind::Temporal, RetrieverKind::Diagnostic] {
         assert!(!lane.is_query_fallback_lane());
     }
 }

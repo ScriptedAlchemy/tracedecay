@@ -233,18 +233,16 @@ pub enum RetrieverKind {
     Semantic,
     Graph,
     Temporal,
-    TaskSession,
     Diagnostic,
 }
 
 impl RetrieverKind {
-    pub const ALL_LANES: [Self; 7] = [
+    pub const ALL_LANES: [Self; 6] = [
         Self::ExactLiteral,
         Self::Lexical,
         Self::Semantic,
         Self::Graph,
         Self::Temporal,
-        Self::TaskSession,
         Self::Diagnostic,
     ];
 
@@ -258,7 +256,6 @@ impl RetrieverKind {
             Self::Semantic => "semantic",
             Self::Graph => "graph",
             Self::Temporal => "temporal",
-            Self::TaskSession => "task_session",
             Self::Diagnostic => "diagnostic",
         }
     }
@@ -1554,7 +1551,6 @@ mod tests {
                 RetrieverKind::Semantic,
                 RetrieverKind::Graph,
                 RetrieverKind::Temporal,
-                RetrieverKind::TaskSession,
                 RetrieverKind::Diagnostic,
             ],
         );
@@ -1564,7 +1560,6 @@ mod tests {
             ("semantic", RetrieverKind::Semantic),
             ("graph", RetrieverKind::Graph),
             ("temporal", RetrieverKind::Temporal),
-            ("task_session", RetrieverKind::TaskSession),
             ("diagnostic", RetrieverKind::Diagnostic),
         ] {
             assert_eq!(
@@ -1577,6 +1572,10 @@ mod tests {
                 format!("\"{wire}\""),
             );
         }
+        assert!(
+            serde_json::from_str::<RetrieverKind>("\"task_session\"").is_err(),
+            "an unmounted task/session join must not deserialize as a runtime lane",
+        );
     }
 
     #[test]

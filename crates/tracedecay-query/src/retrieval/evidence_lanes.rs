@@ -20,8 +20,8 @@ use tracedecay_domain::{
     FixedPointScore, FreshnessCompatibilityV1, GenerationDiagnosticV1, LogicalEvidenceId,
     ManifestDigest, ProviderId, RetrievalAnchorId, RetrievalBudgetUsage, RetrievalFailure,
     RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SessionId, SourceFreshness, SourceInstanceKey,
-    SourceNamespace, SourceOccurrenceId, TaskId, canonical_sha256,
+    RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceInstanceKey, SourceNamespace,
+    SourceOccurrenceId, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
 
@@ -74,38 +74,6 @@ fn elapsed_micros(started_at: Instant, now: Instant) -> u64 {
     u64::try_from(now.saturating_duration_since(started_at).as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Task relation that selected source-owned evidence.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskEvidenceRelationV1 {
-    Session,
-    Message,
-    Attempt,
-    Review,
-    Outcome,
-    Artifact,
-    Receipt,
-    Handoff,
-    Code,
-    Git,
-    Ci,
-    Diagnostic,
-}
-
-/// Compact Plan-24 topology evidence. Owning payloads remain source-local.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TaskSessionLaneEvidenceV1 {
-    pub candidate_anchor: RetrievalAnchorId,
-    pub source_occurrence: SourceOccurrenceId,
-    pub authorization_revision: AuthorizationRevision,
-    pub graph_epoch: ManifestDigest,
-    pub task_id: TaskId,
-    pub relation: TaskEvidenceRelationV1,
-    pub owning_anchor: RetrievalAnchorId,
-    pub linked_session: Option<SessionId>,
-}
-
 /// Compact diagnostic evidence bound to one immutable code generation.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -152,33 +120,6 @@ impl<'a> TemporalLaneRequestV1<'a> {
             base,
             query,
             participant_epoch,
-            control,
-        }
-    }
-}
-
-/// Plan-24 task-rooted selector over an injected canonical graph authority.
-pub struct TaskSessionLaneRequestV1<'a> {
-    pub base: &'a RetrievalRequest,
-    pub query: &'a EphemeralSanitizedQueryViewV1,
-    pub task_id: TaskId,
-    pub graph_epoch: ManifestDigest,
-    pub control: &'a EvidenceLaneExecutionControlV1,
-}
-
-impl<'a> TaskSessionLaneRequestV1<'a> {
-    pub fn new(
-        base: &'a RetrievalRequest,
-        query: &'a EphemeralSanitizedQueryViewV1,
-        task_id: TaskId,
-        graph_epoch: ManifestDigest,
-        control: &'a EvidenceLaneExecutionControlV1,
-    ) -> Self {
-        Self {
-            base,
-            query,
-            task_id,
-            graph_epoch,
             control,
         }
     }
@@ -269,13 +210,6 @@ impl TemporalCandidateExportPortV1 for CanonicalTemporalCandidateExportPortV1<'_
         }
         Ok(RetrieverOutcome::Complete(batch))
     }
-}
-
-pub trait TaskSessionCandidateReadPortV1 {
-    fn read_task_session_candidates(
-        &self,
-        request: &TaskSessionLaneRequestV1<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<TaskSessionLaneEvidenceV1>>, RetrievalPortError>;
 }
 
 pub trait DiagnosticCandidateReadPortV1 {
@@ -785,32 +719,6 @@ impl<'a, P: TemporalCandidateExportPortV1 + ?Sized> TemporalLaneRetrieverV1<'a, 
     }
 }
 
-pub struct TaskSessionLaneRetrieverV1<'a, P: ?Sized> {
-    port: &'a P,
-}
-
-impl<'a, P: TaskSessionCandidateReadPortV1 + ?Sized> TaskSessionLaneRetrieverV1<'a, P> {
-    pub fn new(port: &'a P) -> Self {
-        Self { port }
-    }
-
-    pub fn execute(
-        &self,
-        request: &TaskSessionLaneRequestV1<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<TaskSessionLaneEvidenceV1>>, RetrievalPortError>
-    {
-        execute_lane(
-            RetrieverKind::TaskSession,
-            request.base,
-            request.control,
-            || self.port.read_task_session_candidates(request),
-            |evidence| {
-                evidence.graph_epoch == request.graph_epoch && evidence.task_id == request.task_id
-            },
-        )
-    }
-}
-
 pub struct DiagnosticLaneRetrieverV1<'a, P: ?Sized> {
     port: &'a P,
 }
@@ -862,24 +770,6 @@ impl LaneEvidenceBinding for TemporalLaneEvidenceV1 {
 
     fn source_anchor(&self) -> &RetrievalAnchorId {
         &self.hydration_anchor
-    }
-}
-
-impl LaneEvidenceBinding for TaskSessionLaneEvidenceV1 {
-    fn candidate_anchor(&self) -> &RetrievalAnchorId {
-        &self.candidate_anchor
-    }
-
-    fn source_occurrence(&self) -> &SourceOccurrenceId {
-        &self.source_occurrence
-    }
-
-    fn authorization_revision(&self) -> &AuthorizationRevision {
-        &self.authorization_revision
-    }
-
-    fn source_anchor(&self) -> &RetrievalAnchorId {
-        &self.owning_anchor
     }
 }
 
