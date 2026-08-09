@@ -224,7 +224,40 @@ pub struct CostsReadModelV1 {
     pub current: bool,
     pub usage: Vec<MetricValueV1>,
     pub estimated_cost: Vec<MetricValueV1>,
+    /// Provider-backed operation latency, projected from the same retained
+    /// Plan 26 operation-resource events as Observatory. Each entry keeps
+    /// provider/model identity explicit; `None` is a real uncorrelated state,
+    /// never a client-side guess.
+    pub latency: Vec<ProviderLatencyReadModelV1>,
     pub pricing_revision: Option<String>,
+}
+
+/// One provider/model cohort in the Costs latency read model.
+///
+/// The percentile cells are ordinary canonical metrics so every value carries
+/// its exact unit, horizon, denominator, coverage/censoring, and projector
+/// provenance. Identity provenance is kept separately because latency is
+/// measured by `OperationResourceObservedV1`, while provider/model identity
+/// may be joined from an exact `ProviderUsageObservationV1` request/session.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct ProviderLatencyReadModelV1 {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub identity_provenance: MetricProvenanceV1,
+    pub identity_unavailable_reason: Option<String>,
+    pub queue: LatencyDistributionReadModelV1,
+    pub start: LatencyDistributionReadModelV1,
+    pub first_progress: LatencyDistributionReadModelV1,
+    pub service: LatencyDistributionReadModelV1,
+    pub terminal: LatencyDistributionReadModelV1,
+}
+
+/// p50/p95/p99 for one provider operation latency stage.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct LatencyDistributionReadModelV1 {
+    pub p50: MetricValueV1,
+    pub p95: MetricValueV1,
+    pub p99: MetricValueV1,
 }
 
 #[cfg(test)]
