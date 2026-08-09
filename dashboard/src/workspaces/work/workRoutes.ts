@@ -1,12 +1,11 @@
 import {
-  AcceptProposalCommandSchema,
   AcceptTaskCommandSchema,
   AdmitWorkExecutionRequestV1Schema,
+  DecideWorkProposalRequestV1Schema,
   ExecutionTopologyMetricsRequestV1Schema,
   ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
   ReplanDependenciesCommandSchema,
-  ReviewProposalRequestV1Schema,
   WorkAttemptListRequestV1Schema,
   WorkAttemptListV1Schema,
   WorkGraphReadRequestV1Schema,
@@ -150,15 +149,15 @@ export const WORK_REPLAN_DEPENDENCIES_ROUTE = {
 export const WORK_REVIEW_PROPOSAL_ROUTE = {
   operation: "operation.work.review_proposal",
   path: "/api/work/review-proposal",
-  request: ReviewProposalRequestV1Schema,
-  response: WorkProjectionSchema,
+  request: DecideWorkProposalRequestV1Schema,
+  response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 export const WORK_ACCEPT_PROPOSAL_ROUTE = {
   operation: "operation.work.accept_proposal",
   path: "/api/work/accept-proposal",
-  request: AcceptProposalCommandSchema,
-  response: WorkProjectionSchema,
+  request: DecideWorkProposalRequestV1Schema,
+  response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 export const WORK_ADMIT_EXECUTION_ROUTE = {

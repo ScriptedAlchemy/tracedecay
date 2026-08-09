@@ -183,10 +183,7 @@ mod tests {
         );
         assert_eq!(
             actual_ids,
-            expected_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>(),
+            expected_ids,
             "dashboard routes must cover every core Work operation exactly once"
         );
         assert_eq!(

@@ -16,11 +16,6 @@ export function assertNever(value: never): never {
 
 export const WIRE_SCHEMA_REVISION = 1 as const;
 
-export const AcceptProposalCommandSchema = z.object({
-  review: z.lazy(() => ReviewProposalCommandSchema),
-});
-export type AcceptProposalCommand = z.infer<typeof AcceptProposalCommandSchema>;
-
 export const AcceptTaskCommandSchema = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   expected_version: z.number().int(),
@@ -41,6 +36,13 @@ export type AcceptWorkTaskRequestV1 = z.infer<typeof AcceptWorkTaskRequestV1Sche
 export const ActorIdSchema = z.string();
 export type ActorId = z.infer<typeof ActorIdSchema>;
 
+export const AddWorkTaskRequestV1Schema = z.object({
+  item: z.lazy(() => WorkItemV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+});
+export type AddWorkTaskRequestV1 = z.infer<typeof AddWorkTaskRequestV1Schema>;
+
 export const AdjudicateWorkLeakCommandV1Schema = z.object({
   adjudication_id: z.string(),
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
@@ -50,13 +52,13 @@ export const AdjudicateWorkLeakCommandV1Schema = z.object({
 });
 export type AdjudicateWorkLeakCommandV1 = z.infer<typeof AdjudicateWorkLeakCommandV1Schema>;
 
-export const AdmitExecutionCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  expected_version: z.number().int(),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
+export const AdmitWorkExecutionRequestV1Schema = z.object({
+  based_on_version: z.number().int(),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
 });
-export type AdmitExecutionCommand = z.infer<typeof AdmitExecutionCommandSchema>;
+export type AdmitWorkExecutionRequestV1 = z.infer<typeof AdmitWorkExecutionRequestV1Schema>;
 
 export const AdmitWorkPlacementCommandSchema = z.object({
   occurred_at: z.lazy(() => UtcMicrosSchema),
@@ -294,15 +296,6 @@ export const ApplyWorkRelationReplanRequestV1Schema = z.object({
 });
 export type ApplyWorkRelationReplanRequestV1 = z.infer<typeof ApplyWorkRelationReplanRequestV1Schema>;
 
-export const AttachRuntimeEvidenceCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  evidence: z.lazy(() => RuntimeEvidenceRefSchema),
-  expected_version: z.number().int(),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
-  task_id: z.lazy(() => TaskIdSchema),
-});
-export type AttachRuntimeEvidenceCommand = z.infer<typeof AttachRuntimeEvidenceCommandSchema>;
-
 /** Strongly typed canonical identity: `AttemptId`. */
 export const AttemptIdSchema = z.string();
 export type AttemptId = z.infer<typeof AttemptIdSchema>;
@@ -348,52 +341,18 @@ export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.objec
 })]);
 export type AutomaticWorktreeGcV1 = z.infer<typeof AutomaticWorktreeGcV1Schema>;
 
-/** One human-review queue: a count, or the reason there is no count.
+/** The scheduler reading served by `status`, `pause`, and `resume`.
 
-Kept as a tagged reading rather than a bare number because these two queues
-are the entire human-approval step of the automation pipeline. A queue whose
-authority is unmounted must not report `0`, which reads as "checked, nothing
-waiting" — the precise false zero this shape exists to prevent. */
-export const AutomationPendingReviewCountV1Schema = z.discriminatedUnion("state", [z.object({
-  count: z.number().int(),
-  reason: z.string().nullable(),
-  state: z.literal("measured"),
-}), z.object({
-  count: z.number().int().nullable(),
-  reason: z.string(),
-  state: z.literal("unreadable"),
-})]);
-export type AutomationPendingReviewCountV1 = z.infer<typeof AutomationPendingReviewCountV1Schema>;
-
-export const AutomationPendingReviewV1Schema = z.object({
-  fact_proposals: z.lazy(() => AutomationPendingReviewCountV1Schema),
-  skills: z.lazy(() => AutomationPendingReviewCountV1Schema),
-});
-export type AutomationPendingReviewV1 = z.infer<typeof AutomationPendingReviewV1Schema>;
-
-/** The scheduler reading served by all three of `status`, `pause`, and
-`resume`.
-
-The two control routes return this same payload rather than an
-acknowledgement because the pause flag is the thing a caller is actually
-asking about, and a bare `{"ok":true}` would leave the dashboard to assume
-the new state instead of observing it. Returning the re-read means a client
-never has to optimistically flip a control it has not seen take effect.
-
-Typed here, rather than assembled with `json!`, so the shape reaches
-`contract_schema.rs` and the dashboard consumes a generated contract. The
-field set is deliberately identical to the `json!` literal it replaces: this
-is the same wire, described, not a new one. */
+Automation is autonomous: the status has no pending-review counters. The
+last run record carries the validation, repair, application, quarantine,
+and deployment receipts that describe what actually happened. */
 export const AutomationSchedulerStatusV1Schema = z.object({
+  configuration_revision_id: z.string(),
   control_path: z.string(),
   enabled: z.boolean(),
   last_session_activity: z.number().int().nullable(),
   now: z.number().int(),
   paused: z.boolean(),
-  pending_fact_proposals: z.number().int().nullable(),
-  pending_review: z.lazy(() => AutomationPendingReviewV1Schema),
-  pending_skills: z.number().int().nullable(),
-  project_config_path: z.string(),
   scheduler_tick_secs: z.number().int(),
   status: z.string(),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
@@ -404,18 +363,11 @@ export const AutomationSettingsPayloadV1Schema = z.object({
   availability: z.lazy(() => SettingsAvailabilityV1Schema),
   backend: z.string().nullable().optional(),
   config_endpoint: z.string(),
+  configuration_revision_id: z.string().nullable().optional(),
   enabled: z.boolean().nullable().optional(),
   host_mode: z.string().nullable().optional(),
-  source_coverage: z.lazy(() => AutomationSourceCoverageV1Schema),
 });
 export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPayloadV1Schema>;
-
-export const AutomationSourceCoverageV1Schema = z.object({
-  effective: z.string(),
-  global: z.string(),
-  project: z.string(),
-});
-export type AutomationSourceCoverageV1 = z.infer<typeof AutomationSourceCoverageV1Schema>;
 
 export const AutomationTaskStatusV1Schema = z.object({
   due: z.boolean(),
@@ -470,6 +422,7 @@ export const BranchTopologyPolicyV1Schema = z.object({
 export type BranchTopologyPolicyV1 = z.infer<typeof BranchTopologyPolicyV1Schema>;
 
 export const CallChainMeasurementV1Schema = z.object({
+  complete: z.boolean(),
   directed: z.boolean(),
   edge_kind: z.string(),
   found: z.boolean(),
@@ -515,10 +468,6 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 export const CatalogGenerationIdSchema = z.string();
 export type CatalogGenerationId = z.infer<typeof CatalogGenerationIdSchema>;
 
-/** Strongly typed canonical identity: `CodeGenerationId`. */
-export const CodeGenerationIdSchema = z.string();
-export type CodeGenerationId = z.infer<typeof CodeGenerationIdSchema>;
-
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
@@ -561,6 +510,7 @@ export const CostsReadModelV1Schema = z.object({
   current: z.boolean(),
   estimated_cost: z.array(z.lazy(() => MetricValueV1Schema)),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
+  latency: z.array(z.lazy(() => ProviderLatencyReadModelV1Schema)),
   observed_at_micros: z.number().int(),
   pricing_revision: z.string().nullable(),
   usage: z.array(z.lazy(() => MetricValueV1Schema)),
@@ -580,21 +530,22 @@ export const CoveringTestV1Schema = z.object({
 });
 export type CoveringTestV1 = z.infer<typeof CoveringTestV1Schema>;
 
-export const CreateWorkCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
-  task_id: z.lazy(() => TaskIdSchema),
-  title: z.string(),
-});
-export type CreateWorkCommand = z.infer<typeof CreateWorkCommandSchema>;
-
 export const CreateWorkProductRequestV1Schema = z.object({
   initial_graph: z.lazy(() => WorkProductGraphV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
 });
 export type CreateWorkProductRequestV1 = z.infer<typeof CreateWorkProductRequestV1Schema>;
+
+export const CreateWorkTaskRequestV1Schema = z.object({
+  initiative: z.lazy(() => WorkInitiativeV1Schema),
+  item: z.lazy(() => WorkItemV1Schema),
+  milestone: z.lazy(() => WorkMilestoneV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  plan: z.lazy(() => WorkPlanV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+});
+export type CreateWorkTaskRequestV1 = z.infer<typeof CreateWorkTaskRequestV1Schema>;
 
 /** Strongly typed canonical identity: `CredentialReferenceId`. */
 export const CredentialReferenceIdSchema = z.string();
@@ -1204,6 +1155,10 @@ export type ExecutionIntegrationKindV1 = z.infer<typeof ExecutionIntegrationKind
 export const ExecutionIntegrationOutcomeV1Schema = z.enum(["cancelled", "conflicted", "denied", "effect_unknown", "failed", "locked", "partial", "rejected", "stale", "succeeded", "timed_out", "unknown", "unsupported"]);
 export type ExecutionIntegrationOutcomeV1 = z.infer<typeof ExecutionIntegrationOutcomeV1Schema>;
 
+/** Whether the owning drift interval is still open or exactly closed. */
+export const ExecutionIntervalStateV1Schema = z.enum(["closed", "open"]);
+export type ExecutionIntervalStateV1 = z.infer<typeof ExecutionIntervalStateV1Schema>;
+
 /** Independently proved execution-leak class. */
 export const ExecutionLeakKindV1Schema = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
 export type ExecutionLeakKindV1 = z.infer<typeof ExecutionLeakKindV1Schema>;
@@ -1231,6 +1186,11 @@ export type ExecutionRerunCauseV1 = z.infer<typeof ExecutionRerunCauseV1Schema>;
 /** Which independent system observed the rerun. */
 export const ExecutionRerunSourceV1Schema = z.enum(["ci", "runtime", "test"]);
 export type ExecutionRerunSourceV1 = z.infer<typeof ExecutionRerunSourceV1Schema>;
+
+/** Exact reason a stack became stale. The enum is bounded and never
+carries a branch, ref, worktree, repository, or provider identity. */
+export const ExecutionStackDriftKindV1Schema = z.enum(["base_advanced", "dependency_missing", "head_advanced", "merge_base_changed", "ref_deleted", "retargeted", "superseded", "unknown", "worktree_generation_changed"]);
+export type ExecutionStackDriftKindV1 = z.infer<typeof ExecutionStackDriftKindV1Schema>;
 
 /** Delivery surface family. Addresses, payloads, principals, and
 recipients are never observed, so the family is the whole label. */
@@ -1275,6 +1235,9 @@ export const ExecutionTopologyDimensionV1Schema = z.discriminatedUnion("dimensio
   dimension: z.literal("integration_outcome"),
   value: z.lazy(() => ExecutionIntegrationOutcomeV1Schema),
 }), z.object({
+  dimension: z.literal("interval_state"),
+  value: z.lazy(() => ExecutionIntervalStateV1Schema),
+}), z.object({
   dimension: z.literal("leak_kind"),
   value: z.lazy(() => ExecutionLeakKindV1Schema),
 }), z.object({
@@ -1286,6 +1249,9 @@ export const ExecutionTopologyDimensionV1Schema = z.discriminatedUnion("dimensio
 }), z.object({
   dimension: z.literal("rerun_source"),
   value: z.lazy(() => ExecutionRerunSourceV1Schema),
+}), z.object({
+  dimension: z.literal("stack_drift_kind"),
+  value: z.lazy(() => ExecutionStackDriftKindV1Schema),
 }), z.object({
   dimension: z.literal("surface"),
   value: z.lazy(() => ExecutionSurfaceFamilyV1Schema),
@@ -1567,27 +1533,24 @@ export const FeedbackSystemQualityReadModelV1Schema = z.object({
 });
 export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
-/** One explained, read-only proposal. The digest binds acceptance to the
-evaluated decision content, so a stale or altered proposal cannot be
-accepted against a moved Work version. */
+/** A canonical product proposal and the exact verified graph that licensed it.
+
+`proposal` can be moved directly into a `DecideWorkProposalRequestV1`;
+callers use `verified_graph_version` to construct that mutation's CAS pin. */
 export const GeneratedWorkProposalSchema = z.object({
-  based_on_version: z.number().int(),
+  calibration: z.lazy(() => WorkCalibrationEvidenceV1Schema),
   decision: z.lazy(() => WorkProposalDecisionV1Schema),
-  proposal_digest: z.lazy(() => ManifestDigestSchema),
-  proposal_id: z.lazy(() => ProposalIdSchema),
-  task_id: z.lazy(() => TaskIdSchema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  verified_graph_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
 });
 export type GeneratedWorkProposal = z.infer<typeof GeneratedWorkProposalSchema>;
 
-/** Read-only proposal generation is pinned to the current Work version.
-
-The optional live Git frontier is supplied by the caller's Git evidence
-authority; the application never derives it from the Work history, and the
-evaluator never merges it with the local frontier. */
+/** Read-only proposal generation over one exact current product graph. */
 export const GenerateProposalRequestSchema = z.object({
   live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   proposal_id: z.lazy(() => ProposalIdSchema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
 });
 export type GenerateProposalRequest = z.infer<typeof GenerateProposalRequestSchema>;
@@ -1751,6 +1714,14 @@ export const IncomingCallEdgeV1Schema = z.object({
   target: z.string(),
 });
 export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
+
+/** p50/p95/p99 for one provider operation latency stage. */
+export const LatencyDistributionReadModelV1Schema = z.object({
+  p50: z.lazy(() => MetricValueV1Schema),
+  p95: z.lazy(() => MetricValueV1Schema),
+  p99: z.lazy(() => MetricValueV1Schema),
+});
+export type LatencyDistributionReadModelV1 = z.infer<typeof LatencyDistributionReadModelV1Schema>;
 
 export const LcmCompressionSummaryV1Schema = z.object({
   node_count: z.number().int(),
@@ -1971,7 +1942,6 @@ export type LeakOwnerClassV1 = z.infer<typeof LeakOwnerClassV1Schema>;
 
 export const LinkAcceptedWorkAttemptRequestV1Schema = z.object({
   based_on_version: z.number().int(),
-  evidence: z.lazy(() => TaskEvidenceLinkV1Schema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
@@ -2478,6 +2448,17 @@ export const ObservabilityHorizonV1Schema = z.object({
 });
 export type ObservabilityHorizonV1 = z.infer<typeof ObservabilityHorizonV1Schema>;
 
+/** Stable logical identity of one provider observation source.
+
+The session identity is provider-native evidence. The physical file identity
+is represented separately by [`ObservationSourceGenerationV1`]. */
+export const ObservationSourceIdentityV1Schema = z.object({
+  provider: z.lazy(() => ProviderIdSchema).optional(),
+  session_id: z.lazy(() => SessionIdSchema),
+  source_key: z.union([z.lazy(() => SessionIdSchema), z.null()]).optional(),
+});
+export type ObservationSourceIdentityV1 = z.infer<typeof ObservationSourceIdentityV1Schema>;
+
 export const ObservatoryReadModelV1Schema = z.object({
   analytics_mode: z.lazy(() => AnalyticsModeReadModelV1Schema),
   authorized_scope_ref: z.string(),
@@ -2536,6 +2517,27 @@ export const PrAutoTrackPayloadV1Schema = z.object({
   tracked: z.array(z.lazy(() => PrAutoTrackEntryV1Schema)),
 });
 export type PrAutoTrackPayloadV1 = z.infer<typeof PrAutoTrackPayloadV1Schema>;
+
+/** Operator judgment before the owning Work authority binds exact current
+generations, relation revision, command identity, and observation time. */
+export const PrepareWorkDuplicateAdjudicationRequestV1Schema = z.object({
+  first_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  quantities: z.lazy(() => WorkDuplicateAdjudicationQuantitiesV1Schema),
+  reason: z.string(),
+  second_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  verdict: z.lazy(() => DuplicateEffortKindV1Schema),
+});
+export type PrepareWorkDuplicateAdjudicationRequestV1 = z.infer<typeof PrepareWorkDuplicateAdjudicationRequestV1Schema>;
+
+/** Read-only preparation input. Authority identities, clocks, and revision
+pins are deliberately absent because the backend owns them. */
+export const PrepareWorkProductMutationRequestV1Schema = z.object({
+  causation_event_id: z.string().nullable(),
+  change: z.lazy(() => WorkProductChangeDraftV1Schema),
+  evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+});
+export type PrepareWorkProductMutationRequestV1 = z.infer<typeof PrepareWorkProductMutationRequestV1Schema>;
 
 export const ProjectAliasRecordSchema = z.object({
   alias_path: z.string(),
@@ -2673,6 +2675,26 @@ export type ProtectedRefSelectorV1 = z.infer<typeof ProtectedRefSelectorV1Schema
 export const ProviderIdSchema = z.string();
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
+/** One provider/model cohort in the Costs latency read model.
+
+The percentile cells are ordinary canonical metrics so every value carries
+its exact unit, horizon, denominator, coverage/censoring, and projector
+provenance. Identity provenance is kept separately because latency is
+measured by `OperationResourceObservedV1`, while provider/model identity
+may be joined from an exact `ProviderUsageObservationV1` request/session. */
+export const ProviderLatencyReadModelV1Schema = z.object({
+  first_progress: z.lazy(() => LatencyDistributionReadModelV1Schema),
+  identity_provenance: z.lazy(() => MetricProvenanceV1Schema),
+  identity_unavailable_reason: z.string().nullable(),
+  model: z.string().nullable(),
+  provider: z.string().nullable(),
+  queue: z.lazy(() => LatencyDistributionReadModelV1Schema),
+  service: z.lazy(() => LatencyDistributionReadModelV1Schema),
+  start: z.lazy(() => LatencyDistributionReadModelV1Schema),
+  terminal: z.lazy(() => LatencyDistributionReadModelV1Schema),
+});
+export type ProviderLatencyReadModelV1 = z.infer<typeof ProviderLatencyReadModelV1Schema>;
+
 export const ProviderUsageSummaryV1Schema = z.object({
   available: z.boolean(),
   cost_basis: z.string().nullable(),
@@ -2807,28 +2829,6 @@ export const RetryWorkAttemptCommandV1Schema = z.object({
 });
 export type RetryWorkAttemptCommandV1 = z.infer<typeof RetryWorkAttemptCommandV1Schema>;
 
-export const ReviewProposalCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  expected_version: z.number().int(),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
-  proposal_digest: z.lazy(() => ManifestDigestSchema),
-  proposal_id: z.lazy(() => ProposalIdSchema),
-  task_id: z.lazy(() => TaskIdSchema),
-});
-export type ReviewProposalCommand = z.infer<typeof ReviewProposalCommandSchema>;
-
-/** A proposal review records a non-accepting disposition. Acceptance remains a
-separate command so callers cannot accidentally collapse review into
-approval. */
-export const ReviewProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
-export type ReviewProposalDispositionV1 = z.infer<typeof ReviewProposalDispositionV1Schema>;
-
-export const ReviewProposalRequestV1Schema = z.object({
-  disposition: z.lazy(() => ReviewProposalDispositionV1Schema),
-  review: z.lazy(() => ReviewProposalCommandSchema),
-});
-export type ReviewProposalRequestV1 = z.infer<typeof ReviewProposalRequestV1Schema>;
-
 export const ReviewRequirementV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_owner_and_independent_review"),
 }), z.object({
@@ -2874,13 +2874,6 @@ export type RootScopeOutcomeV1_for_RootGenerationV1 = z.infer<typeof RootScopeOu
 /** Strongly typed canonical identity: `RunId`. */
 export const RunIdSchema = z.string();
 export type RunId = z.infer<typeof RunIdSchema>;
-
-export const RuntimeEvidenceRefSchema = z.object({
-  evidence_digest: z.lazy(() => ManifestDigestSchema),
-  run_id: z.lazy(() => RunIdSchema),
-  terminal: z.boolean(),
-});
-export type RuntimeEvidenceRef = z.infer<typeof RuntimeEvidenceRefSchema>;
 
 export const SavingsAccountingSummaryV1Schema = z.object({
   available: z.boolean(),
@@ -3071,6 +3064,10 @@ export const SensitiveFilesystemLocatorV1Schema = z.object({
   sealed_value_digest: z.lazy(() => ManifestDigestSchema),
 });
 export type SensitiveFilesystemLocatorV1 = z.infer<typeof SensitiveFilesystemLocatorV1Schema>;
+
+/** Strongly typed canonical identity: `SessionId`. */
+export const SessionIdSchema = z.string();
+export type SessionId = z.infer<typeof SessionIdSchema>;
 
 export const SettingsAvailabilityV1Schema = z.object({
   available: z.boolean(),
@@ -3509,6 +3506,19 @@ export const TelemetrySettingsV1Schema = z.object({
 });
 export type TelemetrySettingsV1 = z.infer<typeof TelemetrySettingsV1Schema>;
 
+/** Requested temporal interpretation. */
+export const TemporalModeV1Schema = z.discriminatedUnion("kind", [z.object({
+  cutoff: z.lazy(() => UtcMicrosSchema),
+  kind: z.literal("as_of"),
+}), z.object({
+  kind: z.literal("current"),
+}), z.object({
+  kind: z.literal("evolution"),
+}), z.object({
+  kind: z.literal("forensic"),
+})]);
+export type TemporalModeV1 = z.infer<typeof TemporalModeV1Schema>;
+
 export const TestMapMeasurementV1Schema = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
@@ -3588,6 +3598,16 @@ export type UserSettingsPayloadV1 = z.infer<typeof UserSettingsPayloadV1Schema>;
 export const UtcMicrosSchema = z.number().int();
 export type UtcMicros = z.infer<typeof UtcMicrosSchema>;
 
+export const VerifiedWorkEvidenceRootV1Schema = z.object({
+  item: z.lazy(() => WorkItemV1Schema),
+  links: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
+  proposal_decisions: z.array(z.lazy(() => WorkProposalDecisionV12Schema)),
+  relation_replan_decisions: z.array(z.lazy(() => WorkRelationReplanDecisionV1Schema)),
+  relations: z.array(z.lazy(() => WorkProductRelationV1Schema)),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type VerifiedWorkEvidenceRootV1 = z.infer<typeof VerifiedWorkEvidenceRootV1Schema>;
+
 /** One exact verified graph snapshot identity. */
 export const VerifiedWorkGraphVersionV1Schema = z.object({
   event_sequence: z.number().int(),
@@ -3634,6 +3654,17 @@ export const WorkAcceptanceCriterionV1Schema = z.object({
   evidence_required: z.boolean(),
 });
 export type WorkAcceptanceCriterionV1 = z.infer<typeof WorkAcceptanceCriterionV1Schema>;
+
+export const WorkAnchorHydrationV1Schema = z.object({
+  anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
+  content: z.array(z.string()),
+  continuation: z.string().nullable(),
+  coverage: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
+  exact_anchors: z.array(z.lazy(() => RetrievalAnchorIdSchema)),
+  freshness: z.lazy(() => WorkEvidenceFreshnessV1Schema),
+  redacted: z.boolean(),
+});
+export type WorkAnchorHydrationV1 = z.infer<typeof WorkAnchorHydrationV1Schema>;
 
 export const WorkApprovalPolicySchema = z.enum(["never", "on_request"]);
 export type WorkApprovalPolicy = z.infer<typeof WorkApprovalPolicySchema>;
@@ -3687,6 +3718,7 @@ export const WorkAttemptEvidenceRecordV1Schema = z.object({
   observed_at: z.lazy(() => UtcMicrosSchema),
   outcome: z.lazy(() => WorkAttemptProviderOutcomeV1Schema),
   provider_fallback: z.union([z.lazy(() => WorkProviderFallbackRecordV1Schema), z.null()]),
+  provider_session: z.union([z.lazy(() => ObservationSourceIdentityV1Schema), z.null()]).optional(),
   requested_route: z.lazy(() => WorkProviderRouteV1Schema),
   stderr: z.union([z.lazy(() => WorkAttemptStreamSummaryV1Schema), z.null()]),
   stdout: z.union([z.lazy(() => WorkAttemptStreamSummaryV1Schema), z.null()]),
@@ -3756,9 +3788,10 @@ export type WorkAttemptProgressV1 = z.infer<typeof WorkAttemptProgressV1Schema>;
 
 export const WorkAttemptProjectionBindingV1Schema = z.object({
   accepted_proposal: z.lazy(() => ProposalIdSchema),
-  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
-  work_version: z.number().int(),
+  event_sequence: z.number().int(),
+  graph_version: z.number().int(),
+  recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
+  source_watermark: z.record(z.number().int()),
 });
 export type WorkAttemptProjectionBindingV1 = z.infer<typeof WorkAttemptProjectionBindingV1Schema>;
 
@@ -3785,6 +3818,13 @@ export const WorkAttemptProviderOutcomeV1Schema = z.discriminatedUnion("outcome"
   outcome: z.literal("timed_out"),
 })]);
 export type WorkAttemptProviderOutcomeV1 = z.infer<typeof WorkAttemptProviderOutcomeV1Schema>;
+
+export const WorkAttemptReceiptV1Schema = z.object({
+  artifacts: z.array(z.lazy(() => WorkArtifactRefV1Schema)),
+  evidence: z.union([z.lazy(() => WorkAttemptEvidenceRecordV1Schema), z.null()]),
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+});
+export type WorkAttemptReceiptV1 = z.infer<typeof WorkAttemptReceiptV1Schema>;
 
 /** What resume-after-restart did to each open attempt. */
 export const WorkAttemptRecoveryReportV1Schema = z.object({
@@ -3858,6 +3898,37 @@ export const WorkCalibratedSizingV1Schema = z.object({
   support_floor: z.number().int(),
 });
 export type WorkCalibratedSizingV1 = z.infer<typeof WorkCalibratedSizingV1Schema>;
+
+/** Raw calibration values and their exact decision provenance.
+
+No rate, probability, or composite score is derived here. Consumers see
+the authority-supplied outcome rows, categorical uncertainty, and exact
+denominator counts that produced the proposal's existing calibrated sizing. */
+export const WorkCalibrationEvidenceV1Schema = z.object({
+  cohort_route: z.string().nullable(),
+  comparable_outcomes: z.number().int(),
+  eligible_route_count: z.number().int(),
+  incomparable_outcomes: z.number().int(),
+  provenance: z.lazy(() => WorkCalibrationProvenanceV1Schema),
+  raw_outcomes: z.array(z.lazy(() => WorkPriorOutcomeV1Schema)),
+  routes_with_outcomes: z.number().int(),
+  uncertainty: z.lazy(() => WorkCalibrationUncertaintyV1Schema),
+});
+export type WorkCalibrationEvidenceV1 = z.infer<typeof WorkCalibrationEvidenceV1Schema>;
+
+export const WorkCalibrationProvenanceV1Schema = z.object({
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
+  configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
+  evaluated_at: z.lazy(() => UtcMicrosSchema),
+  evaluator_id: z.string(),
+  evaluator_revision: z.number().int(),
+  input_digest: z.lazy(() => ManifestDigestSchema),
+  local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
+});
+export type WorkCalibrationProvenanceV1 = z.infer<typeof WorkCalibrationProvenanceV1Schema>;
+
+export const WorkCalibrationUncertaintyV1Schema = z.enum(["incomparable", "sparse", "stale", "supported"]);
+export type WorkCalibrationUncertaintyV1 = z.infer<typeof WorkCalibrationUncertaintyV1Schema>;
 
 export const WorkCancellationAcknowledgementV1Schema = z.object({
   acknowledged_at: z.lazy(() => UtcMicrosSchema),
@@ -3943,7 +4014,6 @@ export const WorkDuplicateAdjudicationAppendOutcomeV1Schema = z.discriminatedUni
 export type WorkDuplicateAdjudicationAppendOutcomeV1 = z.infer<typeof WorkDuplicateAdjudicationAppendOutcomeV1Schema>;
 
 export const WorkDuplicateAdjudicationCommandV1Schema = z.object({
-  adjudication_id: z.string(),
   command_id: z.lazy(() => WorkCommandIdSchema),
   evidence: z.lazy(() => WorkDuplicateAdjudicationEvidenceV1Schema),
   expected_revision: z.number().int().nullable(),
@@ -3957,11 +4027,8 @@ export const WorkDuplicateAdjudicationCommandV1Schema = z.object({
 export type WorkDuplicateAdjudicationCommandV1 = z.infer<typeof WorkDuplicateAdjudicationCommandV1Schema>;
 
 export const WorkDuplicateAdjudicationEvidenceV1Schema = z.object({
-  evidence_generation: z.lazy(() => ProjectionGenerationIdSchema),
-  file_generation: z.lazy(() => CodeGenerationIdSchema),
-  local_anchor_refs: z.array(z.lazy(() => RetrievalAnchorIdSchema)),
-  symbol_generation: z.lazy(() => CodeGenerationIdSchema),
-  topology_generation: z.lazy(() => ProjectionGenerationIdSchema),
+  topology_generation: z.lazy(() => WorkTopologyGenerationRefV1Schema),
+  work_generation: z.lazy(() => ProjectionGenerationIdSchema),
 });
 export type WorkDuplicateAdjudicationEvidenceV1 = z.infer<typeof WorkDuplicateAdjudicationEvidenceV1Schema>;
 
@@ -3979,6 +4046,7 @@ export type WorkDuplicateAdjudicationQuantitiesV1 = z.infer<typeof WorkDuplicate
 
 export const WorkDuplicateAdjudicationReceiptV1Schema = z.object({
   actor_id: z.lazy(() => ActorIdSchema),
+  adjudication_ref: z.lazy(() => ManifestDigestSchema),
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => WorkDuplicateAdjudicationCommandV1Schema),
   revision: z.number().int(),
@@ -3992,6 +4060,39 @@ export type WorkEffectStateV1 = z.infer<typeof WorkEffectStateV1Schema>;
 export const WorkEgressPolicySchema = z.enum(["allowlisted", "deny"]);
 export type WorkEgressPolicy = z.infer<typeof WorkEgressPolicySchema>;
 
+export const WorkEvidenceContinuationV1Schema = z.discriminatedUnion("kind", [z.object({
+  cursor: z.string(),
+  kind: z.literal("anchor"),
+  link_id: z.string(),
+}), z.object({
+  continuation: z.lazy(() => WorkTaskSessionContinuationV1Schema),
+  kind: z.literal("task_session"),
+})]);
+export type WorkEvidenceContinuationV1 = z.infer<typeof WorkEvidenceContinuationV1Schema>;
+
+export const WorkEvidenceCoverageStateV1Schema = z.enum(["complete", "partial", "unknown"]);
+export type WorkEvidenceCoverageStateV1 = z.infer<typeof WorkEvidenceCoverageStateV1Schema>;
+
+export const WorkEvidenceCoverageV1Schema = z.object({
+  hydrated: z.number().int(),
+  omitted: z.number().int(),
+  selected: z.number().int(),
+  state: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
+});
+export type WorkEvidenceCoverageV1 = z.infer<typeof WorkEvidenceCoverageV1Schema>;
+
+export const WorkEvidenceExpansionSelectorV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("anchor"),
+  link_id: z.string(),
+}), z.object({
+  attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  kind: z.literal("task_session"),
+})]);
+export type WorkEvidenceExpansionSelectorV1 = z.infer<typeof WorkEvidenceExpansionSelectorV1Schema>;
+
+export const WorkEvidenceFreshnessV1Schema = z.enum(["current", "stale", "unknown"]);
+export type WorkEvidenceFreshnessV1 = z.infer<typeof WorkEvidenceFreshnessV1Schema>;
+
 /** One immutable evidence frontier. Local code/session evidence and live Git
 evidence each carry their own frontier; the evaluator never merges,
 substitutes, or advances one from the other. */
@@ -4000,6 +4101,60 @@ export const WorkEvidenceFrontierV1Schema = z.object({
   watermark: z.lazy(() => UtcMicrosSchema),
 });
 export type WorkEvidenceFrontierV1 = z.infer<typeof WorkEvidenceFrontierV1Schema>;
+
+export const WorkEvidenceOmissionReasonV1Schema = z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "stale", "timed_out", "unavailable"]);
+export type WorkEvidenceOmissionReasonV1 = z.infer<typeof WorkEvidenceOmissionReasonV1Schema>;
+
+export const WorkEvidenceOmissionV1Schema = z.object({
+  reason: z.lazy(() => WorkEvidenceOmissionReasonV1Schema),
+  relation: z.string(),
+});
+export type WorkEvidenceOmissionV1 = z.infer<typeof WorkEvidenceOmissionV1Schema>;
+
+export const WorkEvidenceRetrievalV1Schema = z.object({
+  continuations: z.array(z.lazy(() => WorkEvidenceContinuationV1Schema)),
+  coverage: z.lazy(() => WorkEvidenceCoverageV1Schema),
+  freshness: z.lazy(() => WorkEvidenceFreshnessV1Schema),
+  item: z.lazy(() => WorkItemV1Schema),
+  omissions: z.array(z.lazy(() => WorkEvidenceOmissionV1Schema)),
+  proposal_decisions: z.array(z.lazy(() => WorkProposalDecisionV12Schema)),
+  redacted: z.boolean(),
+  relation_replan_decisions: z.array(z.lazy(() => WorkRelationReplanDecisionV1Schema)),
+  relations: z.array(z.lazy(() => WorkProductRelationV1Schema)),
+  sources: z.array(z.lazy(() => WorkEvidenceSourceV1Schema)),
+  task_id: z.lazy(() => TaskIdSchema),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkEvidenceRetrievalV1 = z.infer<typeof WorkEvidenceRetrievalV1Schema>;
+
+/** One TaskId-rooted read. The exact Work graph identity remains mandatory on
+continuation and expansion requests, so neither an anchor nor a cursor is
+authority by possession. */
+export const WorkEvidenceRetrieveRequestV1Schema = z.object({
+  continuation: z.union([z.lazy(() => WorkEvidenceContinuationV1Schema), z.null()]),
+  expansion: z.union([z.lazy(() => WorkEvidenceExpansionSelectorV1Schema), z.null()]),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  page_size: z.number().int(),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+  task_id: z.lazy(() => TaskIdSchema),
+  temporal: z.lazy(() => TemporalModeV1Schema),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkEvidenceRetrieveRequestV1 = z.infer<typeof WorkEvidenceRetrieveRequestV1Schema>;
+
+export const WorkEvidenceSourceV1Schema = z.discriminatedUnion("kind", [z.object({
+  hydration: z.lazy(() => WorkAnchorHydrationV1Schema),
+  kind: z.literal("anchor"),
+  link: z.lazy(() => TaskEvidenceLinkV1Schema),
+}), z.object({
+  kind: z.literal("attempt_receipt"),
+  receipt: z.lazy(() => WorkAttemptReceiptV1Schema),
+}), z.object({
+  attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  evidence: z.lazy(() => WorkTaskSessionEvidenceV1Schema),
+  kind: z.literal("task_session"),
+})]);
+export type WorkEvidenceSourceV1 = z.infer<typeof WorkEvidenceSourceV1Schema>;
 
 export const WorkExecutableReferenceSchema = z.object({
   artifact_digest: z.lazy(() => ManifestDigestSchema),
@@ -4028,6 +4183,18 @@ export const WorkExecutionEnvelopeV1Schema = z.object({
   worktree_root: z.string(),
 });
 export type WorkExecutionEnvelopeV1 = z.infer<typeof WorkExecutionEnvelopeV1Schema>;
+
+export const WorkExecutionHistoryV1Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("absent"),
+}), z.object({
+  attempt_coverage: z.lazy(() => WorkAttemptListCoverageV1Schema),
+  observed_order: z.array(z.lazy(() => WorkObservedExecutionV1Schema)),
+  order_basis: z.lazy(() => WorkObservedExecutionOrderBasisV1Schema),
+  spans: z.array(z.lazy(() => WorkExecutionSpanV1Schema)),
+  state: z.literal("listed"),
+  timing_coverage: z.lazy(() => WorkExecutionTimingCoverageV1Schema),
+})]);
+export type WorkExecutionHistoryV1 = z.infer<typeof WorkExecutionHistoryV1Schema>;
 
 export const WorkExecutionLeakKindV1Schema = z.enum(["attempt_without_live_owner", "effect_unknown_past_deadline", "lease_after_terminal", "missing_worktree_binding", "none", "unbounded_delivery", "unknown"]);
 export type WorkExecutionLeakKindV1 = z.infer<typeof WorkExecutionLeakKindV1Schema>;
@@ -4072,6 +4239,109 @@ export const WorkExecutionSnapshotSchema = z.object({
 });
 export type WorkExecutionSnapshot = z.infer<typeof WorkExecutionSnapshotSchema>;
 
+export const WorkExecutionSpanV1Schema = z.object({
+  admitted_projection_sequence: z.number().int(),
+  effect_state: z.lazy(() => WorkEffectStateV1Schema),
+  ended_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  started_at: z.lazy(() => UtcMicrosSchema),
+  state: z.lazy(() => WorkAttemptStateV1Schema),
+  terminal_evidence_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
+  wall_micros: z.number().int().nullable(),
+});
+export type WorkExecutionSpanV1 = z.infer<typeof WorkExecutionSpanV1Schema>;
+
+export const WorkExecutionTimingCoverageV1Schema = z.discriminatedUnion("coverage", [z.object({
+  coverage: z.literal("complete"),
+}), z.object({
+  coverage: z.literal("partial"),
+  invalid_terminal_span: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+  missing_dispatch: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
+})]);
+export type WorkExecutionTimingCoverageV1 = z.infer<typeof WorkExecutionTimingCoverageV1Schema>;
+
+export const WorkExperienceApplicabilityV1Schema = z.enum(["same_accepted_route", "same_milestone"]);
+export type WorkExperienceApplicabilityV1 = z.infer<typeof WorkExperienceApplicabilityV1Schema>;
+
+export const WorkExperienceCandidateV1Schema = z.object({
+  applicability: z.array(z.lazy(() => WorkExperienceApplicabilityV1Schema)),
+  evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
+  item: z.lazy(() => WorkItemV1Schema),
+});
+export type WorkExperienceCandidateV1 = z.infer<typeof WorkExperienceCandidateV1Schema>;
+
+export const WorkExperienceCoverageV1Schema = z.discriminatedUnion("coverage", [z.object({
+  applicable: z.number().int(),
+  coverage: z.literal("complete"),
+  returned: z.number().int(),
+  stale_excluded: z.number().int(),
+}), z.object({
+  applicable: z.number().int(),
+  coverage: z.literal("partial"),
+  omitted_by_limit: z.number().int(),
+  returned: z.number().int(),
+  stale_excluded: z.number().int(),
+}), z.object({
+  coverage: z.literal("unavailable"),
+})]);
+export type WorkExperienceCoverageV1 = z.infer<typeof WorkExperienceCoverageV1Schema>;
+
+export const WorkExperienceRequestV1Schema = z.object({
+  evidence_not_before: z.lazy(() => UtcMicrosSchema),
+  expertise_categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
+  limit: z.number().int(),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+  task_id: z.lazy(() => TaskIdSchema),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkExperienceRequestV1 = z.infer<typeof WorkExperienceRequestV1Schema>;
+
+export const WorkExperienceV1Schema = z.object({
+  candidates: z.array(z.lazy(() => WorkExperienceCandidateV1Schema)),
+  coverage: z.lazy(() => WorkExperienceCoverageV1Schema),
+  evidence_not_before: z.lazy(() => UtcMicrosSchema),
+  expertise: z.lazy(() => WorkExpertiseAuthorizationV1Schema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkExperienceV1 = z.infer<typeof WorkExperienceV1Schema>;
+
+export const WorkExpertiseAuthorizationV1Schema = z.discriminatedUnion("availability", [z.object({
+  availability: z.literal("available"),
+  categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
+  durability: z.lazy(() => WorkExpertiseContextDurabilityV1Schema),
+  expires_at: z.lazy(() => UtcMicrosSchema),
+  pin: z.lazy(() => WorkExpertiseConsentPinV1Schema),
+}), z.object({
+  availability: z.literal("unavailable"),
+  legal_actions: z.array(z.lazy(() => WorkExpertiseLegalActionV1Schema)),
+  pin: z.lazy(() => WorkExpertiseConsentPinV1Schema),
+  reasons: z.array(z.lazy(() => WorkExpertiseUnavailableReasonV1Schema)),
+})]);
+export type WorkExpertiseAuthorizationV1 = z.infer<typeof WorkExpertiseAuthorizationV1Schema>;
+
+export const WorkExpertiseCategoryV1Schema = z.enum(["architecture", "domain", "framework", "language", "operations", "security", "testing"]);
+export type WorkExpertiseCategoryV1 = z.infer<typeof WorkExpertiseCategoryV1Schema>;
+
+export const WorkExpertiseConsentPinV1Schema = z.object({
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
+  configuration_revision: z.lazy(() => ConfigurationRevisionIdSchema),
+  configuration_snapshot: z.lazy(() => ConfigurationSnapshotIdSchema),
+  provenance_digest: z.lazy(() => ManifestDigestSchema),
+});
+export type WorkExpertiseConsentPinV1 = z.infer<typeof WorkExpertiseConsentPinV1Schema>;
+
+export const WorkExpertiseContextDurabilityV1Schema = z.literal("ephemeral_only");
+export type WorkExpertiseContextDurabilityV1 = z.infer<typeof WorkExpertiseContextDurabilityV1Schema>;
+
+export const WorkExpertiseLegalActionV1Schema = z.enum(["allow_requested_categories", "grant_project_consent", "grant_user_consent", "renew_project_consent", "renew_user_consent"]);
+export type WorkExpertiseLegalActionV1 = z.infer<typeof WorkExpertiseLegalActionV1Schema>;
+
+export const WorkExpertiseUnavailableReasonV1Schema = z.enum(["project_consent_disabled", "project_consent_expired", "project_consent_not_yet_effective", "requested_category_not_allowed", "user_consent_disabled", "user_consent_expired", "user_consent_not_yet_effective"]);
+export type WorkExpertiseUnavailableReasonV1 = z.infer<typeof WorkExpertiseUnavailableReasonV1Schema>;
+
 export const WorkFallbackTopologySchema = z.discriminatedUnion("kind", [z.object({
   executable: z.lazy(() => WorkExecutableReferenceSchema),
   kind: z.literal("codex_cli"),
@@ -4111,7 +4381,6 @@ export type WorkFrontierComparisonV1 = z.infer<typeof WorkFrontierComparisonV1Sc
 
 export const WorkGraphChangeV1Schema = z.discriminatedUnion("kind", [z.object({
   based_on_version: z.number().int(),
-  evidence: z.lazy(() => TaskEvidenceLinkV1Schema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   kind: z.literal("accepted_attempt_linked"),
   linked_at: z.lazy(() => UtcMicrosSchema),
@@ -4119,6 +4388,11 @@ export const WorkGraphChangeV1Schema = z.discriminatedUnion("kind", [z.object({
 }), z.object({
   evidence: z.lazy(() => TaskEvidenceLinkV1Schema),
   kind: z.literal("evidence_linked"),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  admitted_at: z.lazy(() => UtcMicrosSchema),
+  based_on_version: z.number().int(),
+  kind: z.literal("execution_admitted"),
   task_id: z.lazy(() => TaskIdSchema),
 }), z.object({
   handoff: z.lazy(() => WorkHandoffV1Schema),
@@ -4145,6 +4419,12 @@ export const WorkGraphChangeV1Schema = z.discriminatedUnion("kind", [z.object({
 }), z.object({
   item: z.lazy(() => WorkItemV1Schema),
   kind: z.literal("task_added"),
+}), z.object({
+  initiative: z.lazy(() => WorkInitiativeV1Schema),
+  item: z.lazy(() => WorkItemV1Schema),
+  kind: z.literal("task_created"),
+  milestone: z.lazy(() => WorkMilestoneV1Schema),
+  plan: z.lazy(() => WorkPlanV1Schema),
 }), z.object({
   applied_at: z.lazy(() => UtcMicrosSchema),
   kind: z.literal("task_relations_replanned"),
@@ -4267,12 +4547,13 @@ export type WorkItemInputV1 = z.infer<typeof WorkItemInputV1Schema>;
 
 export const WorkItemV1Schema = z.object({
   accepted_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-  accepted_attempts: z.record(z.string()),
+  accepted_attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   accepted_criteria: z.record(z.string()),
   accepted_proposal: z.union([z.lazy(() => ProposalIdSchema), z.null()]),
   accepted_route: z.union([z.lazy(() => WorkRouteDecisionV1Schema), z.null()]),
   archived_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   evidence_links: z.array(z.string()),
+  execution_admitted_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   handoffs: z.array(z.lazy(() => WorkHandoffV1Schema)),
   input: z.lazy(() => WorkItemInputV1Schema),
 });
@@ -4331,11 +4612,24 @@ export const WorkMilestoneV1Schema = z.object({
 });
 export type WorkMilestoneV1 = z.infer<typeof WorkMilestoneV1Schema>;
 
+export const WorkObservedExecutionOrderBasisV1Schema = z.literal("terminal_observed_at_then_admitted_projection_sequence_then_attempt_identity");
+export type WorkObservedExecutionOrderBasisV1 = z.infer<typeof WorkObservedExecutionOrderBasisV1Schema>;
+
+export const WorkObservedExecutionV1Schema = z.object({
+  admitted_projection_sequence: z.number().int(),
+  evidence_digest: z.lazy(() => ManifestDigestSchema),
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  ordinal: z.number().int(),
+  state: z.lazy(() => WorkAttemptStateV1Schema),
+});
+export type WorkObservedExecutionV1 = z.infer<typeof WorkObservedExecutionV1Schema>;
+
 /** Ordinal band. Never a probability, never a scalar score.
 
 Bands are ordered `Lowest` .. `Highest`. Comparison is the only operation
-the evaluator performs over them, so no weighted sum can be reconstructed
-from a recorded decision. */
+consumers perform over them, so no weighted sum can be reconstructed from
+a recorded decision. */
 export const WorkOrdinalBandV1Schema = z.enum(["high", "highest", "low", "lowest", "moderate"]);
 export type WorkOrdinalBandV1 = z.infer<typeof WorkOrdinalBandV1Schema>;
 
@@ -4436,6 +4730,24 @@ export const WorkPlanV1Schema = z.object({
 });
 export type WorkPlanV1 = z.infer<typeof WorkPlanV1Schema>;
 
+/** Cohort denominator. APPLICATION-supplied, never worker-supplied.
+
+A worker cannot widen its own calibration cohort, so a route cannot earn
+calibrated sizing by reporting its own successes. */
+export const WorkPriorOutcomeV1Schema = z.object({
+  accepted: z.boolean(),
+  escaped_defect: z.boolean(),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  rework: z.boolean(),
+  route_id: z.string(),
+  terminal: z.lazy(() => WorkPriorTerminalV1Schema),
+});
+export type WorkPriorOutcomeV1 = z.infer<typeof WorkPriorOutcomeV1Schema>;
+
+/** How a prior attempt on a route ended. Recorded, never inferred. */
+export const WorkPriorTerminalV1Schema = z.enum(["cancelled", "failed", "succeeded", "timed_out"]);
+export type WorkPriorTerminalV1 = z.infer<typeof WorkPriorTerminalV1Schema>;
+
 export const WorkProductAuthorizedRelationScopeV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("project"),
   project_id: z.lazy(() => ProjectIdSchema),
@@ -4445,6 +4757,45 @@ export const WorkProductAuthorizedRelationScopeV1Schema = z.discriminatedUnion("
   repository_id: z.lazy(() => RepositoryIdSchema),
 })]);
 export type WorkProductAuthorizedRelationScopeV1 = z.infer<typeof WorkProductAuthorizedRelationScopeV1Schema>;
+
+/** Operator-selected graph change before the owning Work authority binds the
+current verified head and revision authorities. */
+export const WorkProductChangeDraftV1Schema = z.discriminatedUnion("change", [z.object({
+  change: z.literal("accept_task"),
+  evidence_by_criterion: z.record(z.string()),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  change: z.literal("add_task"),
+  item: z.lazy(() => WorkItemV1Schema),
+}), z.object({
+  change: z.literal("admit_execution"),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  change: z.literal("apply_relation_replan"),
+  proposal_id: z.lazy(() => ProposalIdSchema),
+}), z.object({
+  change: z.literal("create_task"),
+  initiative: z.lazy(() => WorkInitiativeV1Schema),
+  item: z.lazy(() => WorkItemV1Schema),
+  milestone: z.lazy(() => WorkMilestoneV1Schema),
+  plan: z.lazy(() => WorkPlanV1Schema),
+}), z.object({
+  change: z.literal("decide_proposal"),
+  disposition: z.lazy(() => WorkProposalDispositionV12Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+}), z.object({
+  change: z.literal("decide_relation_replan"),
+  disposition: z.lazy(() => WorkProposalDispositionV12Schema),
+  proposal: z.lazy(() => WorkRelationReplanProposalV1Schema),
+}), z.object({
+  change: z.literal("link_accepted_attempt"),
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  change: z.literal("record_handoff"),
+  handoff: z.lazy(() => WorkHandoffV1Schema),
+})]);
+export type WorkProductChangeDraftV1 = z.infer<typeof WorkProductChangeDraftV1Schema>;
 
 export const WorkProductEventEvidenceV1Schema = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
@@ -4525,11 +4876,20 @@ export const WorkProductMutationRequestV1Schema = z.discriminatedUnion("mutation
   mutation: z.literal("accept_task"),
   request: z.lazy(() => AcceptWorkTaskRequestV1Schema),
 }), z.object({
+  mutation: z.literal("add_task"),
+  request: z.lazy(() => AddWorkTaskRequestV1Schema),
+}), z.object({
+  mutation: z.literal("admit_execution"),
+  request: z.lazy(() => AdmitWorkExecutionRequestV1Schema),
+}), z.object({
   mutation: z.literal("apply_relation_replan"),
   request: z.lazy(() => ApplyWorkRelationReplanRequestV1Schema),
 }), z.object({
   mutation: z.literal("create"),
   request: z.lazy(() => CreateWorkProductRequestV1Schema),
+}), z.object({
+  mutation: z.literal("create_task"),
+  request: z.lazy(() => CreateWorkTaskRequestV1Schema),
 }), z.object({
   mutation: z.literal("decide_proposal"),
   request: z.lazy(() => DecideWorkProposalRequestV1Schema),
@@ -4563,6 +4923,49 @@ export const WorkProductProjectionBundleV1Schema = z.object({
 });
 export type WorkProductProjectionBundleV1 = z.infer<typeof WorkProductProjectionBundleV1Schema>;
 
+export const WorkProductRelationV1Schema = z.discriminatedUnion("kind", [z.object({
+  identity: z.lazy(() => WorkAttemptIdentityV1Schema),
+  kind: z.literal("accepted_attempt"),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  cause: z.lazy(() => TaskIdSchema),
+  effect: z.lazy(() => TaskIdSchema),
+  kind: z.literal("causal_candidate"),
+}), z.object({
+  kind: z.literal("evidence"),
+  link_id: z.string(),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  dependency: z.lazy(() => TaskIdSchema),
+  dependent: z.lazy(() => TaskIdSchema),
+  kind: z.literal("gates"),
+}), z.object({
+  handoff_id: z.string(),
+  kind: z.literal("handoff"),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  kind: z.literal("informational"),
+  source: z.lazy(() => TaskIdSchema),
+  target: z.lazy(() => TaskIdSchema),
+}), z.object({
+  initiative_id: z.string(),
+  kind: z.literal("initiative_contains_plan"),
+  plan_id: z.string(),
+}), z.object({
+  kind: z.literal("milestone_contains_task"),
+  milestone_id: z.string(),
+  task_id: z.lazy(() => TaskIdSchema),
+}), z.object({
+  kind: z.literal("plan_contains_milestone"),
+  milestone_id: z.string(),
+  plan_id: z.string(),
+}), z.object({
+  kind: z.literal("proposal_decision"),
+  proposal_id: z.lazy(() => ProposalIdSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+})]);
+export type WorkProductRelationV1 = z.infer<typeof WorkProductRelationV1Schema>;
+
 export const WorkProductRevisionPinsV1Schema = z.object({
   catalog_generation_id: z.lazy(() => CatalogGenerationIdSchema),
   configuration_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
@@ -4570,8 +4973,12 @@ export const WorkProductRevisionPinsV1Schema = z.object({
 });
 export type WorkProductRevisionPinsV1 = z.infer<typeof WorkProductRevisionPinsV1Schema>;
 
-/** The relation subset selected for one request. `ProfileOwnedNoGit` is an
-explicit no-Git selection, not an empty set that bypasses authorization. */
+/** The exact owner-relative relation set selected for a canonical Work graph.
+
+This identity lives in the domain because Plan 32 attempt admission must
+retain it byte-for-byte through provider settlement. Reconstructing it
+from a project context would conflate explicit no-Git work with a scoped
+repository relation. */
 export const WorkProductSelectionScopeV1Schema = z.discriminatedUnion("selection", [z.object({
   selection: z.literal("profile_owned_no_git"),
 }), z.object({
@@ -4586,7 +4993,6 @@ export const WorkProjectionSchema = z.object({
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
   execution_admitted: z.boolean(),
   history_len: z.number().int(),
-  runtime_evidence: z.array(z.lazy(() => RuntimeEvidenceRefSchema)),
   task_accepted: z.boolean(),
   task_id: z.lazy(() => TaskIdSchema),
   title: z.string(),
@@ -4663,10 +5069,36 @@ executes; each action names a separate version-checked application command. */
 export const WorkProposalActionV1Schema = z.enum(["admit_execution", "hold_for_dependencies", "proceed_to_acceptance", "replan"]);
 export type WorkProposalActionV1 = z.infer<typeof WorkProposalActionV1Schema>;
 
+export const WorkProposalComparisonEffectV1Schema = z.literal("advisory_only");
+export type WorkProposalComparisonEffectV1 = z.infer<typeof WorkProposalComparisonEffectV1Schema>;
+
+export const WorkProposalComparisonRequestV1Schema = z.object({
+  new_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  old_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type WorkProposalComparisonRequestV1 = z.infer<typeof WorkProposalComparisonRequestV1Schema>;
+
+export const WorkProposalComparisonV1Schema = z.object({
+  added_evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
+  added_relations: z.array(z.lazy(() => WorkProductRelationV1Schema)),
+  effect: z.lazy(() => WorkProposalComparisonEffectV1Schema),
+  item_changed: z.boolean(),
+  new: z.lazy(() => VerifiedWorkEvidenceRootV1Schema),
+  old: z.lazy(() => VerifiedWorkEvidenceRootV1Schema),
+  removed_evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
+  removed_relations: z.array(z.lazy(() => WorkProductRelationV1Schema)),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type WorkProposalComparisonV1 = z.infer<typeof WorkProposalComparisonV1Schema>;
+
 /** One explained, replayable work-loop decision. */
 export const WorkProposalDecisionV1Schema = z.object({
   based_on_version: z.number().int(),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
+  configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   decomposition: z.union([z.lazy(() => WorkDecompositionProposalV1Schema), z.null()]).optional(),
   deterministic_fallback: z.boolean(),
   disposition: z.lazy(() => WorkProposalDispositionV1Schema),
@@ -4701,7 +5133,7 @@ export type WorkProposalDispositionV1 = z.infer<typeof WorkProposalDispositionV1
 export const WorkProposalDispositionV12Schema = z.enum(["accepted", "rejected", "superseded"]);
 export type WorkProposalDispositionV12 = z.infer<typeof WorkProposalDispositionV12Schema>;
 
-export const WorkProposalReasonV1Schema = z.enum(["deadline_exceeded", "dependencies_unresolved", "deterministic_baseline_selected", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "human_override_applied", "insufficient_calibration_support", "invalid_request", "no_eligible_routes", "proposal_accepted", "ready", "request_cancelled", "route_budget_exceeded", "route_content_location_refused", "route_evidence_sparse", "route_evidence_stale", "task_accepted", "terminal_evidence_observed"]);
+export const WorkProposalReasonV1Schema = z.enum(["deadline_exceeded", "dependencies_unresolved", "deterministic_baseline_selected", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "human_override_applied", "insufficient_calibration_support", "invalid_request", "no_eligible_routes", "proposal_accepted", "ready", "request_cancelled", "route_budget_exceeded", "route_content_location_refused", "route_evidence_sparse", "route_evidence_stale", "runtime_coverage_partial", "runtime_coverage_unavailable", "task_accepted", "terminal_evidence_observed"]);
 export type WorkProposalReasonV1 = z.infer<typeof WorkProposalReasonV1Schema>;
 
 export const WorkProposalV1Schema = z.object({
@@ -4834,10 +5266,10 @@ export const WorkRetryAttemptOutcomeV1Schema = z.discriminatedUnion("outcome", [
 })]);
 export type WorkRetryAttemptOutcomeV1 = z.infer<typeof WorkRetryAttemptOutcomeV1Schema>;
 
-export const WorkRetryCauseV1Schema = z.enum(["runtime_failure", "test_failure"]);
+export const WorkRetryCauseV1Schema = z.literal("runtime_failure");
 export type WorkRetryCauseV1 = z.infer<typeof WorkRetryCauseV1Schema>;
 
-/** A selector into an owning runtime or managed-Test evidence authority.
+/** A selector into the owning runtime-terminal evidence authority.
 
 `evidence_ref` is an opaque local reference. The Work retry owner resolves
 it through [`WorkRetryEvidencePortV1`]; callers never submit the evidence
@@ -4860,28 +5292,8 @@ export const WorkRetryReceiptV1Schema = z.object({
 });
 export type WorkRetryReceiptV1 = z.infer<typeof WorkRetryReceiptV1Schema>;
 
-export const WorkRetrySourceV1Schema = z.enum(["runtime", "test"]);
+export const WorkRetrySourceV1Schema = z.literal("runtime");
 export type WorkRetrySourceV1 = z.infer<typeof WorkRetrySourceV1Schema>;
-
-/** Public opaque capability returned by Work. The managed-Test tool accepts it
-as `work_retry_test_binding_token`, then resolves its authority only from
-the registered Work store. */
-export const WorkRetryTestBindingTokenOutcomeV1Schema = z.object({
-  token: z.lazy(() => WorkRetryTestBindingTokenV1Schema),
-});
-export type WorkRetryTestBindingTokenOutcomeV1 = z.infer<typeof WorkRetryTestBindingTokenOutcomeV1Schema>;
-
-/** Work's request to launch managed Tests for an exact prior attempt. It has
-no caller-supplied test outcome, digest, scope, or timestamp. */
-export const WorkRetryTestBindingTokenRequestV1Schema = z.object({
-  original_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
-});
-export type WorkRetryTestBindingTokenRequestV1 = z.infer<typeof WorkRetryTestBindingTokenRequestV1Schema>;
-
-/** Opaque, Work-minted token that a trusted managed-Test launch carries into
-its terminal journal entry. The database, not syntax, proves ownership. */
-export const WorkRetryTestBindingTokenV1Schema = z.string();
-export type WorkRetryTestBindingTokenV1 = z.infer<typeof WorkRetryTestBindingTokenV1Schema>;
 
 export const WorkRouteDecisionV1Schema = z.discriminatedUnion("decision", [z.object({
   decision: z.literal("abstained"),
@@ -5107,6 +5519,73 @@ export const WorkSynthesisSourceSetV1Schema = z.object({
 });
 export type WorkSynthesisSourceSetV1 = z.infer<typeof WorkSynthesisSourceSetV1Schema>;
 
+export const WorkTaskSessionContinuationV1Schema = z.object({
+  attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  participant_epoch: z.lazy(() => ManifestDigestSchema),
+  ranking_cursor: z.string().nullable(),
+  source: z.lazy(() => ObservationSourceIdentityV1Schema),
+  temporal_cursor: z.string().nullable(),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkTaskSessionContinuationV1 = z.infer<typeof WorkTaskSessionContinuationV1Schema>;
+
+export const WorkTaskSessionCoverageV1Schema = z.object({
+  hidden: z.number().int(),
+  redacted: z.number().int(),
+  unknown: z.number().int(),
+  visible: z.number().int(),
+});
+export type WorkTaskSessionCoverageV1 = z.infer<typeof WorkTaskSessionCoverageV1Schema>;
+
+export const WorkTaskSessionEvidenceV1Schema = z.object({
+  attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  continuation: z.union([z.lazy(() => WorkTaskSessionContinuationV1Schema), z.null()]),
+  coverage: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
+  coverage_counts: z.lazy(() => WorkTaskSessionCoverageV1Schema),
+  freshness: z.lazy(() => WorkEvidenceFreshnessV1Schema),
+  hydrated: z.array(z.lazy(() => WorkTaskSessionHydrationV1Schema)),
+  participant_epoch: z.lazy(() => ManifestDigestSchema),
+  ranked_anchors: z.array(z.lazy(() => WorkTaskSessionRankedAnchorV1Schema)),
+  redacted: z.boolean(),
+  source: z.lazy(() => ObservationSourceIdentityV1Schema),
+  task_id: z.lazy(() => TaskIdSchema),
+  verified_version: z.lazy(() => VerifiedWorkGraphVersionV1Schema),
+});
+export type WorkTaskSessionEvidenceV1 = z.infer<typeof WorkTaskSessionEvidenceV1Schema>;
+
+export const WorkTaskSessionHydrationStateV1Schema = z.enum(["available", "deleted", "locked", "redacted", "retained_but_unavailable", "retention_expired", "unauthorized", "unverifiable_legacy"]);
+export type WorkTaskSessionHydrationStateV1 = z.infer<typeof WorkTaskSessionHydrationStateV1Schema>;
+
+export const WorkTaskSessionHydrationV1Schema = z.object({
+  anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
+  content: z.array(z.number().int()).nullable(),
+  rank: z.number().int(),
+  state: z.lazy(() => WorkTaskSessionHydrationStateV1Schema),
+});
+export type WorkTaskSessionHydrationV1 = z.infer<typeof WorkTaskSessionHydrationV1Schema>;
+
+export const WorkTaskSessionRankContributionV1Schema = z.object({
+  calibrated_feature_micros: z.number().int(),
+  calibration_profile: z.string(),
+  ordinal_rank: z.number().int(),
+  raw_score_micros: z.number().int(),
+  retriever: z.string(),
+  retriever_revision: z.string(),
+  score_domain: z.string(),
+  source_occurrence: z.string(),
+  weight_micros: z.number().int(),
+  weighted_contribution_micros: z.number().int(),
+});
+export type WorkTaskSessionRankContributionV1 = z.infer<typeof WorkTaskSessionRankContributionV1Schema>;
+
+export const WorkTaskSessionRankedAnchorV1Schema = z.object({
+  anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
+  contributions: z.array(z.lazy(() => WorkTaskSessionRankContributionV1Schema)),
+  final_ordinal: z.number().int(),
+  utility_micros: z.number().int(),
+});
+export type WorkTaskSessionRankedAnchorV1 = z.infer<typeof WorkTaskSessionRankedAnchorV1Schema>;
+
 /** Kind of work the snapshot facts describe. Derived only from facts already in
 the input; `Unclassified` when those facts do not distinguish a kind. */
 export const WorkTaskShapeKindV1Schema = z.enum(["change", "investigation", "synthesis", "unclassified", "verification"]);
@@ -5164,6 +5643,10 @@ export const WorkTopologyExecutionPlacementV1Schema = z.object({
   mode: z.lazy(() => WorktreePlacementModeV1Schema),
 });
 export type WorkTopologyExecutionPlacementV1 = z.infer<typeof WorkTopologyExecutionPlacementV1Schema>;
+
+/** Strongly typed algorithm-tagged integrity digest: `WorkTopologyGenerationRefV1`. */
+export const WorkTopologyGenerationRefV1Schema = z.string();
+export type WorkTopologyGenerationRefV1 = z.infer<typeof WorkTopologyGenerationRefV1Schema>;
 
 /** The integration-strategy dimension, read verbatim from the resolved work
 topology policy the runs in scope are admitted against. */
