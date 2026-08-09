@@ -312,7 +312,7 @@ impl SourceEditDurableEffectPayloadV1 {
                 None,
                 None,
                 None,
-                Some(result.text_only_matches.len()),
+                Some(result.hazards.len()),
             ),
             _ => (None, None, None, None, None),
         };
@@ -374,9 +374,54 @@ pub struct SourceEditSurfaceResultV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_edit::{RenameFileEditV1, RenameHazardKindV1, RenameHazardV1};
 
     const EXPECTED_STATE: &str =
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn durable_rename_metadata_counts_current_hazards_and_changes() {
+        let outcome = SourceEditSurfaceOutcomeV1::Rename(RenameResult {
+            success: true,
+            files: vec![
+                RenameFileEditV1 {
+                    file: "src/lib.rs".to_owned(),
+                    replaced_count: 2,
+                },
+                RenameFileEditV1 {
+                    file: "src/caller.rs".to_owned(),
+                    replaced_count: 3,
+                },
+            ],
+            hazards: vec![
+                RenameHazardV1 {
+                    kind: RenameHazardKindV1::Shadowing,
+                    blocking: false,
+                    message: "shadowing requires review".to_owned(),
+                    site_id: Some("site.shadowing".to_owned()),
+                },
+                RenameHazardV1 {
+                    kind: RenameHazardKindV1::ChangedResolution,
+                    blocking: true,
+                    message: "resolution would change".to_owned(),
+                    site_id: Some("site.resolution".to_owned()),
+                },
+            ],
+            message: "rename planned".to_owned(),
+            ..RenameResult::default()
+        });
+        let operation = UseCaseId::new("use-case.application.rename-symbol")
+            .expect("rename operation identity");
+
+        let durable = SourceEditDurableEffectPayloadV1::from_live(&operation, &outcome);
+
+        assert_eq!(durable.change_count, Some(5));
+        assert_eq!(durable.finding_count, Some(2));
+        assert_eq!(
+            durable.files,
+            ["src/lib.rs".to_owned(), "src/caller.rs".to_owned()]
+        );
+    }
 
     #[test]
     fn source_edit_surface_wire_types_are_deserialize_owned() {

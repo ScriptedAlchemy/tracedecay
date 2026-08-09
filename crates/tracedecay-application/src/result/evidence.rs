@@ -1,5 +1,6 @@
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
@@ -58,7 +59,7 @@ impl TemporalState {
 }
 
 /// A policy decision pinned into a receipt or provider identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDecisionRef {
     pub decision_id: String,
@@ -106,7 +107,7 @@ impl PolicyDecisionRef {
 }
 
 /// Proof that this request crossed the current authorization boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorityReceipt {
     pub grant_id: CapabilityGrantId,

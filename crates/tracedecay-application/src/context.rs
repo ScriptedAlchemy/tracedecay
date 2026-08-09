@@ -90,7 +90,9 @@ impl ResolvedScope {
 }
 
 /// Disclosure ceiling carried by an immutable grant and revalidated at sinks.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DisclosureClass {
     Metadata,

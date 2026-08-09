@@ -157,7 +157,9 @@ mod tests {
 }
 
 /// Reconciliation state retained after an admitted effect.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationState {
     Pending,
@@ -269,7 +271,7 @@ impl EffectReceipt {
 
 /// Result of an admitted effect. `EffectUnknown` remains a receipt state and
 /// cannot be remapped into a pre-admission problem.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EffectResult<T> {
     pub effect_id: EffectId,
