@@ -19,21 +19,21 @@
  * computation's floor, and `pairs.length` is what survived this request's floor
  * and cap. Reporting any one as "the store" misstates the other two.
  */
-import { useMemo, useState } from 'react';
-import type { EChartsOption } from 'echarts';
+import { useMemo, useState } from "react";
+import type { EChartsOption } from "echarts";
 
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
-import { Panel, Readout } from '../../ui/instrument.tsx';
-import { StateChip } from '../../ui/StateChip.tsx';
-import { Chart } from '../../viz/chart/Chart.tsx';
-import { SearchField } from '../../ui/search/SearchField.tsx';
+import { PayloadBoundary } from "../../ui/ReadSection.tsx";
+import { Panel, Readout } from "../../ui/instrument.tsx";
+import { StateChip } from "../../ui/StateChip.tsx";
+import { Chart } from "../../viz/chart/Chart.tsx";
+import { SearchField } from "../../ui/search/SearchField.tsx";
 import {
   useMemoryProjection,
   useMemorySimilarity,
   type ProjectionPayload,
   type SimilarityPayload,
-} from '../../data/query/memory.ts';
-import { projectionReading, similarityReading } from './memoryModel.ts';
+} from "../../data/query/memory.ts";
+import { projectionReading, similarityReading } from "./memoryModel.ts";
 
 /**
  * The similarity floors this panel offers.
@@ -48,8 +48,8 @@ import { projectionReading, similarityReading } from './memoryModel.ts';
 const FLOORS = [0.95, 0.85, 0.75, 0.6] as const;
 
 export function MemoryGeometry() {
-  const [query, setQuery] = useState('');
-  const [applied, setApplied] = useState('');
+  const [query, setQuery] = useState("");
+  const [applied, setApplied] = useState("");
   const [floor, setFloor] = useState<number>(0.85);
   const projection = useMemoryProjection(applied);
   const similarity = useMemorySimilarity(floor);
@@ -63,21 +63,21 @@ export function MemoryGeometry() {
             onChange={setQuery}
             onSubmit={() => setApplied(query.trim())}
             onClear={() => {
-              setQuery('');
-              setApplied('');
+              setQuery("");
+              setApplied("");
             }}
             label="Restrict the projection"
             placeholder="Restrict the projection"
             hint="an empty query projects every vectored fact"
             submitted={applied}
           />
-          <LegacyBoundary
+          <PayloadBoundary
             title="Phase projection"
             pending={projection.isPending}
             result={projection.data}
           >
             {(data) => <ProjectionBody data={data} />}
-          </LegacyBoundary>
+          </PayloadBoundary>
         </div>
       </Panel>
       <Panel
@@ -85,13 +85,13 @@ export function MemoryGeometry() {
         actions={<FloorControl floor={floor} onSelect={setFloor} />}
         elevation="well"
       >
-        <LegacyBoundary
+        <PayloadBoundary
           title="Pairwise similarity"
           pending={similarity.isPending}
           result={similarity.data}
         >
           {(data) => <SimilarityBody data={data} />}
-        </LegacyBoundary>
+        </PayloadBoundary>
       </Panel>
     </div>
   );
@@ -118,8 +118,8 @@ function FloorControl({
           onClick={() => onSelect(value)}
           className={
             value === floor
-              ? 'td-hit border border-edge-strong bg-surface-3 px-2 text-3xs text-text-primary'
-              : 'td-hit border border-edge-subtle px-2 text-3xs text-text-secondary hover:bg-surface-2'
+              ? "td-hit border border-edge-strong bg-surface-3 px-2 text-3xs text-text-primary"
+              : "td-hit border border-edge-subtle px-2 text-3xs text-text-secondary hover:bg-surface-2"
           }
         >
           ≥ {value.toFixed(2)}
@@ -133,12 +133,20 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
   const reading = projectionReading(data);
   const option = useMemo<EChartsOption>(
     () => ({
-      xAxis: { type: 'value', axisLabel: { show: false }, axisTick: { show: false } },
-      yAxis: { type: 'value', axisLabel: { show: false }, axisTick: { show: false } },
+      xAxis: {
+        type: "value",
+        axisLabel: { show: false },
+        axisTick: { show: false },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { show: false },
+        axisTick: { show: false },
+      },
       grid: { left: 6, right: 6, top: 8, bottom: 6, containLabel: true },
       series: [
         {
-          type: 'scatter',
+          type: "scatter",
           symbolSize: 5,
           data: reading.points.map((point) => [point.x, point.y]),
         },
@@ -146,7 +154,7 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
     }),
     [reading.points],
   );
-  if (data.error !== '') {
+  if (data.error !== "") {
     return (
       <p role="status" className="text-2xs leading-relaxed text-state-error">
         the projection could not be computed: {data.error}
@@ -155,7 +163,9 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
   }
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-2xs leading-relaxed text-text-secondary">{reading.note}</p>
+      <p className="text-2xs leading-relaxed text-text-secondary">
+        {reading.note}
+      </p>
       {reading.projected ? (
         <>
           <Chart
@@ -164,14 +174,17 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
             option={option}
           />
           <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-edge-subtle pt-2 text-2xs sm:grid-cols-4">
-            <Figure label="projected" value={reading.points.length.toLocaleString()} />
+            <Figure
+              label="projected"
+              value={reading.points.length.toLocaleString()}
+            />
             <Figure label="vector width" value={reading.dim.toLocaleString()} />
             <Figure
               label="pc1 extent"
               value={
                 reading.extent
                   ? `${reading.extent.x[0].toFixed(2)} … ${reading.extent.x[1].toFixed(2)}`
-                  : '—'
+                  : "—"
               }
             />
             <Figure
@@ -179,12 +192,12 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
               value={
                 reading.extent
                   ? `${reading.extent.y[0].toFixed(2)} … ${reading.extent.y[1].toFixed(2)}`
-                  : '—'
+                  : "—"
               }
             />
           </dl>
           {/* The scatter is a canvas, so the census below is the accessible
-            * reading of the same data rather than a decoration of it. */}
+           * reading of the same data rather than a decoration of it. */}
           <ul
             aria-label="Projected facts by category"
             className="flex flex-wrap gap-x-3 gap-y-0.5 text-3xs text-text-muted"
@@ -198,7 +211,9 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
         </>
       ) : (
         <StateChip
-          kind={reading.points.length === 0 ? 'complete_zero_findings' : 'partial'}
+          kind={
+            reading.points.length === 0 ? "complete_zero_findings" : "partial"
+          }
           detail={`method reported as "${data.method}"`}
         />
       )}
@@ -208,7 +223,7 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
 
 function SimilarityBody({ data }: { data: SimilarityPayload }) {
   const reading = similarityReading(data);
-  if (data.error !== '') {
+  if (data.error !== "") {
     return (
       <p role="status" className="text-2xs leading-relaxed text-state-error">
         similarity could not be computed: {data.error}
@@ -217,28 +232,33 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
   }
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-2xs leading-relaxed text-text-secondary">{reading.denominators}</p>
+      <p className="text-2xs leading-relaxed text-text-secondary">
+        {reading.denominators}
+      </p>
       <div className="flex flex-wrap items-end gap-4 border-y border-edge-subtle py-2">
         <Readout
           label="mean"
           size="sm"
-          value={reading.average == null ? 'unmeasured' : reading.average.toFixed(4)}
+          value={
+            reading.average == null ? "unmeasured" : reading.average.toFixed(4)
+          }
         />
         <Readout
           label="min"
           size="sm"
-          value={reading.min == null ? 'unmeasured' : reading.min.toFixed(4)}
+          value={reading.min == null ? "unmeasured" : reading.min.toFixed(4)}
         />
         <Readout
           label="max"
           size="sm"
-          value={reading.max == null ? 'unmeasured' : reading.max.toFixed(4)}
+          value={reading.max == null ? "unmeasured" : reading.max.toFixed(4)}
         />
       </div>
       {reading.capped ? (
         <p className="text-3xs leading-relaxed text-text-muted">
-          the list below stops at this request's cap of {data.limit.toLocaleString()} pairs —
-          it is the top of the ranking, not all of it
+          the list below stops at this request's cap of{" "}
+          {data.limit.toLocaleString()} pairs — it is the top of the ranking,
+          not all of it
         </p>
       ) : null}
       {reading.returned === 0 ? (
@@ -246,7 +266,7 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
           no pair scores at or above {data.min_similarity.toFixed(2)}
           {reading.scored > 0
             ? ` — ${reading.scored.toLocaleString()} pairs were scored below it`
-            : ''}
+            : ""}
         </p>
       ) : (
         // Named and tab-reachable: the pair list scrolls and holds no
@@ -270,21 +290,30 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
                 <span className="td-value" data-cell="numeric">
                   {pair.similarity.toFixed(4)}
                 </span>
-                <span className="text-text-secondary">{pair.classification}</span>
+                <span className="text-text-secondary">
+                  {pair.classification}
+                </span>
                 <span>
                   {pair.a_category}
-                  {pair.a_category === pair.b_category ? '' : ` · ${pair.b_category}`}
+                  {pair.a_category === pair.b_category
+                    ? ""
+                    : ` · ${pair.b_category}`}
                 </span>
               </p>
-              <p className="text-2xs leading-relaxed text-text-secondary">{pair.a_content}</p>
-              <p className="text-2xs leading-relaxed text-text-secondary">{pair.b_content}</p>
+              <p className="text-2xs leading-relaxed text-text-secondary">
+                {pair.a_content}
+              </p>
+              <p className="text-2xs leading-relaxed text-text-secondary">
+                {pair.b_content}
+              </p>
             </li>
           ))}
         </ol>
       )}
       <p className="text-3xs leading-relaxed text-text-muted">
-        a scored pair is a measurement, not a proposal — what the curator would do about one
-        lives on the Curation view
+        a scored pair is a measurement, not a proposal — the Curation view
+        reports the daemon's automatic post-validation outcomes and
+        enable/disable control
       </p>
     </div>
   );

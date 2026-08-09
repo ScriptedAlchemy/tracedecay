@@ -24,7 +24,7 @@ import type { ZodType } from 'zod';
 
 import { resolveFixture } from '../../stories/fixtures/data.ts';
 import { MultiRootCapabilityV1Schema } from '../contracts/generated.ts';
-import { AnyObject } from '../data/query/legacy.ts';
+import { AnyObject } from '../data/query/payload.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
@@ -200,9 +200,9 @@ const DiagnosticsPayload = z
 // The three automation list routes still answer with a bare `Value`, so these
 // stay mirrors. Their scheduler sibling does not: `automation_scheduler_api.rs`
 // is typed now, the page reads the generated `AutomationSchedulerStatusV1Schema`
-// directly, and the hand-written copy that used to sit here — every field
-// `optional()`, no `pending_review` at all — was mirroring a page schema that no
-// longer exists. It is gone rather than rewritten; a generated contract needs no
+// directly, and the hand-written copy that used to sit here — with every field
+// optional — was mirroring a page schema that no longer
+// exists. It is gone rather than rewritten; a generated contract needs no
 // mirror, and keeping one would be the drift this suite exists to catch.
 //
 // Every field below is required because the handler's `json!` literal writes it
@@ -238,7 +238,11 @@ const SkillsPayloadSchema = z
       z
         .object({
           metadata: z
-            .object({ id: z.string(), title: z.string(), state: z.string() })
+            .object({
+              id: z.string(),
+              title: z.string(),
+              state: z.enum(['active', 'disabled', 'archived']),
+            })
             .passthrough(),
         })
         .passthrough(),
@@ -247,18 +251,25 @@ const SkillsPayloadSchema = z
   })
   .passthrough();
 
-// AutomationsPage.tsx: FactProposalsPayloadSchema
-// (automation_fact_proposals_api.rs::list). `add_fact_request` is the one
-// optional member — `skip_serializing_if = "Option::is_none"` on
-// `FactProposalRecord` — so a record without one omits the key entirely.
-const FactProposalsPayloadSchema = z
+// AutomationsPage.tsx: automatic fact receipt list (the adapter still answers
+// a bare Value, so this remains a local mirror until it enters codegen).
+const AutomaticFactReceiptsPayloadSchema = z
   .object({
-    proposals: z.array(
+    receipts: z.array(
       z
         .object({
-          proposal_id: z.string(),
-          state: z.string(),
-          add_fact_request: z.object({ content: z.string() }).passthrough().optional(),
+          schema_version: z.number(),
+          apply_id: z.string(),
+          run_id: z.string(),
+          state: z.enum(['applied', 'quarantined']),
+          add_fact_request: z.object({ content: z.string() }).passthrough(),
+          evidence_hash: z.string().optional(),
+          item: AnyObject.optional(),
+          validation: AnyObject.optional(),
+          quarantine_reason: z.string().optional(),
+          applied_canonical_fact_id: z.string().optional(),
+          applied_fact_id: z.number().nullable().optional(),
+          recorded_at: z.number(),
         })
         .passthrough(),
     ),
@@ -697,12 +708,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const data = parse(AutomationSchedulerStatusV1Schema, '/api/automation/scheduler/status');
     expect(data.paused).toBe(false);
     expect(data.status.length).toBeGreaterThan(0);
-    // Both queues measured. This is the reading a mounted profile produces, and
-    // it is also what the list panels consult before they will call themselves
-    // empty — an `unreadable` fixture here would put every automation
-    // screenshot into the deferred state instead of the populated one.
-    expect(data.pending_review.fact_proposals.state).toBe('measured');
-    expect(data.pending_review.skills.state).toBe('measured');
+    expect(data.configuration_revision_id.length).toBeGreaterThan(0);
+    expect(data.tasks.length).toBeGreaterThan(0);
   });
 
   // The three list gates below assert the wire invariant each panel's
@@ -722,10 +729,13 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.count).toBe(data.skills.length);
   });
 
-  it('GET /api/automation/fact-proposals — automations (FactProposalsPayloadSchema)', () => {
-    const data = parse(FactProposalsPayloadSchema, '/api/automation/fact-proposals');
-    expect(data.proposals.length).toBeGreaterThanOrEqual(3);
-    expect(data.count).toBe(data.proposals.length);
+  it('GET /api/automation/automatic-fact-receipts — automations', () => {
+    const data = parse(
+      AutomaticFactReceiptsPayloadSchema,
+      '/api/automation/automatic-fact-receipts',
+    );
+    expect(data.receipts.length).toBeGreaterThanOrEqual(3);
+    expect(data.count).toBe(data.receipts.length);
     // Strictly under the cap the route ran the query with, so the fixture is a
     // complete answer rather than a full page that may have more behind it.
     expect(data.count).toBeLessThan(data.limit);

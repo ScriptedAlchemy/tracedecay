@@ -1,19 +1,7 @@
-/**
- * The two governance reads behind /automations: the scheduler's review queues,
- * and the storage-findings producers the nav rail's Doctor dot folds into one
- * state.
- *
- * Own module rather than more of `axe-audit.ts`, for the reason
- * `axe-workspaces.ts` gives: both halves need payload builders nothing else
- * uses. They sit together because they are the same failure in two places — a
- * read that did not happen, printed as a measurement that did. The scheduler
- * prints it as a `0` where a queue could not be counted; the dot prints it as a
- * clean bill of health where no producer ever looked.
- *
- * The scenarios are composed apart in `axe-audit.ts`, in the order they have
- * always run: the scheduler set, then Brain and Explorer, then the dot.
- */
+/** Browser audit scenarios for daemon-owned automation outcomes and the
+ * storage-findings state shown in the navigation rail. */
 import type { Page } from '@playwright/test';
+
 import { resolveFixture } from '../stories/fixtures/data.ts';
 import {
   expectAbsent,
@@ -34,15 +22,6 @@ const STORAGE_FINDINGS_KINDS = [
   'table_growth',
 ] as const;
 
-/**
- * The storage-findings envelope with each producer's source coverage replaced.
- *
- * Built from the checked-in fixture rather than hand-rolled, so the envelope
- * and Doctor payload around `kind_statuses` stay exactly what the audit and the
- * `endpoint-fixtures` contract gate already validate. A hand-written envelope
- * that silently failed to parse would make every scenario read `unknown` and
- * look like a passing three-state dot while proving nothing.
- */
 function storageFindings(
   statuses: ReadonlyArray<{ state: string; observed_entries: number }>,
 ): Record<string, unknown> {
@@ -65,198 +44,55 @@ function allProducers(state: string, observed = 0) {
   return STORAGE_FINDINGS_KINDS.map(() => ({ state, observed_entries: observed }));
 }
 
-/** The scheduler payload, with the two review queues in a chosen state. */
-function scheduler(review: {
-  factProposals: { state: 'measured'; count: number } | { state: 'unreadable'; reason: string };
-  skills: { state: 'measured'; count: number } | { state: 'unreadable'; reason: string };
-}): Record<string, unknown> {
-  const wire = (r: typeof review.factProposals) =>
-    r.state === 'measured'
-      ? { state: 'measured', count: r.count, reason: null }
-      : { state: 'unreadable', count: null, reason: r.reason };
-  return {
-    status: 'configured',
-    paused: false,
-    enabled: true,
-    scheduler_tick_secs: 900,
-    // Null, never zero, for a queue that could not be read — exactly what
-    // `automation_scheduler_api.rs` now emits.
-    pending_fact_proposals:
-      review.factProposals.state === 'measured' ? review.factProposals.count : null,
-    pending_skills: review.skills.state === 'measured' ? review.skills.count : null,
-    pending_review: { fact_proposals: wire(review.factProposals), skills: wire(review.skills) },
-    now: Math.floor(Date.now() / 1000),
-    last_session_activity: Math.floor(Date.now() / 1000) - 1200,
-    project_config_path: '/fast/projects/tracedecay/.tracedecay/automation.toml',
-    control_path: '/fast/projects/tracedecay/.tracedecay/automation.control.json',
-    tasks: [
-      { task: 'memory_curator', due: false, skip_reason: 'cooldown', last_scheduler_run: null },
-      { task: 'session_reflector', due: true, skip_reason: null, last_scheduler_run: null },
-      { task: 'skill_writer', due: false, skip_reason: 'no_new_sessions', last_scheduler_run: null },
-    ],
-  };
-}
-
-/** The pending-review tiles, as rendered text keyed by label. */
-async function reviewTiles(page: Page): Promise<Record<string, string>> {
-  return page.evaluate(() => {
-    const out: Record<string, string> = {};
-    for (const legend of Array.from(document.querySelectorAll('.td-legend'))) {
-      const label = (legend.textContent ?? '').trim();
-      if (label !== 'pending proposals' && label !== 'pending skills') continue;
-      const cell = legend.parentElement?.querySelector('[data-cell="numeric"]');
-      out[label] = (cell?.textContent ?? '').trim();
-    }
-    return out;
-  });
-}
-
-async function doctorDotState(page: Page): Promise<{ state: string; label: string }> {
-  const dot = page.locator('[data-doctor-health]').first();
-  await dot.waitFor({ state: 'attached', timeout: 15_000 });
-  return {
-    state: (await dot.getAttribute('data-doctor-health')) ?? '',
-    label: (await dot.getAttribute('aria-label')) ?? '',
-  };
-}
-
 export const AUTOMATION_SCHEDULER_SCENARIOS: readonly Scenario[] = [
   {
     id: 'automations-measured',
     route: '/automations',
-    proves: 'a real count still renders as a measured figure',
+    proves: 'scheduler receipts and automatic fact outcomes render without approval controls',
     overrides: {
-      [SCHEDULER]: {
-        status: 200,
-        body: scheduler({
-          factProposals: { state: 'measured', count: 5 },
-          skills: { state: 'measured', count: 2 },
-        }),
-      },
+      [SCHEDULER]: { status: 200, body: resolveFixture(SCHEDULER, '') },
     },
     assert: async (page) => {
-      const tiles = await reviewTiles(page);
-      expectEqual(tiles['pending proposals'], '5', 'measured proposals tile');
-      expectEqual(tiles['pending skills'], '2', 'measured skills tile');
-      await expectVisibleText(page, 'measured', 'measured evidence pattern');
-      await expectAbsent(
-        page,
-        'text=Awaiting-review counts are unknown',
-        'no unknown banner on a measured read',
-      );
+      await expectVisibleText(page, 'configuration revision', 'scheduler configuration revision');
+      await expectVisibleText(page, 'Fact application outcomes', 'automatic fact receipt panel');
+      await expectVisibleText(page, 'applied', 'applied receipt state');
+      await expectVisibleText(page, 'quarantined', 'quarantined receipt state');
+      await expectAbsent(page, 'text=approve', 'no browser approval action');
+      await expectAbsent(page, 'text=Apply', 'no browser apply action');
     },
   },
   {
     id: 'automations-confirmed-empty',
     route: '/automations',
-    proves: 'a queue that was read and is genuinely empty may still say zero',
+    proves: 'an empty automatic receipt history is stated as empty',
     overrides: {
-      [SCHEDULER]: {
+      '/api/automation/automatic-fact-receipts': {
         status: 200,
-        body: scheduler({
-          factProposals: { state: 'measured', count: 0 },
-          skills: { state: 'measured', count: 0 },
-        }),
+        body: { receipts: [], count: 0, limit: 50, error: '' },
       },
     },
     assert: async (page) => {
-      const tiles = await reviewTiles(page);
-      expectEqual(tiles['pending proposals'], '0', 'confirmed-empty proposals tile');
-      expectEqual(tiles['pending skills'], '0', 'confirmed-empty skills tile');
-      await expectAbsent(
-        page,
-        'text=Awaiting-review counts are unknown',
-        'a confirmed empty queue is not reported as unknown',
-      );
-    },
-  },
-  {
-    id: 'automations-unreadable',
-    route: '/automations',
-    proves: 'THE DEFECT 1 PROOF — both governance queues failed to read, and neither renders 0',
-    overrides: {
-      [SCHEDULER]: {
-        status: 200,
-        body: scheduler({
-          factProposals: {
-            state: 'unreadable',
-            reason: 'the project fact authority could not be read: database is locked',
-          },
-          skills: {
-            state: 'unreadable',
-            reason: 'the managed skill store could not be read: permission denied',
-          },
-        }),
-      },
-    },
-    assert: async (page) => {
-      const tiles = await reviewTiles(page);
-      // The whole defect, asserted directly: a failed read must not print a 0.
-      expectEqual(
-        tiles['pending proposals'],
-        '—',
-        'unreadable proposals tile, which a measured zero would falsify',
-      );
-      expectEqual(
-        tiles['pending skills'],
-        '—',
-        'unreadable skills tile, which a measured zero would falsify',
-      );
-      await expectVisibleText(page, 'unknown', 'unknown evidence pattern');
       await expectVisibleText(
         page,
-        'Awaiting-review counts are unknown, not zero.',
-        'the unknown-not-zero sentence',
+        'no fact application outcomes are recorded',
+        'empty receipt history',
       );
-      await expectVisibleText(page, 'database is locked', 'the fact-authority failure reason');
-      await expectVisibleText(page, 'permission denied', 'the skill-store failure reason');
-    },
-  },
-  {
-    id: 'automations-mixed',
-    route: '/automations',
-    proves: 'one unreadable queue never suppresses the other queue’s real count',
-    overrides: {
-      [SCHEDULER]: {
-        status: 200,
-        body: scheduler({
-          factProposals: { state: 'measured', count: 3 },
-          skills: {
-            state: 'unreadable',
-            reason: 'the user profile root could not be resolved: no home directory',
-          },
-        }),
-      },
-    },
-    assert: async (page) => {
-      const tiles = await reviewTiles(page);
-      expectEqual(tiles['pending proposals'], '3', 'measured proposals beside an unreadable queue');
-      expectEqual(tiles['pending skills'], '—', 'unreadable skills tile');
-      await expectVisibleText(page, 'no home directory', 'the profile-root failure reason');
     },
   },
   {
     id: 'automations-uncontracted-payload',
     route: '/automations',
-    proves:
-      'a scheduler payload missing the pending_review union reads as unsupported schema, never as counts',
+    proves: 'a scheduler payload missing its configuration revision reads as unsupported schema',
     overrides: {
       [SCHEDULER]: {
         status: 200,
-        // The flat `pending_*` mirrors without the discriminated union. The
-        // bundle ships inside the binary that answers this route, so this is
-        // not a version skew the surface may paper over with the mirrors: it
-        // is a payload that does not satisfy the generated contract.
         body: {
           status: 'configured',
           paused: false,
           enabled: true,
           scheduler_tick_secs: 900,
-          pending_fact_proposals: null,
-          pending_skills: null,
           now: Math.floor(Date.now() / 1000),
           last_session_activity: null,
-          project_config_path: '/x/automation.toml',
           control_path: '/x/automation.control.json',
           tasks: [],
         },
@@ -268,33 +104,25 @@ export const AUTOMATION_SCHEDULER_SCENARIOS: readonly Scenario[] = [
         'The daemon answered with a shape this build does not understand.',
         'the unsupported-schema sentence',
       );
-      // No tile at all is the point: an uncontracted payload must not be
-      // mined for a number, and must not print a zero in place of one.
-      const tiles = await reviewTiles(page);
-      if ('pending proposals' in tiles || 'pending skills' in tiles) {
-        throw new Error(
-          `FALSIFIED: an uncontracted scheduler payload still rendered review tiles: ${JSON.stringify(tiles)}`,
-        );
-      }
-      await expectAbsent(
-        page,
-        'text=Awaiting-review counts are unknown',
-        'no partial scheduler panel behind an unsupported-schema state',
-      );
+      await expectAbsent(page, 'text=configuration revision', 'no scheduler data from malformed payload');
     },
   },
 ];
 
-/**
- * The nav rail's Doctor dot, in each state the storage-findings read can put it
- * in. Each one asserts the dot's own attribute and the label it announces;
- * `axe-audit.ts` records what became of the dot scenarios that only read them.
- */
+async function doctorDotState(page: Page): Promise<{ state: string; label: string }> {
+  const dot = page.locator('[data-doctor-health]').first();
+  await dot.waitFor({ state: 'attached', timeout: 15_000 });
+  return {
+    state: (await dot.getAttribute('data-doctor-health')) ?? '',
+    label: (await dot.getAttribute('aria-label')) ?? '',
+  };
+}
+
 export const STORAGE_FINDINGS_SCENARIOS: readonly Scenario[] = [
   {
     id: 'navrail-healthy',
     route: '/automations',
-    proves: 'DEFECT 2 state 1 — every producer looked and found nothing: verified healthy',
+    proves: 'every storage producer looked and found nothing',
     overrides: { [FINDINGS]: { status: 200, body: storageFindings(allProducers('real', 0)) } },
     assert: async (page) => {
       const dot = await doctorDotState(page);
@@ -305,7 +133,7 @@ export const STORAGE_FINDINGS_SCENARIOS: readonly Scenario[] = [
   {
     id: 'navrail-attention',
     route: '/automations',
-    proves: 'DEFECT 2 state 2 — a producer observed real findings: attention needed',
+    proves: 'a storage producer observed real findings',
     overrides: {
       [FINDINGS]: {
         status: 200,
@@ -324,7 +152,7 @@ export const STORAGE_FINDINGS_SCENARIOS: readonly Scenario[] = [
   {
     id: 'navrail-unknown-transport',
     route: '/automations',
-    proves: 'DEFECT 2 state 3 — the storage-findings read is broken: health unknown, not all-clear',
+    proves: 'a broken storage-findings read remains unknown',
     overrides: {
       [FINDINGS]: { status: 500, body: { detail: 'storage findings reader unavailable' } },
     },
@@ -337,10 +165,8 @@ export const STORAGE_FINDINGS_SCENARIOS: readonly Scenario[] = [
   {
     id: 'navrail-unknown-nocoverage',
     route: '/automations',
-    proves: 'a producer that never ran is unknown, not a clean bill of health',
-    overrides: {
-      [FINDINGS]: { status: 200, body: storageFindings(allProducers('unsupported', 0)) },
-    },
+    proves: 'a producer that never ran is unknown, not healthy',
+    overrides: { [FINDINGS]: { status: 200, body: storageFindings(allProducers('unsupported', 0)) } },
     assert: async (page) => {
       const dot = await doctorDotState(page);
       expectEqual(dot.state, 'unknown', 'doctor dot state');

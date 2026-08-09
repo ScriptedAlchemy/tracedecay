@@ -3,10 +3,9 @@
  *
  * `data.ts` says its payloads are "gated against each route's single decoding
  * schema by `data.test.ts`". That file did not exist. Under the missing gate
- * the Automations scheduler fixture went on omitting `pending_review` after the
- * Rust handler made it required, so a healthy HTTP 200 decoded as
- * `unsupported_schema` — and the visual audit screenshotted that failure plate
- * for the Automations scheduler without anything noticing.
+ * the Automations scheduler fixture must stay aligned with the generated
+ * daemon-owned task receipt contract, so a healthy HTTP 200 does not decode as
+ * an unsupported schema in the visual audit.
  *
  * What this suite pins is the DAEMON side: every fixture is parsed against the
  * generated contract for the route it answers, straight out of
@@ -151,8 +150,8 @@ const UNCONTRACTED: Readonly<Record<string, string>> = {
     'analytics_api::diagnostics_summary answers with a bare Value',
   '/api/automation/jobs': 'automation_jobs_api::list answers with a bare Value',
   '/api/automation/skills': 'automation_skills_api::list answers with a bare Value',
-  '/api/automation/fact-proposals':
-    'automation_fact_proposals_api::list answers with a bare Value',
+  '/api/automation/automatic-fact-receipts':
+    'automatic_fact_receipts_api::list answers with a bare Value',
   '/api/automation/runs': 'automation_run_api::run_list answers with a bare Value',
 };
 
