@@ -28,7 +28,6 @@ dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
 hex = "0.4"
-regex = "1.12.3"
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "std",
