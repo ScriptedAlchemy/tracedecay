@@ -306,6 +306,7 @@ fn replay_owner_claim(_claim: ObservabilityEmissionClaimV1) -> ObservabilityOwne
 pub(super) async fn recover_pending(
     db: &RegisteredGlobalDb,
     identity: &ObservabilityProducerIdentityV1,
+    data: &mpsc::Receiver<QueuedObservation>,
     durable_emission_lock: &AsyncMutex<()>,
     progress: &mut ProducerWorkerProgress,
     persistence_deadline: Duration,
@@ -314,6 +315,12 @@ pub(super) async fn recover_pending(
     // prevents the worker from adopting a newly claimed row before its sender
     // has either enqueued it or returned it as durable deferred work.
     let _durable_guard = durable_emission_lock.lock().await;
+    // Check only while holding that admission lock. An async owner admission
+    // holds it through claim and queue send, so an empty queue here proves
+    // recovery cannot steal and relabel a live carrier as delayed.
+    if !data.is_empty() {
+        return;
+    }
     let pending = match timeout(
         persistence_deadline,
         db.pending_observability_emissions(&identity.authorized_scope_ref, MAX_PRODUCER_CAPACITY),

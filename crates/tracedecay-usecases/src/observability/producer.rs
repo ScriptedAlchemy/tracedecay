@@ -437,36 +437,32 @@ async fn run_worker(
         first_error: None,
         rollup_frontier_initialized: false,
     };
-    let frontier_initialization = timeout(
-        state.deadlines.persistence,
-        db.initialize_observability_rollup_frontier(&identity.authorized_scope_ref),
-    )
-    .await;
-    match frontier_initialization {
-        Ok(Ok(_)) => progress.rollup_frontier_initialized = true,
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "observability rollup frontier initialization failed");
+    let initialization_db = Arc::clone(&db);
+    let initialization_scope = identity.authorized_scope_ref.clone();
+    let persistence_deadline = state.deadlines.persistence;
+    let frontier_initialization = async move {
+        match timeout(
+            persistence_deadline,
+            initialization_db.initialize_observability_rollup_frontier(&initialization_scope),
+        )
+        .await
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "observability rollup frontier initialization failed");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "observability rollup frontier initialization exceeded persistence deadline"
+                );
+                false
+            }
         }
-        Err(_) => {
-            tracing::warn!(
-                "observability rollup frontier initialization exceeded persistence deadline"
-            );
-        }
-    }
-    recover_pending(
-        &db,
-        &identity,
-        &state.durable_emission_lock,
-        &mut progress,
-        state.deadlines.persistence,
-    )
-    .await;
-    let first_rollup_at = if progress.rollup_frontier_initialized && data.is_empty() {
-        Instant::now()
-    } else {
-        Instant::now() + ROLLUP_IDLE_RETRY_INTERVAL
     };
-    let rollup_tick = sleep_until(first_rollup_at);
+    tokio::pin!(frontier_initialization);
+    let mut frontier_initialization_pending = true;
+    let rollup_tick = sleep_until(Instant::now() + ROLLUP_IDLE_RETRY_INTERVAL);
     tokio::pin!(rollup_tick);
     let mut rollup_source_persisted = false;
     loop {
@@ -528,6 +524,7 @@ async fn run_worker(
                 recover_pending(
                     &db,
                     &identity,
+                    &data,
                     &state.durable_emission_lock,
                     &mut progress,
                     state.deadlines.persistence,
@@ -538,6 +535,22 @@ async fn run_worker(
                     // Only a newly durable topology/drop source can revoke a
                     // prior deferral and wake the slow no-work cadence.
                     rollup_source_persisted = false;
+                    rollup_tick.as_mut().reset(Instant::now());
+                }
+            }
+            initialized = &mut frontier_initialization, if frontier_initialization_pending => {
+                frontier_initialization_pending = false;
+                progress.rollup_frontier_initialized = initialized;
+                recover_pending(
+                    &db,
+                    &identity,
+                    &data,
+                    &state.durable_emission_lock,
+                    &mut progress,
+                    state.deadlines.persistence,
+                )
+                .await;
+                if initialized && data.is_empty() {
                     rollup_tick.as_mut().reset(Instant::now());
                 }
             }
@@ -644,6 +657,7 @@ async fn settle_worker(
         recover_pending(
             db,
             identity,
+            data,
             &state.durable_emission_lock,
             progress,
             state.deadlines.persistence,

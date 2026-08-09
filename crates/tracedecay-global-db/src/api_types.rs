@@ -50,6 +50,48 @@ pub struct AnalyticsEventRecord {
     pub metadata_json: Option<String>,
 }
 
+/// Durable handoff between an owner-derived observability fact and its exact
+/// producer-stamped delivery envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityEmissionOutboxRecordV1 {
+    pub project_id: String,
+    pub owner_event_id: String,
+    pub owner_fact_json: String,
+    pub delivery_envelope_json: String,
+}
+
+/// Result of claiming one stable owner fact in the registered outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservabilityEmissionClaimV1 {
+    Claimed {
+        delivery_envelope_json: String,
+    },
+    Pending {
+        delivery_envelope_json: String,
+    },
+    Settled {
+        delivery_envelope_json: String,
+        analytics_event_id: i64,
+    },
+}
+
+impl ObservabilityEmissionClaimV1 {
+    pub fn delivery_envelope_json(&self) -> &str {
+        match self {
+            Self::Claimed {
+                delivery_envelope_json,
+            }
+            | Self::Pending {
+                delivery_envelope_json,
+            }
+            | Self::Settled {
+                delivery_envelope_json,
+                ..
+            } => delivery_envelope_json,
+        }
+    }
+}
+
 impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource
     for AnalyticsEventRecord
 {
