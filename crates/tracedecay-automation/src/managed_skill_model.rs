@@ -123,14 +123,13 @@ fn truncate_frontmatter_chars(value: &str, max_chars: usize) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillSource {
     AutomationRun,
-    UserDraft,
+    User,
     Import,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillState {
-    PendingApproval,
     Active,
     Disabled,
     Archived,
@@ -203,20 +202,19 @@ impl ManagedSkillDraft {
                 summary: self.summary,
                 category: self.category,
                 targets: self.targets,
-                state: ManagedSkillState::PendingApproval,
+                state: ManagedSkillState::Active,
                 materialization_scope: ManagedSkillMaterializationScope::default(),
                 pinned: false,
                 checksum: String::new(),
                 created_at: now,
                 updated_at: now,
-                approved_at: None,
+                activated_at: Some(now),
                 absorbed_into: None,
                 archived_reason: None,
                 provenance: self.provenance,
             },
             body_markdown: self.body_markdown,
             support_files: self.support_files,
-            pending_update: None,
         };
         validate_managed_skill(&skill)?;
         skill.refresh_checksum();
@@ -245,7 +243,7 @@ pub struct ManagedSkillMetadata {
     #[serde(default)]
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved_at: Option<i64>,
+    pub activated_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absorbed_into: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,8 +256,6 @@ pub struct ManagedSkill {
     pub metadata: ManagedSkillMetadata,
     pub body_markdown: String,
     pub support_files: Vec<ManagedSupportFile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_update: Option<ManagedSkillPendingUpdate>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,47 +269,12 @@ pub struct ManagedSkillUpdate {
     pub pinned: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedSkillPendingUpdate {
-    pub base_checksum: String,
-    pub staged_at: i64,
-    pub metadata: ManagedSkillMetadata,
-    pub body_markdown: String,
-    #[serde(default)]
-    pub support_files: Vec<ManagedSupportFile>,
-    pub resulting_state: ManagedSkillState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staged_reason: Option<String>,
-}
-
-impl ManagedSkillPendingUpdate {
-    pub fn into_skill(self) -> ManagedSkill {
-        ManagedSkill {
-            metadata: self.metadata,
-            body_markdown: self.body_markdown,
-            support_files: self.support_files,
-            pending_update: None,
-        }
-    }
-
-    pub fn normalize_timestamps(&mut self) {
-        let mut skill = ManagedSkill {
-            metadata: self.metadata.clone(),
-            body_markdown: self.body_markdown.clone(),
-            support_files: self.support_files.clone(),
-            pending_update: None,
-        };
-        skill.normalize_timestamps();
-        self.metadata = skill.metadata;
-    }
-}
-
 impl ManagedSkill {
     pub fn set_state(&mut self, state: ManagedSkillState) {
         if self.metadata.state != state {
             self.metadata.state = state;
             if state == ManagedSkillState::Active {
-                self.metadata.approved_at = Some(current_metadata_timestamp());
+                self.metadata.activated_at = Some(current_metadata_timestamp());
             }
             self.touch();
         }
@@ -542,7 +503,7 @@ mod tests {
             body_markdown: "# Native escape\n".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "tester".to_string(),
                 run_id: None,
             },
@@ -557,6 +518,30 @@ mod tests {
             frontmatter["description"].as_scalar(),
             Some(r#"Use when checking "quoted" paths like C:\tmp"#)
         );
+    }
+
+    #[test]
+    fn materialized_skill_is_active_with_an_activation_timestamp() {
+        let skill = ManagedSkillDraft {
+            id: "immediate-activation".to_string(),
+            title: "Immediate activation".to_string(),
+            summary: "Materialize policy-validated guidance immediately.".to_string(),
+            category: "testing".to_string(),
+            targets: vec![SkillInstallTarget::Claude],
+            body_markdown: "# Immediate activation\n".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::AutomationRun,
+                actor: "automation".to_string(),
+                run_id: Some("run-1".to_string()),
+            },
+        }
+        .materialize()
+        .unwrap();
+
+        assert_eq!(skill.metadata.state, ManagedSkillState::Active);
+        assert_eq!(skill.metadata.activated_at, Some(skill.metadata.created_at));
+        assert_eq!(skill.metadata.updated_at, skill.metadata.created_at);
     }
 
     #[test]

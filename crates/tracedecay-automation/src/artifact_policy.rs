@@ -60,17 +60,17 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
             eval_replay_command: "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture",
         },
         AgentTaskKind::SkillWriter => TaskArtifactPolicy {
-            optimizer_action: "update skill writer evidence or draft validation",
+            optimizer_action: "update skill writer evidence or activation validation",
             accepted_next_actions: &[
-                "review managed skill drafts or auto-enabled changes",
-                "approve, disable, or archive through managed skill controls",
+                "review automatically activated managed skill changes",
+                "disable or archive through managed skill controls if needed",
             ],
             rejected_next_actions: &[
                 "review rejected skill proposals",
                 "collect stronger usage evidence before rerunning",
             ],
             handoff_test: "cargo test --test automation_runner_test skill_writer",
-            eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_creates_pending_skill_drafts_for_approval -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test skill_writer_runner_activates_validated_skills -- --nocapture",
         },
         AgentTaskKind::CombinedReview => TaskArtifactPolicy {
             optimizer_action: "update combined review evidence or per-task validation",

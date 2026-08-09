@@ -4,8 +4,7 @@ use std::path::{Component, Path};
 use crate::managed_skill_format::target_key;
 use crate::managed_skill_model::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    ManagedSkill, ManagedSkillPendingUpdate, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget,
+    ManagedSkill, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
 };
 use crate::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use crate::{Result, config_error};
@@ -271,56 +270,6 @@ pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
         validate_frontmatter_scalar("provenance run_id", run_id)?;
     }
     validate_managed_support_files(&skill.support_files)
-}
-
-pub fn validate_managed_pending_update(
-    id: &str,
-    pending: &ManagedSkillPendingUpdate,
-) -> Result<()> {
-    validate_skill_id(id)?;
-    if pending.metadata.id != id {
-        return Err(config_error(format!(
-            "managed skill pending update id '{}' does not match '{id}'",
-            pending.metadata.id
-        )));
-    }
-    validate_checksum("base_checksum", &pending.base_checksum)?;
-    if pending.staged_at <= 0 {
-        return Err(config_error(
-            "managed skill staged_at must be a positive timestamp",
-        ));
-    }
-    if !matches!(
-        pending.resulting_state,
-        ManagedSkillState::Active | ManagedSkillState::Archived
-    ) {
-        return Err(config_error(
-            "managed skill pending update resulting_state must be active or archived",
-        ));
-    }
-    let skill = ManagedSkill {
-        metadata: pending.metadata.clone(),
-        body_markdown: pending.body_markdown.clone(),
-        support_files: pending.support_files.clone(),
-        pending_update: None,
-    };
-    validate_managed_skill(&skill)
-}
-
-fn validate_checksum(field: &str, checksum: &str) -> Result<()> {
-    validate_non_empty(field, checksum)?;
-    let Some(digest) = checksum.strip_prefix("sha256:") else {
-        return Err(config_error(format!(
-            "managed skill {field} must be a sha256 checksum"
-        )));
-    };
-    if digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(config_error(format!(
-            "managed skill {field} must be a sha256 checksum"
-        )))
-    }
 }
 
 pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> {

@@ -9,7 +9,7 @@ pub fn frontmatter_string(value: &str) -> String {
 pub fn source_key(source: ManagedSkillSource) -> &'static str {
     match source {
         ManagedSkillSource::AutomationRun => "automation_run",
-        ManagedSkillSource::UserDraft => "user_draft",
+        ManagedSkillSource::User => "user",
         ManagedSkillSource::Import => "import",
     }
 }
@@ -17,7 +17,6 @@ pub fn source_key(source: ManagedSkillSource) -> &'static str {
 #[doc(hidden)]
 pub fn state_key(state: ManagedSkillState) -> &'static str {
     match state {
-        ManagedSkillState::PendingApproval => "pending_approval",
         ManagedSkillState::Active => "active",
         ManagedSkillState::Disabled => "disabled",
         ManagedSkillState::Archived => "archived",

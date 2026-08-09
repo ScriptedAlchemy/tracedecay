@@ -21,14 +21,13 @@ pub mod managed_skills {
     pub use crate::managed_skill_model::{
         MATERIALIZED_SKILL_MANAGED_BY, MAX_MANAGED_SKILL_BODY_BYTES,
         MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES, ManagedSkill, ManagedSkillDraft,
-        ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillPendingUpdate,
-        ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-        ManagedSupportFile, SkillInstallTarget, current_metadata_timestamp,
-        default_managed_skill_targets,
+        ManagedSkillMaterializationScope, ManagedSkillMetadata, ManagedSkillProvenance,
+        ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile,
+        SkillInstallTarget, current_metadata_timestamp, default_managed_skill_targets,
     };
     pub use crate::managed_skill_validation::{
-        validate_managed_pending_update, validate_managed_skill, validate_managed_skill_update,
-        validate_managed_support_files, validate_skill_id,
+        validate_managed_skill, validate_managed_skill_update, validate_managed_support_files,
+        validate_skill_id,
     };
 }
 

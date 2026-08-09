@@ -1,10 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 pub use tracedecay_domain::configuration::{
     AutomationBackendV1 as AutomationBackend, AutomationHostModeV1 as AutomationHostMode,
-    AutomationMemoryApplyPolicyV1 as AutomationMemoryApplyPolicy,
-    AutomationSettingsV1 as AutomationConfig,
-    AutomationSkillActivationPolicyV1 as AutomationSkillActivationPolicy,
-    AutomationTaskSetV1 as AutomationTaskSet, AutomationTaskSettingsV1 as AutomationTaskConfig,
+    AutomationSettingsV1 as AutomationConfig, AutomationTaskSetV1 as AutomationTaskSet,
+    AutomationTaskSettingsV1 as AutomationTaskConfig,
 };
 
 use crate::{AutomationError, Result, config_error};
@@ -99,10 +97,6 @@ pub struct AutomationConfigPatch {
     pub timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_tick_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_apply_policy: Option<AutomationMemoryApplyPolicy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill_activation_policy: Option<AutomationSkillActivationPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_memory_digest: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,12 +207,6 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
     if let Some(scheduler_tick_secs) = patch.scheduler_tick_secs {
         config.scheduler_tick_secs = scheduler_tick_secs;
     }
-    if let Some(memory_apply_policy) = patch.memory_apply_policy {
-        config.memory_apply_policy = memory_apply_policy;
-    }
-    if let Some(skill_activation_policy) = patch.skill_activation_policy {
-        config.skill_activation_policy = skill_activation_policy;
-    }
     if let Some(export_memory_digest) = patch.export_memory_digest {
         config.export_memory_digest = export_memory_digest;
     }
@@ -264,11 +252,6 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     merge_optional_field(&mut config.model_id, patch.model_id);
     merge_optional_field(&mut config.timeout_secs, patch.timeout_secs);
     merge_optional_field(&mut config.scheduler_tick_secs, patch.scheduler_tick_secs);
-    merge_optional_field(&mut config.memory_apply_policy, patch.memory_apply_policy);
-    merge_optional_field(
-        &mut config.skill_activation_policy,
-        patch.skill_activation_policy,
-    );
     merge_optional_field(&mut config.export_memory_digest, patch.export_memory_digest);
     merge_optional_field(&mut config.combine_due_tasks, patch.combine_due_tasks);
     merge_optional_field(&mut config.allow_job_commands, patch.allow_job_commands);

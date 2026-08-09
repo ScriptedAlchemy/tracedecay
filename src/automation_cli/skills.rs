@@ -6,8 +6,8 @@ pub(super) async fn handle_automation_skills_command(
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::managed_skills::{
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate,
-        archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
-        load_managed_skill, restore_managed_skill, update_managed_skill,
+        apply_managed_skill_update, archive_managed_skill, create_managed_skill,
+        disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
     };
 
     let profile_root = tracedecay::storage::default_profile_root()?;
@@ -93,9 +93,11 @@ pub(super) async fn handle_automation_skills_command(
             pinned,
         } => {
             refresh_exports = true;
-            update_managed_skill(
+            let current = load_managed_skill(&profile_root, &id).await?;
+            apply_managed_skill_update(
                 &profile_root,
                 &id,
+                &current.metadata.checksum,
                 ManagedSkillUpdate {
                     title,
                     summary,

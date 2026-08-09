@@ -340,8 +340,8 @@ async fn run_skill_writer_for_store(
         }
     };
 
-    // Refresh adoption outcomes of previously approved skills so this run's
-    // feedback artifact reports real post-approval quality. Best effort: a
+    // Refresh adoption outcomes of previously activated skills so this run's
+    // feedback artifact reports real post-activation quality. Best effort: a
     // stale snapshot must not block skill writing.
     if let Err(err) = super::outcomes::refresh_skill_outcomes(
         &profile_root,
@@ -353,7 +353,7 @@ async fn run_skill_writer_for_store(
         tracing::warn!(error = %err, "failed to refresh skill outcomes");
     }
 
-    let activation_policy = skill_writer_activation_policy(config);
+    let activation_policy = skill_writer_activation_policy();
     let request = AgentTaskRequest::new(
         run.run_id.clone(),
         AgentTaskKind::SkillWriter,
@@ -361,7 +361,7 @@ async fn run_skill_writer_for_store(
         evidence_hash.clone(),
         json!({
             "skill_writer_evidence": evidence,
-            "apply": false,
+            "apply": true,
             "activation_policy": activation_policy,
         }),
     );
@@ -435,7 +435,7 @@ async fn run_skill_writer_for_store(
     })
 }
 
-/// Validates and stages the `skills` half of a skill-writer (or combined) run,
+/// Validates and applies the `skills` half of a skill-writer (or combined) run,
 /// returning the report plus the not-yet-appended success ledger record.
 async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
@@ -459,15 +459,16 @@ async fn finalize_skill_writer_success(
         + proposal_outcome.consolidations.len();
     let rejected_count = proposal_outcome.rejected.len();
     let report = json!({
-        "status": if proposal_outcome.rejected.is_empty() { "needs_approval" } else { "quarantined_partial" },
+        "status": if proposal_outcome.rejected.is_empty() { "applied" } else { "quarantined_partial" },
         "dry_run": false,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
         "created_skills": proposal_outcome.created,
         "updated_skills": proposal_outcome.updated,
-        "staged_consolidations": proposal_outcome.consolidations,
+        "applied_consolidations": proposal_outcome.consolidations,
         "rejected_skills": proposal_outcome.rejected,
+        "deployment": proposal_outcome.deployment,
         "skill_improvement_recommendations": evidence
             .get("skill_improvement_recommendations")
             .cloned()
@@ -483,8 +484,9 @@ async fn finalize_skill_writer_success(
             "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
             "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
-            "staged_consolidations": report.get("staged_consolidations").cloned().unwrap_or_else(|| json!([])),
+            "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
             "rejected_skills": report.get("rejected_skills").cloned().unwrap_or_else(|| json!([])),
+            "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
         })),
         accepted_count,
         rejected_count,
@@ -492,11 +494,12 @@ async fn finalize_skill_writer_success(
     record.applied_ops = Some(json!({
         "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
         "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
-        "staged_consolidations": report.get("staged_consolidations").cloned().unwrap_or_else(|| json!([])),
+        "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
+        "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
     }));
     record.rejected_ops = report.get("rejected_skills").cloned();
     record.validation_report = Some(json!({
-        "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
+        "status": report.get("status").cloned().unwrap_or_else(|| json!("applied")),
         "dry_run": false,
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
@@ -762,7 +765,7 @@ async fn run_combined_review_for_retrieval(
         .unwrap_or_else(|| generated_run_id("combined_review"));
     let reflector_run_id = format!("{run_id}_facts");
     let skill_run_id = format!("{run_id}_skills");
-    let activation_policy = skill_writer_activation_policy(config);
+    let activation_policy = skill_writer_activation_policy();
     let combined_evidence_hash = Some(canonical_evidence_hash(&json!({
         "session_reflection_evidence": reflector_bundle.evidence,
         "skill_writer_evidence": skill_bundle.evidence,
@@ -1815,7 +1818,11 @@ mod tests {
         let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records)
             .await
             .expect_err("the rejected second proposal must keep its original error path");
-        assert!(error.to_string().contains("not pending approval"));
+        assert!(
+            error
+                .to_string()
+                .contains("not awaiting automatic application")
+        );
         assert!(
             crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root).exists(),
             "the first new promotion must still refresh before returning the later conflict"

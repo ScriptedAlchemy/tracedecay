@@ -575,21 +575,6 @@ impl AutomationHostModeV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationMemoryApplyPolicyV1 {
-    #[default]
-    ValidateThenApply,
-    DraftForApproval,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationSkillActivationPolicyV1 {
-    #[default]
-    DraftForApproval,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AutomationTaskSettingsV1 {
@@ -640,8 +625,6 @@ pub struct AutomationSettingsV1 {
     pub model_id: Option<String>,
     pub timeout_secs: u64,
     pub scheduler_tick_secs: u64,
-    pub memory_apply_policy: AutomationMemoryApplyPolicyV1,
-    pub skill_activation_policy: AutomationSkillActivationPolicyV1,
     pub export_memory_digest: bool,
     pub combine_due_tasks: bool,
     pub allow_job_commands: bool,
@@ -690,8 +673,6 @@ impl Default for AutomationSettingsV1 {
             model_id: None,
             timeout_secs: 60,
             scheduler_tick_secs: 60,
-            memory_apply_policy: AutomationMemoryApplyPolicyV1::ValidateThenApply,
-            skill_activation_policy: AutomationSkillActivationPolicyV1::DraftForApproval,
             export_memory_digest: true,
             combine_due_tasks: true,
             allow_job_commands: false,

@@ -18,12 +18,12 @@ pub enum AutomationAction {
         #[command(subcommand)]
         action: AutomationRunsAction,
     },
-    /// Manage profile-owned automation skills and approvals.
+    /// Manage profile-owned automation skills.
     Skills {
         #[command(subcommand)]
         action: AutomationSkillsAction,
     },
-    /// Review and apply session-reflection fact proposals.
+    /// Inspect session-reflection fact application history.
     Facts {
         #[command(subcommand)]
         action: AutomationFactsAction,
@@ -327,7 +327,7 @@ pub enum AutomationSkillsAction {
     Archive { id: String },
     /// Restore an archived skill to active state.
     Restore { id: String },
-    /// Export approved managed skills into a host plugin overlay or prompt index.
+    /// Export active managed skills into a host plugin overlay or prompt index.
     Install {
         /// Host target to install for.
         #[arg(long, value_enum)]
@@ -375,9 +375,9 @@ impl From<AutomationSkillsInstallTarget>
 
 #[derive(Subcommand)]
 pub enum AutomationFactsAction {
-    /// List session-reflection fact proposals.
+    /// List session-reflection fact application records.
     List {
-        /// Proposal state filter: pending_approval, applied, rejected, rejected_validation.
+        /// State filter: applying, applied, rejected, or quarantined.
         #[arg(long)]
         state: Option<String>,
         /// Maximum proposals to show.
@@ -390,26 +390,9 @@ pub enum AutomationFactsAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Show one fact proposal.
+    /// Show one fact application record.
     View {
         id: String,
-        /// Project path (default: current directory, with discovery).
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Approve and apply a pending fact proposal to memory.
-    Apply {
-        id: String,
-        /// Project path (default: current directory, with discovery).
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Reject a pending fact proposal.
-    Reject {
-        id: String,
-        /// Optional decision reason.
-        #[arg(long)]
-        reason: Option<String>,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,

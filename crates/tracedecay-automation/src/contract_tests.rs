@@ -7,7 +7,6 @@ use crate::apply_policy::{
 };
 use crate::artifact_policy::artifact_policy;
 use crate::backend::AgentTaskKind;
-use crate::config::AutomationConfig;
 use crate::text::truncate_chars_for_prompt;
 use crate::{AutomationError, AutomationRunRecord};
 
@@ -67,13 +66,12 @@ fn automation_error_preserves_standard_classifications() {
 
 #[test]
 fn apply_policy_preserves_complete_and_partial_outcomes() {
-    let config = AutomationConfig::default();
     assert_eq!(
-        MemoryApplyPolicy::applied_curation_ops(&config, 2, 2).decision(),
+        MemoryApplyPolicy::applied_curation_ops(2, 2).decision(),
         MemoryApplyDecision::AutoApplyAllowed
     );
     assert_eq!(
-        MemoryApplyPolicy::applied_curation_ops(&config, 2, 1).decision(),
+        MemoryApplyPolicy::applied_curation_ops(2, 1).decision(),
         MemoryApplyDecision::ApplyIncomplete
     );
 
@@ -89,16 +87,11 @@ fn apply_policy_preserves_complete_and_partial_outcomes() {
 }
 
 #[test]
-fn apply_policy_preserves_the_legacy_proposal_only_escape_hatch() {
-    let config = AutomationConfig {
-        auto_apply_memory_ops: false,
-        ..AutomationConfig::default()
-    };
+fn apply_policy_validates_then_applies_accepted_operations() {
+    let policy = MemoryApplyPolicy::curation_ops(1);
 
-    let policy = MemoryApplyPolicy::curation_ops(&config, 1);
-
-    assert_eq!(policy.decision(), MemoryApplyDecision::ApplyIncomplete);
-    assert!(!policy.to_json()["mutates_store"].as_bool().unwrap());
+    assert_eq!(policy.decision(), MemoryApplyDecision::AutoApplyAllowed);
+    assert!(policy.to_json()["mutates_store"].as_bool().unwrap());
 }
 
 #[test]

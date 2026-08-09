@@ -643,13 +643,7 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   dashboard-local health grade.
 - Knowledge: facts, memories, evidence, contradictions, supersession, curation, and cross-project relationships.
 - Delivery: changes, commits, branches, worktrees, pull requests, CI, releases, and typed workflow runs tied to product delivery.
-- Automations: schedules, run history, artifacts, provider/runtime approvals,
-  automatically materialized managed skills and memory curation, session
-  reflection, durable curation evidence, and bounded admin pause, disable,
-  backoff, quarantine, rollback, and override controls. It observes the
-  production-profile default-scheduled curator/reflector/skill-writer loop and
-  its effects; it never gates curation behind review, approval, validation, or
-  an apply action.
+- Automations: schedules, run history, artifacts, approvals, generated skills, memory curation, session reflection, and bounded controls.
 - Observatory: hook hints, event flow, latency, failures, daemon health, storage health, queues, and product diagnostics, including canonical analyzer/gateway state, conflicts, coverage, and freshness.
 - Costs: provider/model usage, tokens, latency, estimated cost, cache effects, and time/project/session breakdowns.
 - Settings: effective layered configuration and application-supplied typed

@@ -2,7 +2,6 @@ use serde_json::{Value, json};
 
 use crate::AutomationRunRecord;
 use crate::backend::AgentTaskKind;
-use crate::config::{AutomationConfig, AutomationMemoryApplyPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryApplySubject {
@@ -50,48 +49,36 @@ impl MemoryApplySubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryApplyPolicy {
     subject: MemoryApplySubject,
-    memory_apply_policy: AutomationMemoryApplyPolicy,
     accepted_count: usize,
     mutates_store: bool,
     fully_applied: bool,
 }
 
 impl MemoryApplyPolicy {
-    pub fn curation_ops(config: &AutomationConfig, accepted_count: usize) -> Self {
-        let should_apply = should_apply_memory_ops(config, accepted_count);
+    pub fn curation_ops(accepted_count: usize) -> Self {
+        let should_apply = should_apply_memory_ops(accepted_count);
         Self::new(
             MemoryApplySubject::CurationOps,
-            config,
             accepted_count,
             should_apply,
             should_apply,
         )
     }
 
-    pub fn applied_curation_ops(
-        config: &AutomationConfig,
-        accepted_count: usize,
-        applied_count: usize,
-    ) -> Self {
-        let should_apply = should_apply_memory_ops(config, accepted_count);
+    pub fn applied_curation_ops(accepted_count: usize, applied_count: usize) -> Self {
+        let should_apply = should_apply_memory_ops(accepted_count);
         Self::new(
             MemoryApplySubject::CurationOps,
-            config,
             accepted_count,
             should_apply && applied_count > 0,
             should_apply && applied_count >= accepted_count,
         )
     }
 
-    pub fn session_facts(
-        config: &AutomationConfig,
-        accepted_count: usize,
-        applied_count: usize,
-    ) -> Self {
-        let should_apply = should_apply_memory_ops(config, accepted_count);
+    pub fn session_facts(accepted_count: usize, applied_count: usize) -> Self {
+        let should_apply = should_apply_memory_ops(accepted_count);
         Self::new(
             MemoryApplySubject::SessionFacts,
-            config,
             accepted_count,
             should_apply && applied_count > 0,
             should_apply && accepted_count > 0 && applied_count >= accepted_count,
@@ -100,22 +87,20 @@ impl MemoryApplyPolicy {
 
     fn new(
         subject: MemoryApplySubject,
-        config: &AutomationConfig,
         accepted_count: usize,
         mutates_store: bool,
         fully_applied: bool,
     ) -> Self {
         Self {
             subject,
-            memory_apply_policy: config.memory_apply_policy,
             accepted_count,
             mutates_store,
             fully_applied,
         }
     }
 
-    pub fn should_apply(config: &AutomationConfig, accepted_count: usize) -> bool {
-        should_apply_memory_ops(config, accepted_count)
+    pub fn should_apply(accepted_count: usize) -> bool {
+        should_apply_memory_ops(accepted_count)
     }
 
     pub fn decision(self) -> MemoryApplyDecision {
@@ -134,9 +119,7 @@ impl MemoryApplyPolicy {
         let decision = self.decision();
         json!({
             "decision": decision.as_str(),
-            "memory_apply_policy": self.memory_apply_policy,
-            "approval_required": self.accepted_count > 0
-                && self.memory_apply_policy == AutomationMemoryApplyPolicy::DraftForApproval,
+            "memory_apply_policy": "validate_then_apply",
             "autonomous_memory_apply": self.mutates_store,
             "mutates_store": self.mutates_store,
         })
@@ -170,7 +153,11 @@ where
 fn memory_curator_applied_count(report: &Value) -> usize {
     report
         .get("applied")
-        .and_then(value_as_usize)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+        })
         .or_else(|| {
             report
                 .get("results")
@@ -242,14 +229,6 @@ fn array_len(value: &Value) -> Option<usize> {
     value.as_array().map(Vec::len)
 }
 
-#[doc(hidden)]
-pub fn value_as_usize(value: &Value) -> Option<usize> {
-    value
-        .as_u64()
-        .and_then(|number| usize::try_from(number).ok())
-}
-
-fn should_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
+fn should_apply_memory_ops(accepted_count: usize) -> bool {
     accepted_count > 0
-        && config.memory_apply_policy == AutomationMemoryApplyPolicy::ValidateThenApply
 }
