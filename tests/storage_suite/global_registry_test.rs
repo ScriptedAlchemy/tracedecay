@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, write_store_manifest_to_path,
@@ -161,7 +161,7 @@ fn project_column_exists(db_path: &Path, column: &str) -> bool {
 }
 
 #[tokio::test]
-async fn registered_profile_runtime_migrates_existing_project_rows_to_canonical_keys() {
+async fn registered_profile_runtime_refuses_non_canonical_project_rows_without_mutation() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
@@ -169,15 +169,13 @@ async fn registered_profile_runtime_migrates_existing_project_rows_to_canonical_
     std::fs::create_dir_all(&project_root).unwrap();
     let legacy_key = project_root.join(".").to_string_lossy().to_string();
 
-    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TABLE projects (
-                path TEXT PRIMARY KEY,
-                tokens_saved INTEGER NOT NULL DEFAULT 0
-            );",
-        )
+    // Build the complete registered-store schema through the production
+    // fixture path, then corrupt only the canonical-key invariant.
+    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
+        .await
         .unwrap();
+    close_profile_runtime(db).await;
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
     raw_conn
         .execute(
             "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)",
@@ -186,16 +184,32 @@ async fn registered_profile_runtime_migrates_existing_project_rows_to_canonical_
         .unwrap();
     drop(raw_conn);
 
-    let db = HostAdmissionTestRuntimeV1::profile(dir.path())
-        .await
-        .unwrap();
-
-    assert_eq!(db.get_project_tokens(&project_root).await, 77);
+    let error = match HostAdmissionTestRuntimeV1::profile(dir.path()).await {
+        Ok(_) => panic!("a non-canonical projects.path row must not be migrated"),
+        Err(error) => error,
+    };
     assert_eq!(
-        db.list_project_paths_compat().await,
-        vec![project_root.canonicalize().unwrap().to_string_lossy()]
+        error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("project registry")
     );
-    close_profile_runtime(db).await;
+    assert!(error.to_string().contains("non-canonical key"), "{error}");
+
+    let raw_conn =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut statement = raw_conn
+        .prepare("SELECT path, tokens_saved FROM projects ORDER BY path")
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows, vec![(legacy_key, 77)]);
 }
 
 #[tokio::test]
@@ -309,7 +323,7 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
 }
 
 #[tokio::test]
-async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_projects() {
+async fn delete_code_projects_cascades_registry_rows_without_touching_project_ledger_rows() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project_root = dir.path().join("repo");
@@ -927,7 +941,7 @@ async fn registry_remote_resolution_is_conservative_when_ambiguous() {
 }
 
 #[tokio::test]
-async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
+async fn project_tokens_saved_schema_and_queries_still_work() {
     let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
@@ -953,7 +967,12 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_one).await, 33);
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
-    assert_eq!(db.list_project_paths_compat().await.len(), 2);
+    assert_eq!(
+        db.try_list_project_paths()
+            .await
+            .expect("project ledger path listing should succeed"),
+        vec![project_one, project_two]
+    );
     close_profile_runtime(db).await;
 }
 
@@ -981,27 +1000,39 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
     upsert_test_store(&db, "proj_retained", "store_retained").await;
     close_profile_runtime(db).await;
 
-    let runtime =
-        tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::open(
+    {
+        let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
             profile.path(),
+            "registry GC fixture",
         )
-        .await
         .unwrap();
-    let preview = runtime
-        .registry_gc(profile.path(), None, false)
-        .await
+        let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+            &lifecycle,
+            profile.path(),
+            "registry GC fixture",
+        )
         .unwrap();
-    assert_eq!(preview.code_project_candidate_count, 1);
-    assert_eq!(preview.storage_project_candidate_count, 2);
-    assert_eq!(preview.protected_code_project_count, 1);
+        let runtime =
+            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::open(
+                profile.path(),
+            )
+            .await
+            .unwrap();
+        let preview = runtime
+            .registry_gc(profile.path(), None, false)
+            .await
+            .unwrap();
+        assert_eq!(preview.code_project_candidate_count, 1);
+        assert_eq!(preview.storage_project_candidate_count, 2);
+        assert_eq!(preview.protected_code_project_count, 1);
 
-    let applied = runtime
-        .registry_gc(profile.path(), None, true)
-        .await
-        .unwrap();
-    assert_eq!(applied.deleted_code_project_count, 1);
-    assert_eq!(applied.deleted_storage_project_count, 2);
-    drop(runtime);
+        let applied = runtime
+            .registry_gc(profile.path(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(applied.deleted_code_project_count, 1);
+        assert_eq!(applied.deleted_storage_project_count, 2);
+    }
 
     let db = HostAdmissionTestRuntimeV1::profile(profile.path())
         .await
@@ -1020,7 +1051,10 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
         "a missing root must not discard authority for a retained store"
     );
     assert!(
-        db.list_project_paths_compat().await.is_empty(),
+        db.try_list_project_paths()
+            .await
+            .expect("project ledger path listing should succeed")
+            .is_empty(),
         "dead savings-ledger paths should be reapable independently of stores"
     );
     close_profile_runtime(db).await;

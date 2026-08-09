@@ -2,14 +2,14 @@ use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants, require_foreign_key_audit,
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
-    suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
-    validate_authority_schema_contract, validate_registry_schema_contract,
-    validate_remote_deletion_schema_contract,
+    validate_authority_rows_exhaustive, validate_authority_schema_contract,
+    validate_registry_schema_contract, validate_remote_deletion_schema_contract,
 };
 use super::{
-    configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error,
+    configuration, ensure_parse_offset_columns, ensure_session_parent_columns,
+    git_index_transactions, global_db_operation_error, global_db_operation_message,
     observability_rollup, observation, observation_projection, project_registry, session_temporal,
+    stack_delivery,
 };
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior,
@@ -426,7 +426,6 @@ pub async fn ensure_registered_schema_for_admission(
             },
             error => global_db_operation_error("classify LCM schema admission", error),
         })?;
-    let workflow_admission = inspect_workflow_schema_for_admission(conn).await?;
     let configuration_fresh = configuration::fresh_configuration_store_evidence(conn)
         .await
         .map_err(|error| match error {
@@ -440,6 +439,12 @@ pub async fn ensure_registered_schema_for_admission(
                 global_db_operation_error("inspect configuration schema freshness", error)
             }
         })?;
+    let temporal_admission = session_temporal::require_admissible_session_temporal_schema(
+        conn,
+        configuration_fresh.as_ref(),
+    )
+    .await?;
+    let workflow_admission = inspect_workflow_schema_for_admission(conn).await?;
     configuration::admit_configuration_schema(conn, configuration_fresh.as_ref())
         .await
         .map_err(|error| match error {
@@ -472,7 +477,7 @@ pub async fn ensure_registered_schema_for_admission(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    let migration = async {
+    let admission = async {
         configuration::ensure_configuration_schema(&transaction, configuration_fresh.as_ref())
             .await
             .map_err(|error| match error {
@@ -493,12 +498,14 @@ pub async fn ensure_registered_schema_for_admission(
             // resumable cursor and is removed only by a completed FK sweep.
             require_foreign_key_audit(&transaction).await?;
         }
-        transaction
-            .execute_batch(REGISTRY_SCHEMA)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize global project registry", error)
-            })?;
+        if is_fresh {
+            transaction
+                .execute_batch(REGISTRY_SCHEMA)
+                .await
+                .map_err(|error| {
+                    global_db_operation_error("initialize global project registry", error)
+                })?;
+        }
         if is_fresh {
             transaction
                 .execute_batch(REMOTE_DELETION_SCHEMA)
@@ -507,13 +514,18 @@ pub async fn ensure_registered_schema_for_admission(
                     global_db_operation_error("initialize remote deletion catalog", error)
                 })?;
         }
-        ensure_code_project_native_root_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
-        project_registry::migrate_project_rows_to_canonical_keys(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
-        validate_registry_schema_contract(&transaction).await?;
+        if let Err(error) = validate_registry_schema_contract(&transaction).await {
+            if is_fresh {
+                return Err(error);
+            }
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    project_registry::PROJECT_REGISTRY_AUTHORITY,
+                    error.to_string(),
+                ),
+            );
+        }
+        project_registry::validate_project_rows_have_canonical_keys(&transaction).await?;
 
         git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
         crate::native_integration::ensure_native_integration_schema(&transaction).await?;
@@ -528,6 +540,7 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize delivery settlement schema", error)
             })?;
+        stack_delivery::ensure_github_stack_delivery_schema(&transaction).await?;
         observability_rollup::ensure_observability_rollup_schema(&transaction).await?;
         if workflow_admission == WorkflowSchemaAdmission::Create {
             for table in WORKFLOW_TABLE_CONTRACTS_V1 {
@@ -571,8 +584,9 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
 
         ensure_authority_audit_checkpoint_schema(&transaction).await?;
-        suspend_session_invariants_for_schema_upgrade(&transaction).await?;
-        session_temporal::ensure_session_temporal_schema(&transaction).await?;
+        if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
+            session_temporal::install_session_temporal_schema(&transaction).await?;
+        }
         observation::ensure_observation_schema(&transaction).await?;
         observation_projection::ensure_observation_projection_schema(&transaction)
             .await
@@ -584,7 +598,9 @@ pub async fn ensure_registered_schema_for_admission(
             "initialize registered external source state",
         )
         .await?;
-        ensure_authority_invariant_schema(&transaction).await?;
+        if temporal_admission == session_temporal::SessionTemporalSchemaAdmission::Fresh {
+            ensure_authority_invariant_schema(&transaction).await?;
+        }
 
         tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
             .await
@@ -601,19 +617,49 @@ pub async fn ensure_registered_schema_for_admission(
             })?;
         tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
             &transaction,
+            if is_fresh {
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationSchemaInstall::ProvenFresh
+            } else {
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationSchemaInstall::Existing
+            },
         )
         .await
-        .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
-        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(&transaction)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("initialize workflow index schema", error)
-            })?;
+        .map_err(|error| match error {
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                component: "Git correlation",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("initialize git correlation schema", error),
+        })?;
+        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(
+            &transaction,
+            if is_fresh {
+                tracedecay_sessions::runtime::workflow_index::WorkflowIndexSchemaInstall::ProvenFresh
+            } else {
+                tracedecay_sessions::runtime::workflow_index::WorkflowIndexSchemaInstall::Existing
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            tracedecay_sessions::runtime::workflow_index::WorkflowIndexError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                component: "Workflow index",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("initialize workflow index schema", error),
+        })?;
         tracedecay_runtime_core::errors::Result::Ok(())
     }
     .await;
 
-    match migration {
+    match admission {
         Ok(()) => transaction
             .commit()
             .await
@@ -661,6 +707,41 @@ pub async fn converge_registered_schema(
     // guarded writes may proceed while these idempotent repairs advance.
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
+    let privacy = tracedecay_sessions::runtime::lcm::converge_privacy_remediation(conn)
+        .await
+        .map_err(|error| global_db_operation_error("converge LCM privacy remediation", error))?;
+    if matches!(
+        privacy.phase,
+        tracedecay_sessions::runtime::lcm::LcmPrivacyRemediationPhaseV1::ResetRequired
+    ) {
+        let reason = privacy.failure_code.ok_or_else(|| {
+            global_db_operation_message(
+                "converge LCM privacy remediation",
+                "reset-required privacy state has no failure code",
+            )
+        })?;
+        return Err(
+            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                "LCM privacy remediation",
+                reason,
+            ),
+        );
+    }
+    if matches!(
+        privacy.phase,
+        tracedecay_sessions::runtime::lcm::LcmPrivacyRemediationPhaseV1::Failed
+    ) {
+        let reason = privacy.failure_code.ok_or_else(|| {
+            global_db_operation_message(
+                "converge LCM privacy remediation",
+                "failed privacy state has no failure code",
+            )
+        })?;
+        return Err(global_db_operation_message(
+            "converge LCM privacy remediation",
+            reason,
+        ));
+    }
     ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
 }
 
@@ -928,6 +1009,52 @@ mod tests {
         assert!(
             rows.next().await.unwrap().is_some(),
             "rejected catalog must not be silently converged"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_registry_without_final_code_project_columns_requires_typed_reset() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        {
+            let connection = TestConnection::open(&database_path);
+            ensure_registered_schema(&connection)
+                .await
+                .expect("initialize final V2 authority schema");
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch("ALTER TABLE code_projects DROP COLUMN primary_root_platform")
+                .expect("remove required final code-project column");
+        }
+
+        let connection = TestConnection::open(&database_path);
+        let error = ensure_registered_schema(&connection)
+            .await
+            .expect_err("an old code-project shape must not be upgraded");
+        let Some((authority, reason)) = error.reset_required_context() else {
+            panic!("old code-project shape returned the wrong typed problem: {error}");
+        };
+        assert_eq!(
+            authority,
+            super::project_registry::PROJECT_REGISTRY_AUTHORITY
+        );
+        assert!(
+            reason.contains("primary_root_platform"),
+            "reset problem must identify the missing final column: {reason}"
+        );
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM pragma_table_xinfo('code_projects')
+                 WHERE name = 'primary_root_platform'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "rejected code-project schema must not be silently upgraded"
         );
     }
 

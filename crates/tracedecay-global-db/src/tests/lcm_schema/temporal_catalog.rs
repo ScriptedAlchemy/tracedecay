@@ -18,8 +18,30 @@ async fn temporal_schema_complete_object_catalog() {
     assert_eq!(temporal_schema_object_catalog(&db_path).await, expected);
     assert!(
         table_exists(&db_path, "lcm_raw_messages").await,
-        "the additive temporal schema must preserve legacy LCM tables"
+        "fresh initialization must compose the final temporal and LCM schemas"
     );
+}
+
+#[tokio::test]
+async fn final_schema_omits_legacy_lcm_summary_storage() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install the final schema");
+    drop(db);
+
+    for object in [
+        "lcm_summary_nodes",
+        "lcm_summary_sources",
+        "lcm_summary_nodes_fts",
+    ] {
+        assert!(
+            !table_exists(&db_path, object).await,
+            "final schema must not install obsolete legacy LCM summary storage: {object}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -132,188 +154,7 @@ async fn temporal_payload_manifest_schema_is_payload_global() {
     }
 }
 
-#[tokio::test]
-async fn temporal_schema_migration_is_atomic_and_idempotent() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    conn.execute_batch("CREATE TABLE session_temporal_generations (wrong_column TEXT);")
-        .await
-        .unwrap();
-    drop(conn);
-    drop(raw_db);
-
-    assert!(
-        open_global_db(&db_path).await.is_err(),
-        "an incompatible temporal table must reject the whole additive migration"
-    );
-    assert!(
-        !table_exists(&db_path, "session_temporal_schema_migrations").await,
-        "a rejected temporal migration must not leave its version marker behind"
-    );
-    assert!(
-        !table_exists(&db_path, "session_summary_nodes").await,
-        "a rejected temporal migration must not leave partially-created authority tables"
-    );
-
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    conn.execute("DROP TABLE session_temporal_generations", ())
-        .await
-        .unwrap();
-    drop(conn);
-    drop(raw_db);
-
-    let db = open_global_db(&db_path)
-        .await
-        .expect("fresh temporal migration should succeed");
-    drop(db);
-    let initial_catalog = temporal_schema_object_catalog(&db_path).await;
-    let initial_version = temporal_schema_version(&db_path).await;
-
-    let restart_path = tmp.path().join(".tracedecay").join("restart.db");
-    copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    let reopened = open_global_db(&restart_path)
-        .await
-        .expect("idempotent temporal reopen should succeed");
-    drop(reopened);
-    assert_eq!(
-        temporal_schema_version(&restart_path).await,
-        initial_version
-    );
-    assert_eq!(
-        temporal_schema_object_catalog(&restart_path).await,
-        initial_catalog
-    );
-}
-
-#[tokio::test]
-async fn temporal_schema_replaces_stale_refresh_guards_on_every_reopen() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
-        .await
-        .expect("temporal schema initialization should not error");
-    drop(db);
-
-    let triggers = [
-        "session_refresh_progress_insert_guard_v1",
-        "session_refresh_receipts_insert_guard_v1",
-    ];
-    let mut canonical = Vec::new();
-    for trigger in triggers {
-        canonical.push((trigger, normalized_trigger_sql(&db_path, trigger).await));
-    }
-
-    for marker_version in [1_i64, 2_i64] {
-        let raw_db = TestConnection::open(&db_path);
-        let conn = (*raw_db).clone();
-        conn.execute_batch(
-            "DROP TRIGGER session_refresh_progress_insert_guard_v1;
-             DROP TRIGGER session_refresh_receipts_insert_guard_v1;
-             CREATE TRIGGER session_refresh_progress_insert_guard_v1
-             BEFORE INSERT ON session_refresh_progress BEGIN SELECT 1; END;
-             CREATE TRIGGER session_refresh_receipts_insert_guard_v1
-             BEFORE INSERT ON session_refresh_receipts BEGIN SELECT 1; END;",
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "UPDATE session_temporal_schema_migrations
-             SET version = ?1
-             WHERE name = 'session-temporal'",
-            params![marker_version],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-        drop(raw_db);
-
-        let reopened = open_global_db(&db_path)
-            .await
-            .expect("stale refresh guards should be replaced");
-        drop(reopened);
-        for (trigger, expected) in &canonical {
-            assert_eq!(
-                normalized_trigger_sql(&db_path, trigger).await,
-                *expected,
-                "{trigger} must converge at marker version {marker_version}"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn temporal_schema_trigger_installation_is_atomic() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    conn.execute_batch("CREATE TABLE authority_audit_checkpoints (wrong_column TEXT);")
-        .await
-        .unwrap();
-    drop(conn);
-    drop(raw_db);
-
-    let migration_error = match open_global_db(&db_path).await {
-        Ok(_) => panic!("an invariant-installation failure must reject the temporal migration"),
-        Err(error) => error,
-    };
-    assert!(
-        !table_exists(&db_path, "session_temporal_schema_migrations").await,
-        "the temporal marker must not commit before invariant triggers install: {migration_error}"
-    );
-    assert!(
-        !table_exists(&db_path, "session_summary_nodes").await,
-        "temporal authority tables and invariant triggers must share one transaction"
-    );
-}
-
-#[tokio::test]
-async fn temporal_schema_refuses_future_version_without_mutation() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
-        .await
-        .expect("temporal schema initialization should not error");
-    drop(db);
-    assert!(
-        table_exists(&db_path, "session_temporal_schema_migrations").await,
-        "the temporal schema must install a version marker before a future version is tested"
-    );
-
-    let before_catalog = temporal_schema_object_catalog(&db_path).await;
-    let future_version = temporal_schema_version(&db_path).await + 97;
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    conn.execute(
-        "UPDATE session_temporal_schema_migrations
-         SET version = ?1
-         WHERE name = 'session-temporal'",
-        params![future_version],
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
-
-    let restart_path = tmp.path().join(".tracedecay").join("future.db");
-    copy_database_for_temporal_restart(&db_path, &restart_path).await;
-    assert!(
-        open_global_db(&restart_path).await.is_err(),
-        "a newer temporal schema must be refused instead of treated as current"
-    );
-    assert_eq!(temporal_schema_version(&restart_path).await, future_version);
-    assert_eq!(
-        temporal_schema_object_catalog(&restart_path).await,
-        before_catalog
-    );
-}
+mod admission;
 
 #[tokio::test]
 async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
@@ -733,7 +574,7 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
 }
 
 #[tokio::test]
-async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
+async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path)
@@ -754,10 +595,16 @@ async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
     drop(conn);
     drop(raw_db);
 
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("current-version temporal schema should reopen");
-    drop(reopened);
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("unexpected temporal indexes must require reset"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("session temporal")
+    );
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
@@ -773,14 +620,14 @@ async fn temporal_schema_drops_redundant_receipt_and_progress_indexes() {
             .await
             .unwrap();
         assert!(
-            rows.next().await.unwrap().is_none(),
-            "{index} duplicates an exact primary-key or unique-key prefix"
+            rows.next().await.unwrap().is_some(),
+            "rejected temporal schema must not drop {index}"
         );
     }
 }
 
 #[tokio::test]
-async fn temporal_schema_rejects_malformed_fts_atomically() {
+async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
@@ -791,29 +638,54 @@ async fn temporal_schema_rejects_malformed_fts_atomically() {
         "CREATE TABLE session_occurrences_fts (
             index_text TEXT NOT NULL,
             snippet_text TEXT NOT NULL
-        );",
+        );
+         INSERT INTO session_occurrences_fts (index_text, snippet_text)
+         VALUES ('retained malformed FTS', 'retained malformed FTS');",
     )
     .await
     .unwrap();
     drop(conn);
     drop(raw_db);
+    let before_catalog = temporal_schema_object_catalog(&db_path).await;
 
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a markerless malformed FTS store must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a markerless malformed FTS store must return typed reset-required");
+    assert_eq!(authority, "session temporal");
     assert!(
-        open_global_db(&db_path).await.is_err(),
-        "matching columns on an ordinary table must not impersonate the temporal FTS contract"
+        reason.contains("nonempty store"),
+        "unexpected reason: {reason}"
     );
     assert!(
         !table_exists(&db_path, "session_temporal_schema_migrations").await,
-        "FTS validation failure must roll back the temporal marker"
+        "typed refusal must not install the temporal marker"
     );
     assert!(
         !table_exists(&db_path, "session_summary_nodes").await,
-        "FTS validation failure must roll back every newly-created temporal authority table"
+        "typed refusal must not install temporal authority tables"
+    );
+    assert!(
+        table_exists(&db_path, "session_occurrences_fts").await,
+        "typed refusal must preserve the malformed FTS table"
+    );
+    assert_eq!(
+        row_count(&db_path, "session_occurrences_fts").await,
+        1,
+        "typed refusal must preserve malformed FTS rows"
+    );
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        before_catalog,
+        "typed refusal must not rewrite malformed FTS storage"
     );
 }
 
 #[tokio::test]
-async fn temporal_schema_rebuilds_existing_rows_into_exact_fts_contracts() {
+async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path)
@@ -844,31 +716,74 @@ async fn temporal_schema_rebuilds_existing_rows_into_exact_fts_contracts() {
     drop(conn);
     drop(raw_db);
 
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("missing temporal FTS objects should be rebuilt");
-    drop(reopened);
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("missing temporal FTS objects must require reset"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("session temporal")
+    );
 
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
-    for (table, expected_content) in [("session_summary_nodes_fts", "session_summary_nodes")] {
-        let mut rows = conn
-            .query(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                params![table],
-            )
-            .await
-            .unwrap();
-        let sql: String = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        let normalized = sql.to_ascii_lowercase().replace(char::is_whitespace, "");
-        assert!(normalized.contains("createvirtualtable"));
-        assert!(normalized.contains("usingfts5("));
-        assert!(normalized.contains(&format!("content='{expected_content}'")));
-        assert!(normalized.contains("content_rowid='rowid'"));
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'session_summary_nodes_fts'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert!(
+        rows.next().await.unwrap().is_none(),
+        "rejected current schema must not recreate missing FTS storage"
+    );
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM session_summary_nodes
+             WHERE summary_id = 'fts-summary'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1
+    );
+}
 
-        let query = format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH 'migration'");
-        let mut matches = conn.query(&query, ()).await.unwrap();
-        let count: i64 = matches.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(count, 1, "migration must rebuild existing rows for {table}");
-    }
+#[tokio::test]
+async fn temporal_schema_rejects_missing_graph_publication_authority_without_rebuilding_it() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("temporal schema initialization should not error");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute("DROP TABLE graph_verified_heads_v1", ())
+        .await
+        .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("missing graph publication authority must require reset"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("session temporal")
+    );
+    assert!(
+        !table_exists(&db_path, "graph_verified_heads_v1").await,
+        "rejected current schema must not recreate missing graph publication storage"
+    );
 }
