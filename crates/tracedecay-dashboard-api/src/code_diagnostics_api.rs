@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
+use super::util::{JsonError, http_detail, internal_error};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
@@ -151,13 +151,6 @@ fn bad_request(error: &impl ToString) -> JsonError {
         Json(json!({
             "detail": error.to_string(),
         })),
-    )
-}
-
-fn internal_error(error: impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&error.to_string())),
     )
 }
 

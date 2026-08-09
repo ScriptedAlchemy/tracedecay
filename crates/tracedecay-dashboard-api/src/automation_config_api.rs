@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
+use super::util::{JsonError, internal_error};
 use crate::user_config::UserConfig;
 use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{
@@ -125,13 +125,6 @@ fn bad_request(err: &impl ToString) -> JsonError {
                 "message": message,
             }],
         })),
-    )
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
     )
 }
 

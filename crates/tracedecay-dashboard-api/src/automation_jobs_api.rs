@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
+use super::util::{JsonError, http_detail, internal_error};
 use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
 use tracedecay_agent_hosts::automation::config::{
     AutomationConfig, effective_config, load_project_config,
@@ -356,12 +356,5 @@ fn not_found(job_id: &str) -> JsonError {
     (
         StatusCode::NOT_FOUND,
         Json(http_detail(&format!("automation job '{job_id}' not found"))),
-    )
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
     )
 }

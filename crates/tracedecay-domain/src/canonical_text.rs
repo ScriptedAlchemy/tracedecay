@@ -101,6 +101,13 @@ pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
     encode_lowercase_hex(&hasher.finalize())
 }
 
+/// Lowercase-hex SHA-256 of `bytes` — the one digest-to-text encoding every
+/// surface shares, so no call site re-rolls its own nibble table.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    encode_lowercase_hex(&Sha256::digest(bytes))
+}
+
 /// [`canonical_framed_sha256`] returning the raw 32 digest bytes for callers
 /// that derive fixed-length key material instead of a textual identity.
 #[must_use]

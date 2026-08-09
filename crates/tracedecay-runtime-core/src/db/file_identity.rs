@@ -7,7 +7,6 @@ use std::os::unix::fs::MetadataExt;
 
 /// Why a `SQLite` source could not yield a stable physical identity.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum SqliteFileIdentityError {
     Open,
     Inspect,

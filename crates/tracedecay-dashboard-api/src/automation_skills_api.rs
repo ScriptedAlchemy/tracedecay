@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
+use super::util::{JsonError, http_detail, internal_error};
 use tracedecay_agent_hosts::agents::{
     ManagedSkillExportReport, export_managed_skills_to_agent_hosts, home_dir,
 };
@@ -390,11 +390,4 @@ fn is_bad_request(message: &str) -> bool {
         || message.contains("stale")
         || message.contains("pending update")
         || message.contains("does not change")
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
 }

@@ -649,34 +649,6 @@ async fn build_state_inner(
     Ok(state)
 }
 
-/// Builds the dashboard state shared by the CLI `run` path and the
-/// `tracedecay_dashboard` MCP tool.
-#[allow(dead_code)]
-pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
-    build_state_inner(
-        cg,
-        None,
-        true,
-        DashboardStateCompositionV1 {
-            project_graph_resolver: None,
-            graph_read_authority: None,
-            registered_project_session_db: None,
-            lcm_read_authority: None,
-            git_correlation_read_authority: None,
-            registered_savings_db: None,
-            automation_scheduler_reconciler: None,
-            automation_writer: standalone_dashboard_automation_writer(),
-            doctor_report_reader: None,
-            code_index_freshness_reader: None,
-            feedback_status_reader: None,
-            code_diagnostics_broker: None,
-            application_invocation_executor: None,
-            delivery_settlement_authority: None,
-        },
-    )
-    .await
-}
-
 pub async fn build_state_with_automation_reconciler(
     cg: Arc<TraceDecay>,
     composition: DashboardStateCompositionV1,

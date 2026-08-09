@@ -2,13 +2,12 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail};
+use super::util::{JsonError, internal_error};
 use crate::user_config::UserConfig;
 use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_agent_hosts::automation::config::{
@@ -279,11 +278,4 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
         return "backend_disabled";
     }
     "configured"
-}
-
-fn internal_error(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
-    )
 }

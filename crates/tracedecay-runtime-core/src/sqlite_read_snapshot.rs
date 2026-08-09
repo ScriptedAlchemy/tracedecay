@@ -195,8 +195,8 @@ impl SourceGeneration {
 pub struct SnapshotSet {
     databases: BTreeMap<PathBuf, SnapshotDatabase>,
     copied_bytes: u64,
-    #[allow(dead_code)]
-    scratch: Arc<ScratchDirectory>,
+    /// Held only so the scratch tempdir outlives every snapshot database.
+    _scratch: Arc<ScratchDirectory>,
 }
 
 impl SnapshotSet {
@@ -271,7 +271,7 @@ impl SnapshotSet {
         Ok(Self {
             databases,
             copied_bytes,
-            scratch,
+            _scratch: scratch,
         })
     }
 

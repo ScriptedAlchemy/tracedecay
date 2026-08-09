@@ -3,7 +3,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use sha2::{Digest, Sha256};
 use tracedecay_application::now_micros;
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
@@ -1302,15 +1301,7 @@ fn is_canonical_sha256_hex(value: &str) -> bool {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let digest = Sha256::digest(bytes);
-    let mut actual = String::with_capacity(64);
-    for byte in digest {
-        actual.push(char::from(HEX[usize::from(byte >> 4)]));
-        actual.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    actual
+    tracedecay_domain::canonical_text::sha256_hex(bytes)
 }
 
 #[cfg(test)]

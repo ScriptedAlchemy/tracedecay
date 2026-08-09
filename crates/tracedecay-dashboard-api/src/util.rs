@@ -113,6 +113,12 @@ pub fn json_error(status: StatusCode, detail: impl Into<String>) -> JsonError {
     (status, Json(http_detail(&detail.into())))
 }
 
+/// The 500 ladder every handler module shares; module-local copies drifted
+/// into three signatures before this became the one definition.
+pub fn internal_error(error: impl ToString) -> JsonError {
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+}
+
 /// Wrapper around Axum's `Path` extractor that preserves the dashboard JSON
 /// error contract instead of Axum's default text/plain rejection body.
 pub struct JsonPath<T>(pub T);

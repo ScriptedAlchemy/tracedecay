@@ -623,17 +623,11 @@ fn sync_parent(path: &Path) -> Result<(), GraphDbError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), GraphDbError> {
-    #[cfg(unix)]
-    {
-        File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| unavailable_io("sync graph backup directory", path, error))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    tracedecay_domain::framed_log::sync_directory(
+        path,
+        tracedecay_domain::framed_log::DirectorySyncPolicy::Strict,
+    )
+    .map_err(|error| unavailable_io("sync graph backup directory", path, error))
 }
 
 fn unavailable_io(operation: &str, path: &Path, error: std::io::Error) -> GraphDbError {

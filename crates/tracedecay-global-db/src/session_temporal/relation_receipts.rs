@@ -5,7 +5,7 @@ use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::SessionStoreResult;
 
-use super::query::{generation_i64, storage, storage_message};
+use super::query::{generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationProjection, projection_watermark};
 use crate::RegisteredGlobalDb;
 
@@ -162,7 +162,7 @@ pub(crate) async fn apply_relation_projection(
                 i64::try_from(projection.generation)
                     .map_err(|error| storage(RECEIPT_OPERATION, error))?,
                 applied.as_str(),
-                now_micros()?,
+                now_micros(RECEIPT_OPERATION)?.0,
             ],
         )
         .await
@@ -272,13 +272,4 @@ async fn expected_receipt(
             "relation receipt has an invalid state",
         )),
     }
-}
-
-fn now_micros() -> SessionStoreResult<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| storage(RECEIPT_OPERATION, error))
-        .and_then(|duration| {
-            i64::try_from(duration.as_micros()).map_err(|error| storage(RECEIPT_OPERATION, error))
-        })
 }

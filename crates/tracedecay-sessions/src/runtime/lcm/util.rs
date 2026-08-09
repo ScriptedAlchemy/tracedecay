@@ -1,5 +1,3 @@
-use sha2::{Digest, Sha256};
-
 use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Value, params};
 
 use super::LcmError;
@@ -29,9 +27,7 @@ pub fn opt_i64(value: Option<i64>) -> Value {
 }
 
 pub fn sha256_hex(content: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    hex::encode(hasher.finalize())
+    tracedecay_domain::canonical_text::sha256_hex(content)
 }
 
 pub async fn fetch_i64(
