@@ -12,19 +12,25 @@
         "content": "Hetzner runner keeps the self-hosted CI queue under two minutes.",
         "category": "project",
         "source": "eval-protected",
-        "trust": 0.95
+        "trust": 0.95,
+        "preload_query": "hetzner runner",
+        "preload_searches": 60
       },
       {
         "content": "Dashboard bundles are prebuilt before cargo package ships them.",
         "category": "code_area",
         "source": "eval-protected",
-        "trust": 0.92
+        "trust": 0.92,
+        "preload_query": "dashboard bundles prebuilt",
+        "preload_searches": 35
       },
       {
         "content": "Branch databases live under .tracedecay/branches keyed by branch name.",
         "category": "code_area",
         "source": "eval-protected",
-        "trust": 0.9
+        "trust": 0.9,
+        "preload_query": "branch databases keyed",
+        "preload_searches": 25
       },
       {
         "content": "Demo note: the staging banner color is mauve for this project.",
@@ -74,6 +80,14 @@
       "source": "eval-protected",
       "op": "eq",
       "value": 3,
+      "phase": "both"
+    },
+    {
+      "kind": "retrieval-total",
+      "name": "protected_facts_retain_retrieval_frequency",
+      "source": "eval-protected",
+      "op": "eq",
+      "value": 120,
       "phase": "both"
     },
     {
