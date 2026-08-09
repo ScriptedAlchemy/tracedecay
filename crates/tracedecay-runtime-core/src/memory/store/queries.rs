@@ -11,7 +11,7 @@ use crate::tracedecay::current_timestamp;
 
 use super::{
     ENTITY_BATCH_SIZE, MemoryStore, db_error, db_message, fact_from_row, normalized_limit,
-    parse_category, sql_i64_list,
+    sql_i64_list,
 };
 
 impl MemoryStore<'_> {
@@ -157,45 +157,6 @@ impl MemoryStore<'_> {
             }
         }
         Ok(existing)
-    }
-
-    /// Batched category lookup for fact ids, for callers (bank/dirty
-    /// marking) that only need the stored `category` rather than the full
-    /// record [`Self::get_fact`] would return. Ids absent from
-    /// `memory_facts` are simply absent from the returned map.
-    pub(crate) async fn fact_categories(
-        &self,
-        fact_ids: &[i64],
-    ) -> Result<HashMap<i64, MemoryCategory>> {
-        let mut categories = HashMap::with_capacity(fact_ids.len());
-        for chunk in fact_ids.chunks(ENTITY_BATCH_SIZE) {
-            let Some(id_list) = sql_i64_list(chunk) else {
-                continue;
-            };
-            let sql =
-                format!("SELECT fact_id, category FROM memory_facts WHERE fact_id IN ({id_list})");
-            let mut rows = self
-                .conn
-                .query(&sql, params![])
-                .await
-                .map_err(|e| db_error("fact_categories", e))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| db_error("fact_categories", e))?
-            {
-                let fact_id = row
-                    .get::<i64>(0)
-                    .map_err(|e| db_error("fact_categories", e))?;
-                let category = parse_category(
-                    &row.get::<String>(1)
-                        .map_err(|e| db_error("fact_categories", e))?,
-                    "fact_categories",
-                )?;
-                categories.insert(fact_id, category);
-            }
-        }
-        Ok(categories)
     }
 
     /// Bulk-loads stored HRR vectors by `fact_id`. Facts whose vector is NULL or

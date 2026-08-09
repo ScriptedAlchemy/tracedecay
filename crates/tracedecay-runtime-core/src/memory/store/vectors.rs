@@ -11,7 +11,7 @@ use crate::db::engine::params;
 use crate::errors::Result;
 use crate::memory::encoding::HolographicEncoder;
 
-use super::{HRR_ALGEBRA, MemoryStore, db_error, db_message, normalized_limit};
+use super::{HRR_ALGEBRA, MemoryStore, db_error, normalized_limit};
 
 impl MemoryStore<'_> {
     pub async fn compute_missing_vectors(&self, limit: usize) -> Result<usize> {
@@ -79,17 +79,5 @@ impl MemoryStore<'_> {
         }
 
         Ok(fact_ids.len())
-    }
-
-    pub(crate) async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
-        let Some(fact) = self.get_fact(fact_id).await? else {
-            return Err(db_message(
-                "repair_fact_vector",
-                format!("fact {fact_id} not found"),
-            ));
-        };
-        self.update_fact_vector(fact_id, &fact.content, &fact.entities, "repair_fact_vector")
-            .await?;
-        Ok(true)
     }
 }
