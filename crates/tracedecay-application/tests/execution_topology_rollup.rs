@@ -13,15 +13,16 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, BlockedCauseV1, ConflictAdjudicatorV1, ConflictKindV1, ConflictOutcomeV1,
-    ConflictPredictionV1, ConflictScoreKindV1, CoverageStateV1, ExecutionPlacementV1,
-    ExecutionTopologyKindV1, ExecutionTopologySampledV1, IntegrationOperationKindV1,
-    IntegrationOwnerReceiptV1, IntegrationPhaseV1, IntegrationResultV1, IntegrationScopeClassV1,
-    LeakOwnerClassV1, ManifestDigest, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ProjectId, RepositoryId, ReviewTopologyV1,
-    TelemetryDropObservedV1, UtcMicros, WorkBlockedIntervalObservedV1, WorkConflictOutcomeLinkedV1,
-    WorkConflictPredictionObservedV1, WorkExecutionLeakKindV1, WorkExecutionLeakObservedV1,
-    WorkExecutionLeakRecoveryV1, WorkIntegrationTransitionObservedV1, WorkTopologyBranchV1,
-    WorktreeId,
+    ConflictPredictionV1, ConflictScoreKindV1, CoverageStateV1, DuplicateEffectOutcomeV1,
+    DuplicateEffortKindV1, ExecutionPlacementV1, ExecutionTopologyKindV1,
+    ExecutionTopologySampledV1, IntegrationOperationKindV1, IntegrationOwnerReceiptV1,
+    IntegrationPhaseV1, IntegrationResultV1, IntegrationScopeClassV1, LeakOwnerClassV1,
+    ManifestDigest, ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+    ProjectId, QuantityEvidenceClassV1, RepositoryId, ReviewTopologyV1, TelemetryDropObservedV1,
+    UtcMicros, WorkBlockedIntervalObservedV1, WorkConflictOutcomeLinkedV1,
+    WorkConflictPredictionObservedV1, WorkDuplicateEffortObservedV1, WorkExecutionLeakKindV1,
+    WorkExecutionLeakObservedV1, WorkExecutionLeakRecoveryV1, WorkIntegrationTransitionObservedV1,
+    WorkTopologyBranchV1, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 #[path = "execution_topology_rollup/stack_drift.rs"]
@@ -248,6 +249,38 @@ fn topology_event_with(
         coverage,
         dropped_count,
         process_boot_id,
+    )
+}
+fn duplicate_event(
+    sequence: u64,
+    event_time_micros: i64,
+    revision: u64,
+    wall_micros: u64,
+    anchor: &str,
+) -> ObservabilityEnvelopeV1 {
+    envelope(
+        sequence,
+        event_time_micros,
+        &format!("trace.duplicate.{sequence}"),
+        ObservabilityPayloadV1::WorkDuplicateEffort(WorkDuplicateEffortObservedV1 {
+            adjudication_ref: "receipt.duplicate.boundary".to_owned(),
+            adjudication_revision: revision,
+            kind: DuplicateEffortKindV1::ExactDuplicate,
+            wall_micros: Some(wall_micros),
+            token_count: None,
+            cost_micros: None,
+            test_count: None,
+            effect_count: None,
+            evidence: QuantityEvidenceClassV1::OwnerReceipt,
+            effect_outcome: DuplicateEffectOutcomeV1::Prevented,
+            coverage: CoverageStateV1::Known,
+            local_anchor_refs: vec![anchor.to_owned()],
+        }),
+        None,
+        None,
+        CoverageStateV1::Known,
+        0,
+        "boot.duplicate-rollup",
     )
 }
 fn integration_event(
@@ -703,6 +736,47 @@ fn arbitrary_partial_boundaries_merge_with_full_day_interior_without_changing_pr
     );
     assert_eq!(peak.value.value, Some(15.0));
     assert_eq!(peak.value.coverage.eligible, Some(15));
+}
+#[test]
+fn duplicate_corrections_round_trip_through_boundary_classification() {
+    let requested = horizon(0, DAY_MICROS / 2);
+    let boundary = build_execution_topology_boundary_fragment(
+        SCOPE,
+        &requested,
+        page(
+            vec![
+                duplicate_event(430, 1_000_000, 1, 10, "anchor.duplicate.origin"),
+                duplicate_event(431, 2_000_000, 2, 20, "anchor.duplicate.correction"),
+            ],
+            "duplicate-boundary",
+            CoverageStateV1::Known,
+        ),
+    )
+    .expect("duplicate evidence serializes through the boundary fragment");
+    let projected = project_execution_topology_fragments_with_boundaries(
+        SCOPE,
+        &requested,
+        432,
+        &[],
+        &[boundary],
+    );
+    let duplicate_wall_micros = find(
+        &projected,
+        "work_duplicate_effort_total",
+        &[
+            ExecutionTopologyDimensionV1::DuplicateKind(
+                tracedecay_application::ExecutionDuplicateKindV1::ExactDuplicate,
+            ),
+            ExecutionTopologyDimensionV1::Unit(
+                tracedecay_application::ExecutionQuantityUnitV1::WallMicros,
+            ),
+        ],
+    );
+    assert!(projected.current);
+    assert_eq!(duplicate_wall_micros.value.value, Some(20.0));
+    assert_eq!(duplicate_wall_micros.value.coverage.eligible, Some(1));
+    assert_eq!(duplicate_wall_micros.value.coverage.observed, 1);
+    assert_eq!(duplicate_wall_micros.value.coverage.unknown, 0);
 }
 #[test]
 fn canonical_serde_roundtrip_and_bad_missing_interiors_fail_closed() {

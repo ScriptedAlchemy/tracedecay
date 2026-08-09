@@ -113,7 +113,35 @@ pub(super) struct DuplicateRowV1 {
 
 /// A duplicate relation receipt revision. Evidence anchors support drill-down,
 /// but only this stable receipt pair determines correction replacement.
-pub(super) type DuplicateReceiptKeyV1 = (String, u64);
+///
+/// The length prefix makes the JSON object key unambiguous even though receipt
+/// references may themselves contain colons.
+pub(super) type DuplicateReceiptKeyV1 = String;
+
+pub(super) fn duplicate_receipt_key(
+    adjudication_ref: &str,
+    adjudication_revision: u64,
+) -> DuplicateReceiptKeyV1 {
+    format!(
+        "{}:{adjudication_ref}:{adjudication_revision}",
+        adjudication_ref.len()
+    )
+}
+
+pub(super) fn duplicate_receipt_key_parts(key: &str) -> Option<(&str, u64)> {
+    let (reference_length, remainder) = key.split_once(':')?;
+    let reference_length = reference_length.parse::<usize>().ok()?;
+    let reference = remainder.get(..reference_length)?;
+    let revision = remainder
+        .get(reference_length..)?
+        .strip_prefix(':')?
+        .parse::<u64>()
+        .ok()?;
+    if revision == 0 || duplicate_receipt_key(reference, revision) != key {
+        return None;
+    }
+    Some((reference, revision))
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct BlockedRowV1 {
@@ -414,16 +442,12 @@ impl ExecutionTopologyEvidenceV1 {
             coverage: duplicate.coverage,
             event_time_micros,
         };
-        let receipt = (
-            duplicate.adjudication_ref.clone(),
-            duplicate.adjudication_revision,
-        );
+        let receipt =
+            duplicate_receipt_key(&duplicate.adjudication_ref, duplicate.adjudication_revision);
         match self.duplicates.get(&receipt) {
             Some((existing, existing_time)) if existing.as_ref() != Some(&row) => {
-                self.duplicates.insert(
-                    receipt,
-                    (None, (*existing_time).max(event_time_micros)),
-                );
+                self.duplicates
+                    .insert(receipt, (None, (*existing_time).max(event_time_micros)));
             }
             Some(_) => {}
             None => {
@@ -506,6 +530,15 @@ mod aggregation_tests {
         WorkExecutionLeakRecoveryV1,
     };
 
+    #[test]
+    fn duplicate_receipt_keys_round_trip_references_with_colons() {
+        let key = duplicate_receipt_key("receipt:duplicate:fixture", 7);
+        assert_eq!(
+            duplicate_receipt_key_parts(&key),
+            Some(("receipt:duplicate:fixture", 7))
+        );
+    }
+
     fn duplicate(
         adjudication_revision: u64,
         anchor_refs: &[&str],
@@ -564,10 +597,7 @@ mod aggregation_tests {
         evidence.absorb_duplicate(&duplicate(1, &["receipt.duplicate.alpha"], 20), 0);
         evidence.absorb_duplicate(&duplicate(1, &["receipt.duplicate.alpha"], 21), 0);
         assert!(
-            evidence
-                .duplicates
-                .values()
-                .all(|(row, _)| row.is_none()),
+            evidence.duplicates.values().all(|(row, _)| row.is_none()),
             "conflicting same-revision quantities must not pick an arrival-order winner"
         );
     }

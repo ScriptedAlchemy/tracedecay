@@ -5,8 +5,8 @@ use tracedecay_domain::canonical_sha256;
 
 use super::capacity_rollup::ExecutionTopologyCapacityRollupV1;
 use super::{
-    ConflictOutcomeRowV1, ConflictPredictionRowV1, DuplicateReceiptKeyV1, DuplicateRowV1,
-    ExecutionTopologyEvidenceV1, ExecutionTopologyRollupStateErrorV1,
+    ConflictOutcomeRowV1, ConflictPredictionRowV1, DuplicateRowV1, ExecutionTopologyEvidenceV1,
+    ExecutionTopologyRollupStateErrorV1, duplicate_receipt_key_parts,
 };
 
 pub(in crate::execution_topology_metrics) const MAX_CAPACITY_CORRECTION_CARRY_V1: usize = 512;
@@ -42,10 +42,12 @@ impl ExecutionTopologyEvidenceV1 {
     ) -> Result<ExecutionTopologyCapacityCorrectionCarryV1, ExecutionTopologyRollupStateErrorV1>
     {
         let mut carry = ExecutionTopologyCapacityCorrectionCarryV1::default();
-        for ((reference, revision), (row, event_time_micros)) in &self.duplicates {
+        for (receipt, (row, event_time_micros)) in &self.duplicates {
+            let (reference, revision) = duplicate_receipt_key_parts(receipt)
+                .ok_or(ExecutionTopologyRollupStateErrorV1::IncompatibleState)?;
             carry.push(ExecutionTopologyCapacityCorrectionCandidateV1::Duplicate {
                 reference: protected_reference("execution-topology.duplicate", reference)?,
-                revision: *revision,
+                revision,
                 event_time_micros: *event_time_micros,
                 row: *row,
             })?;
@@ -236,7 +238,7 @@ fn apply_candidates(
     capacity: &mut ExecutionTopologyCapacityRollupV1,
     candidates: &[ExecutionTopologyCapacityCorrectionCandidateV1],
 ) {
-    let mut duplicates = BTreeMap::<DuplicateReceiptKeyV1, (Option<DuplicateRowV1>, i64)>::new();
+    let mut duplicates = BTreeMap::<(String, u64), (Option<DuplicateRowV1>, i64)>::new();
     let mut predictions = BTreeMap::<String, ConflictPredictionRowV1>::new();
     let mut outcomes = BTreeMap::<String, ConflictOutcomeRowV1>::new();
     for candidate in candidates {
@@ -268,7 +270,7 @@ fn apply_candidates(
 }
 
 fn absorb_duplicate_candidate(
-    target: &mut BTreeMap<DuplicateReceiptKeyV1, (Option<DuplicateRowV1>, i64)>,
+    target: &mut BTreeMap<(String, u64), (Option<DuplicateRowV1>, i64)>,
     reference: &str,
     revision: u64,
     event_time_micros: i64,
