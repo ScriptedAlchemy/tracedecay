@@ -12,7 +12,8 @@ use tracedecay_application::{
     ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
     WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
     WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
     WorkStorageError, WorkStoragePort, WorkSynthesisAdmissionRecordV1,
     WorkSynthesisAdmissionStoragePort, WorkSynthesisAttemptV1, WorkSynthesisInsertOutcome,
     WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
@@ -150,19 +151,21 @@ impl WorkStoragePort for TestStore {
         history.push(request.event.clone());
         Ok(WorkAppendOutcome::Appended(rebuild(history)?))
     }
+}
 
-    /// This double holds Work history only and declares no routing state, so
-    /// the honest answer for a task it holds is the empty snapshot, and a task
-    /// it does not hold is refused exactly the way `load` refuses it.
+struct EmptyProposalRouting;
+
+impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
     fn routing_snapshot(
         &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<tracedecay_application::WorkRoutingSnapshotV1, WorkStorageError> {
-        self.load(authority, task_id)?;
-        Ok(tracedecay_application::WorkRoutingSnapshotV1::default())
+        _context: &RequestContext,
+        _task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
+        Ok(WorkRoutingSnapshotV1::default())
     }
 }
+
+const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
 
 fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
     WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
@@ -307,10 +310,35 @@ impl WorkAttemptStoragePort for AttemptStore {
         &self,
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
-        _maximum_active_per_repository: std::num::NonZeroU16,
-        _maximum_parallel_per_task: std::num::NonZeroU16,
+        _concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
         self.insert(authority, attempt)
+    }
+
+    fn admission_capacities(
+        &self,
+        _authority: &WorkAuthority,
+        task_ids: &[TaskId],
+        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
+    ) -> Result<
+        BTreeMap<TaskId, tracedecay_application::WorkAttemptCapacityV1>,
+        WorkAttemptStorageError,
+    > {
+        Ok(task_ids
+            .iter()
+            .cloned()
+            .map(|task_id| {
+                (
+                    task_id,
+                    tracedecay_application::WorkAttemptCapacityV1::new(
+                        0,
+                        0,
+                        0,
+                        concurrency.clone(),
+                    ),
+                )
+            })
+            .collect())
     }
 
     fn load(
@@ -465,8 +493,7 @@ impl WorkSynthesisAdmissionStoragePort for AttemptStore {
         &self,
         authority: &WorkAuthority,
         record: &WorkSynthesisAdmissionRecordV1,
-        _maximum_active_per_repository: std::num::NonZeroU16,
-        _maximum_parallel_per_task: std::num::NonZeroU16,
+        _concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
     ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
         self.insert_synthesis(authority, record)
     }
@@ -568,6 +595,7 @@ fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &st
         .generate_proposal(
             context,
             digest('b'),
+            &EMPTY_PROPOSAL_ROUTING,
             GenerateProposalRequest {
                 task_id: task_id.clone(),
                 proposal_id: id(&format!("proposal.{task}")),

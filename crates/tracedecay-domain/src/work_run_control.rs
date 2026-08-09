@@ -30,7 +30,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::{AttemptId, RunId, TaskId, UtcMicros};
+use crate::{
+    AttemptId, BlockedCauseV1, CoverageStateV1, RunId, TaskId, UtcMicros,
+    WorkBlockedIntervalObservedV1, WorkflowStepId, canonical_sha256,
+};
 
 /// Ceiling on the attempt frontier one pause records, so a pathological run
 /// cannot make the control row unbounded.
@@ -54,6 +57,10 @@ pub enum WorkRunControlContractError {
     NotPaused,
     #[error("Work run control transition moved backwards in time")]
     NonMonotonicTransition,
+    #[error("Work blocked interval revision must be non-zero")]
+    InvalidBlockedIntervalRevision,
+    #[error("Work blocked interval closure predates its start")]
+    InvalidBlockedIntervalClosure,
 }
 
 /// The published control state of one run.
@@ -325,6 +332,256 @@ impl WorkRunControlV1 {
     }
 }
 
+/// The exact canonical subject of one Work blocked interval.
+///
+/// A run-control pause is only observable for a provider attempt when the
+/// workflow journal proves which workflow step admitted that attempt. The
+/// operation name is deliberately not accepted here: it is not a step
+/// identity, and substituting it would turn an unavailable journal binding
+/// into fabricated observability evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "WorkBlockedIntervalIdentityV1")]
+pub struct WorkBlockedIntervalIdentityV1 {
+    task_id: TaskId,
+    run_id: RunId,
+    attempt_id: AttemptId,
+    step_id: WorkflowStepId,
+}
+
+impl WorkBlockedIntervalIdentityV1 {
+    pub const fn new(
+        task_id: TaskId,
+        run_id: RunId,
+        attempt_id: AttemptId,
+        step_id: WorkflowStepId,
+    ) -> Self {
+        Self {
+            task_id,
+            run_id,
+            attempt_id,
+            step_id,
+        }
+    }
+
+    pub const fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub const fn attempt_id(&self) -> &AttemptId {
+        &self.attempt_id
+    }
+
+    pub const fn step_id(&self) -> &WorkflowStepId {
+        &self.step_id
+    }
+
+    /// A stable opaque reference used only to construct the observability
+    /// envelope identity. The raw task, run, attempt, and step identifiers
+    /// remain in the durable Work receipt and never enter telemetry payloads.
+    pub fn observation_ref(&self) -> Result<String, WorkRunControlContractError> {
+        let digest = canonical_sha256(&("tracedecay.work-blocked-interval.v1", self))
+            .map_err(|_| WorkRunControlContractError::InvalidBlockedIntervalRevision)?;
+        Ok(format!("work-blocked-interval:{}", digest.as_str()))
+    }
+}
+
+/// The authoritative reason that opened a blocked interval.
+///
+/// The control authority is captured with the reason rather than inferred
+/// from a later control row. A resume or terminal closure may advance the run
+/// authority, but it cannot rewrite why the attempt was blocked.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "WorkBlockedIntervalCauseV1")]
+pub struct WorkBlockedIntervalCauseV1 {
+    reason: WorkRunControlReasonV1,
+    authority: WorkRunControlAuthorityV1,
+}
+
+impl WorkBlockedIntervalCauseV1 {
+    pub const fn new(reason: WorkRunControlReasonV1, authority: WorkRunControlAuthorityV1) -> Self {
+        Self { reason, authority }
+    }
+
+    pub const fn reason(&self) -> WorkRunControlReasonV1 {
+        self.reason
+    }
+
+    pub const fn authority(&self) -> WorkRunControlAuthorityV1 {
+        self.authority
+    }
+
+    pub const fn observability_cause(&self) -> BlockedCauseV1 {
+        match self.reason {
+            WorkRunControlReasonV1::OperatorRequest => BlockedCauseV1::Other,
+            WorkRunControlReasonV1::HumanWait => BlockedCauseV1::NeedsInput,
+            WorkRunControlReasonV1::BudgetExhausted => BlockedCauseV1::Backpressure,
+            WorkRunControlReasonV1::Recovery => BlockedCauseV1::Lease,
+        }
+    }
+}
+
+/// How an open interval became settled.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(title = "WorkBlockedIntervalClosureV1")]
+pub enum WorkBlockedIntervalClosureV1 {
+    /// The run-control authority readmitted reservations.
+    Resumed {
+        reason: WorkRunControlReasonV1,
+        authority: WorkRunControlAuthorityV1,
+    },
+    /// The owning provider attempt reached a terminal state under its own
+    /// fenced compare-and-swap.
+    AttemptTerminal,
+}
+
+/// One durable, revisioned blocked-interval receipt.
+///
+/// An open receipt is the first revision. A resume or terminal attempt CAS
+/// writes the next revision on this same identity with a proved end instant.
+/// Consumers must therefore fold by the opaque envelope trace identity and
+/// retain the highest revision; a crash can replay either receipt safely.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "WorkBlockedIntervalReceiptV1")]
+pub struct WorkBlockedIntervalReceiptV1 {
+    identity: WorkBlockedIntervalIdentityV1,
+    cause: WorkBlockedIntervalCauseV1,
+    interval_revision: u32,
+    started_at: UtcMicros,
+    ended_at: Option<UtcMicros>,
+    closure: Option<WorkBlockedIntervalClosureV1>,
+}
+
+impl WorkBlockedIntervalReceiptV1 {
+    pub fn opened(
+        identity: WorkBlockedIntervalIdentityV1,
+        cause: WorkBlockedIntervalCauseV1,
+        started_at: UtcMicros,
+    ) -> Result<Self, WorkRunControlContractError> {
+        Ok(Self {
+            identity,
+            cause,
+            interval_revision: 1,
+            started_at,
+            ended_at: None,
+            closure: None,
+        })
+    }
+
+    pub fn close(
+        &self,
+        ended_at: UtcMicros,
+        closure: WorkBlockedIntervalClosureV1,
+    ) -> Result<Self, WorkRunControlContractError> {
+        if self.interval_revision != 1 || self.ended_at.is_some() || ended_at.0 < self.started_at.0
+        {
+            return Err(WorkRunControlContractError::InvalidBlockedIntervalClosure);
+        }
+        Ok(Self {
+            identity: self.identity.clone(),
+            cause: self.cause,
+            interval_revision: 2,
+            started_at: self.started_at,
+            ended_at: Some(ended_at),
+            closure: Some(closure),
+        })
+    }
+
+    pub fn identity(&self) -> &WorkBlockedIntervalIdentityV1 {
+        &self.identity
+    }
+
+    pub const fn cause(&self) -> WorkBlockedIntervalCauseV1 {
+        self.cause
+    }
+
+    pub const fn interval_revision(&self) -> u32 {
+        self.interval_revision
+    }
+
+    pub const fn started_at(&self) -> UtcMicros {
+        self.started_at
+    }
+
+    pub const fn ended_at(&self) -> Option<UtcMicros> {
+        self.ended_at
+    }
+
+    pub const fn closure(&self) -> Option<WorkBlockedIntervalClosureV1> {
+        self.closure
+    }
+
+    pub const fn is_settled(&self) -> bool {
+        self.ended_at.is_some()
+    }
+
+    pub fn observation_ref(&self) -> Result<String, WorkRunControlContractError> {
+        self.identity.observation_ref()
+    }
+
+    pub fn observability_payload(&self) -> WorkBlockedIntervalObservedV1 {
+        WorkBlockedIntervalObservedV1 {
+            cause: self.cause.observability_cause(),
+            interval_revision: self.interval_revision,
+            valid_from_micros: self.started_at.0,
+            valid_until_micros: self.ended_at.map(|ended_at| ended_at.0),
+            coverage: CoverageStateV1::Known,
+        }
+    }
+
+    fn validate(&self) -> Result<(), WorkRunControlContractError> {
+        match (self.ended_at, self.closure) {
+            (Some(ended_at), Some(_))
+                if self.interval_revision == 2 && ended_at.0 >= self.started_at.0 =>
+            {
+                Ok(())
+            }
+            (None, None) if self.interval_revision == 1 => Ok(()),
+            (Some(_), Some(_)) | (None, None) => {
+                Err(WorkRunControlContractError::InvalidBlockedIntervalRevision)
+            }
+            _ => Err(WorkRunControlContractError::InvalidBlockedIntervalClosure),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkBlockedIntervalReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            identity: WorkBlockedIntervalIdentityV1,
+            cause: WorkBlockedIntervalCauseV1,
+            interval_revision: u32,
+            started_at: UtcMicros,
+            ended_at: Option<UtcMicros>,
+            closure: Option<WorkBlockedIntervalClosureV1>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let receipt = Self {
+            identity: wire.identity,
+            cause: wire.cause,
+            interval_revision: wire.interval_revision,
+            started_at: wire.started_at,
+            ended_at: wire.ended_at,
+            closure: wire.closure,
+        };
+        receipt.validate().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
 fn validate_fenced_attempts(attempts: &[AttemptId]) -> Result<(), WorkRunControlContractError> {
     if attempts.len() > MAX_FENCED_WORK_ATTEMPTS {
         return Err(WorkRunControlContractError::TooManyFencedAttempts);
@@ -497,6 +754,54 @@ mod tests {
             .expect("resume");
         assert!(resumed.deadline().is_exhausted());
         assert_eq!(resumed.deadline().deadline, UtcMicros(6_000));
+    }
+
+    #[test]
+    fn blocked_interval_receipt_is_revisioned_and_refuses_a_backward_closure() {
+        let receipt = WorkBlockedIntervalReceiptV1::opened(
+            WorkBlockedIntervalIdentityV1::new(
+                TaskId::new("task.interval").expect("task id"),
+                RunId::new("run.interval").expect("run id"),
+                AttemptId::new("attempt.interval").expect("attempt id"),
+                WorkflowStepId::new("step.interval").expect("step id"),
+            ),
+            WorkBlockedIntervalCauseV1::new(
+                WorkRunControlReasonV1::HumanWait,
+                WorkRunControlAuthorityV1::new(2).expect("authority"),
+            ),
+            UtcMicros(100),
+        )
+        .expect("open receipt");
+        assert_eq!(receipt.interval_revision(), 1);
+        assert!(!receipt.is_settled());
+        assert_eq!(
+            receipt
+                .close(UtcMicros(99), WorkBlockedIntervalClosureV1::AttemptTerminal)
+                .expect_err("backward closure"),
+            WorkRunControlContractError::InvalidBlockedIntervalClosure
+        );
+
+        let settled = receipt
+            .close(
+                UtcMicros(125),
+                WorkBlockedIntervalClosureV1::AttemptTerminal,
+            )
+            .expect("settled receipt");
+        assert_eq!(settled.interval_revision(), 2);
+        assert_eq!(settled.ended_at(), Some(UtcMicros(125)));
+        assert_eq!(
+            settled
+                .close(
+                    UtcMicros(130),
+                    WorkBlockedIntervalClosureV1::AttemptTerminal,
+                )
+                .expect_err("already settled"),
+            WorkRunControlContractError::InvalidBlockedIntervalClosure
+        );
+        assert_eq!(
+            settled.observability_payload().cause,
+            BlockedCauseV1::NeedsInput
+        );
     }
 
     #[test]

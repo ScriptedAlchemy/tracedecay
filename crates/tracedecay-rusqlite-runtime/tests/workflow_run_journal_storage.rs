@@ -11,16 +11,25 @@
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
-    WorkflowAdmissionSnapshot, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
-    WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowRunAppendOutcome,
-    WorkflowRunAppendRequest, WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError,
-    WorkflowRunStoragePort, work_executable_catalog_digest, workflow_artifact_payload_digest,
+    CancellationContext, WorkflowAdmissionSnapshot, WorkflowArtifactPayload,
+    WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError, WorkflowArtifactStorePort,
+    WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutRequest,
+    WorkflowProviderAdmission, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
+    WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
+    durable_workflow_fan_out_plan, prepare_workflow_fan_out, work_executable_catalog_digest,
+    workflow_artifact_payload_digest,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RunId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkCommandId,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProviderId, RepositoryId, RunId, UtcMicros, WorkApprovalPolicy, WorkArtifactId,
+    WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkflowDefinition,
+    WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName,
     WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepId,
+    WorkflowStepId, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
@@ -68,6 +77,127 @@ fn definition() -> WorkflowDefinition {
         work_executable_catalog_digest().unwrap(),
     )
     .unwrap()
+}
+
+fn fan_out_definition() -> WorkflowDefinition {
+    WorkflowDefinition::new(
+        id::<WorkflowDefinitionId>("workflow.definition.journal.fan-out"),
+        1,
+        id::<ProjectId>("project.workflow.journal"),
+        vec![WorkflowStep {
+            step_id: id::<WorkflowStepId>("fan-out"),
+            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: vec![id::<WorkflowOutputName>("finding")],
+            fan_out: Some(WorkflowFanOut { max_width: 1 }),
+        }],
+        digest('a'),
+        digest('b'),
+        work_executable_catalog_digest().unwrap(),
+    )
+    .unwrap()
+}
+
+fn work_authority(worktree: &str) -> WorkAuthority {
+    WorkAuthority::new(
+        id("project.workflow.journal"),
+        id::<RepositoryId>("repository.workflow.journal"),
+        id::<WorktreeId>(worktree),
+        id::<ActorId>("actor.workflow.journal"),
+        digest('9'),
+    )
+    .unwrap()
+}
+
+fn execution_snapshot() -> WorkExecutionSnapshot {
+    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>(
+            "configuration-revision.workflow-journal",
+        ),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>(
+            "configuration-snapshot.workflow-journal",
+        ),
+        effective_behavior_digest: digest('b'),
+        resolution_provenance_digest: digest('2'),
+        route: WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow-journal"),
+            id::<WorkProviderRouteId>("route.workflow-journal"),
+        )
+        .unwrap(),
+        backend: WorkProviderBackendV1::CodexAppServer,
+        protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: "gpt-test".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.workflow-journal".to_owned(),
+            digest('3'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline: UtcMicros(90_000_000),
+        fallback: WorkFallbackTopology::Disabled,
+        topology: tracedecay_domain::configuration::safe_work_topology_policy_v1(),
+    })
+    .unwrap()
+}
+
+fn admit_fan_out_run(
+    service: &WorkflowRunService<WorkflowSqliteAuthority>,
+    run_id: RunId,
+    authority: WorkAuthority,
+    command: &str,
+) {
+    let definition = fan_out_definition();
+    let provider = WorkflowProviderAdmission {
+        execution_snapshot: execution_snapshot(),
+        topology_digest: digest('c'),
+        provider_registry_digest: digest('d'),
+        worktree_placement: tracedecay_domain::configuration::safe_work_topology_policy_v1()
+            .placement,
+        reference: None,
+        commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        cancellation_generation: 1,
+        effect_state: WorkEffectStateV1::Observational,
+    };
+    let planned = prepare_workflow_fan_out(&WorkflowFanOutRequest {
+        definition: definition.clone(),
+        run_id: run_id.clone(),
+        step_id: id("fan-out"),
+        fence: WorkflowExecutionFence {
+            attempt_id: id::<AttemptId>(&format!("attempt.{command}")),
+            lease: WorkLeaseFenceV1::new(
+                id::<WorkLeaseId>(&format!("lease.{command}")),
+                WorkFenceEpochV1::new(1).unwrap(),
+            )
+            .unwrap(),
+        },
+        admitted_at: UtcMicros(100),
+        cancellation: CancellationContext::active(format!("cancel.{command}")).unwrap(),
+        max_parallel: 1,
+        failure_policy: WorkflowFailurePolicy::Collect,
+        provider: provider.clone(),
+        inputs: vec![WorkflowFanOutInput {
+            identity: command.to_owned(),
+            input_digest: digest('e'),
+        }],
+    })
+    .unwrap();
+    let durable = durable_workflow_fan_out_plan(&planned, &provider, authority).unwrap();
+    service
+        .admit_with_fan_out(
+            run_id,
+            definition,
+            admission(),
+            vec![durable],
+            context(&format!("command.{command}"), '4', 100),
+        )
+        .unwrap();
 }
 
 fn admission() -> WorkflowAdmissionSnapshot {
@@ -338,5 +468,63 @@ fn corrupted_artifact_rows_are_refused_on_hydration() {
     assert_eq!(
         authority.load(payload.artifact()).unwrap_err(),
         WorkflowArtifactStoreError::DigestMismatch
+    );
+}
+
+#[test]
+fn active_recovery_pages_resume_after_restart_and_exclude_foreign_authority() {
+    let store = RegisteredWorkflowStore::start("run-journal-active-recovery-pages");
+    let authority = attach(&store);
+    let service = WorkflowRunService::new(authority.clone());
+    for ordinal in 0..32 {
+        let run_id = id::<RunId>(&format!("run.workflow.recovery.{ordinal:02}"));
+        service
+            .admit(
+                run_id,
+                definition(),
+                admission(),
+                context(&format!("command.recovery.{ordinal:02}"), '1', ordinal + 1),
+            )
+            .unwrap();
+    }
+    let registered_authority = work_authority("worktree.workflow.journal.registered");
+    admit_fan_out_run(
+        &service,
+        id("run.workflow.recovery.32"),
+        registered_authority.clone(),
+        "recovery.matching",
+    );
+    admit_fan_out_run(
+        &service,
+        id("run.workflow.recovery.33"),
+        work_authority("worktree.workflow.journal.foreign"),
+        "recovery.foreign",
+    );
+
+    let first = authority
+        .active_projection_page(&registered_authority, None)
+        .unwrap();
+    assert_eq!(first.projections.len(), 32);
+    let cursor = first
+        .continuation
+        .expect("a full page with remaining durable runs must retain a cursor");
+    assert_eq!(cursor.after_run_id.as_str(), "run.workflow.recovery.31");
+
+    let store = store.restart("run-journal-active-recovery-pages-restarted");
+    let reopened = attach(&store);
+    let second = reopened
+        .active_projection_page(&registered_authority, Some(&cursor))
+        .unwrap();
+    assert_eq!(second.continuation, None);
+    assert_eq!(second.projections.len(), 1);
+    assert_eq!(
+        second.projections[0].run_id().as_str(),
+        "run.workflow.recovery.32"
+    );
+    assert!(
+        second.projections[0]
+            .fan_out_plans()
+            .values()
+            .all(|plan| plan.authority == registered_authority)
     );
 }

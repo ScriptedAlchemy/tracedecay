@@ -7,10 +7,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
-    WorkflowDefinition, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
+    ManifestDigest, RunId, UtcMicros, WorkAttemptIdentityV1, WorkCommandId, WorkflowDefinition,
+    WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
     WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId,
 };
+
+mod fan_out;
+mod io;
+pub use fan_out::{WorkflowFanOutChildPlanV1, WorkflowFanOutFailurePolicyV1, WorkflowFanOutPlanV1};
+pub use io::{WorkflowOutputArtifact, WorkflowStepInput, WorkflowStepOutput};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowRunStateError {
@@ -48,126 +53,6 @@ pub struct WorkflowRunEventContext {
     pub occurred_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowOutputArtifact {
-    attempt_identity: WorkAttemptIdentityV1,
-    artifact: WorkArtifactRefV1,
-}
-
-impl WorkflowOutputArtifact {
-    pub const fn new(attempt_identity: WorkAttemptIdentityV1, artifact: WorkArtifactRefV1) -> Self {
-        Self {
-            attempt_identity,
-            artifact,
-        }
-    }
-
-    pub fn attempt_identity(&self) -> &WorkAttemptIdentityV1 {
-        &self.attempt_identity
-    }
-
-    pub fn artifact(&self) -> &WorkArtifactRefV1 {
-        &self.artifact
-    }
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowStepOutput {
-    output_name: WorkflowOutputName,
-    artifacts: Vec<WorkflowOutputArtifact>,
-}
-
-impl WorkflowStepOutput {
-    pub fn new(
-        output_name: WorkflowOutputName,
-        mut artifacts: Vec<WorkflowOutputArtifact>,
-    ) -> Result<Self, WorkflowRunStateError> {
-        artifacts.sort_by(|left, right| left.attempt_identity.cmp(&right.attempt_identity));
-        let attempt_count = artifacts
-            .iter()
-            .map(|artifact| artifact.attempt_identity())
-            .collect::<BTreeSet<_>>()
-            .len();
-        let artifact_count = artifacts
-            .iter()
-            .map(|artifact| artifact.artifact().artifact_id())
-            .collect::<BTreeSet<_>>()
-            .len();
-        if artifacts.is_empty()
-            || attempt_count != artifacts.len()
-            || artifact_count != artifacts.len()
-        {
-            return Err(WorkflowRunStateError::InvalidStepOutputs);
-        }
-        Ok(Self {
-            output_name,
-            artifacts,
-        })
-    }
-
-    pub fn output_name(&self) -> &WorkflowOutputName {
-        &self.output_name
-    }
-
-    pub fn artifacts(&self) -> &[WorkflowOutputArtifact] {
-        &self.artifacts
-    }
-
-    fn validate(&self) -> Result<(), WorkflowRunStateError> {
-        if Self::new(self.output_name.clone(), self.artifacts.clone())? != *self {
-            return Err(WorkflowRunStateError::InvalidStepOutputs);
-        }
-        Ok(())
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkflowStepOutput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            output_name: WorkflowOutputName,
-            artifacts: Vec<WorkflowOutputArtifact>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.output_name, wire.artifacts).map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowStepInput {
-    reference: WorkflowOutputReference,
-    artifacts: Vec<WorkflowOutputArtifact>,
-}
-
-impl WorkflowStepInput {
-    fn from_output(
-        reference: WorkflowOutputReference,
-        output: &WorkflowStepOutput,
-    ) -> Result<Self, WorkflowRunStateError> {
-        output.validate()?;
-        Ok(Self {
-            reference,
-            artifacts: output.artifacts.clone(),
-        })
-    }
-
-    pub fn reference(&self) -> &WorkflowOutputReference {
-        &self.reference
-    }
-
-    pub fn artifacts(&self) -> &[WorkflowOutputArtifact] {
-        &self.artifacts
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowRunStatus {
@@ -199,6 +84,14 @@ pub enum WorkflowStepStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum WorkflowRunCommand {
+    SettleFanOutChildren {
+        step_id: WorkflowStepId,
+        attempts: Vec<WorkAttemptIdentityV1>,
+    },
+    ReleaseFanOutChildren {
+        step_id: WorkflowStepId,
+        attempts: Vec<WorkAttemptIdentityV1>,
+    },
     StartStep {
         step_id: WorkflowStepId,
         placement: WorkflowPlacementReceipt,
@@ -226,6 +119,16 @@ pub enum WorkflowRunEventKind {
         definition: WorkflowDefinition,
         pinned_topology_digest: ManifestDigest,
         pinned_provider_registry_digest: ManifestDigest,
+        #[serde(default)]
+        fan_out_plans: Vec<WorkflowFanOutPlanV1>,
+    },
+    FanOutChildrenReleased {
+        step_id: WorkflowStepId,
+        attempts: Vec<WorkAttemptIdentityV1>,
+    },
+    FanOutChildrenSettled {
+        step_id: WorkflowStepId,
+        attempts: Vec<WorkAttemptIdentityV1>,
     },
     StepStarted {
         step_id: WorkflowStepId,
@@ -269,6 +172,39 @@ impl WorkflowRunEvent {
         definition
             .validate()
             .map_err(|_| WorkflowRunStateError::InvalidDefinition)?;
+        Self::admitted_with_fan_out(
+            run_id,
+            definition,
+            pinned_topology_digest,
+            pinned_provider_registry_digest,
+            Vec::new(),
+            context,
+        )
+    }
+
+    pub fn admitted_with_fan_out(
+        run_id: RunId,
+        definition: WorkflowDefinition,
+        pinned_topology_digest: ManifestDigest,
+        pinned_provider_registry_digest: ManifestDigest,
+        fan_out_plans: Vec<WorkflowFanOutPlanV1>,
+        context: WorkflowRunEventContext,
+    ) -> Result<Self, WorkflowRunStateError> {
+        definition
+            .validate()
+            .map_err(|_| WorkflowRunStateError::InvalidDefinition)?;
+        for plan in &fan_out_plans {
+            plan.validate(&definition)?;
+        }
+        if fan_out_plans
+            .iter()
+            .map(|plan| &plan.step_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != fan_out_plans.len()
+        {
+            return Err(WorkflowRunStateError::InvalidDefinition);
+        }
         Ok(Self {
             run_id,
             sequence: 1,
@@ -279,6 +215,7 @@ impl WorkflowRunEvent {
                 definition,
                 pinned_topology_digest,
                 pinned_provider_registry_digest,
+                fan_out_plans,
             },
         })
     }
@@ -345,6 +282,9 @@ pub struct WorkflowRunProjection {
     status: WorkflowRunStatus,
     sequence: u64,
     steps: BTreeMap<WorkflowStepId, WorkflowStepRunProjection>,
+    fan_out_plans: BTreeMap<WorkflowStepId, WorkflowFanOutPlanV1>,
+    released_fan_out_attempts: BTreeSet<WorkAttemptIdentityV1>,
+    settled_fan_out_attempts: BTreeSet<WorkAttemptIdentityV1>,
     history: Vec<WorkflowRunEvent>,
 }
 
@@ -355,6 +295,7 @@ impl WorkflowRunProjection {
             definition,
             pinned_topology_digest,
             pinned_provider_registry_digest,
+            fan_out_plans,
         } = first.event()
         else {
             return Err(WorkflowRunStateError::InvalidTransition);
@@ -365,6 +306,9 @@ impl WorkflowRunProjection {
         definition
             .validate()
             .map_err(|_| WorkflowRunStateError::InvalidDefinition)?;
+        for plan in fan_out_plans {
+            plan.validate(definition)?;
+        }
         let mut steps = BTreeMap::new();
         for step in definition.steps() {
             steps.insert(
@@ -381,6 +325,10 @@ impl WorkflowRunProjection {
                 },
             );
         }
+        let fan_out_plans = fan_out_plans
+            .iter()
+            .map(|plan| (plan.step_id.clone(), plan.clone()))
+            .collect();
         let mut projection = Self {
             run_id: first.run_id().clone(),
             definition: definition.clone(),
@@ -389,6 +337,9 @@ impl WorkflowRunProjection {
             status: WorkflowRunStatus::Running,
             sequence: 1,
             steps,
+            fan_out_plans,
+            released_fan_out_attempts: BTreeSet::new(),
+            settled_fan_out_attempts: BTreeSet::new(),
             history: vec![first.clone()],
         };
         for event in &history[1..] {
@@ -403,6 +354,60 @@ impl WorkflowRunProjection {
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunEvent, WorkflowRunStateError> {
         let event = match command {
+            WorkflowRunCommand::SettleFanOutChildren { step_id, attempts } => {
+                self.require_running()?;
+                let plan = self
+                    .fan_out_plans
+                    .get(&step_id)
+                    .ok_or(WorkflowRunStateError::UnknownStep)?;
+                if attempts.is_empty()
+                    || attempts.iter().collect::<BTreeSet<_>>().len() != attempts.len()
+                    || attempts.iter().any(|identity| {
+                        !self.released_fan_out_attempts.contains(identity)
+                            || self.settled_fan_out_attempts.contains(identity)
+                            || !plan
+                                .children
+                                .iter()
+                                .any(|child| &child.attempt_identity == identity)
+                    })
+                {
+                    return Err(WorkflowRunStateError::InvalidTransition);
+                }
+                WorkflowRunEventKind::FanOutChildrenSettled { step_id, attempts }
+            }
+            WorkflowRunCommand::ReleaseFanOutChildren { step_id, attempts } => {
+                self.require_running()?;
+                let plan = self
+                    .fan_out_plans
+                    .get(&step_id)
+                    .ok_or(WorkflowRunStateError::UnknownStep)?;
+                let active = plan
+                    .children
+                    .iter()
+                    .filter(|child| {
+                        self.released_fan_out_attempts
+                            .contains(&child.attempt_identity)
+                            && !self
+                                .settled_fan_out_attempts
+                                .contains(&child.attempt_identity)
+                    })
+                    .count();
+                if attempts.is_empty()
+                    || attempts.iter().collect::<BTreeSet<_>>().len() != attempts.len()
+                    || active.saturating_add(attempts.len())
+                        > usize::from(plan.maximum_parallel.get())
+                    || attempts.iter().any(|identity| {
+                        self.released_fan_out_attempts.contains(identity)
+                            || !plan
+                                .children
+                                .iter()
+                                .any(|child| &child.attempt_identity == identity)
+                    })
+                {
+                    return Err(WorkflowRunStateError::InvalidTransition);
+                }
+                WorkflowRunEventKind::FanOutChildrenReleased { step_id, attempts }
+            }
             WorkflowRunCommand::StartStep { step_id, placement } => {
                 self.require_step_status(&step_id, WorkflowStepStatus::Ready)?;
                 self.validate_placement(&step_id, &placement)?;
@@ -502,6 +507,62 @@ impl WorkflowRunProjection {
             WorkflowRunEventKind::Admitted { .. } => {
                 return Err(WorkflowRunStateError::InvalidTransition);
             }
+            WorkflowRunEventKind::FanOutChildrenReleased { step_id, attempts } => {
+                next.require_running()?;
+                let plan = next
+                    .fan_out_plans
+                    .get(step_id)
+                    .ok_or(WorkflowRunStateError::UnknownStep)?;
+                let active = plan
+                    .children
+                    .iter()
+                    .filter(|child| {
+                        next.released_fan_out_attempts
+                            .contains(&child.attempt_identity)
+                            && !next
+                                .settled_fan_out_attempts
+                                .contains(&child.attempt_identity)
+                    })
+                    .count();
+                if attempts.is_empty()
+                    || attempts.iter().collect::<BTreeSet<_>>().len() != attempts.len()
+                    || active.saturating_add(attempts.len())
+                        > usize::from(plan.maximum_parallel.get())
+                    || attempts.iter().any(|identity| {
+                        next.released_fan_out_attempts.contains(identity)
+                            || !plan
+                                .children
+                                .iter()
+                                .any(|child| &child.attempt_identity == identity)
+                    })
+                {
+                    return Err(WorkflowRunStateError::InvalidTransition);
+                }
+                next.released_fan_out_attempts
+                    .extend(attempts.iter().cloned());
+            }
+            WorkflowRunEventKind::FanOutChildrenSettled { step_id, attempts } => {
+                next.require_running()?;
+                let plan = next
+                    .fan_out_plans
+                    .get(step_id)
+                    .ok_or(WorkflowRunStateError::UnknownStep)?;
+                if attempts.is_empty()
+                    || attempts.iter().collect::<BTreeSet<_>>().len() != attempts.len()
+                    || attempts.iter().any(|identity| {
+                        !next.released_fan_out_attempts.contains(identity)
+                            || next.settled_fan_out_attempts.contains(identity)
+                            || !plan
+                                .children
+                                .iter()
+                                .any(|child| &child.attempt_identity == identity)
+                    })
+                {
+                    return Err(WorkflowRunStateError::InvalidTransition);
+                }
+                next.settled_fan_out_attempts
+                    .extend(attempts.iter().cloned());
+            }
             WorkflowRunEventKind::StepStarted { step_id, placement } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatus::Ready)?;
@@ -526,7 +587,7 @@ impl WorkflowRunProjection {
                 step.status = WorkflowStepStatus::Succeeded;
                 step.outputs = outputs
                     .iter()
-                    .map(|output| (output.output_name.clone(), output.clone()))
+                    .map(|output| (output.output_name().clone(), output.clone()))
                     .collect();
                 step.effect_receipt = Some(effect_receipt.clone());
                 next.release_dependents();
@@ -554,7 +615,7 @@ impl WorkflowRunProjection {
                 step.status = WorkflowStepStatus::Failed;
                 step.outputs = outputs
                     .iter()
-                    .map(|output| (output.output_name.clone(), output.clone()))
+                    .map(|output| (output.output_name().clone(), output.clone()))
                     .collect();
                 step.effect_receipt = Some(effect_receipt.clone());
                 next.status = WorkflowRunStatus::Failed;
@@ -613,6 +674,18 @@ impl WorkflowRunProjection {
             return Err(WorkflowRunStateError::DuplicateCommand);
         }
         Ok(())
+    }
+
+    pub fn fan_out_plans(&self) -> &BTreeMap<WorkflowStepId, WorkflowFanOutPlanV1> {
+        &self.fan_out_plans
+    }
+
+    pub fn released_fan_out_attempts(&self) -> &BTreeSet<WorkAttemptIdentityV1> {
+        &self.released_fan_out_attempts
+    }
+
+    pub fn settled_fan_out_attempts(&self) -> &BTreeSet<WorkAttemptIdentityV1> {
+        &self.settled_fan_out_attempts
     }
 
     fn validate_outputs(

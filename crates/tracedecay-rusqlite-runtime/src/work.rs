@@ -15,8 +15,15 @@ use crate::exact_sql::{
     ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
 
+pub(crate) mod capacity;
+mod duplicate_adjudication;
+mod effect_holder;
 mod events;
+mod leak_adjudication;
+mod owner_observation;
 mod projection;
+mod retry;
+mod retry_evidence_binding;
 mod schema;
 mod sql;
 

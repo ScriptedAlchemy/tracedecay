@@ -21,7 +21,9 @@ use crate::exact_sql::{
     ExactSqlStatement, ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction,
     ExactSqlValue, ExactSqlValue as MigrationSqlValue,
 };
+mod census;
 mod disposition;
+mod effect_holder;
 mod effect_mutation;
 mod run_journal;
 mod schema;
@@ -295,24 +297,25 @@ pub enum WorkflowSqliteAuthorityBuildError {
 fn require_workflow_schema(
     handle: &ExactSqlHandle,
 ) -> Result<(), WorkflowSqliteAuthorityBuildError> {
+    let table_parameters = WORKFLOW_TABLE_CONTRACTS_V1
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows = handle
         .query(
             ExactSqlStatement::new(
-                "SELECT name, sql FROM sqlite_master
-                 WHERE type = 'table'
-                   AND name IN (
-                       'workflow_artifact_payloads',
-                       'workflow_definition_disposition',
-                       'workflow_definition_source_journal',
-                       'workflow_definition_transition_journal',
-                       'workflow_effect_journal',
-                       'workflow_handoffs',
-                       'workflow_run_journal',
-                       'workflow_schema'
-                   )
-                 ORDER BY name"
-                    .to_owned(),
-                Vec::new(),
+                format!(
+                    "SELECT name, sql FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name IN ({table_parameters})
+                     ORDER BY name"
+                ),
+                WORKFLOW_TABLE_CONTRACTS_V1
+                    .iter()
+                    .map(|table| ExactSqlValue::Text(table.name.to_owned()))
+                    .collect(),
             )
             .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
             Duration::from_secs(5),
@@ -587,6 +590,13 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
 }
 
 impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
+    fn has_pending_effects(
+        &self,
+        worktree_id: &tracedecay_domain::WorktreeId,
+    ) -> Result<bool, WorkflowEffectAuthorityErrorV1> {
+        effect_holder::has_pending_effects(&self.storage, worktree_id)
+    }
+
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,

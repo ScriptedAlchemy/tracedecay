@@ -6,8 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, ProposalId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkAuthority,
-    WorkCommandId, WorkContractError, WorkEvent, WorkEventKind, WorkProjection,
+    ConfigurationRevisionId, ManifestDigest, ProposalId, RuntimeEvidenceRef, TaskId, UtcMicros,
+    WorkAuthority, WorkCommandId, WorkContractError, WorkEvent, WorkEventKind, WorkProjection,
     WorkProjectionStateV1, WorkVersion, canonical_sha256,
 };
 use tracedecay_policy::work_loop::{
@@ -34,6 +34,15 @@ pub enum WorkStorageError {
     #[error("work command identity was reused with different input")]
     IdempotencyConflict,
     #[error("work storage is unavailable")]
+    Unavailable,
+}
+
+/// Failure to read the mounted routing authority for one proposal.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum WorkRoutingSnapshotErrorV1 {
+    #[error("proposal routing is not authorized")]
+    NotFoundOrNotAuthorized,
+    #[error("proposal routing is unavailable")]
     Unavailable,
 }
 
@@ -78,6 +87,11 @@ impl WorkAppendOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkRoutingSnapshotV1 {
+    /// Exact configuration revision that declared the routes. Mounted
+    /// configuration authorities always provide this; test and synthetic
+    /// authorities may intentionally leave it absent.
+    #[serde(default)]
+    pub configuration_revision: Option<ConfigurationRevisionId>,
     #[serde(default)]
     pub eligible_routes: Vec<WorkRouteCandidateV1>,
     #[serde(default)]
@@ -112,6 +126,20 @@ impl WorkRoutingSnapshotV1 {
     }
 }
 
+/// Exact-authority routing boundary for proposal generation.
+///
+/// Configuration-derived provider declarations, current grant filtering, and
+/// exact executable verification belong here rather than in Work event
+/// storage. The caller must mount one concrete authority; there is no default
+/// route source and policy receives only the resulting immutable snapshot.
+pub trait WorkRoutingSnapshotPortV1: Send + Sync {
+    fn routing_snapshot(
+        &self,
+        context: &RequestContext,
+        task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1>;
+}
+
 /// Exact-authority storage boundary. Implementations must compare both the
 /// expected version and `(command_id, input_digest)` atomically.
 ///
@@ -133,31 +161,6 @@ pub trait WorkStoragePort: Send + Sync {
     ) -> Result<WorkProjection, WorkStorageError>;
 
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError>;
-
-    /// Authorized routing state for one scoped task: the declared eligible
-    /// routes, the budget envelope, the content-location limit, the recorded
-    /// prior outcomes, and any recorded human route override.
-    ///
-    /// This is a read of state the authority already holds, on the same scope
-    /// check as every other method here; it is not a provider-discovery path
-    /// and it must never enumerate providers the authority has not declared.
-    ///
-    /// An adapter that holds no routing state answers with the empty snapshot
-    /// and the planner records `NoEligibleRoutes`; supplying a fabricated route
-    /// or budget instead would put evidence into a decision record that no
-    /// authority ever declared.
-    ///
-    /// This method is REQUIRED and deliberately carries no default body. A
-    /// default here answered "no routing state" on behalf of adapters that had
-    /// never considered the question, so a storage adapter could silently route
-    /// every production proposal against a snapshot it did not author. Every
-    /// implementation must now state its own answer, and one that forgets is a
-    /// compile error rather than a silent wrong answer.
-    fn routing_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkStorageError>;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -227,7 +230,7 @@ pub struct AdmitExecutionCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AttachRuntimeEvidenceCommand {
+pub(crate) struct AttachRuntimeEvidenceCommand {
     pub task_id: TaskId,
     pub evidence: RuntimeEvidenceRef,
     pub expected_version: WorkVersion,
@@ -380,6 +383,7 @@ where
         &self,
         context: &RequestContext,
         configuration_digest: ManifestDigest,
+        routing_authority: &dyn WorkRoutingSnapshotPortV1,
         request: GenerateProposalRequest,
     ) -> Result<GeneratedWorkProposal, ApplicationProblem> {
         admit(context, request.occurred_at)?;
@@ -400,14 +404,12 @@ where
                 .filter(|evidence| evidence.is_terminal())
                 .count(),
         )?;
-        // Routing evidence is read under the same authority as the Work
-        // history and canonicalized here, so the evaluator receives one
-        // authorized, order-stable snapshot and never sources a route,
-        // a budget, or a prior outcome for itself.
-        let routing = self
-            .storage
-            .routing_snapshot(&authority, &request.task_id)
-            .map_err(storage_problem)?
+        // Routing evidence comes from the concrete authority mounted for this
+        // request, then is canonicalized here so policy receives one
+        // authorized, order-stable snapshot and never discovers a provider.
+        let routing = routing_authority
+            .routing_snapshot(context, &request.task_id)
+            .map_err(routing_problem)?
             .canonicalize();
         let input = WorkProposalPolicyInputV1 {
             task_id: request.task_id.clone(),
@@ -427,6 +429,7 @@ where
             policy_revision: context.grant().revision,
             policy_digest: context.grant().digest.clone(),
             configuration_digest,
+            configuration_revision: routing.configuration_revision,
             deadline: context.deadline().expires_at,
             cancellation: match context.cancellation().state {
                 CancellationState::Active => WorkProposalCancellationV1::Active,
@@ -517,7 +520,7 @@ where
         )
     }
 
-    pub fn attach_runtime_evidence(
+    pub(crate) fn attach_runtime_evidence(
         &self,
         context: &RequestContext,
         command: AttachRuntimeEvidenceCommand,
@@ -819,6 +822,18 @@ fn storage_problem(error: WorkStorageError) -> ApplicationProblem {
             code: "application.work.storage-unavailable".to_owned(),
             message: "The Work authority is unavailable.".to_owned(),
         }),
+    }
+}
+
+fn routing_problem(error: WorkRoutingSnapshotErrorV1) -> ApplicationProblem {
+    match error {
+        WorkRoutingSnapshotErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
+        WorkRoutingSnapshotErrorV1::Unavailable => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "application.work.routing-unavailable".to_owned(),
+                message: "The Work proposal routing authority is unavailable.".to_owned(),
+            })
+        }
     }
 }
 

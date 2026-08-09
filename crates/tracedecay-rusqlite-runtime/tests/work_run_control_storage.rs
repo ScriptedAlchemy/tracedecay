@@ -23,13 +23,15 @@ use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
     ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
     UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1,
-    WorkEgressPolicy, WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
-    WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkRunControlAuthorityV1, WorkRunControlReasonV1, WorkRunControlStateV1, WorkRunControlV1,
-    WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkBlockedIntervalCauseV1,
+    WorkBlockedIntervalClosureV1, WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRunControlAuthorityV1,
+    WorkRunControlReasonV1, WorkRunControlStateV1, WorkRunControlV1, WorkSandboxPolicy,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorkflowStepId, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -273,6 +275,23 @@ fn paused(
         .unwrap()
 }
 
+fn blocked_interval(attempt_id: &str, started_at: UtcMicros) -> WorkBlockedIntervalReceiptV1 {
+    WorkBlockedIntervalReceiptV1::opened(
+        WorkBlockedIntervalIdentityV1::new(
+            task(),
+            run(),
+            id::<AttemptId>(attempt_id),
+            id::<WorkflowStepId>("step.run-control.storage"),
+        ),
+        WorkBlockedIntervalCauseV1::new(
+            WorkRunControlReasonV1::HumanWait,
+            WorkRunControlAuthorityV1::new(2).unwrap(),
+        ),
+        started_at,
+    )
+    .unwrap()
+}
+
 #[test]
 fn a_run_with_no_durable_attempt_has_no_admission_to_control() {
     let store = RegisteredWorkStore::start("run-control-absent");
@@ -323,6 +342,15 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
         admission.live_attempts,
         vec![id::<AttemptId>("attempt.rc.1")]
     );
+    // Journal binding is pause-only evidence. It must not promote a terminal
+    // attempt into a new blocked interval during a later run-control pause.
+    let bindings = store
+        .storage()
+        .workflow_bound_live_attempts(&authority, &task(), &run())
+        .unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].attempt_id, id::<AttemptId>("attempt.rc.1"));
+    assert_eq!(bindings[0].step_id, None);
 
     // A different run under the same authority is a separate admission.
     let other = attempt_for(task(), id::<RunId>("run.run-control.other"), "attempt.rc.9");
@@ -335,6 +363,43 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
             .expect("this run")
             .total_attempts,
         2
+    );
+}
+
+#[test]
+fn publication_refuses_an_attempt_frontier_changed_after_snapshot() {
+    let store = RegisteredWorkStore::start("run-control-frontier-race");
+    let authority = authority("actor.run-control.frontier-race");
+    let first = attempt("attempt.frontier-race.1");
+    store.storage().insert(&authority, &first).unwrap();
+    let frontier = store
+        .storage()
+        .run_control_frontier(&authority, &task(), &run())
+        .unwrap()
+        .expect("frontier");
+
+    // This admission lands after pause prepared its frontier. The storage CAS
+    // must observe it in the same write transaction as publication.
+    let racing = attempt("attempt.frontier-race.2");
+    store.storage().insert(&authority, &racing).unwrap();
+    let control = paused(
+        WorkRunControlReasonV1::OperatorRequest,
+        UtcMicros(400),
+        frontier.admission.live_attempts.clone(),
+    );
+    assert_eq!(
+        store
+            .storage()
+            .publish_run_control_at_frontier(&authority, &frontier, &control, &[])
+            .expect_err("changed attempt frontier"),
+        WorkRunControlStorageError::AuthorityConflict
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_run_control(&authority, &task(), &run())
+            .unwrap(),
+        None
     );
 }
 
@@ -392,7 +457,7 @@ fn the_first_publication_inserts_and_a_racing_first_publication_conflicts() {
     );
     store
         .storage()
-        .publish_run_control(&authority, None, &control)
+        .publish_run_control(&authority, None, &control, &[])
         .unwrap();
     assert_eq!(
         store
@@ -407,7 +472,7 @@ fn the_first_publication_inserts_and_a_racing_first_publication_conflicts() {
     assert_eq!(
         store
             .storage()
-            .publish_run_control(&authority, None, &control)
+            .publish_run_control(&authority, None, &control, &[])
             .expect_err("a racing first publication conflicts"),
         WorkRunControlStorageError::AuthorityConflict
     );
@@ -425,7 +490,7 @@ fn publication_is_a_compare_and_swap_on_the_monotonic_authority_version() {
     );
     store
         .storage()
-        .publish_run_control(&authority, None, &paused_control)
+        .publish_run_control(&authority, None, &paused_control, &[])
         .unwrap();
     assert_eq!(paused_control.authority().get(), 2);
 
@@ -440,6 +505,7 @@ fn publication_is_a_compare_and_swap_on_the_monotonic_authority_version() {
                 &authority,
                 Some(WorkRunControlAuthorityV1::new(1).unwrap()),
                 &resumed,
+                &[],
             )
             .expect_err("stale authority version"),
         WorkRunControlStorageError::AuthorityConflict
@@ -447,7 +513,7 @@ fn publication_is_a_compare_and_swap_on_the_monotonic_authority_version() {
     // The exact version that is published swaps successfully.
     store
         .storage()
-        .publish_run_control(&authority, Some(paused_control.authority()), &resumed)
+        .publish_run_control(&authority, Some(paused_control.authority()), &resumed, &[])
         .unwrap();
     let stored = store
         .storage()
@@ -475,7 +541,7 @@ fn control_rows_are_isolated_per_authority_and_survive_a_restart() {
     );
     store
         .storage()
-        .publish_run_control(&mine, None, &control)
+        .publish_run_control(&mine, None, &control, &[])
         .unwrap();
 
     // Another actor sees no control row at all — not a running one.
@@ -498,5 +564,159 @@ fn control_rows_are_isolated_per_authority_and_survive_a_restart() {
     assert_eq!(
         recovered.fenced_attempts(),
         [id::<AttemptId>("attempt.rc.1")]
+    );
+}
+
+#[test]
+fn settled_blocked_intervals_are_revisioned_isolated_and_replayed_after_restart() {
+    let store = RegisteredWorkStore::start("run-control-blocked-interval-replay");
+    let mine = authority("actor.run-control.blocked.mine");
+    let peer = authority("actor.run-control.blocked.peer");
+    let paused_control = paused(
+        WorkRunControlReasonV1::HumanWait,
+        UtcMicros(400),
+        vec![id::<AttemptId>("attempt.blocked")],
+    );
+    let opened = blocked_interval("attempt.blocked", UtcMicros(400));
+    store
+        .storage()
+        .publish_run_control(&mine, None, &paused_control, &[opened.clone()])
+        .unwrap();
+    assert_eq!(
+        store
+            .storage()
+            .open_blocked_intervals(&mine, &task(), &run())
+            .unwrap(),
+        vec![opened.clone()]
+    );
+
+    let resumed = paused_control
+        .resume(WorkRunControlReasonV1::OperatorRequest, UtcMicros(800))
+        .unwrap();
+    let settled = opened
+        .close(
+            UtcMicros(800),
+            WorkBlockedIntervalClosureV1::Resumed {
+                reason: WorkRunControlReasonV1::OperatorRequest,
+                authority: resumed.authority(),
+            },
+        )
+        .unwrap();
+    store
+        .storage()
+        .publish_run_control(
+            &mine,
+            Some(paused_control.authority()),
+            &resumed,
+            &[settled.clone()],
+        )
+        .unwrap();
+    assert_eq!(settled.interval_revision(), 2);
+    assert!(
+        store
+            .storage()
+            .open_blocked_intervals(&mine, &task(), &run())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&peer, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&mine, 1)
+            .unwrap(),
+        vec![settled.clone()]
+    );
+
+    // Queue admission is not delivery. The durable cursor schedules bounded
+    // cyclic replay, so a producer crash after `try_emit` remains recoverable
+    // after reopening the registered store.
+    let restarted = store.restart("run-control-blocked-interval-replay");
+    assert_eq!(
+        restarted
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&mine, 1)
+            .unwrap(),
+        vec![settled.clone()]
+    );
+    // Once the retained path has a durable producer claim, its exact receipt
+    // CAS removes only that revision from future scans.
+    restarted
+        .storage()
+        .mark_settled_blocked_interval_durable(&mine, &settled)
+        .unwrap();
+    assert!(
+        restarted
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&mine, 1)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn terminal_attempt_closes_its_open_blocked_interval_in_the_same_fenced_cas() {
+    let store = RegisteredWorkStore::start("run-control-blocked-interval-terminal");
+    let authority = authority("actor.run-control.blocked.terminal");
+    let attempt = attempt("attempt.blocked.terminal");
+    store.storage().insert(&authority, &attempt).unwrap();
+
+    let paused_control = paused(
+        WorkRunControlReasonV1::HumanWait,
+        UtcMicros(400),
+        vec![attempt.identity().attempt_id().clone()],
+    );
+    let opened = blocked_interval("attempt.blocked.terminal", UtcMicros(400));
+    store
+        .storage()
+        .publish_run_control(&authority, None, &paused_control, &[opened.clone()])
+        .unwrap();
+
+    let terminal = succeeded(&attempt);
+    store
+        .storage()
+        .update(
+            &authority,
+            attempt.lease(),
+            attempt.state(),
+            &terminal,
+            None,
+        )
+        .unwrap();
+
+    let settled = opened
+        .close(
+            UtcMicros(500),
+            WorkBlockedIntervalClosureV1::AttemptTerminal,
+        )
+        .unwrap();
+    assert!(
+        store
+            .storage()
+            .open_blocked_intervals(&authority, &task(), &run())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&authority, 1)
+            .unwrap(),
+        vec![settled.clone()]
+    );
+
+    let restarted = store.restart("run-control-blocked-interval-terminal");
+    assert_eq!(
+        restarted
+            .storage()
+            .next_settled_blocked_intervals_for_observation(&authority, 1)
+            .unwrap(),
+        vec![settled]
     );
 }

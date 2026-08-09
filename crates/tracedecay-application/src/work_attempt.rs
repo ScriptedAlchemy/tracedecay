@@ -9,24 +9,29 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU16;
 use thiserror::Error;
 use tracedecay_domain::{
-    AttemptId, CommitId, ManifestDigest, RefId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestId,
-    WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1,
-    WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError,
-    WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef, canonical_sha256,
+    AttemptId, CommitId, ManifestDigest, ProjectId, RefId, RepositoryId, RunId, RuntimeEvidenceRef,
+    SessionId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
+    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId,
+    WorkEffectStateV1, WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
+    WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef,
+    WorktreeId, canonical_sha256,
 };
 
 use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
 use crate::work_read::WorkProjectionReadPort;
 use crate::{ApplicationProblem, RequestAdmission, RequestContext};
 
+mod capacity;
 mod problem;
 mod synthesis_admission;
+pub use capacity::{
+    MAX_WORK_ATTEMPT_CAPACITY_TASKS, WorkAttemptCapacityScopeV1, WorkAttemptCapacityV1,
+    WorkAttemptCapacityVerdictV1,
+};
 use problem::{
     conflict_problem, contract_problem, denied_problem, invalid_problem,
     list_page_contract_problem, not_found_problem, projection_problem, stale_cursor_problem,
@@ -82,14 +87,22 @@ pub trait WorkAttemptStoragePort: Send + Sync {
 
     /// Inserts a lease only while the registered topology still has room.
     /// The capacity check and insertion are one storage transaction so two
-    /// concurrent admissions cannot overbook a repository or task.
+    /// concurrent admissions cannot overbook the project, repository, or task.
     fn insert_bounded(
         &self,
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
-        maximum_active_per_repository: NonZeroU16,
-        maximum_parallel_per_task: NonZeroU16,
+        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError>;
+
+    /// Reads the same exact project/repository/task capacity counts used by
+    /// bounded insertion without reserving or mutating capacity.
+    fn admission_capacities(
+        &self,
+        authority: &WorkAuthority,
+        task_ids: &[TaskId],
+        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
+    ) -> Result<std::collections::BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError>;
 
     fn load(
         &self,
@@ -120,6 +133,19 @@ pub trait WorkAttemptStoragePort: Send + Sync {
         &self,
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError>;
+
+    /// Whether any non-terminal attempt holds this exact registered Work
+    /// scope, independent of the actor and policy lineage that admitted it.
+    /// Cleanup is an infrastructure safety read and must see old-policy and
+    /// delegated-actor rows without granting ordinary cross-authority access.
+    fn has_open_attempts_in_exact_scope(
+        &self,
+        _project_id: &ProjectId,
+        _repository_id: &RepositoryId,
+        _worktree_id: &WorktreeId,
+    ) -> Result<bool, WorkAttemptStorageError> {
+        Err(WorkAttemptStorageError::Unavailable)
+    }
 
     /// One page of attempts in this authority scope, in stable
     /// task/run/attempt identity order, strictly after `start_after`.
@@ -248,6 +274,10 @@ pub struct WorkAttemptEvidenceRecordV1 {
     pub outcome: WorkAttemptProviderOutcomeV1,
     pub stdout: Option<WorkAttemptStreamSummaryV1>,
     pub stderr: Option<WorkAttemptStreamSummaryV1>,
+    /// Native provider session/thread identity, when the provider reported
+    /// one. Admission cannot supply this value and no fallback is fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<SessionId>,
     /// Present only when the pinned preferred backend was disqualified before
     /// startup. `None` means the attempt ran on its first-choice backend.
     pub provider_fallback: Option<WorkProviderFallbackRecordV1>,
@@ -530,9 +560,10 @@ where
         })
     }
 
-    /// Records a cancellation request against a running attempt. The daemon
-    /// runtime acknowledges and escalates; this command only makes the
-    /// request durable so a crash cannot lose it.
+    /// Records a cancellation request against an open attempt. A leased or
+    /// recovery-required attempt can be cancelled before provider startup;
+    /// the daemon runtime observes the durable request and produces no
+    /// provider effect.
     pub fn request_cancellation(
         &self,
         context: &RequestContext,
@@ -560,10 +591,15 @@ where
                 ))
             };
         }
-        if attempt.state() != WorkAttemptStateV1::Running {
+        if !matches!(
+            attempt.state(),
+            WorkAttemptStateV1::Leased
+                | WorkAttemptStateV1::Running
+                | WorkAttemptStateV1::RecoveryRequired
+        ) {
             return Err(conflict_problem(
                 "application.work-attempt.not-cancellable",
-                "Only a running Work attempt can accept a cancellation request.",
+                "Only an open Work attempt can accept a cancellation request.",
             ));
         }
         let request = WorkCancellationRequestV1::new(command.request_id, command.occurred_at)
@@ -783,6 +819,16 @@ where
         identity: &WorkAttemptIdentityV1,
         evidence: &WorkAttemptEvidenceRecordV1,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.settle_with_artifacts(context, identity, evidence, Vec::new())
+    }
+
+    pub fn settle_with_artifacts(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<tracedecay_domain::WorkArtifactRefV1>,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
         let authority = work_authority(context)?;
         let attempt = self
             .attempts
@@ -792,11 +838,16 @@ where
         let (state, terminal) =
             terminal_for_outcome(&evidence.outcome, digest, evidence.observed_at)
                 .map_err(contract_problem)?;
+        let artifacts = if artifacts.is_empty() {
+            attempt.artifacts().to_vec()
+        } else {
+            artifacts
+        };
         let next = attempt
             .transition(
                 state,
                 attempt.progress(),
-                attempt.artifacts().to_vec(),
+                artifacts,
                 attempt.cancellation().clone(),
                 attempt.recovery().clone(),
                 evidence
@@ -987,6 +1038,7 @@ where
             outcome: WorkAttemptProviderOutcomeV1::Cancelled,
             stdout: None,
             stderr: None,
+            provider_session_id: None,
             // Route selection happens in the daemon runtime, which is not on
             // this path: a cancellation observed by the authority itself
             // never re-decides a backend.

@@ -234,3 +234,17 @@ fn work_topology_publication_identity_is_content_addressed() {
             .expect("expected idempotency")
     );
 }
+
+#[test]
+fn work_topology_evidence_ref_is_minted_from_the_verified_graph_authority() {
+    let first = store();
+    let replayed = store();
+
+    let first_ref = first.evidence_ref().expect("topology evidence ref");
+    assert_eq!(
+        first_ref,
+        replayed.evidence_ref().expect("replayed evidence ref")
+    );
+    assert!(first_ref.as_str().starts_with("sha256:"));
+    assert_ne!(first_ref.as_str(), first.generation().as_str());
+}

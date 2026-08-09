@@ -2,20 +2,25 @@
 //! registered exact-SQL channel.
 
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU16;
 use tracedecay_application::{
-    WorkAttemptAdmissionKind, WorkAttemptEvidencePageV1, WorkAttemptEvidenceReadPort,
-    WorkAttemptEvidenceRecordV1, WorkAttemptEvidenceRowV1, WorkAttemptInsertOutcome,
-    WorkAttemptListPageV1, WorkAttemptStorageError, WorkAttemptStoragePort,
-    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
+    WorkAttemptAdmissionKind, WorkAttemptCapacityV1, WorkAttemptEvidencePageV1,
+    WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptEvidenceRowV1,
+    WorkAttemptInsertOutcome, WorkAttemptListPageV1, WorkAttemptStorageError,
+    WorkAttemptStoragePort, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort,
+    WorkSynthesisInsertOutcome,
 };
-use tracedecay_domain::{WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority};
+use tracedecay_domain::{
+    ProjectId, RepositoryId, TaskId, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAuthority, WorktreeId, configuration::TopologyConcurrencyPolicyV1,
+};
 
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
     WorkSqliteStorage, authority_params_owned, exact_sql_integer, exact_sql_statement,
     exact_sql_text, registered_work_query,
 };
+
+mod rooted_evidence;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +33,7 @@ fn insert_attempt(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,
     attempt: &WorkAttemptV1,
-    capacity: Option<(NonZeroU16, NonZeroU16)>,
+    concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
     let payload = serde_json::to_string(&StoredWorkAttemptV1 {
         attempt: attempt.clone(),
@@ -52,13 +57,12 @@ fn insert_attempt(
     }
     require_run_reservation_admitted(&transaction, authority, attempt.identity())?;
     require_first_run_admission(&transaction, authority, attempt)?;
-    if let Some((repository_limit, task_limit)) = capacity {
-        require_capacity(
+    if let Some(concurrency) = concurrency {
+        crate::work::capacity::require_capacity(
             &transaction,
             authority,
             attempt.identity().task_id(),
-            repository_limit,
-            task_limit,
+            concurrency,
         )?;
     }
     transaction
@@ -144,15 +148,19 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         &self,
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
-        maximum_active_per_repository: NonZeroU16,
-        maximum_parallel_per_task: NonZeroU16,
+        concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        insert_attempt(
-            self,
-            authority,
-            attempt,
-            Some((maximum_active_per_repository, maximum_parallel_per_task)),
-        )
+        insert_attempt(self, authority, attempt, Some(concurrency))
+    }
+
+    fn admission_capacities(
+        &self,
+        authority: &WorkAuthority,
+        task_ids: &[TaskId],
+        concurrency: &TopologyConcurrencyPolicyV1,
+    ) -> Result<std::collections::BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError>
+    {
+        crate::work::capacity::capacities(&self.handle, authority, task_ids, concurrency)
     }
 
     fn load(
@@ -263,6 +271,11 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
             let _ = transaction.rollback();
             return Err(WorkAttemptStorageError::FenceConflict);
         }
+        crate::work_run_control::close_blocked_intervals_on_terminal_attempt(
+            &transaction,
+            authority,
+            next,
+        )?;
         transaction
             .commit()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -292,6 +305,28 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                     .map_err(|_| WorkAttemptStorageError::Unavailable)
             })
             .collect()
+    }
+
+    fn has_open_attempts_in_exact_scope(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        worktree_id: &WorktreeId,
+    ) -> Result<bool, WorkAttemptStorageError> {
+        let rows = registered_work_query(
+            &self.handle,
+            "SELECT task_id FROM work_attempts_v1
+             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+               AND terminal = 0
+             LIMIT 1",
+            vec![
+                ExactSqlValue::Text(project_id.as_str().to_owned()),
+                ExactSqlValue::Text(repository_id.as_str().to_owned()),
+                ExactSqlValue::Text(worktree_id.as_str().to_owned()),
+            ],
+        )
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        Ok(!rows.rows.is_empty())
     }
 
     fn list(
@@ -369,7 +404,7 @@ fn insert_synthesis_record(
     storage: &WorkSqliteStorage,
     authority: &WorkAuthority,
     record: &WorkSynthesisAdmissionRecordV1,
-    capacity: Option<(NonZeroU16, NonZeroU16)>,
+    concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
     let attempt = &record.result.attempt;
     let payload = serde_json::to_string(&StoredWorkAttemptV1 {
@@ -394,13 +429,12 @@ fn insert_synthesis_record(
     }
     require_run_reservation_admitted(&transaction, authority, attempt.identity())?;
     require_first_run_admission(&transaction, authority, attempt)?;
-    if let Some((repository_limit, task_limit)) = capacity {
-        require_capacity(
+    if let Some(concurrency) = concurrency {
+        crate::work::capacity::require_capacity(
             &transaction,
             authority,
             attempt.identity().task_id(),
-            repository_limit,
-            task_limit,
+            concurrency,
         )?;
     }
     transaction
@@ -448,15 +482,9 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteStorage {
         &self,
         authority: &WorkAuthority,
         record: &WorkSynthesisAdmissionRecordV1,
-        maximum_active_per_repository: NonZeroU16,
-        maximum_parallel_per_task: NonZeroU16,
+        concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
-        insert_synthesis_record(
-            self,
-            authority,
-            record,
-            Some((maximum_active_per_repository, maximum_parallel_per_task)),
-        )
+        insert_synthesis_record(self, authority, record, Some(concurrency))
     }
 
     fn load_synthesis(
@@ -674,42 +702,6 @@ fn require_run_reservation_admitted(
         Some("paused") => Err(WorkAttemptStorageError::ReservationFenced),
         Some(_) => Err(WorkAttemptStorageError::Unavailable),
     }
-}
-
-fn require_capacity(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    authority: &WorkAuthority,
-    task_id: &tracedecay_domain::TaskId,
-    repository_limit: NonZeroU16,
-    task_limit: NonZeroU16,
-) -> Result<(), WorkAttemptStorageError> {
-    let rows = registered_work_query(
-        transaction,
-        "SELECT COUNT(*),
-                COALESCE(SUM(CASE WHEN task_id = ?3 THEN 1 ELSE 0 END), 0)
-         FROM work_attempts_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND terminal = 0",
-        vec![
-            ExactSqlValue::Text(authority.project_id().as_str().to_owned()),
-            ExactSqlValue::Text(authority.repository_id().as_str().to_owned()),
-            ExactSqlValue::Text(task_id.as_str().to_owned()),
-        ],
-    )
-    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    let row = rows
-        .rows
-        .first()
-        .ok_or(WorkAttemptStorageError::Unavailable)?;
-    let repository_active = exact_sql_integer(&row.values, 0)
-        .and_then(|value| u16::try_from(value).ok())
-        .ok_or(WorkAttemptStorageError::Unavailable)?;
-    let task_active = exact_sql_integer(&row.values, 1)
-        .and_then(|value| u16::try_from(value).ok())
-        .ok_or(WorkAttemptStorageError::Unavailable)?;
-    if repository_active >= repository_limit.get() || task_active >= task_limit.get() {
-        return Err(WorkAttemptStorageError::CapacityExceeded);
-    }
-    Ok(())
 }
 
 fn identity_params(identity: &WorkAttemptIdentityV1) -> [ExactSqlValue; 3] {

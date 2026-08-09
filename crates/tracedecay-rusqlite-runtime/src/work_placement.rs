@@ -10,8 +10,8 @@
 
 use tracedecay_application::{WorkPlacementStorageError, WorkPlacementStoragePort};
 use tracedecay_domain::{
-    RunId, TaskId, WorkAuthority, WorkPlacementIdentityV1, WorkPlacementKindV1,
-    WorkPlacementStateV1, WorkPlacementV1,
+    ProjectId, RepositoryId, RunId, TaskId, WorkAuthority, WorkPlacementIdentityV1,
+    WorkPlacementKindV1, WorkPlacementStateV1, WorkPlacementV1,
 };
 
 use crate::exact_sql::ExactSqlValue;
@@ -79,6 +79,28 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         let run_id =
             RunId::new(run_id.to_owned()).map_err(|_| WorkPlacementStorageError::Unavailable)?;
         Ok(Some(WorkPlacementIdentityV1::new(task_id, run_id)))
+    }
+
+    fn has_target_holder_in_exact_repository_root(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        root: &str,
+    ) -> Result<bool, WorkPlacementStorageError> {
+        let rows = registered_work_query(
+            &self.handle,
+            "SELECT task_id FROM work_placements_v1
+             WHERE project_id = ?1 AND repository_id = ?2
+               AND target_root = ?3 AND state IN ('admitted', 'quarantined')
+             LIMIT 1",
+            vec![
+                ExactSqlValue::Text(project_id.as_str().to_owned()),
+                ExactSqlValue::Text(repository_id.as_str().to_owned()),
+                ExactSqlValue::Text(root.to_owned()),
+            ],
+        )
+        .map_err(|_| WorkPlacementStorageError::Unavailable)?;
+        Ok(!rows.rows.is_empty())
     }
 
     fn publish_placement(

@@ -130,6 +130,20 @@ impl EffectAuthorityBinding {
 }
 
 fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> RequestContext {
+    effect_context_for_request(
+        actor,
+        grant_revision,
+        grant_digest,
+        "request.workflow.runtime-store",
+    )
+}
+
+fn effect_context_for_request(
+    actor: &str,
+    grant_revision: u64,
+    grant_digest: char,
+    request_id: &str,
+) -> RequestContext {
     let scope = ResolvedScope::new(
         id("project.workflow.runtime-store"),
         id("repository.workflow.runtime-store"),
@@ -159,7 +173,7 @@ fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> Reque
         actor,
         scope,
         grant,
-        id::<RequestId>("request.workflow.runtime-store"),
+        id::<RequestId>(request_id),
         Deadline::new(UtcMicros(80_000_000)).unwrap(),
         CancellationContext::active("cancel.workflow.runtime-store").unwrap(),
     )
@@ -187,7 +201,30 @@ fn effect_identity_at(
     binding: EffectAuthorityBinding,
     started_at: UtcMicros,
 ) -> WorkflowEffectIdentityV1 {
-    let context = effect_context(actor, binding.grant_revision, binding.grant_digest);
+    effect_identity_for_request(
+        operation,
+        actor,
+        input,
+        binding,
+        started_at,
+        "request.workflow.runtime-store",
+    )
+}
+
+fn effect_identity_for_request(
+    operation: WorkflowEffectOperationV1,
+    actor: &str,
+    input: char,
+    binding: EffectAuthorityBinding,
+    started_at: UtcMicros,
+    request_id: &str,
+) -> WorkflowEffectIdentityV1 {
+    let context = effect_context_for_request(
+        actor,
+        binding.grant_revision,
+        binding.grant_digest,
+        request_id,
+    );
     let policy = PolicyDecisionRef::new(
         "policy.workflow.runtime-store.v1",
         binding.policy_revision,
@@ -205,9 +242,20 @@ fn effect_identity_at(
         digest(binding.catalog_digest),
         digest(binding.privacy_digest),
     );
+    let idempotency_key = if operation == WorkflowEffectOperationV1::HandoffRedeem {
+        WorkflowEffectIdentityV1::handoff_redeem_idempotency_key(
+            context.request_id(),
+            context.actor(),
+            context.scope(),
+            &receipt_context.binding_digest().unwrap(),
+        )
+        .unwrap()
+    } else {
+        id::<IdempotencyKey>(&format!("workflow.effect.{input}"))
+    };
     WorkflowEffectIdentityV1::new(
         operation,
-        id::<IdempotencyKey>(&format!("workflow.effect.{input}")),
+        idempotency_key,
         context.request_id().clone(),
         context.actor().clone(),
         context.scope().clone(),
@@ -702,6 +750,73 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
 }
 
 #[test]
+fn a_new_redeem_request_cannot_alias_the_first_requests_success() {
+    let store = RegisteredWorkflowStore::start("workflow-effect-redeem-new-request");
+    let authority = authority(&store);
+    let scope = handoff_scope();
+    let secret = "n".repeat(48);
+    let grant = TaskHandoffGrant::new(
+        scope.clone(),
+        token_digest(&secret),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+        runtime_frontier(),
+    )
+    .unwrap();
+    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    let first_identity = effect_identity_for_request(
+        WorkflowEffectOperationV1::HandoffRedeem,
+        "actor.workflow.target",
+        'e',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(20),
+        "request.workflow.redeem.first",
+    );
+    let second_identity = effect_identity_for_request(
+        WorkflowEffectOperationV1::HandoffRedeem,
+        "actor.workflow.target",
+        'e',
+        EffectAuthorityBinding::BASE,
+        UtcMicros(30),
+        "request.workflow.redeem.second",
+    );
+    let prepared = WorkflowEffectPreparedV1::handoff_redeem(
+        first_identity.input_digest().clone(),
+        token_digest(&secret),
+        scope,
+        UtcMicros(20),
+    );
+
+    let first = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &first_identity,
+        &prepared,
+        UtcMicros(21),
+    )
+    .unwrap();
+    let second = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &second_identity,
+        &prepared,
+        UtcMicros(31),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        first.terminal().unwrap().outcome(),
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(_))
+    ));
+    assert_eq!(
+        second.terminal().unwrap().outcome(),
+        &WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::InvalidRequest)
+    );
+    assert_ne!(
+        first_identity.idempotency_key(),
+        second_identity.idempotency_key()
+    );
+}
+
+#[test]
 fn rejected_effect_replays_the_exact_problem_without_reapplying() {
     let store = RegisteredWorkflowStore::start("workflow-effect-problem-replay");
     let authority = authority(&store);
@@ -760,10 +875,24 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
         identity.input_digest().clone(),
         definition(1, "operation.prepare.v1"),
     );
+    assert!(
+        !WorkflowEffectAuthorityPortV1::has_pending_effects(
+            &workflow_authority,
+            &identity.scope().worktree_id,
+        )
+        .unwrap()
+    );
     let reserved =
         WorkflowEffectAuthorityPortV1::reserve_effect(&workflow_authority, &identity, &prepared)
             .unwrap();
     assert_eq!(reserved.state(), WorkflowEffectJournalStateV1::BeforeEffect);
+    assert!(
+        WorkflowEffectAuthorityPortV1::has_pending_effects(
+            &workflow_authority,
+            &identity.scope().worktree_id,
+        )
+        .unwrap()
+    );
     store.inspect(|connection| {
         connection
             .execute(
@@ -785,6 +914,13 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
     .unwrap();
 
     assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
+    assert!(
+        !WorkflowEffectAuthorityPortV1::has_pending_effects(
+            &restarted_authority,
+            &identity.scope().worktree_id,
+        )
+        .unwrap()
+    );
     assert_eq!(restarted.count("workflow_definition_source_journal"), 1);
 }
 
