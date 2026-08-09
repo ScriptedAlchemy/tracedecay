@@ -86,18 +86,22 @@ fn rename_apply_rejects_a_stale_or_missing_preview_digest() {
     };
     assert!(request.validate().is_err());
 
+    if let SourceEditRequest::RenameSymbol { binding, .. } = &mut request.edit {
+        binding.accepted_preview = Some(RenamePreviewAcceptanceV1 {
+            preview_id: common::digest(common::SHA256_A),
+            preview_digest: common::digest(common::SHA256_B),
+            plan_digest: common::digest(common::SHA256_A),
+            repository_revision: Some("0123456789abcdef".to_owned()),
+            graph_revision: common::digest(common::SHA256_B),
+        });
+    } else {
+        unreachable!("rename test request");
+    }
+    assert!(request.validate().is_err());
+
     let SourceEditRequest::RenameSymbol { binding, .. } = &mut request.edit else {
         unreachable!("rename test request");
     };
-    binding.accepted_preview = Some(RenamePreviewAcceptanceV1 {
-        preview_id: common::digest(common::SHA256_A),
-        preview_digest: common::digest(common::SHA256_B),
-        plan_digest: common::digest(common::SHA256_A),
-        repository_revision: Some("0123456789abcdef".to_owned()),
-        graph_revision: common::digest(common::SHA256_B),
-    });
-    assert!(request.validate().is_err());
-
     binding.accepted_preview.as_mut().unwrap().preview_digest = request.expected_state.clone();
     assert!(request.validate().is_ok());
 }

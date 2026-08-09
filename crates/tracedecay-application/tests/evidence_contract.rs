@@ -51,7 +51,8 @@ fn pre_admission_problem_has_canonical_identity_and_semantics() {
         operation.result_contract().clone(),
         context.request_id().clone(),
         ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-    );
+    )
+    .expect("not-found envelope is valid");
 
     let wire = serde_json::to_value(&problem).unwrap();
     assert_eq!(wire["problem"]["kind"], "not_found_or_not_authorized");
@@ -125,6 +126,7 @@ fn problem_record_preserves_bounded_retry_and_partial_coverage() {
             .unwrap(),
         ),
     )
+    .expect("partial-coverage envelope is valid")
     .with_owning_layer(ProblemOwningLayer::Port)
     .with_retry_after_millis(Some(250))
     .unwrap()
