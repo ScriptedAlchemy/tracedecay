@@ -237,6 +237,20 @@ struct DeclaredStackRequest {
 }
 
 fn declared_stack_request(fixture: &NativeGitFixture, revision_id: &str) -> DeclaredStackRequest {
+    declared_stack_request_for_scope(
+        fixture,
+        revision_id,
+        ScopeSetRevision::new(5).expect("scope revision"),
+        "branch-stack.native",
+    )
+}
+
+fn declared_stack_request_for_scope(
+    fixture: &NativeGitFixture,
+    revision_id: &str,
+    scope_set_revision: ScopeSetRevision,
+    stack_id: &str,
+) -> DeclaredStackRequest {
     let project = ProjectId::new("project.native-declared-topology").expect("project");
     let repository = RepositoryId::new("repository.native-declared-topology").expect("repository");
     let main_worktree = WorktreeId::new("worktree.native.main").expect("main worktree");
@@ -258,7 +272,6 @@ fn declared_stack_request(fixture: &NativeGitFixture, revision_id: &str) -> Decl
     )
     .expect("feature scope");
     let scope_set_id = ScopeSetId::new("scope-set.native-declared-topology").expect("scope set");
-    let scope_set_revision = ScopeSetRevision::new(5).expect("scope revision");
     let authorized_scope_set = authorize_registered_roots(
         &project,
         scope_set_id.clone(),
@@ -273,7 +286,7 @@ fn declared_stack_request(fixture: &NativeGitFixture, revision_id: &str) -> Decl
     let main_node = StackNodeId::new("stack-node.native.main").expect("main node");
     let feature_node = StackNodeId::new("stack-node.native.feature").expect("feature node");
     let revision = BranchStackRevisionV1::new(
-        BranchStackId::new("branch-stack.native").expect("stack"),
+        BranchStackId::new(stack_id).expect("stack"),
         BranchStackRevisionId::new(revision_id).expect("revision"),
         inventory_snapshot_id.clone(),
         inventory_epoch,
@@ -608,6 +621,73 @@ fn declared_stack_projection_conforms_to_native_linked_worktree_state() {
     let second_store = projection_store(&runtime, &second.repository);
     assert_ne!(first_store.generation(), second_store.generation());
     assert_ne!(first_store.ref_watermark(), second_store.ref_watermark());
+}
+
+#[test]
+fn declared_scope_revision_change_retains_its_matching_worktree_occupancies() {
+    let fixture = NativeGitFixture::new();
+    fixture.advance_feature("first feature revision\n");
+    let first = declared_stack_request_for_scope(
+        &fixture,
+        "branch-stack-revision.native.scope.5",
+        ScopeSetRevision::new(5).expect("first scope revision"),
+        "branch-stack.native.scope.5",
+    );
+    let runtime = Arc::new(VerifiedSnapshotRuntime::default());
+    let resolver = resolver(&fixture, &first, Arc::clone(&runtime));
+    let cancellation = CancellationSignal::active("cancel.native-declared-topology.scope-revision")
+        .expect("cancellation");
+
+    expect_declared_stack(
+        resolver
+            .resolve(&first.request, &cancellation)
+            .expect("first declared-stack resolution"),
+        &first.revision,
+    );
+
+    fixture.advance_feature("second feature revision\n");
+    let second = declared_stack_request_for_scope(
+        &fixture,
+        "branch-stack-revision.native.scope.6",
+        ScopeSetRevision::new(6).expect("second scope revision"),
+        "branch-stack.native.scope.6",
+    );
+    expect_declared_stack(
+        resolver
+            .resolve(&second.request, &cancellation)
+            .expect("second declared-stack resolution"),
+        &second.revision,
+    );
+
+    let store = projection_store(&runtime, &second.repository);
+    assert_eq!(
+        store
+            .worktree_occupancy_exact(
+                &first.project,
+                &first.repository,
+                &first.scope_set_id,
+                first.scope_set_revision,
+                first.request.authorized_scope_set.digest(),
+                first.source.reference.as_ref().expect("source ref"),
+                Arc::new(NeverCancelled),
+            )
+            .expect("first scope occupancy"),
+        vec![first.source.worktree_id.clone()]
+    );
+    assert_eq!(
+        store
+            .worktree_occupancy_exact(
+                &second.project,
+                &second.repository,
+                &second.scope_set_id,
+                second.scope_set_revision,
+                second.request.authorized_scope_set.digest(),
+                second.source.reference.as_ref().expect("source ref"),
+                Arc::new(NeverCancelled),
+            )
+            .expect("second scope occupancy"),
+        vec![second.source.worktree_id.clone()]
+    );
 }
 
 #[test]

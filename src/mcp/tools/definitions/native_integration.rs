@@ -25,6 +25,124 @@ fn digest_property(description: &str) -> serde_json::Value {
     })
 }
 
+fn strict_object(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required,
+    })
+}
+
+fn branch_stack_revision_property() -> serde_json::Value {
+    let node = strict_object(
+        json!({
+            "node_id": string_property("Exact declared stack-node identity."),
+            "project_id": string_property("Canonical project identity."),
+            "repository_id": string_property("Canonical repository identity."),
+            "reference": string_property("Full declared Git reference."),
+            "tip": string_property("Exact declared commit identity."),
+            "worktree_id": { "type": ["string", "null"] },
+        }),
+        &[
+            "node_id",
+            "project_id",
+            "repository_id",
+            "reference",
+            "tip",
+            "worktree_id",
+        ],
+    );
+    let edge = strict_object(
+        json!({
+            "dependency": string_property("Exact dependency stack-node identity."),
+            "dependent": string_property("Exact dependent stack-node identity."),
+        }),
+        &["dependency", "dependent"],
+    );
+    strict_object(
+        json!({
+            "stack_id": string_property("Exact declared branch-stack identity."),
+            "revision_id": string_property("Exact declared branch-stack revision identity."),
+            "inventory_snapshot_id": string_property("Frozen worktree inventory snapshot identity."),
+            "inventory_epoch": { "type": "integer", "minimum": 1 },
+            "source": {
+                "type": "string",
+                "enum": ["explicit_declaration", "accepted_task_branch_topology"],
+            },
+            "nodes": { "type": "array", "items": node },
+            "edges": { "type": "array", "items": edge },
+            "canonical_order": {
+                "type": "array",
+                "items": { "type": "string" },
+            },
+            "digest": digest_property("Digest of the immutable declared branch-stack revision."),
+        }),
+        &[
+            "stack_id",
+            "revision_id",
+            "inventory_snapshot_id",
+            "inventory_epoch",
+            "source",
+            "nodes",
+            "edges",
+            "canonical_order",
+            "digest",
+        ],
+    )
+}
+
+fn selection_binding_property() -> serde_json::Value {
+    let declared_stack_edge = strict_object(
+        json!({
+            "kind": { "const": "declared_stack_edge" },
+            "binding": strict_object(
+                json!({
+                    "stack_id": string_property("Exact declared branch-stack identity."),
+                    "revision_id": string_property("Exact declared branch-stack revision identity."),
+                    "revision_digest": digest_property("Digest of the exact declared branch-stack revision."),
+                    "declared_revision": branch_stack_revision_property(),
+                    "source_node_id": string_property("Exact declared source stack-node identity."),
+                    "destination_node_id": string_property("Exact declared destination stack-node identity."),
+                    "direction": {
+                        "type": "string",
+                        "enum": [
+                            "propagate_dependency_to_dependent",
+                            "land_dependent_into_dependency",
+                        ],
+                    },
+                }),
+                &[
+                    "stack_id",
+                    "revision_id",
+                    "revision_digest",
+                    "declared_revision",
+                    "source_node_id",
+                    "destination_node_id",
+                    "direction",
+                ],
+            ),
+        }),
+        &["kind", "binding"],
+    );
+    let independent_branch = strict_object(
+        json!({
+            "kind": { "const": "independent_branch" },
+            "binding": strict_object(
+                json!({
+                    "proposal_digest": digest_property("Exact independent-branch proposal digest."),
+                }),
+                &["proposal_digest"],
+            ),
+        }),
+        &["kind", "binding"],
+    );
+    json!({
+        "oneOf": [declared_stack_edge, independent_branch],
+        "description": "Either one exact declared stack edge and immutable declared revision, or one exact independent-branch proposal digest. Branch names, paths, and provider topology cannot select an edge.",
+    })
+}
+
 /// The exact authorized root pair plus one declared-edge or independent-branch
 /// binding. Both roots must resolve to the same proven repository.
 fn snapshot_binding_properties() -> serde_json::Value {
@@ -56,10 +174,7 @@ fn snapshot_binding_properties() -> serde_json::Value {
             "minimum": 1,
             "description": "Monotonic inventory epoch frozen with the snapshot."
         },
-        "selection": {
-            "type": "object",
-            "description": "Either an exact declared stack edge (stack, revision, node pair, direction) or an independent-branch proposal digest. Branch names, paths, and provider topology cannot select an edge."
-        },
+        "selection": selection_binding_property(),
         "grant_digest": digest_property("Capability grant revision digest."),
         "policy_digest": digest_property("Policy revision digest.")
     })

@@ -17,8 +17,22 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
-pub(super) const DECLARED_TOPOLOGY_STALE: &str = "git_topology_declared_state_stale";
-const DECLARED_TOPOLOGY_UNAVAILABLE: &str = "git_topology_declared_authority_unavailable";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GitTopologySyncFailure {
+    Stale,
+    Denied,
+    Unavailable,
+}
+
+impl GitTopologySyncFailure {
+    pub(super) const fn failure_code(self) -> &'static str {
+        match self {
+            Self::Stale => "git_topology_declared_state_stale",
+            Self::Denied => "git_topology_declared_authority_denied",
+            Self::Unavailable => "git_topology_declared_authority_unavailable",
+        }
+    }
+}
 
 #[derive(Clone)]
 struct GitTopologySyncCancellation(Arc<AtomicBool>);
@@ -36,21 +50,21 @@ pub(super) fn publish_native_topology(
     worktree: WorktreeId,
     scope_sets: AuthorizedScopeSetSqliteStorage,
     cancelled: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<(), GitTopologySyncFailure> {
     let identity = git_topology_projection_identity(
-        git_topology_namespace(&repository).map_err(|error| error.to_string())?,
+        git_topology_namespace(&repository).map_err(|_| GitTopologySyncFailure::Unavailable)?,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     let current = runtime
         .verified_snapshot(&identity, Arc::clone(&cancelled))
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     let (branch_stacks, worktree_occupancies) = match current {
         Some(snapshot) => {
             let store = GitTopologyProjectionStore::from_verified_snapshot_verified(
                 snapshot,
                 Arc::new(GitTopologySyncCancellation(Arc::clone(&cancelled))),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| GitTopologySyncFailure::Unavailable)?;
             (
                 store.branch_stacks().to_vec(),
                 store.worktree_occupancies().to_vec(),
@@ -68,11 +82,11 @@ pub(super) fn publish_native_topology(
     let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
     let projection = adapter
         .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
-        .map_err(|error| error.to_string())?
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?
         .with_declared_topology(branch_stacks, worktree_occupancies)
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     let check = || {
         if cancelled.load(Ordering::Relaxed) {
             Err(GraphDbError::Cancelled)
@@ -81,12 +95,12 @@ pub(super) fn publish_native_topology(
         }
     };
     let manifest = build_git_topology_manifest_checked(identity, &projection, &revision, &check)
-        .map_err(|error| error.to_string())?;
-    let idempotency =
-        git_topology_idempotency_key(&projection, &revision).map_err(|error| error.to_string())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+    let idempotency = git_topology_idempotency_key(&projection, &revision)
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     runtime
         .publish_verified_manifest(&manifest, idempotency, cancelled)
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     Ok(())
 }
 
@@ -96,9 +110,9 @@ pub(super) fn validate_retained_declared_topology(
     branch_stacks: &[GitBranchStackBindingV1],
     worktree_occupancies: &[GitWorktreeOccupancyV1],
     storage: &AuthorizedScopeSetSqliteStorage,
-) -> Result<(), String> {
+) -> Result<(), GitTopologySyncFailure> {
     let enrolled = GitRepositoryAuthority::discover(repository_root)
-        .map_err(|_| "enrolled Git topology root is unavailable".to_owned())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     for binding in branch_stacks {
         let scope_set = exact_scope_set(
             storage,
@@ -127,7 +141,7 @@ pub(super) fn validate_retained_declared_topology(
             .map(|occupancy| occupancy.worktree_id.clone())
             .collect::<BTreeSet<_>>();
         if expected_worktrees != projected_worktrees {
-            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+            return Err(GitTopologySyncFailure::Stale);
         }
         for node in &binding.revision.nodes {
             let roots = scope_set
@@ -144,15 +158,15 @@ pub(super) fn validate_retained_declared_topology(
                 })
                 .collect::<Vec<_>>();
             if roots.is_empty() {
-                return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+                return Err(GitTopologySyncFailure::Denied);
             }
             for root in roots {
                 let authority = root_authority(root, repository, &enrolled)?;
                 let tip = authority
                     .exact_reference_tip(node.reference.as_str())
-                    .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+                    .map_err(|_| GitTopologySyncFailure::Unavailable)?;
                 if tip.as_str() != node.tip.as_str() {
-                    return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+                    return Err(GitTopologySyncFailure::Stale);
                 }
             }
             let occupied = occupied_worktrees(
@@ -163,7 +177,7 @@ pub(super) fn validate_retained_declared_topology(
                 &enrolled,
             )?;
             if occupied.len() > 1 || occupied.first() != node.worktree_id.as_ref() {
-                return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+                return Err(GitTopologySyncFailure::Stale);
             }
         }
     }
@@ -184,11 +198,11 @@ pub(super) fn validate_retained_declared_topology(
             })
             .collect::<Vec<_>>();
         if roots.len() != 1 {
-            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+            return Err(GitTopologySyncFailure::Denied);
         }
         let authority = root_authority(roots[0], repository, &enrolled)?;
         if !head_occupancy_matches(&authority, occupancy.reference.as_ref())? {
-            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+            return Err(GitTopologySyncFailure::Stale);
         }
     }
     Ok(())
@@ -199,13 +213,13 @@ fn exact_scope_set(
     id: &tracedecay_domain::ScopeSetId,
     revision: tracedecay_domain::ScopeSetRevision,
     digest: &tracedecay_domain::ManifestDigest,
-) -> Result<AuthorizedScopeSet, String> {
+) -> Result<AuthorizedScopeSet, GitTopologySyncFailure> {
     let scope_set = storage
         .read(id)
-        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?
-        .ok_or_else(|| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?
+        .ok_or(GitTopologySyncFailure::Unavailable)?;
     if scope_set.revision() != revision || scope_set.digest() != digest {
-        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        return Err(GitTopologySyncFailure::Stale);
     }
     Ok(scope_set)
 }
@@ -216,7 +230,7 @@ fn occupied_worktrees(
     repository: &RepositoryId,
     reference: &RefId,
     enrolled: &GitRepositoryAuthority,
-) -> Result<Vec<WorktreeId>, String> {
+) -> Result<Vec<WorktreeId>, GitTopologySyncFailure> {
     let mut occupied = Vec::new();
     for root in scope_set.roots().iter().filter(|root| {
         &root.scope().project_id == project && &root.scope().repository_id == repository
@@ -235,17 +249,15 @@ fn root_authority(
     root: &AuthorizedRoot,
     repository: &RepositoryId,
     enrolled: &GitRepositoryAuthority,
-) -> Result<GitRepositoryAuthority, String> {
+) -> Result<GitRepositoryAuthority, GitTopologySyncFailure> {
     if &root.scope().repository_id != repository {
-        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        return Err(GitTopologySyncFailure::Denied);
     }
-    let locator = root
-        .locator()
-        .ok_or_else(|| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+    let locator = root.locator().ok_or(GitTopologySyncFailure::Unavailable)?;
     let authority = GitRepositoryAuthority::discover(&locator.canonical_root)
-        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     if authority.common_dir() != enrolled.common_dir() {
-        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        return Err(GitTopologySyncFailure::Denied);
     }
     Ok(authority)
 }
@@ -253,10 +265,10 @@ fn root_authority(
 fn head_occupancy_matches(
     authority: &GitRepositoryAuthority,
     reference: Option<&RefId>,
-) -> Result<bool, String> {
+) -> Result<bool, GitTopologySyncFailure> {
     let status = authority
         .status()
-        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     Ok(match (&status.head, reference) {
         (GitHeadStateV1::Attached { branch, .. }, Some(reference)) => {
             branch == reference.as_str()

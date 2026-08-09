@@ -28,8 +28,7 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
     NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
     NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-    RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeInventoryEpoch,
-    WorktreeInventorySnapshotId,
+    RepositoryId, UtcMicros, WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
@@ -44,13 +43,13 @@ use tracedecay_tool_catalog::{
     UseCaseId, CodecBindingKey,
 };
 
+use crate::CancellationSignal;
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::native_integration::{
     NativeIntegrationCancelDispositionV1, NativeIntegrationPortError,
-    NativeIntegrationPreflightOutcomeV1, NativeIntegrationSelectionBindingV1,
-    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
-    NativeIntegrationStackResolutionRequestV1,
+    NativeIntegrationPreflightOutcomeV1, NativeIntegrationStackResolutionOutcomeV1,
+    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
 };
 use crate::git::worktree::{
     NativeWorktreeSurfaceResultV1, WorktreeCleanupConfirmRequestV1,
@@ -60,7 +59,9 @@ use crate::git::worktree::{
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
-use crate::{AuthorizedScopeSet, CancellationSignal, ResolvedScope};
+mod stack_snapshot;
+
+pub use stack_snapshot::NativeIntegrationStackSnapshotSurfaceRequest;
 
 /// Canonical wire operation names for the native-integration journey.
 pub const NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION: &str = "stack_snapshot";
@@ -78,60 +79,6 @@ pub use crate::git::worktree::{
 // ---------------------------------------------------------------------------
 // stack_snapshot
 // ---------------------------------------------------------------------------
-
-/// Exact caller-supplied identity frozen by `stack_snapshot`.
-///
-/// This is the Plan 36 step 1 binding: the exact authorized `ProjectId`,
-/// `RepositoryId`, source/destination worktree and ref identity, the frozen
-/// inventory snapshot/epoch, the scope/grant/policy revisions, and either an
-/// independent-branch proposal digest or the exact stack/revision/node/edge
-/// binding. Nothing here can be inferred from a path, CWD, branch display
-/// name, free-form SHA, or provider topology.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationStackSnapshotSurfaceRequest {
-    pub source: ResolvedScope,
-    pub destination: ResolvedScope,
-    pub authorized_scope_set_id: ScopeSetId,
-    pub authorized_scope_set_revision: ScopeSetRevision,
-    pub authorized_scope_set_digest: ManifestDigest,
-    pub inventory_snapshot_id: WorktreeInventorySnapshotId,
-    pub inventory_epoch: WorktreeInventoryEpoch,
-    pub selection: NativeIntegrationSelectionBindingV1,
-    pub grant_digest: ManifestDigest,
-    pub policy_digest: ManifestDigest,
-}
-
-impl NativeIntegrationStackSnapshotSurfaceRequest {
-    /// Bind the caller-visible proof to the exact topology request the
-    /// resolution authority accepts. `observed_at` is minted by the daemon,
-    /// never by the caller.
-    pub fn into_resolution_request(
-        self,
-        authorized_scope_set: AuthorizedScopeSet,
-        observed_at: UtcMicros,
-    ) -> Result<NativeIntegrationStackResolutionRequestV1, ApplicationContractError> {
-        if authorized_scope_set.scope_set_id() != &self.authorized_scope_set_id
-            || authorized_scope_set.revision() != self.authorized_scope_set_revision
-            || authorized_scope_set.digest() != &self.authorized_scope_set_digest
-        {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "native integration registered scope set",
-            });
-        }
-        Ok(NativeIntegrationStackResolutionRequestV1 {
-            source: self.source,
-            destination: self.destination,
-            authorized_scope_set,
-            inventory_snapshot_id: self.inventory_snapshot_id,
-            inventory_epoch: self.inventory_epoch,
-            selection: self.selection,
-            grant_digest: self.grant_digest,
-            policy_digest: self.policy_digest,
-            observed_at,
-        })
-    }
-}
 
 /// Application service for `stack_snapshot`.
 ///

@@ -32,8 +32,7 @@ use tracedecay_application::{
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
     NativeIntegrationReceiptProjectionV1, NativeIntegrationStatusProjectionV1,
     NativeIntegrationStatusRequestV1, NativeIntegrationSurfaceResultV1,
-    NativeIntegrationSurfaceUnavailableV1, NativeWorktreeService, NativeWorktreeSurfaceRequest,
-    NativeWorktreeSurfaceResultV1, WorktreeContractError, native_integration_surface_operation,
+    NativeIntegrationSurfaceUnavailableV1, native_integration_surface_operation,
 };
 use tracedecay_domain::{
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
@@ -151,18 +150,12 @@ async fn execute_with_owner(
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
-            let resolution = match registered_topology_request(&owner, snapshot, observed_at) {
-                Ok(request) => request,
-                Err(error) => {
-                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                        NativeIntegrationSurfaceUnavailableV1::from(&error),
-                    ));
-                }
-            };
-            let outcome =
-                tokio::task::spawn_blocking(move || owner.stack_snapshot(resolution, &signal))
-                    .await
-                    .map_err(|_| unavailable_native_integration())?;
+            let outcome = tokio::task::spawn_blocking(move || {
+                let resolution = registered_topology_request(&owner, *snapshot, observed_at)?;
+                owner.stack_snapshot(resolution, &signal)
+            })
+            .await
+            .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(outcome) => NativeIntegrationSurfaceResultV1::from_stack_resolution(&outcome)
                     .map_err(|_| invalid()),
@@ -179,30 +172,21 @@ async fn execute_with_owner(
                     .0
                     .saturating_add(NATIVE_INTEGRATION_PREVIEW_TTL_MICROS),
             );
-            let stack_runtime = owner
-                .github_stack_runtime(context.scope())
-                .map_err(|_| unavailable_native_integration())?;
-            let topology =
-                match registered_topology_request(&owner, preflight.snapshot, observed_at) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                            NativeIntegrationSurfaceUnavailableV1::from(&error),
-                        ));
-                    }
-                };
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
-            let application_request = NativeIntegrationPreflightRequestV1 {
-                context,
-                topology,
-                evidence: preflight.evidence.into(),
-                preview_id,
-                preferred_mode: preflight.preferred_mode,
-                preview_expires_at,
-                observed_at,
-            };
             let outcome = tokio::task::spawn_blocking(move || {
+                let stack_runtime = owner.github_stack_runtime(context.scope())?;
+                let topology =
+                    registered_topology_request(&owner, preflight.snapshot, observed_at)?;
+                let application_request = NativeIntegrationPreflightRequestV1 {
+                    context,
+                    topology,
+                    evidence: preflight.evidence.into(),
+                    preview_id,
+                    preferred_mode: preflight.preferred_mode,
+                    preview_expires_at,
+                    observed_at,
+                };
                 let outcome = match stack_runtime.as_ref() {
                     Some(runtime) => runtime
                         .preflight(&application_request, &signal)
@@ -412,67 +396,6 @@ async fn execute_with_owner(
                 Err(error) => surface_result_from_contract_error(error),
             }
         }
-        NativeIntegrationSurfaceRequest::Worktree(request) => {
-            let scope_sets = match owner.worktree_scope_sets() {
-                Ok(scope_sets) => scope_sets,
-                Err(error) => {
-                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                        NativeIntegrationSurfaceUnavailableV1::from(&error),
-                    ));
-                }
-            };
-            let service = NativeWorktreeService::new(scope_sets, owner.worktree_authority());
-            let outcome = match request {
-                NativeWorktreeSurfaceRequest::Inventory(request) => service
-                    .inventory(&request, &signal)
-                    .map(NativeWorktreeSurfaceResultV1::Inventory),
-                NativeWorktreeSurfaceRequest::Inspect(request) => service
-                    .inspect(&request, &signal)
-                    .map(NativeWorktreeSurfaceResultV1::Inspection),
-                NativeWorktreeSurfaceRequest::Confirm(request) => service
-                    .confirm(&request, &signal)
-                    .map(NativeWorktreeSurfaceResultV1::Confirmation),
-                NativeWorktreeSurfaceRequest::Remove(request) => service
-                    .remove(&request, &signal)
-                    .map(NativeWorktreeSurfaceResultV1::Removal),
-                NativeWorktreeSurfaceRequest::Reconcile(request) => service
-                    .reconcile(&request, &signal)
-                    .map(NativeWorktreeSurfaceResultV1::Reconciliation),
-            };
-            match outcome {
-                Ok(outcome) => Ok(NativeIntegrationSurfaceResultV1::Worktree(outcome)),
-                Err(error) => worktree_surface_error(error),
-            }
-        }
-    }
-}
-
-fn worktree_surface_error(
-    error: WorktreeContractError,
-) -> Result<NativeIntegrationSurfaceResultV1, ApplicationProblem> {
-    match error {
-        WorktreeContractError::Domain(_) | WorktreeContractError::Inconsistent { .. } => {
-            Err(invalid_native_integration_request())
-        }
-        WorktreeContractError::ScopeSetDenied | WorktreeContractError::Denied => Ok(
-            NativeIntegrationSurfaceResultV1::unavailable(
-                NativeIntegrationSurfaceUnavailableV1::Denied,
-            ),
-        ),
-        WorktreeContractError::Stale => Ok(NativeIntegrationSurfaceResultV1::unavailable(
-            NativeIntegrationSurfaceUnavailableV1::Stale,
-        )),
-        WorktreeContractError::DurabilityUncertain | WorktreeContractError::Native(_) => Ok(
-            NativeIntegrationSurfaceResultV1::unavailable(
-                NativeIntegrationSurfaceUnavailableV1::DurabilityUncertain,
-            ),
-        ),
-        WorktreeContractError::ScopeSetUnavailable
-        | WorktreeContractError::AuthorityUnavailable => Ok(
-            NativeIntegrationSurfaceResultV1::unavailable(
-                NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted,
-            ),
-        ),
     }
 }
 

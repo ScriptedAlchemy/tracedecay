@@ -980,6 +980,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stack_snapshot_requires_an_exact_selection_binding() {
+        let definition = get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_stack_snapshot")
+            .expect("stack snapshot definition");
+        let selection = &definition.input_schema["properties"]["selection"];
+
+        assert_eq!(selection["oneOf"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            selection["oneOf"][0]["properties"]["kind"]["const"],
+            "declared_stack_edge"
+        );
+        assert!(selection["oneOf"][0]["properties"]["binding"]["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("declared_revision"))));
+        assert_eq!(
+            selection["oneOf"][1]["properties"]["kind"]["const"],
+            "independent_branch"
+        );
+    }
 
     #[test]
     fn test_explore_call_budget_tiers() {

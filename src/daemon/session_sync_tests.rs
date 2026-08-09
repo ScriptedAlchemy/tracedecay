@@ -11,9 +11,10 @@ use tracedecay_application::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
 };
 
+use super::git_topology::GitTopologySyncFailure;
 use super::work::{
     SessionSyncInterruption, coalesced_alias_local_interruption, git_history_frontier_from_meta,
-    git_history_source_frontier, git_sync_work_result,
+    git_history_source_frontier, git_sync_with_topology_result, git_sync_work_result,
 };
 use super::{
     DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncWorkResult,
@@ -203,6 +204,40 @@ fn partial_coverage_is_never_completed_without_failures() {
         completion_termination(None, true, &stats, false, true),
         OperationTermination::Partial
     );
+}
+
+#[test]
+fn declared_git_topology_failures_keep_their_typed_failure_code() {
+    for (failure, expected) in [
+        (
+            GitTopologySyncFailure::Stale,
+            "git_topology_declared_state_stale",
+        ),
+        (
+            GitTopologySyncFailure::Denied,
+            "git_topology_declared_authority_denied",
+        ),
+        (
+            GitTopologySyncFailure::Unavailable,
+            "git_topology_declared_authority_unavailable",
+        ),
+    ] {
+        let result = git_sync_with_topology_result(
+            SessionSyncWorkResult::Finished {
+                interruption: None,
+                committed: true,
+                stats: SessionSyncStatsV1::default(),
+                coverage: Vec::new(),
+                source_frontiers: Vec::new(),
+                failure_codes: Vec::new(),
+            },
+            Err(failure),
+        );
+        let SessionSyncWorkResult::Finished { failure_codes, .. } = result else {
+            panic!("declared topology failure must preserve completed Git sync evidence");
+        };
+        assert_eq!(failure_codes, vec![expected.to_owned()]);
+    }
 }
 
 #[test]
