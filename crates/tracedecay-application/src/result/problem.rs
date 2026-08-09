@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::EffectReceipt;
 use crate::error::ApplicationContractError;
 
 /// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
@@ -49,6 +50,7 @@ pub enum LegalAction {
     Refresh,
     Retry,
     Reconcile,
+    Reset,
     ContactAdministrator,
 }
 
@@ -90,23 +92,49 @@ impl SafeDiagnostic {
     }
 }
 
-/// Stable problem-code taxonomy for failures before a request is admitted.
+/// Stable problem-code taxonomy for request failures and admitted terminals.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationProblemKind {
     InvalidRequest,
     NotFoundOrNotAuthorized,
     Conflict,
+    PartialEffect,
     Stale,
     Unsupported,
     Unavailable,
+    ResetRequired,
     Saturated,
     Cancelled,
     TimedOut,
 }
 
-/// Pre-admission application failure. Resource-addressed denial intentionally
-/// shares one shape with absence and hidden policy outcomes.
+impl ApplicationProblemKind {
+    /// Whether this problem was produced after the application admitted the
+    /// operation.  These states must remain terminal receipts at every
+    /// adapter boundary; they are never safe to reinterpret as availability.
+    pub const fn terminality(self) -> ProblemTerminality {
+        match self {
+            Self::PartialEffect | Self::ResetRequired => ProblemTerminality::AdmittedTerminal,
+            Self::InvalidRequest
+            | Self::NotFoundOrNotAuthorized
+            | Self::Conflict
+            | Self::Stale
+            | Self::Unsupported
+            | Self::Unavailable
+            | Self::Saturated
+            | Self::Cancelled
+            | Self::TimedOut => ProblemTerminality::PreAdmission,
+        }
+    }
+
+    pub const fn is_admitted_terminal(self) -> bool {
+        matches!(self, Self::PartialEffect | Self::ResetRequired)
+    }
+}
+
+/// Application failure or admitted terminal. Resource-addressed denial
+/// intentionally shares one shape with absence and hidden policy outcomes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ApplicationProblem {
@@ -124,6 +152,14 @@ pub enum ApplicationProblem {
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
+    /// The primary effect committed, but a required post-commit step failed.
+    /// The canonical receipt prevents callers from blindly replaying it.
+    PartialEffect {
+        diagnostic: SafeDiagnostic,
+        committed_receipt: EffectReceipt,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
     Stale {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
@@ -135,6 +171,11 @@ pub enum ApplicationProblem {
         legal_actions: Vec<LegalAction>,
     },
     Unavailable {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    ResetRequired {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
@@ -155,18 +196,24 @@ pub enum ApplicationProblem {
 }
 
 impl ApplicationProblem {
-    pub fn kind(&self) -> ApplicationProblemKind {
+    pub const fn kind(&self) -> ApplicationProblemKind {
         match self {
             Self::InvalidRequest { .. } => ApplicationProblemKind::InvalidRequest,
             Self::NotFoundOrNotAuthorized { .. } => ApplicationProblemKind::NotFoundOrNotAuthorized,
             Self::Conflict { .. } => ApplicationProblemKind::Conflict,
+            Self::PartialEffect { .. } => ApplicationProblemKind::PartialEffect,
             Self::Stale { .. } => ApplicationProblemKind::Stale,
             Self::Unsupported { .. } => ApplicationProblemKind::Unsupported,
             Self::Unavailable { .. } => ApplicationProblemKind::Unavailable,
+            Self::ResetRequired { .. } => ApplicationProblemKind::ResetRequired,
             Self::Saturated { .. } => ApplicationProblemKind::Saturated,
             Self::Cancelled { .. } => ApplicationProblemKind::Cancelled,
             Self::TimedOut { .. } => ApplicationProblemKind::TimedOut,
         }
+    }
+
+    pub const fn terminality(&self) -> ProblemTerminality {
+        self.kind().terminality()
     }
 
     pub fn not_found_or_not_authorized(retry: RetryDirective) -> Self {
@@ -206,14 +253,24 @@ impl ApplicationProblem {
         }
     }
 
+    pub fn reset_required(diagnostic: SafeDiagnostic) -> Self {
+        Self::ResetRequired {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reset],
+        }
+    }
+
     pub const fn retry(&self) -> RetryDirective {
         match self {
             Self::InvalidRequest { retry, .. }
             | Self::NotFoundOrNotAuthorized { retry, .. }
             | Self::Conflict { retry, .. }
+            | Self::PartialEffect { retry, .. }
             | Self::Stale { retry, .. }
             | Self::Unsupported { retry, .. }
             | Self::Unavailable { retry, .. }
+            | Self::ResetRequired { retry, .. }
             | Self::Saturated { retry, .. }
             | Self::Cancelled { retry, .. }
             | Self::TimedOut { retry, .. } => *retry,
@@ -225,9 +282,11 @@ impl ApplicationProblem {
             Self::InvalidRequest { legal_actions, .. }
             | Self::NotFoundOrNotAuthorized { legal_actions, .. }
             | Self::Conflict { legal_actions, .. }
+            | Self::PartialEffect { legal_actions, .. }
             | Self::Stale { legal_actions, .. }
             | Self::Unsupported { legal_actions, .. }
             | Self::Unavailable { legal_actions, .. }
+            | Self::ResetRequired { legal_actions, .. }
             | Self::Saturated { legal_actions, .. }
             | Self::Cancelled { legal_actions, .. }
             | Self::TimedOut { legal_actions, .. } => legal_actions,
@@ -238,9 +297,11 @@ impl ApplicationProblem {
         match self {
             Self::InvalidRequest { diagnostic, .. }
             | Self::Conflict { diagnostic, .. }
+            | Self::PartialEffect { diagnostic, .. }
             | Self::Stale { diagnostic, .. }
             | Self::Unsupported { diagnostic, .. }
             | Self::Unavailable { diagnostic, .. }
+            | Self::ResetRequired { diagnostic, .. }
             | Self::Saturated { diagnostic, .. } => Some(diagnostic),
             Self::NotFoundOrNotAuthorized { .. }
             | Self::Cancelled { .. }
@@ -253,9 +314,11 @@ impl ApplicationProblem {
             Self::InvalidRequest { .. } => "invalid_request",
             Self::NotFoundOrNotAuthorized { .. } => "not_found_or_not_authorized",
             Self::Conflict { .. } => "conflict",
+            Self::PartialEffect { .. } => "partial_effect",
             Self::Stale { .. } => "stale",
             Self::Unsupported { .. } => "unsupported",
             Self::Unavailable { .. } => "unavailable",
+            Self::ResetRequired { .. } => "reset_required",
             Self::Saturated { .. } => "saturated",
             Self::Cancelled { .. } => "cancelled",
             Self::TimedOut { .. } => "timed_out",
@@ -273,5 +336,42 @@ impl ApplicationProblem {
                 Self::TimedOut { .. } => "The request timed out before admission",
                 _ => unreachable!("diagnostic-bearing problem handled above"),
             })
+    }
+
+    pub fn committed_receipt(&self) -> Option<&EffectReceipt> {
+        match self {
+            Self::PartialEffect {
+                committed_receipt, ..
+            } => Some(committed_receipt),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApplicationProblem, ApplicationProblemKind, LegalAction, ProblemTerminality,
+        RetryDirective, SafeDiagnostic,
+    };
+
+    #[test]
+    fn reset_required_is_a_distinct_non_retryable_terminal() {
+        let problem = ApplicationProblem::reset_required(
+            SafeDiagnostic::new("store.reset_required", "The store must be reset.")
+                .expect("fixture diagnostic is valid"),
+        );
+
+        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
+        assert_eq!(problem.canonical_code(), "reset_required");
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
+        assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert!(problem.committed_receipt().is_none());
+
+        let wire = serde_json::to_value(&problem).expect("problem serializes");
+        assert_eq!(wire["kind"], "reset_required");
+        assert_eq!(wire["retry"], "never");
+        assert_eq!(wire["legal_actions"], serde_json::json!(["reset"]));
     }
 }
