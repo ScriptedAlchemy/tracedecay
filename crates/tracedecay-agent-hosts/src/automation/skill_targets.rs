@@ -308,7 +308,7 @@ fn render_prompt_index_block(target: SkillInstallTarget, skills: &[ManagedSkill]
     block.push_str(&prompt_index_preamble(target));
 
     if skills.is_empty() {
-        block.push_str("- No approved managed skills are currently exported.\n");
+        block.push_str("- No active automatically managed skills are currently exported.\n");
     } else {
         for skill in skills {
             let _ = writeln!(
@@ -533,7 +533,7 @@ fn orphaned_generated_block_range(
 
 fn prompt_index_preamble(target: SkillInstallTarget) -> String {
     format!(
-        "## TraceDecay managed skills\n\nThis {} index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "## TraceDecay managed skills\n\nThis {} index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         target.prompt_label()
     )
 }

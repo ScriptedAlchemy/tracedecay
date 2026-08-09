@@ -148,14 +148,14 @@ mod tests {
             skill(
                 "review-automation-runs",
                 "Review automation runs",
-                "Review automation run ledgers before approving changes.",
-                "Check run ledger counts, rejected proposals, and pending approval state before applying automation changes.",
+                "Review automation run ledgers after automatic changes apply.",
+                "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
             ),
             skill(
                 "automation-run-review",
                 "Automation run review",
-                "Review automation run ledgers and approval gates.",
-                "Check run ledger counts, rejected proposals, and approval gates before applying automation changes.",
+                "Review automatically applied automation run outcomes.",
+                "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
             ),
         )
     }
@@ -216,8 +216,8 @@ mod tests {
         let c = skill(
             "automation-run-checks",
             "Automation run checks",
-            "Review automation run ledgers before approving changes.",
-            "Check run ledger counts, rejected proposals, and pending approval state before applying automation changes.",
+            "Review automation run ledgers after automatic changes apply.",
+            "Check run ledger counts, rejected proposals, and deployment receipts after automatic application.",
         );
         let candidates = skill_overlap_candidates(&[a, b, c], 1);
         assert_eq!(candidates.len(), 1);

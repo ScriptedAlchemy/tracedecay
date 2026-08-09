@@ -8,11 +8,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tracedecay::automation::jobs::{
+use tracedecay_agent_hosts::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, job_schedule_decision, job_task_key, load_jobs,
     run_user_job_with_backend, save_jobs, validate_job,
 };
-use tracedecay::automation::scheduler::{AutomationSchedule, cron_is_due, parse_schedule};
+use tracedecay_agent_hosts::automation::scheduler::{
+    AutomationSchedule, cron_is_due, parse_schedule,
+};
 
 fn sample_job(id: &str) -> AutomationJob {
     AutomationJob {
@@ -592,18 +594,19 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     let project_root = temp.path().join("project");
     fs::create_dir_all(&profile_root).unwrap();
     fs::create_dir_all(&project_root).unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "job-context".to_string(),
             title: "Job context".to_string(),
             summary: "Adds job context.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Use the profile-specific job context.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "test".to_string(),
                 run_id: None,
             },
@@ -611,10 +614,6 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "job-context")
-        .await
-        .unwrap();
-
     let mut job = sample_job("profile-skill");
     job.skill_ids = vec!["job-context".to_string()];
 
@@ -667,18 +666,19 @@ async fn user_job_does_not_attach_archived_managed_skills() {
     let project_root = temp.path().join("project");
     fs::create_dir_all(&profile_root).unwrap();
     fs::create_dir_all(&project_root).unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "archived-job-context".to_string(),
             title: "Archived job context".to_string(),
             summary: "Must not be attached after archival.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "ARCHIVED_SKILL_BODY_MUST_NOT_RUN".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "test".to_string(),
                 run_id: None,
             },
@@ -686,10 +686,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "archived-job-context")
-        .await
-        .unwrap();
-    tracedecay::automation::managed_skills::archive_managed_skill(
+    tracedecay_agent_hosts::automation::managed_skills::archive_managed_skill(
         &profile_root,
         "archived-job-context",
     )

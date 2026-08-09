@@ -7,7 +7,7 @@ const DAY: i64 = SECS_PER_DAY;
 
 fn summary(skill_id: &str) -> SkillUsageRecord {
     SkillUsageRecord {
-        schema_version: 2,
+        schema_version: 3,
         skill_id: skill_id.to_string(),
         title: Some(format!("{skill_id} title")),
         category: Some("maintenance".to_string()),
@@ -31,17 +31,19 @@ fn summary(skill_id: &str) -> SkillUsageRecord {
 }
 
 fn fact_input(
-    proposal_id: &str,
-    applied_at: i64,
-    telemetry: Option<FactOutcomeTelemetry>,
+    apply_id: &str,
+    state: ProjectMemoryAutomaticFactStateV1,
+    canonical_fact_id: Option<&str>,
+    recorded_at: i64,
+    observation: FactOutcomeObservation,
 ) -> FactOutcomeInput {
     FactOutcomeInput {
-        proposal_id: proposal_id.to_string(),
-        run_id: "run_outcomes".to_string(),
-        canonical_fact_id: format!("fact:{proposal_id}"),
-        fact_id: Some(42),
-        applied_at,
-        telemetry,
+        apply_id: apply_id.to_string(),
+        run_id: Some("run_outcomes".to_string()),
+        state,
+        canonical_fact_id: canonical_fact_id.map(ToOwned::to_owned),
+        recorded_at,
+        observation,
     }
 }
 
@@ -123,15 +125,34 @@ fn ledger_without_activation_baseline_uses_last_activity_fallback() {
 
 #[test]
 fn deleted_fact_yields_deleted_verdict() {
-    let outcome = fact_outcome(fact_input("fact_dead", 5 * DAY, None), 9 * DAY);
+    let outcome = fact_outcome(
+        fact_input(
+            "apply_fact_dead",
+            ProjectMemoryAutomaticFactStateV1::Applied,
+            Some("fact:dead"),
+            5 * DAY,
+            FactOutcomeObservation::Deleted,
+        ),
+        9 * DAY,
+    );
     assert_eq!(outcome.verdict, FactOutcomeVerdict::Deleted);
     assert!(!outcome.still_exists);
-    assert_eq!(outcome.days_since_applied, 4);
+    assert_eq!(outcome.days_since_recorded, 4);
+    assert_eq!(outcome.retrieval_count, None);
 }
 
 #[test]
 fn never_recalled_fact_yields_never_recalled_verdict() {
-    let outcome = fact_outcome(fact_input("fact_idle", 5 * DAY, Some(telemetry())), 9 * DAY);
+    let outcome = fact_outcome(
+        fact_input(
+            "apply_fact_idle",
+            ProjectMemoryAutomaticFactStateV1::Applied,
+            Some("fact:idle"),
+            5 * DAY,
+            FactOutcomeObservation::Available(telemetry()),
+        ),
+        9 * DAY,
+    );
     assert_eq!(outcome.verdict, FactOutcomeVerdict::NeverRecalled);
     assert!(outcome.still_exists);
 }
@@ -142,11 +163,17 @@ fn recalled_fact_yields_recalled_verdict() {
     telemetry.access_count = 3;
     telemetry.last_recalled_at = Some(8 * DAY);
     let outcome = fact_outcome(
-        fact_input("fact_recalled", 5 * DAY, Some(telemetry)),
+        fact_input(
+            "apply_fact_recalled",
+            ProjectMemoryAutomaticFactStateV1::Applied,
+            Some("fact:recalled"),
+            5 * DAY,
+            FactOutcomeObservation::Available(telemetry),
+        ),
         9 * DAY,
     );
     assert_eq!(outcome.verdict, FactOutcomeVerdict::Recalled);
-    assert_eq!(outcome.access_count, 3);
+    assert_eq!(outcome.access_count, Some(3));
 }
 
 #[test]
@@ -155,7 +182,13 @@ fn recalled_and_helpful_fact_yields_top_verdict() {
     telemetry.access_count = 2;
     telemetry.helpful_count = 1;
     let outcome = fact_outcome(
-        fact_input("fact_helpful", 5 * DAY, Some(telemetry)),
+        fact_input(
+            "apply_fact_helpful",
+            ProjectMemoryAutomaticFactStateV1::Applied,
+            Some("fact:helpful"),
+            5 * DAY,
+            FactOutcomeObservation::Available(telemetry),
+        ),
         9 * DAY,
     );
     assert_eq!(outcome.verdict, FactOutcomeVerdict::RecalledAndHelpful);
@@ -166,46 +199,43 @@ fn helpful_feedback_without_recall_is_not_recalled_and_helpful() {
     let mut telemetry = telemetry();
     telemetry.helpful_count = 1;
     let outcome = fact_outcome(
-        fact_input("fact_feedback_only", 5 * DAY, Some(telemetry)),
+        fact_input(
+            "apply_fact_feedback_only",
+            ProjectMemoryAutomaticFactStateV1::Applied,
+            Some("fact:feedback_only"),
+            5 * DAY,
+            FactOutcomeObservation::Available(telemetry),
+        ),
         9 * DAY,
     );
     assert_eq!(outcome.verdict, FactOutcomeVerdict::NeverRecalled);
 }
 
 #[test]
-fn deleted_fact_preserves_canonical_identity_without_numeric_mapping() {
-    let mut input = fact_input("fact_no_mapping", 5 * DAY, None);
-    input.fact_id = None;
-    let outcome = fact_outcome(input, 9 * DAY);
-    assert_eq!(outcome.canonical_fact_id, "fact:fact_no_mapping");
-    assert_eq!(outcome.fact_id, None);
-    assert_eq!(outcome.verdict, FactOutcomeVerdict::Deleted);
+fn quarantined_receipt_preserves_its_terminal_state_without_a_projection() {
+    let outcome = fact_outcome(
+        fact_input(
+            "apply_fact_quarantined",
+            ProjectMemoryAutomaticFactStateV1::Quarantined,
+            None,
+            5 * DAY,
+            FactOutcomeObservation::Quarantined,
+        ),
+        9 * DAY,
+    );
+    assert_eq!(outcome.apply_id, "apply_fact_quarantined");
+    assert_eq!(
+        outcome.state,
+        ProjectMemoryAutomaticFactStateV1::Quarantined
+    );
+    assert_eq!(outcome.canonical_fact_id, None);
+    assert_eq!(outcome.verdict, FactOutcomeVerdict::Quarantined);
+    assert!(!outcome.still_exists);
+    assert_eq!(outcome.access_count, None);
     let serialized = serde_json::to_value(outcome).unwrap();
-    assert_eq!(serialized["canonical_fact_id"], "fact:fact_no_mapping");
-    assert!(serialized.get("fact_id").is_some());
-    assert!(serialized["fact_id"].is_null());
-}
-
-#[test]
-fn legacy_outcome_snapshot_fact_keeps_numeric_mapping() {
-    let legacy = json!({
-        "proposal_id": "legacy-proposal",
-        "run_id": "legacy-run",
-        "fact_id": 42,
-        "applied_at": 5 * DAY,
-        "days_since_applied": 4,
-        "retrieval_count": 0,
-        "access_count": 0,
-        "helpful_count": 0,
-        "unhelpful_count": 0,
-        "still_exists": false,
-        "verdict": "deleted",
-    });
-
-    let outcome: FactOutcomeRecord = serde_json::from_value(legacy).unwrap();
-    assert_eq!(outcome.canonical_fact_id, "");
-    assert_eq!(outcome.fact_id, Some(42));
-    assert_eq!(outcome.verdict, FactOutcomeVerdict::Deleted);
+    assert_eq!(serialized["apply_id"], "apply_fact_quarantined");
+    assert!(serialized.get("proposal_id").is_none());
+    assert!(serialized.get("fact_id").is_none());
 }
 
 #[test]
@@ -216,10 +246,16 @@ fn outcome_eval_definitions_reflect_task_scope_and_verdicts() {
     adopted.use_count = 1;
     adopted.last_used_at = Some(11 * DAY);
     let snapshot = AutomationOutcomesSnapshot {
-        schema_version: 2,
+        schema_version: 3,
         skills: compute_skill_outcomes(&[adopted], 20 * DAY),
         facts: vec![fact_outcome(
-            fact_input("fact_dead", 5 * DAY, None),
+            fact_input(
+                "apply_fact_dead",
+                ProjectMemoryAutomaticFactStateV1::Applied,
+                Some("fact:dead"),
+                5 * DAY,
+                FactOutcomeObservation::Deleted,
+            ),
             20 * DAY,
         )],
         skills_refreshed_at: Some(20 * DAY),
@@ -246,8 +282,8 @@ fn outcome_eval_definitions_reflect_task_scope_and_verdicts() {
         &json!("deleted")
     );
     assert_eq!(
-        fact_evals[0].pointer("/subject/canonical_fact_id").unwrap(),
-        &json!("fact:fact_dead")
+        fact_evals[0].pointer("/subject/apply_id").unwrap(),
+        &json!("apply_fact_dead")
     );
     assert_eq!(fact_evals[0].get("passed").unwrap(), &json!(false));
 }
@@ -349,7 +385,7 @@ async fn seed_activated_skill(profile_root: &Path) {
 
 async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database {
     use crate::application::memory::MemoryApplication;
-    use crate::automation::fact_proposals::{FactProposalState, record_session_fact_proposals};
+    use crate::automation::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
@@ -366,7 +402,7 @@ async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database
     .unwrap();
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
-    let records = record_session_fact_proposals(
+    let batch = record_session_automatic_facts(
         &memory,
         "run-outcome-lock",
         None,
@@ -381,11 +417,11 @@ async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database
                 "metadata": {}
             }
         })],
-        &[],
     )
     .await
     .unwrap();
-    assert_eq!(records[0].state, FactProposalState::Applied);
+    assert!(batch.retry_error.is_none());
+    assert_eq!(batch.receipts[0].state, AutomaticFactState::Applied);
     database
 }
 

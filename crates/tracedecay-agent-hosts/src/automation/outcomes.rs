@@ -6,8 +6,9 @@
 //!
 //! - automatically activated managed skills: adoption derived from the usage ledger
 //!   (`adopted` / `ignored` / `too_early`),
-//! - automatically applied facts: post-apply recall trajectory in the memory store
-//!   (`recalled_and_helpful` / `recalled` / `never_recalled` / `deleted`).
+//! - automatic-fact receipts: terminal application state plus any post-apply
+//!   recall trajectory in the memory store (`recalled_and_helpful` / `recalled`
+//!   / `never_recalled` / `deleted` / `quarantined` / `unavailable`).
 //!
 //! Outcomes are persisted as a snapshot under the dashboard root so the next
 //! automation run for the same task can fold real-quality signal into its
@@ -22,9 +23,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_store::{
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
 };
 
 use super::backend::AgentTaskKind;
@@ -73,6 +74,8 @@ pub enum FactOutcomeVerdict {
     Recalled,
     NeverRecalled,
     Deleted,
+    Quarantined,
+    Unavailable,
 }
 
 impl FactOutcomeVerdict {
@@ -82,6 +85,8 @@ impl FactOutcomeVerdict {
             Self::Recalled => "recalled",
             Self::NeverRecalled => "never_recalled",
             Self::Deleted => "deleted",
+            Self::Quarantined => "quarantined",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -100,20 +105,24 @@ pub struct SkillOutcomeRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactOutcomeRecord {
-    pub proposal_id: String,
-    pub run_id: String,
-    /// Canonical fact identity from the authoritative compatibility proposal.
-    #[serde(default)]
-    pub canonical_fact_id: String,
-    /// Legacy numeric mapping when the authority durably recorded one.
-    #[serde(default)]
-    pub fact_id: Option<i64>,
-    pub applied_at: i64,
-    pub days_since_applied: i64,
-    pub retrieval_count: i64,
-    pub access_count: i64,
-    pub helpful_count: i64,
-    pub unhelpful_count: i64,
+    /// Immutable identity of the terminal automatic-fact receipt.
+    pub apply_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub state: ProjectMemoryAutomaticFactStateV1,
+    /// Present only for receipts whose terminal effect applied a canonical fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_fact_id: Option<String>,
+    pub recorded_at: i64,
+    pub days_since_recorded: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helpful_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unhelpful_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_recalled_at: Option<i64>,
     pub still_exists: bool,
@@ -122,21 +131,29 @@ pub struct FactOutcomeRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 struct FactOutcomeTelemetry {
-    retrieval_count: i64,
-    access_count: i64,
-    helpful_count: i64,
-    unhelpful_count: i64,
+    retrieval_count: u64,
+    access_count: u64,
+    helpful_count: u64,
+    unhelpful_count: u64,
     last_recalled_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum FactOutcomeObservation {
+    Available(FactOutcomeTelemetry),
+    Deleted,
+    Quarantined,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct FactOutcomeInput {
-    proposal_id: String,
-    run_id: String,
-    canonical_fact_id: String,
-    fact_id: Option<i64>,
-    applied_at: i64,
-    telemetry: Option<FactOutcomeTelemetry>,
+    apply_id: String,
+    run_id: Option<String>,
+    state: ProjectMemoryAutomaticFactStateV1,
+    canonical_fact_id: Option<String>,
+    recorded_at: i64,
+    observation: FactOutcomeObservation,
 }
 
 /// Persisted, per-project snapshot of the most recently computed outcomes.
@@ -214,31 +231,36 @@ fn count_since_activation(
     }
 }
 
-/// Computes the post-apply verdict from a compatibility-authority projection.
+/// Computes the current trajectory from one terminal automatic-fact receipt.
 fn fact_outcome(input: FactOutcomeInput, now_unix: i64) -> FactOutcomeRecord {
-    let applied_at = input.applied_at;
+    let recorded_at = input.recorded_at;
     let mut record = FactOutcomeRecord {
-        proposal_id: input.proposal_id,
+        apply_id: input.apply_id,
         run_id: input.run_id,
+        state: input.state,
         canonical_fact_id: input.canonical_fact_id,
-        fact_id: input.fact_id,
-        applied_at,
-        days_since_applied: now_unix.saturating_sub(applied_at) / SECS_PER_DAY,
-        retrieval_count: 0,
-        access_count: 0,
-        helpful_count: 0,
-        unhelpful_count: 0,
+        recorded_at,
+        days_since_recorded: now_unix.saturating_sub(recorded_at) / SECS_PER_DAY,
+        retrieval_count: None,
+        access_count: None,
+        helpful_count: None,
+        unhelpful_count: None,
         last_recalled_at: None,
         still_exists: false,
-        verdict: FactOutcomeVerdict::Deleted,
+        verdict: match &input.observation {
+            FactOutcomeObservation::Deleted => FactOutcomeVerdict::Deleted,
+            FactOutcomeObservation::Quarantined => FactOutcomeVerdict::Quarantined,
+            FactOutcomeObservation::Unavailable => FactOutcomeVerdict::Unavailable,
+            FactOutcomeObservation::Available(_) => FactOutcomeVerdict::NeverRecalled,
+        },
     };
-    let Some(telemetry) = input.telemetry else {
+    let FactOutcomeObservation::Available(telemetry) = input.observation else {
         return record;
     };
-    record.retrieval_count = telemetry.retrieval_count;
-    record.access_count = telemetry.access_count;
-    record.helpful_count = telemetry.helpful_count;
-    record.unhelpful_count = telemetry.unhelpful_count;
+    record.retrieval_count = Some(telemetry.retrieval_count);
+    record.access_count = Some(telemetry.access_count);
+    record.helpful_count = Some(telemetry.helpful_count);
+    record.unhelpful_count = Some(telemetry.unhelpful_count);
     record.last_recalled_at = telemetry.last_recalled_at;
     record.still_exists = true;
     let recalled = telemetry.access_count > 0 || telemetry.last_recalled_at.is_some();
@@ -343,15 +365,15 @@ pub async fn refresh_skill_outcomes(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 2;
+    snapshot.schema_version = 3;
     snapshot.skills = outcomes.clone();
     snapshot.skills_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
     Ok(outcomes)
 }
 
-/// Recomputes fact outcomes after authoritative compatibility reads, then
-/// persists the derived sidecar snapshot (skills half untouched).
+/// Recomputes fact outcomes from terminal automatic-fact receipts, then
+/// persists the current telemetry cache (skills half untouched).
 pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     dashboard_root: &Path,
     application: &MemoryApplication<A>,
@@ -361,7 +383,7 @@ pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 2;
+    snapshot.schema_version = 3;
     snapshot.facts = outcomes.clone();
     snapshot.facts_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
@@ -391,159 +413,133 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
     now_unix: i64,
 ) -> Result<Vec<FactOutcomeRecord>> {
     let mut outcomes = Vec::new();
-    let mut after_proposal_id = None;
+    let mut after_apply_id = None;
 
     loop {
         let page = application
-            .list_project_memory_fact_proposals(
-                Some(ProjectMemoryFactProposalStateV1::Applied),
-                after_proposal_id.clone(),
+            .list_project_memory_automatic_fact_receipts(
+                None,
+                after_apply_id.clone(),
                 FACT_OUTCOME_PAGE_LIMIT,
             )
             .await
-            .map_err(|error| config_error(format!("list applied fact proposals: {error}")))?;
-        let next_after_proposal_id = page.next_after_proposal_id().cloned();
+            .map_err(|error| config_error(format!("list automatic fact receipts: {error}")))?;
+        let next_after_apply_id = page.next_after_apply_id().cloned();
 
-        for proposal in page.proposals() {
-            let canonical_fact_id = proposal.applied_fact_id().ok_or_else(|| {
-                config_error(format!(
-                    "applied compatibility fact proposal '{}' has no canonical fact id",
-                    proposal.proposal_id().as_str()
-                ))
-            })?;
-            let target = ProjectMemoryFactTargetV1::Canonical(
-                ProjectMemoryFactIdV1::new(proposal.owner().clone(), canonical_fact_id.clone())
-                    .map_err(|error| {
-                        config_error(format!(
-                            "invalid canonical fact id for proposal '{}': {error}",
-                            proposal.proposal_id().as_str()
-                        ))
-                    })?,
-            );
-            let projection = application
-                .get_project_memory_fact(target.clone())
-                .await
-                .map_err(|error| {
+        for receipt in page.receipts() {
+            let projection = if receipt.state() == ProjectMemoryAutomaticFactStateV1::Applied {
+                let canonical_fact_id = receipt.applied_fact_id().ok_or_else(|| {
                     config_error(format!(
-                        "read applied fact proposal '{}': {error}",
-                        proposal.proposal_id().as_str()
+                        "applied automatic fact receipt '{}' has no canonical fact id",
+                        receipt.apply_id().as_str()
                     ))
                 })?;
-            let applied_at = applied_at_from_lineage(application, &target, proposal).await?;
-            if let Some(input) = fact_outcome_input(proposal, projection.as_ref(), applied_at)? {
-                outcomes.push(fact_outcome(input, now_unix));
-            }
+                let target = ProjectMemoryFactTargetV1::Canonical(
+                    ProjectMemoryFactIdV1::new(
+                        application.owner().clone(),
+                        canonical_fact_id.clone(),
+                    )
+                    .map_err(|error| {
+                        config_error(format!(
+                            "invalid canonical fact id for automatic receipt '{}': {error}",
+                            receipt.apply_id().as_str()
+                        ))
+                    })?,
+                );
+                Some(
+                    application
+                        .get_project_memory_fact(target)
+                        .await
+                        .map_err(|error| {
+                            config_error(format!(
+                                "read applied automatic fact receipt '{}': {error}",
+                                receipt.apply_id().as_str()
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
+            outcomes.push(fact_outcome(
+                fact_outcome_input(receipt, projection.as_ref())?,
+                now_unix,
+            ));
         }
 
-        let Some(next_after_proposal_id) = next_after_proposal_id else {
+        let Some(next_after_apply_id) = next_after_apply_id else {
             break;
         };
-        after_proposal_id = Some(next_after_proposal_id);
+        after_apply_id = Some(next_after_apply_id);
     }
 
     Ok(outcomes)
 }
 
 fn fact_outcome_input(
-    proposal: &ProjectMemoryFactProposalRecordV1,
+    receipt: &ProjectMemoryAutomaticFactReceiptV1,
     projection: Option<&ProjectMemoryFactProjectionV1>,
-    applied_at: i64,
-) -> Result<Option<FactOutcomeInput>> {
-    if proposal.state() != ProjectMemoryFactProposalStateV1::Applied {
-        return Err(config_error(format!(
-            "fact outcome requested for non-applied proposal '{}'",
-            proposal.proposal_id().as_str()
-        )));
-    }
-    let canonical_fact_id = proposal.applied_fact_id().ok_or_else(|| {
-        config_error(format!(
-            "applied compatibility fact proposal '{}' has no canonical fact id",
-            proposal.proposal_id().as_str()
-        ))
-    })?;
-    let telemetry = match projection {
-        Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
-            let telemetry = fact.telemetry();
-            Some(FactOutcomeTelemetry {
-                retrieval_count: outcome_count(telemetry.retrieval_count(), "retrieval count")?,
-                access_count: outcome_count(telemetry.access_count(), "access count")?,
-                helpful_count: outcome_count(telemetry.helpful_count(), "helpful count")?,
-                unhelpful_count: outcome_count(telemetry.unhelpful_count(), "unhelpful count")?,
-                last_recalled_at: telemetry
-                    .last_recalled_at()
-                    .map(|timestamp| timestamp.0 / 1_000_000),
+) -> Result<FactOutcomeInput> {
+    let state = receipt.state();
+    let apply_id = receipt.apply_id().as_str().to_owned();
+    let run_id = receipt.automation_run_id().map(ToOwned::to_owned);
+    let recorded_at = receipt.recorded_at().0.div_euclid(1_000_000);
+
+    match state {
+        ProjectMemoryAutomaticFactStateV1::Applied => {
+            let canonical_fact_id = receipt.applied_fact_id().ok_or_else(|| {
+                config_error(format!(
+                    "applied automatic fact receipt '{}' has no canonical fact id",
+                    receipt.apply_id().as_str()
+                ))
+            })?;
+            let observation = match projection {
+                Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
+                    let telemetry = fact.telemetry();
+                    FactOutcomeObservation::Available(FactOutcomeTelemetry {
+                        retrieval_count: telemetry.retrieval_count(),
+                        access_count: telemetry.access_count(),
+                        helpful_count: telemetry.helpful_count(),
+                        unhelpful_count: telemetry.unhelpful_count(),
+                        last_recalled_at: telemetry
+                            .last_recalled_at()
+                            .map(|timestamp| timestamp.0.div_euclid(1_000_000)),
+                    })
+                }
+                Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
+                    match unavailable.availability() {
+                        ProjectMemoryFactAvailabilityV1::Deleted => FactOutcomeObservation::Deleted,
+                        ProjectMemoryFactAvailabilityV1::Quarantined => {
+                            FactOutcomeObservation::Quarantined
+                        }
+                        ProjectMemoryFactAvailabilityV1::Unavailable => {
+                            FactOutcomeObservation::Unavailable
+                        }
+                    }
+                }
+                None => FactOutcomeObservation::Unavailable,
+            };
+            Ok(FactOutcomeInput {
+                apply_id,
+                run_id,
+                state,
+                canonical_fact_id: Some(canonical_fact_id.as_str().to_owned()),
+                recorded_at,
+                observation,
             })
         }
-        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
-            match unavailable.availability() {
-                ProjectMemoryFactAvailabilityV1::Deleted => None,
-                ProjectMemoryFactAvailabilityV1::Quarantined
-                | ProjectMemoryFactAvailabilityV1::Unavailable => return Ok(None),
-            }
-        }
-        None => {
-            return Err(config_error(format!(
-                "applied compatibility fact proposal '{}' has no current projection",
-                proposal.proposal_id().as_str()
-            )));
-        }
-    };
-
-    Ok(Some(FactOutcomeInput {
-        proposal_id: proposal.proposal_id().as_str().to_owned(),
-        run_id: proposal
-            .automation_run_id()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| proposal.request().operation_id().as_str())
-            .to_owned(),
-        canonical_fact_id: canonical_fact_id.as_str().to_owned(),
-        fact_id: proposal.legacy_fact_id(),
-        applied_at,
-        telemetry,
-    }))
-}
-
-/// The compatibility promotion batch starts its immutable lineage at the
-/// promotion timestamp, which remains available after payload deletion.
-async fn applied_at_from_lineage<A: ProjectMemoryFactStore>(
-    application: &MemoryApplication<A>,
-    target: &ProjectMemoryFactTargetV1,
-    proposal: &ProjectMemoryFactProposalRecordV1,
-) -> Result<i64> {
-    let query = ProjectMemoryFactHistoryQueryV1::new(target.clone(), None, 1).map_err(|error| {
-        config_error(format!(
-            "build outcome lineage query for proposal '{}': {error}",
-            proposal.proposal_id().as_str()
-        ))
-    })?;
-    let history = application
-        .get_project_memory_history(query)
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "read outcome lineage for proposal '{}': {error}",
-                proposal.proposal_id().as_str()
-            ))
-        })?;
-    let event = history.events().first().ok_or_else(|| {
-        config_error(format!(
-            "applied compatibility fact proposal '{}' has no lineage",
-            proposal.proposal_id().as_str()
-        ))
-    })?;
-    Ok(event.occurred_at().0 / 1_000_000)
-}
-
-fn outcome_count(value: u64, field: &str) -> Result<i64> {
-    i64::try_from(value).map_err(|_| {
-        config_error(format!(
-            "compatibility fact {field} exceeds the legacy outcome range"
-        ))
-    })
+        ProjectMemoryAutomaticFactStateV1::Quarantined => Ok(FactOutcomeInput {
+            apply_id,
+            run_id,
+            state,
+            canonical_fact_id: None,
+            recorded_at,
+            observation: FactOutcomeObservation::Quarantined,
+        }),
+    }
 }
 
 /// The outcome records relevant to one automation task: the skill writer is
-/// judged by skill adoption, fact-producing tasks by fact recall.
+/// judged by skill adoption, fact-producing tasks by automatic-fact trajectory.
 fn task_outcomes(
     task: AgentTaskKind,
     snapshot: &AutomationOutcomesSnapshot,
@@ -561,8 +557,8 @@ fn task_outcomes(
     }
 }
 
-/// The "outcomes of previously applied changes" section embedded in the
-/// `feedback` artifact payload.
+/// The automatic change outcome section embedded in the `feedback` artifact
+/// payload.
 pub(super) fn outcome_feedback_section(
     task: AgentTaskKind,
     snapshot: &AutomationOutcomesSnapshot,
@@ -620,27 +616,28 @@ pub(super) fn outcome_eval_definitions(
         }));
     }
     for record in facts {
-        let passed = matches!(
-            record.verdict,
-            FactOutcomeVerdict::RecalledAndHelpful | FactOutcomeVerdict::Recalled
-        );
+        let passed = record.state == ProjectMemoryAutomaticFactStateV1::Applied
+            && matches!(
+                record.verdict,
+                FactOutcomeVerdict::RecalledAndHelpful | FactOutcomeVerdict::Recalled
+            );
         definitions.push(json!({
             "schema_version": 1,
-            "eval_id": format!("{task_key}:outcome:fact:{}", record.proposal_id),
+            "eval_id": format!("{task_key}:outcome:fact:{}", record.apply_id),
             "kind": "applied_change_outcome",
             "subject": {
-                "type": "applied_fact",
-                "proposal_id": record.proposal_id,
+                "type": "automatic_fact_receipt",
+                "apply_id": record.apply_id,
+                "state": record.state,
                 "canonical_fact_id": record.canonical_fact_id,
-                "fact_id": record.fact_id,
             },
             "observed_outcome": record.verdict.as_str(),
             "expected_outcome": "recalled",
             "passed": passed,
             "pending": false,
             "metrics": {
-                "applied_at": record.applied_at,
-                "days_since_applied": record.days_since_applied,
+                "recorded_at": record.recorded_at,
+                "days_since_recorded": record.days_since_recorded,
                 "retrieval_count": record.retrieval_count,
                 "access_count": record.access_count,
                 "helpful_count": record.helpful_count,
