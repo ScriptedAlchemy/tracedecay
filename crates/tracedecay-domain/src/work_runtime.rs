@@ -1104,7 +1104,12 @@ impl WorkAttemptV1 {
         let item = graph
             .item(self.identity.task_id())
             .ok_or(WorkRuntimeContractError::ProjectionMismatch)?;
-        if self.projection_binding.graph_version() != graph.version()
+        let admitted_graph_version = self
+            .projection_binding
+            .graph_version()
+            .next()
+            .map_err(|_| WorkRuntimeContractError::ProjectionMismatch)?;
+        if admitted_graph_version != graph.version()
             || item.accepted_proposal() != Some(self.projection_binding.accepted_proposal())
         {
             return Err(WorkRuntimeContractError::ProjectionMismatch);

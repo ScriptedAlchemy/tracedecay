@@ -10,23 +10,21 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, TopologyConcurrencyPolicyV1, UtcMicros, WorkAttemptIdentityV1,
-    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkExecutionEnvelopeV1,
-    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkRecoveryStateV1, WorkRestartReasonV1,
-    WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkTopologyPolicyV1, canonical_sha256,
+    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkCommandId,
+    WorkEffectStateV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
+    WorkTopologyPolicyV1, canonical_sha256,
 };
 
 use crate::work::work_authority;
 use crate::work_attempt::{
     CurrentWorkProductAttemptGraphV1, WorkAttemptStorageError, WorkAttemptStoragePort,
-    accepted_attempt_draft,
-    current_work_product_attempt_graph, product_admission_problem,
+    accepted_attempt_draft, current_work_product_attempt_graph, product_admission_problem,
     product_attempt_projection_binding,
 };
 use crate::work_attempt_effect::{
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
-use crate::work_read::{WorkProjectionPortError, WorkProjectionReadPort};
 use crate::{
     ApplicationContractError, ApplicationProblem, LegalAction, RequestAdmission, RequestContext,
     RetryDirective, SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
@@ -317,226 +315,6 @@ pub trait WorkRetryStoragePortV1: WorkAttemptStoragePort {
     ) -> Result<WorkRetryAttemptOutcomeV1, WorkAttemptStorageError>;
 }
 
-pub struct WorkRetryServiceV1<S, P, E> {
-    storage: S,
-    projections: P,
-    evidence: E,
-}
-
-impl<S, P, E> WorkRetryServiceV1<S, P, E>
-where
-    S: WorkRetryStoragePortV1 + WorkAttemptEffectStoragePortV1,
-    P: WorkProjectionReadPort,
-    E: WorkRetryEvidencePortV1,
-{
-    pub const fn new(storage: S, projections: P, evidence: E) -> Self {
-        Self {
-            storage,
-            projections,
-            evidence,
-        }
-    }
-
-    pub fn retry(
-        &self,
-        context: &RequestContext,
-        topology: &WorkTopologyPolicyV1,
-        command: RetryWorkAttemptCommandV1,
-        restarted_at: UtcMicros,
-    ) -> Result<WorkRetryAttemptOutcomeV1, ApplicationProblem> {
-        admit(context, restarted_at)?;
-        if !command.validate() {
-            return Err(invalid_problem());
-        }
-        let authority = work_authority(context)?;
-        let input_digest = canonical_sha256(&(RETRY_INPUT_DIGEST_DOMAIN, &command))
-            .map_err(|_| invalid_problem())?;
-        if let Some(replayed) = self
-            .storage
-            .retry_by_command(&authority, &command.command_id)
-            .map_err(storage_problem)?
-        {
-            return if replayed.receipt().canonical_input_digest == input_digest {
-                Ok(replayed)
-            } else {
-                Err(conflict_problem(
-                    "application.work-retry.idempotency-conflict",
-                    "The Work retry command identity was already used with different input.",
-                ))
-            };
-        }
-
-        let original = self
-            .storage
-            .load(&authority, &command.original_attempt)
-            .map_err(storage_problem)?;
-        self.require_retry_effect_safe(&authority, &original)?;
-        let failure = self
-            .evidence
-            .resolve_failure(&authority, &original, &command.failure)
-            .map_err(evidence_problem)?;
-        validate_failure(&command, &original, &failure)?;
-        if failure.observed_at.0 > restarted_at.0 {
-            return Err(conflict_problem(
-                "application.work-retry.failure-conflict",
-                "The retry failure was observed after retry admission.",
-            ));
-        }
-        let attempt = self.prepare_attempt(context, topology, &command, restarted_at, &original)?;
-        let retry_required_at = failure.observed_at;
-        let receipt = WorkRetryReceiptV1::new(
-            command,
-            failure,
-            attempt.identity().clone(),
-            retry_required_at,
-            restarted_at,
-        )
-        .map_err(retry_receipt_problem)?;
-        if receipt.canonical_input_digest != input_digest {
-            return Err(invalid_problem());
-        }
-        self.storage
-            .insert_retry_bounded(
-                &authority,
-                &WorkRetryWriteV1 { receipt, attempt },
-                &topology.concurrency,
-            )
-            .map_err(storage_problem)
-    }
-
-    fn require_retry_effect_safe(
-        &self,
-        authority: &WorkAuthority,
-        original: &WorkAttemptV1,
-    ) -> Result<(), ApplicationProblem> {
-        if original.execution().effect_state() != WorkEffectStateV1::CompoundNonRepeatable {
-            return Ok(());
-        }
-        let holder = self
-            .storage
-            .load_effect_dispatch(authority, original.identity())
-            .map_err(effect_storage_problem)?;
-        if holder.as_ref().is_some_and(|holder| {
-            holder.resolution() == Some(WorkAttemptEffectResolutionV1::NoEffect)
-        }) {
-            Ok(())
-        } else {
-            Err(conflict_problem(
-                "application.work-retry.effect-unknown",
-                "The original Work attempt has an unresolved non-repeatable effect.",
-            ))
-        }
-    }
-
-    fn prepare_attempt(
-        &self,
-        context: &RequestContext,
-        topology: &WorkTopologyPolicyV1,
-        command: &RetryWorkAttemptCommandV1,
-        restarted_at: UtcMicros,
-        original: &WorkAttemptV1,
-    ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        if original.execution().execution_snapshot().topology() != topology
-            || restarted_at.0 >= original.execution().deadline().0
-        {
-            return Err(conflict_problem(
-                "application.work-retry.admission-conflict",
-                "The original Work admission no longer permits this retry.",
-            ));
-        }
-        let snapshot = self
-            .projections
-            .exact_snapshot(&work_authority(context)?, original.identity().task_id())
-            .map_err(projection_problem)?;
-        let projection = snapshot
-            .projections()
-            .iter()
-            .find(|projection| projection.task_id() == original.identity().task_id())
-            .ok_or_else(not_found_problem)?;
-        if !projection.is_execution_admitted()
-            || projection.accepted_proposal()
-                != Some(original.projection_binding().accepted_proposal())
-        {
-            return Err(conflict_problem(
-                "application.work-retry.projection-conflict",
-                "The Work projection no longer admits the original attempt.",
-            ));
-        }
-        let identity = WorkAttemptIdentityV1::new(
-            original.identity().task_id().clone(),
-            original.identity().run_id().clone(),
-            command.new_attempt_id.clone(),
-        )
-        .map_err(contract_problem)?;
-        let binding = WorkAttemptProjectionBindingV1::new(
-            original.projection_binding().graph_version(),
-            original.projection_binding().event_sequence(),
-            original.projection_binding().source_watermark().clone(),
-            original
-                .projection_binding()
-                .recovered_graph_digest()
-                .clone(),
-            original.projection_binding().accepted_proposal().clone(),
-        )
-        .map_err(contract_problem)?;
-        let cancellation_generation = original
-            .execution()
-            .cancellation_generation()
-            .checked_add(1)
-            .ok_or_else(invalid_problem)?;
-        let envelope = WorkExecutionEnvelopeV1::new(
-            identity.clone(),
-            binding.clone(),
-            original.execution().operation().clone(),
-            original.execution().execution_snapshot().clone(),
-            context.scope().project_id.clone(),
-            context.scope().repository_id.clone(),
-            context.scope().worktree_id.clone(),
-            original.execution().worktree_root().to_owned(),
-            original.execution().reference().cloned(),
-            original.execution().commit().clone(),
-            original.execution().instructions().to_owned(),
-            cancellation_generation,
-            original.execution().effect_state(),
-        )
-        .map_err(contract_problem)?;
-        let epoch = self
-            .storage
-            .next_fence_epoch(&work_authority(context)?)
-            .map_err(storage_problem)?;
-        let lease_digest =
-            canonical_sha256(&(RETRY_LEASE_DOMAIN, &identity)).map_err(|_| invalid_problem())?;
-        let lease_id = WorkLeaseId::new(format!(
-            "work-retry-lease:{}",
-            lease_digest.as_str().trim_start_matches("sha256:")
-        ))
-        .map_err(|_| invalid_problem())?;
-        let lease = WorkLeaseFenceV1::new(
-            lease_id,
-            WorkFenceEpochV1::new(epoch).map_err(contract_problem)?,
-        )
-        .map_err(contract_problem)?;
-        WorkAttemptV1::new(
-            identity,
-            binding,
-            envelope,
-            lease,
-            WorkAttemptStateV1::RecoveryRequired,
-            None,
-            Vec::new(),
-            WorkCancellationStateV1::None,
-            WorkRecoveryStateV1::RecoveryRequired {
-                source_attempt_id: Some(original.identity().attempt_id().clone()),
-                reason: command.failure.cause.restart_reason(),
-            },
-            original.requested_route().clone(),
-            None,
-            None,
-        )
-        .map_err(contract_problem)
-    }
-}
-
 /// Public retry admission over the verified Work product graph. The legacy
 /// projection reader is deliberately absent: the accepted proposal and
 /// execution admission are re-read from the product graph, then the combined
@@ -579,12 +357,8 @@ where
             .map_err(|_| invalid_problem())?;
         let product_digest = canonical_sha256(&(WORK_PRODUCT_RETRY_INPUT_DIGEST_DOMAIN, &command))
             .map_err(|_| invalid_problem())?;
-        let product = current_work_product_attempt_graph(
-            &self.storage,
-            context,
-            binding,
-            restarted_at,
-        )?;
+        let product =
+            current_work_product_attempt_graph(&self.storage, context, binding, restarted_at)?;
         if let Some(replayed) = self
             .storage
             .retry_by_command(&authority, &command.command_id)
@@ -728,9 +502,10 @@ where
     let holder = storage
         .load_effect_dispatch(authority, original.identity())
         .map_err(effect_storage_problem)?;
-    if holder.as_ref().is_some_and(|holder| {
-        holder.resolution() == Some(WorkAttemptEffectResolutionV1::NoEffect)
-    }) {
+    if holder
+        .as_ref()
+        .is_some_and(|holder| holder.resolution() == Some(WorkAttemptEffectResolutionV1::NoEffect))
+    {
         Ok(())
     } else {
         Err(conflict_problem(
@@ -793,7 +568,9 @@ where
         original.execution().effect_state(),
     )
     .map_err(contract_problem)?;
-    let epoch = storage.next_fence_epoch(authority).map_err(storage_problem)?;
+    let epoch = storage
+        .next_fence_epoch(authority)
+        .map_err(storage_problem)?;
     let lease_digest =
         canonical_sha256(&(RETRY_LEASE_DOMAIN, &identity)).map_err(|_| invalid_problem())?;
     let lease_id = WorkLeaseId::new(format!(
@@ -825,7 +602,6 @@ where
     )
     .map_err(contract_problem)
 }
-
 
 fn validate_failure(
     command: &RetryWorkAttemptCommandV1,
@@ -965,20 +741,6 @@ fn effect_storage_problem(error: WorkAttemptEffectStorageErrorV1) -> Application
                 message: "The Work attempt effect authority is unavailable.".to_owned(),
             })
         }
-    }
-}
-
-fn projection_problem(error: WorkProjectionPortError) -> ApplicationProblem {
-    match error {
-        WorkProjectionPortError::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkProjectionPortError::StaleCursor => conflict_problem(
-            "application.work-retry.projection-stale",
-            "The Work projection changed before retry admission.",
-        ),
-        WorkProjectionPortError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-retry.projection-unavailable".to_owned(),
-            message: "The Work projection authority is unavailable.".to_owned(),
-        }),
     }
 }
 

@@ -6,8 +6,7 @@ use tracedecay_domain::{
     TaskId, WorkAuthority, WorkTopologyPolicyV1, configuration::TopologyConcurrencyPolicyV1,
 };
 
-use crate::work::{WorkStoragePort, work_authority};
-use crate::work_read::WorkProjectionReadPort;
+use crate::work::work_authority;
 use crate::{ApplicationProblem, RequestContext};
 
 use super::{WorkAttemptService, WorkAttemptStoragePort, invalid_problem, storage_problem};
@@ -95,11 +94,9 @@ impl WorkAttemptCapacityV1 {
     }
 }
 
-impl<S, P, W> WorkAttemptService<S, P, W>
+impl<S> WorkAttemptService<S>
 where
     S: WorkAttemptStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
 {
     /// Reads exact current capacity for one task without reserving it.
     pub fn admission_capacity_against_registered_topology(

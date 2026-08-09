@@ -12,23 +12,22 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, ObservationSourceIdentityV1, ProjectId, RefId,
-    RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1,
-    WorkCancellationEscalationV1, WorkCancellationRequestId, WorkCancellationRequestV1,
-    WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot,
-    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
-    WorkTopologyPolicyV1, WorkflowOperationRef, WorktreeId, canonical_sha256,
+    RepositoryId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1,
+    WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
+    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
+    WorkEffectStateV1, WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1,
+    WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
+    WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef,
+    WorktreeId, canonical_sha256,
 };
 
-use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
-use crate::work_read::WorkProjectionReadPort;
+use crate::work::work_authority;
 use crate::{ApplicationProblem, RequestAdmission, RequestContext};
-use crate::{VerifiedWorkGraphVersionV1, WorkProductSelectionScopeV1};
 
 mod capacity;
 mod problem;
 mod product_admission;
+mod product_synthesis_admission;
 mod synthesis_admission;
 pub use capacity::{
     MAX_WORK_ATTEMPT_CAPACITY_TASKS, WorkAttemptCapacityScopeV1, WorkAttemptCapacityV1,
@@ -36,14 +35,14 @@ pub use capacity::{
 };
 use problem::{
     conflict_problem, contract_problem, denied_problem, invalid_problem,
-    list_page_contract_problem, not_found_problem, projection_problem, stale_cursor_problem,
-    storage_problem,
+    list_page_contract_problem, not_found_problem, stale_cursor_problem, storage_problem,
 };
 pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
     CurrentWorkProductAttemptGraphV1, accepted_attempt_draft, current_work_product_attempt_graph,
     product_admission_problem, product_attempt_projection_binding,
 };
+pub use product_synthesis_admission::WorkProductSynthesisAttemptServiceV1;
 pub use synthesis_admission::{
     WorkAttemptAdmissionKind, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
 };
@@ -310,8 +309,6 @@ impl WorkAttemptEvidenceRecordV1 {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StartWorkAttemptCommand {
-    pub selection: WorkProductSelectionScopeV1,
-    pub verified_graph_version: VerifiedWorkGraphVersionV1,
     pub task_id: TaskId,
     pub run_id: RunId,
     pub attempt_id: AttemptId,
@@ -436,48 +433,16 @@ pub enum WorkAttemptListV1 {
 
 /// The lease, transition, cancellation, recovery, and evidence authority for
 /// admitted provider attempts.
-pub struct WorkAttemptService<S, P, W> {
+pub struct WorkAttemptService<S> {
     attempts: S,
-    projections: P,
-    work: WorkService<W>,
 }
 
-impl<S, P, W> WorkAttemptService<S, P, W>
+impl<S> WorkAttemptService<S>
 where
     S: WorkAttemptStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
 {
-    pub const fn new(attempts: S, projections: P, work: WorkService<W>) -> Self {
-        Self {
-            attempts,
-            projections,
-            work,
-        }
-    }
-
-    /// Admits and leases one provider attempt against the exact current Work
-    /// projection. Execution must already be admitted on the projection; a
-    /// missing admission or accepted proposal is a typed denial, not a queue.
-    pub fn start(
-        &self,
-        context: &RequestContext,
-        command: StartWorkAttemptCommand,
-    ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        self.start_attempt(context, command)
-    }
-
-    /// Starts an attempt only when its caller-supplied snapshot agrees with
-    /// the topology authority pinned by the daemon registration. The command
-    /// cannot self-attest a different topology and gain a provider lease.
-    pub fn start_against_registered_topology(
-        &self,
-        context: &RequestContext,
-        registered_topology: &WorkTopologyPolicyV1,
-        command: StartWorkAttemptCommand,
-    ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        require_registered_work_topology(&command.execution_snapshot, registered_topology)?;
-        self.start_attempt_bounded(context, command, registered_topology)
+    pub const fn new(attempts: S) -> Self {
+        Self { attempts }
     }
 
     pub fn status(
@@ -869,7 +834,6 @@ where
             )
             .map_err(contract_problem)?;
         self.persist_transition(&authority, &attempt, &next, Some(evidence))?;
-        self.attach_evidence(context, &next, &terminal, evidence.observed_at)?;
         Ok(next)
     }
 
@@ -916,63 +880,7 @@ where
             )
             .map_err(contract_problem)?;
         self.persist_transition(&authority, &attempt, &next, Some(evidence))?;
-        self.attach_evidence(context, &next, &terminal, evidence.observed_at)?;
         Ok(next)
-    }
-
-    fn attach_evidence(
-        &self,
-        context: &RequestContext,
-        attempt: &WorkAttemptV1,
-        terminal: &WorkTerminalEvidenceV1,
-        observed_at: UtcMicros,
-    ) -> Result<(), ApplicationProblem> {
-        let evidence: RuntimeEvidenceRef = terminal
-            .runtime_evidence_ref(attempt.identity().run_id().clone())
-            .map_err(contract_problem)?;
-        let projection = self.work.load(context, attempt.identity().task_id())?;
-        let command_id = derived_command_id(attempt.identity())?;
-        self.work.attach_runtime_evidence(
-            context,
-            AttachRuntimeEvidenceCommand {
-                task_id: attempt.identity().task_id().clone(),
-                evidence,
-                expected_version: projection.version(),
-                command_id,
-                occurred_at: observed_at,
-            },
-        )?;
-        Ok(())
-    }
-
-    fn mint_lease(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkLeaseFenceV1, ApplicationProblem> {
-        let digest = canonical_sha256(&("tracedecay.application.work-lease.v1", identity))
-            .map_err(|_| {
-                invalid_problem(
-                    "application.work-attempt.invalid-lease",
-                    "The Work attempt lease identity could not be derived.",
-                )
-            })?;
-        let lease_id = WorkLeaseId::new(format!(
-            "work-lease:{}",
-            digest.as_str().trim_start_matches("sha256:")
-        ))
-        .map_err(|_| {
-            invalid_problem(
-                "application.work-attempt.invalid-lease",
-                "The Work attempt lease identity could not be derived.",
-            )
-        })?;
-        let epoch = self
-            .attempts
-            .next_fence_epoch(authority)
-            .map_err(storage_problem)?;
-        let epoch = WorkFenceEpochV1::new(epoch).map_err(contract_problem)?;
-        WorkLeaseFenceV1::new(lease_id, epoch).map_err(contract_problem)
     }
 
     fn fence_to_recovery(
@@ -1148,28 +1056,6 @@ fn cancellation_request(state: &WorkCancellationStateV1) -> Option<&WorkCancella
             Some(escalation.acknowledgement().request())
         }
     }
-}
-
-fn derived_command_id(
-    identity: &WorkAttemptIdentityV1,
-) -> Result<WorkCommandId, ApplicationProblem> {
-    let digest = canonical_sha256(&("tracedecay.application.work-attempt-attach.v1", identity))
-        .map_err(|_| {
-            invalid_problem(
-                "application.work-attempt.invalid-command",
-                "The Work attempt attach command identity could not be derived.",
-            )
-        })?;
-    WorkCommandId::new(format!(
-        "work-attempt-evidence:{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| {
-        invalid_problem(
-            "application.work-attempt.invalid-command",
-            "The Work attempt attach command identity could not be derived.",
-        )
-    })
 }
 
 fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {

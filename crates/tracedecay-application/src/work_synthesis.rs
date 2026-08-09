@@ -27,14 +27,15 @@ use tracedecay_domain::{
     WorkTerminalEvidenceV1, WorkflowOutputName, canonical_sha256,
 };
 
-use crate::work::WorkStoragePort;
 use crate::work_attempt::{
-    StartWorkAttemptCommand, WorkAttemptService, WorkAttemptStatusRequestV1,
-    WorkSynthesisAdmissionStoragePort,
+    StartWorkAttemptCommand, WorkProductAttemptServiceV1, WorkSynthesisAdmissionStoragePort,
 };
-use crate::work_read::WorkProjectionReadPort;
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{
+    ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
+    WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1, WorkProductBindingV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
+};
 
 const WORK_SYNTHESIS_SOURCE_SET_DOMAIN: &str =
     "tracedecay.application.work-synthesis-source-set.v1";
@@ -187,52 +188,28 @@ pub enum WorkSynthesisAttemptV1 {
     },
 }
 
-/// Validates the source set against the Work authority, seals it, and admits
-/// the synthesis attempt through the standard attempt admission. Every
-/// source outcome is read from the authority — never trusted from the
-/// caller — and preserved verbatim in the admission record.
-pub fn admit_work_synthesis<S, P, W>(
-    attempts: &WorkAttemptService<S, P, W>,
+/// Validates the source set against the canonical product graph, seals it,
+/// and atomically commits the product link, attempt, and synthesis record.
+/// Every source outcome is read from the attempt authority — never trusted
+/// from the caller — and preserved verbatim in the admission record.
+pub fn admit_work_synthesis_against_registered_topology<S>(
+    attempts: &WorkProductAttemptServiceV1<S>,
     context: &RequestContext,
-    command: AdmitWorkSynthesisCommand,
-) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
-where
-    S: WorkSynthesisAdmissionStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
-{
-    admit_work_synthesis_with_topology(attempts, context, command, None)
-}
-
-pub fn admit_work_synthesis_against_registered_topology<S, P, W>(
-    attempts: &WorkAttemptService<S, P, W>,
-    context: &RequestContext,
+    product_binding: &WorkProductBindingV1,
+    revisions: &WorkProductRevisionPinsV1,
     registered_topology: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
     command: AdmitWorkSynthesisCommand,
 ) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
 where
-    S: WorkSynthesisAdmissionStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
+    S: WorkSynthesisAdmissionStoragePort
+        + WorkGraphReadPortV1
+        + WorkProductOwnerAuthorizationPortV1
+        + WorkProductAttemptAdmissionPortV1,
 {
     crate::require_registered_work_topology(
         &command.start.execution_snapshot,
         registered_topology,
     )?;
-    admit_work_synthesis_with_topology(attempts, context, command, Some(registered_topology))
-}
-
-fn admit_work_synthesis_with_topology<S, P, W>(
-    attempts: &WorkAttemptService<S, P, W>,
-    context: &RequestContext,
-    command: AdmitWorkSynthesisCommand,
-    registered_topology: Option<&tracedecay_domain::configuration::WorkTopologyPolicyV1>,
-) -> Result<WorkSynthesisAttemptV1, ApplicationProblem>
-where
-    S: WorkSynthesisAdmissionStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
-{
     if command.sources.is_empty() {
         return Err(invalid_problem(
             "application.work-synthesis.no-sources",
@@ -259,19 +236,14 @@ where
     }
     let request_digest = canonical_sha256(&(WORK_SYNTHESIS_REQUEST_DOMAIN, &command))
         .map_err(|_| request_identity_problem())?;
-    if let Some(replay) = attempts.synthesis_replay(context, &command.start, &request_digest)? {
+    if let Some(replay) =
+        attempts.replay(context, product_binding, &command.start, &request_digest)?
+    {
         return Ok(WorkSynthesisAttemptV1::Admitted(Box::new(replay)));
     }
     let mut envelopes = Vec::with_capacity(command.sources.len());
     for source in &command.sources {
-        let attempt = attempts.status(
-            context,
-            &WorkAttemptStatusRequestV1 {
-                task_id: source.task_id().clone(),
-                run_id: source.run_id().clone(),
-                attempt_id: source.attempt_id().clone(),
-            },
-        )?;
+        let attempt = attempts.status(context, source)?;
         envelopes.push(WorkSynthesisSourceEnvelopeV1 {
             source: source.clone(),
             outcome: source_outcome(&attempt)?,
@@ -305,11 +277,13 @@ where
         })
         .map(|envelope| envelope.source.clone())
         .collect();
-    let admission = attempts.start_synthesis(
+    let admission = attempts.admit(
         context,
+        product_binding,
+        revisions,
+        registered_topology,
         command.start,
         request_digest,
-        registered_topology,
         move |attempt| WorkSynthesisAdmissionV1 {
             draft: WorkflowSynthesisDraft {
                 output_name: command.output_name,

@@ -18,7 +18,6 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{RunId, TaskId, WorkAuthority};
 
-use crate::work::WorkStoragePort;
 use crate::work_attempt::{
     WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptService, WorkAttemptStoragePort, WorkAttemptTopologyBindingV1,
@@ -28,7 +27,6 @@ use crate::work_placement::{
     WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStatusRequestV1,
     WorkPlacementStoragePort,
 };
-use crate::work_read::WorkProjectionReadPort;
 use crate::{ApplicationProblem, RequestContext, SafeDiagnostic};
 
 /// One page-bounded topology view read. The cursor vocabulary is the attempt
@@ -105,8 +103,8 @@ pub enum ExecutionTopologyViewV1 {
 /// Reads one execution-topology view: the attempt page (with the attempt
 /// list's own bounds, cursor, and staleness contract), one placement reading
 /// per distinct `(task, run)` lane, and the policy-carried dimensions.
-pub fn execution_topology_view<S, P, W, PS>(
-    attempts: &WorkAttemptService<S, P, W>,
+pub fn execution_topology_view<S, PS>(
+    attempts: &WorkAttemptService<S>,
     placements: &WorkPlacementService<PS>,
     policy: &WorkTopologyPolicyV1,
     context: &RequestContext,
@@ -115,8 +113,6 @@ pub fn execution_topology_view<S, P, W, PS>(
 ) -> Result<ExecutionTopologyViewV1, ApplicationProblem>
 where
     S: WorkAttemptStoragePort,
-    P: WorkProjectionReadPort,
-    W: WorkStoragePort,
     PS: WorkPlacementStoragePort,
 {
     if policy.validate().is_err() {
