@@ -9,8 +9,7 @@ mod similarity;
 
 pub use curation::{
     apply_delete_op, apply_merge_op, build_delete_plan, curate_apply_payload,
-    curation_activity_payload, curation_status_payload, delete_fact, push_curation_activity,
-    push_curation_activity_with_level,
+    curation_activity_payload, curation_status_payload, delete_fact,
 };
 pub use facts::{
     fact_detail_payload, fetch_entities, fetch_facts, overview_payload, providers_payload,

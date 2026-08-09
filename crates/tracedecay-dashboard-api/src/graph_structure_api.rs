@@ -26,6 +26,7 @@ use super::util::{JsonPath, JsonQuery, query_rows};
 use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
+use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };
@@ -299,7 +300,7 @@ async fn call_chain(
     let graph = match admitted_graph::<CallChainMeasurementV1>(
         &state,
         &control,
-        crate::application::retrieval::CallableCodeOperationKind::Callees,
+        CallableCodeOperationKind::Callees,
     )
     .await
     {
@@ -406,7 +407,7 @@ async fn strata(
     let graph = match admitted_graph::<StrataMeasurementV1>(
         &state,
         &control,
-        crate::application::retrieval::CallableCodeOperationKind::Facets,
+        CallableCodeOperationKind::Facets,
     )
     .await
     {
@@ -534,7 +535,7 @@ async fn node_facts(
     let graph = match admitted_graph::<FactMatchesMeasurementV1>(
         &state,
         &control,
-        crate::application::retrieval::CallableCodeOperationKind::ExactOccurrence,
+        CallableCodeOperationKind::ExactOccurrence,
     )
     .await
     {
@@ -675,7 +676,7 @@ async fn node_tests(
     let graph = match admitted_graph::<TestMapMeasurementV1>(
         &state,
         &control,
-        crate::application::retrieval::CallableCodeOperationKind::Callers,
+        CallableCodeOperationKind::Callers,
     )
     .await
     {
@@ -838,7 +839,7 @@ async fn node_sessions(
     let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
         &state,
         &control,
-        crate::application::retrieval::CallableCodeOperationKind::ExactOccurrence,
+        CallableCodeOperationKind::ExactOccurrence,
     )
     .await
     {
@@ -934,7 +935,7 @@ fn graph_control<T: Serialize>(
 async fn admitted_graph<T: Serialize>(
     state: &DashboardState,
     control: &DashboardHttpRequestControlV1,
-    operation_kind: crate::application::retrieval::CallableCodeOperationKind,
+    operation_kind: CallableCodeOperationKind,
 ) -> std::result::Result<AdmittedGraphReadV1, Response> {
     let (Some(admission), Some(projection)) = (
         state.code_graph_read_admission.as_ref(),
@@ -947,15 +948,14 @@ async fn admitted_graph<T: Serialize>(
             "the exact-project verified code graph authority is unavailable",
         ));
     };
-    let operation = crate::application::retrieval::callable_code_operation(operation_kind)
-        .map_err(|error| {
-            graph_error_response::<T>(
-                state,
-                crate::graph::CodeGraphReadError::InvalidRequest {
-                    detail: error.to_string(),
-                },
-            )
-        })?;
+    let operation = callable_code_operation(operation_kind).map_err(|error| {
+        graph_error_response::<T>(
+            state,
+            crate::graph::CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            },
+        )
+    })?;
     let context = admission
         .admit(crate::graph::CodeGraphReadAdmissionRequest::new(
             &operation,

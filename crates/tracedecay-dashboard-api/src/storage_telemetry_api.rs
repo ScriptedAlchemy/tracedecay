@@ -57,10 +57,7 @@ use super::read_model::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
-pub use self::table_growth::{
-    SignificantTableGrowthSampleV1, TableGrowthDimensionV1, TableGrowthOmissionV1,
-    TableGrowthThresholdV1,
-};
+pub use self::table_growth::{TableGrowthDimensionV1, TableGrowthThresholdV1};
 
 /// One store's telemetry entry. One entry per distinct store **file**, not per
 /// dashboard role.

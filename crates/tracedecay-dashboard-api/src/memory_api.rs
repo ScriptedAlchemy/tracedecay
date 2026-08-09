@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use schemars::JsonSchema;

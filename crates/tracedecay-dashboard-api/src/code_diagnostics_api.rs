@@ -11,6 +11,7 @@ use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
+use tracedecay_application::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::ManifestDigest;
 use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;
 use tracedecay_lsp::analyzer::broker::DiagnosticsSnapshot;
@@ -155,10 +156,8 @@ fn diagnostics_request(
     crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1,
     JsonError,
 > {
-    let operation = crate::application::retrieval::callable_code_operation(
-        crate::application::retrieval::CallableCodeOperationKind::SourceMetadata,
-    )
-    .map_err(internal_error)?;
+    let operation = callable_code_operation(CallableCodeOperationKind::SourceMetadata)
+        .map_err(internal_error)?;
     Ok(
         crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1::new(
             operation,

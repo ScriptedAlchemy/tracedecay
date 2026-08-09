@@ -17,7 +17,7 @@ use tracedecay_agent_hosts::automation::outcomes::{
     load_outcomes_snapshot,
 };
 use tracedecay_agent_hosts::automation::skill_usage::summarize_skill_usage;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
@@ -104,6 +104,7 @@ fn snapshot_fields(loaded: Result<AutomationOutcomesSnapshot>) -> (Value, String
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::errors::TraceDecayError;
 
     #[test]
     fn a_failed_snapshot_load_reports_the_failure_instead_of_never_refreshed() {

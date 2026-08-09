@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use super::memory_api::{default_agent_plan_max_clusters, default_agent_plan_min_confidence};
 use super::util::http_detail;
 use super::{
-    DashboardAutomationAuthorityErrorV1, DashboardAutomationRunRequestV1, DashboardState,
-    automation_authority_error_response, exact_automation_authority,
+    DashboardAutomationRunRequestV1, DashboardState, automation_authority_error_response,
+    exact_automation_authority,
 };
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
@@ -324,6 +324,7 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
 mod run_list_tests {
     use std::sync::{Arc, Mutex};
 
+    use super::super::DashboardAutomationAuthorityErrorV1;
     use super::*;
 
     #[test]

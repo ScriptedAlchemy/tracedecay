@@ -170,6 +170,9 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         application_invocation_executor: None,
+        delivery_settlements: Arc::new(
+            super::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
+        ),
     })
 }
 
@@ -221,6 +224,9 @@ fn user_state(
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         application_invocation_executor: None,
+        delivery_settlements: Arc::new(
+            super::events_delivery::DashboardDeliverySettlementRegistryV1::new(None),
+        ),
     }
 }
 
