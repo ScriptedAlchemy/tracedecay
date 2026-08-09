@@ -15,7 +15,7 @@ fn session_reflector_options_have_no_storage_selector() {
     );
 }
 
-use tracedecay::automation::fact_proposals::record_session_fact_proposals;
+use tracedecay_agent_hosts::automation::automatic_facts::record_session_automatic_facts;
 
 #[tokio::test]
 async fn session_reflector_runner_skips_when_task_is_disabled() {
@@ -68,7 +68,7 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
@@ -137,7 +137,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         };
 
         let reflector =
-            tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+            tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
                 &cg,
                 &config,
                 &reflector_backend,
@@ -146,7 +146,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             )
             .await
             .unwrap();
-        let skill = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        let skill = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
             &skill_backend,
@@ -198,7 +198,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         ..AutomationConfig::default()
     };
     let reflector =
-        tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+        tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
             &cg,
             &config,
             &reflector_backend,
@@ -207,18 +207,19 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         )
         .await
         .unwrap();
-    let skill = tracedecay::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        &cg,
-        &config,
-        &skill_backend,
-        &retrieval,
-        SkillWriterAutomationOptions {
-            profile_root: Some(profile_root.clone()),
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
+    let skill =
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &skill_backend,
+            &retrieval,
+            SkillWriterAutomationOptions {
+                profile_root: Some(profile_root.clone()),
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(
         reflector.ledger_record.error.as_deref(),
         Some("no_session_evidence")
@@ -238,7 +239,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default() {
+async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
@@ -270,7 +271,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "entities": ["TraceDecay"],
                 "trust": 0.9,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "duplicate should be rejected"
+                "reason": "duplicate should be quarantined"
             },
             {
                 "content": "Uncited session reflection facts must not be accepted",
@@ -278,7 +279,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "tags": ["automation"],
                 "entities": ["TraceDecay"],
                 "trust": 0.7,
-                "reason": "missing citation should be rejected"
+                "reason": "missing citation is invalid"
             },
             {
                 "content": "Session reflection citations must point at bounded evidence",
@@ -287,7 +288,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "entities": ["TraceDecay"],
                 "trust": 0.7,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "missing-message"},
-                "reason": "bogus citation should be rejected"
+                "reason": "bogus citation is invalid"
             },
             {
                 "content": "Session reflection facts require calibrated trust",
@@ -295,7 +296,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "tags": ["automation"],
                 "entities": ["TraceDecay"],
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "missing trust should be rejected"
+                "reason": "missing trust is invalid"
             },
             {
                 "content": "Session reflection facts require a rationale",
@@ -313,7 +314,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "trust": 0.7,
                 "confidence": 0.9,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "confidence should be rejected"
+                "reason": "confidence is invalid"
             },
             {
                 "content": "",
@@ -335,7 +336,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
                 "entities": ["TraceDecay"],
                 "trust": "sky-high",
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "unknown trust label should be rejected"
+                "reason": "unknown trust label is invalid"
             }
         ]
     }));
@@ -374,7 +375,6 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 3);
-    assert_eq!(run.ledger_record.rejected_count, 8);
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["source"],
         json!("session_reflector")
@@ -395,28 +395,28 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         run.report["accepted_facts"][1]["add_fact_request"]["category"],
         json!("tool")
     );
-    let rejected = run.report["rejected_facts"].as_array().unwrap();
+    let quarantined = run.report["quarantined_facts"].as_array().unwrap();
     assert!(
-        rejected
+        quarantined
             .iter()
             .any(|value| value["reason"].as_str().unwrap().contains("duplicate"))
     );
-    let has_rejection_reason = |reason: &str| {
-        rejected
+    let has_quarantine_reason = |reason: &str| {
+        quarantined
             .iter()
             .any(|value| value["reason"] == json!(reason))
     };
-    assert!(has_rejection_reason("content is required"));
-    assert!(has_rejection_reason("source_span is required"));
-    assert!(has_rejection_reason(
+    assert!(has_quarantine_reason("content is required"));
+    assert!(has_quarantine_reason("source_span is required"));
+    assert!(has_quarantine_reason(
         "source_span must cite a bounded session reflection evidence hit"
     ));
-    assert!(has_rejection_reason("trust is required"));
-    assert!(has_rejection_reason(
+    assert!(has_quarantine_reason("trust is required"));
+    assert!(has_quarantine_reason(
         "trust must be a number between 0 and 1, or one of low, medium, high"
     ));
-    assert!(has_rejection_reason("reason is required"));
-    assert!(has_rejection_reason(
+    assert!(has_quarantine_reason("reason is required"));
+    assert!(has_quarantine_reason(
         "confidence is not supported; use trust"
     ));
     assert_eq!(
@@ -428,48 +428,43 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
         .await
         .unwrap();
-    assert!(pending.is_empty());
-    let proposals = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
-        .await
-        .unwrap();
-    assert_eq!(proposals.len(), 3);
-    assert_eq!(proposals[0].run_id, run.run_id);
+    assert_eq!(receipts.len(), 3);
+    assert!(receipts.iter().all(|receipt| receipt.run_id == run.run_id));
     assert_eq!(
-        proposals[0].add_fact_request.as_ref().unwrap().content,
-        "TraceDecay automation should manage durable session reflection facts directly"
-    );
-    assert_eq!(proposals[1].run_id, run.run_id);
-    assert_eq!(
-        proposals[1].add_fact_request.as_ref().unwrap().category,
-        tracedecay::memory::types::MemoryCategory::Tool
+        receipts
+            .iter()
+            .filter(|receipt| receipt.add_fact_request.category
+                == tracedecay::memory::types::MemoryCategory::Tool)
+            .count(),
+        1
     );
     assert_eq!(
-        proposals[0].validation.as_ref().unwrap()["dedupe"]["near_duplicate_threshold"],
-        json!(0.9)
+        run.report["status"],
+        json!("partial"),
+        "terminal applies can coexist with quarantined input"
     );
+    assert_eq!(run.report["receipt"]["applied_count"], json!(3));
+    assert_eq!(run.report["receipt"]["quarantined_count"], json!(8));
     assert_eq!(
-        run.report["proposal_ids"][0],
-        json!(proposals[0].proposal_id)
-    );
-    assert_eq!(run.report["status"], json!("auto_applied"));
-    assert_eq!(run.report["dry_run"], json!(false));
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        run.report["curation_policy"]["effect"]["applied_count"],
+        json!(3)
     );
     assert!(run.ledger_record.applied_ops.is_some());
-    assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]["proposal_ids"]
-            [0],
-        json!(proposals[0].proposal_id)
+    let receipt_ids = run.report["receipt"]["automatic_fact_receipt_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(receipt_ids.len(), 3);
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| { receipt_ids.iter().any(|id| id == &json!(receipt.apply_id)) })
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["applied_proposals"]["accepted_facts"]
-            [0]["add_fact_request"]["content"],
-        json!("TraceDecay automation should manage durable session reflection facts directly")
+        run.ledger_record.validation_report.as_ref().unwrap()["status"],
+        json!("partial")
     );
     let artifact_kinds: Vec<&str> = run
         .ledger_record
@@ -503,10 +498,8 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
             )
     );
     assert_eq!(
-        eval_payload["runner"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture"
-        )
+        eval_payload["runner"]["commands"].as_array().unwrap().len(),
+        1
     );
     let handoff_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
@@ -516,10 +509,11 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         json!("inspect fact automation outcomes")
     );
     assert_eq!(
-        handoff_payload["eval_replay"]["commands"][0],
-        json!(
-            "cargo test --test automation_runner_test session_reflector_runner_auto_applies_valid_fact_proposals_by_default -- --nocapture"
-        )
+        handoff_payload["eval_replay"]["commands"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
     let after_apply = cg
         .search_facts(tracedecay::memory::types::SearchFactsRequest {
@@ -535,7 +529,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         after_apply
             .iter()
             .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
-        "session reflector should auto-apply accepted facts"
+        "session reflector should persist terminal automatic effects"
     );
 
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -544,13 +538,12 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 3);
-    assert_eq!(records[0].rejected_count, 8);
     assert!(records[0].applied_ops.is_some());
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
+async fn session_reflector_runner_auto_applies_validated_facts() {
     const HIGH_ENTROPY_RUN_ID: &str =
         "Qm9vZ2llV29vZ2llMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A4OTc2NTQzMjE";
 
@@ -574,7 +567,6 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
                 enabled: true,
@@ -603,88 +595,37 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     .unwrap();
 
     assert_eq!(backend.calls(), 1);
-    assert_eq!(run.report["status"], json!("auto_applied"));
-    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(run.report["status"], json!("applied"));
+    assert_eq!(run.report["receipt"]["applied_count"], json!(1));
+    assert_eq!(run.report["receipt"]["quarantined_count"], json!(0));
     assert_eq!(
-        run.report["session_fact_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["mutates_store"],
+        run.report["curation_policy"]["effect"]["mutates_store"],
         json!(true)
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["autonomous_memory_apply"],
-        json!(true)
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["require_dashboard_approval"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["approval_required"],
-        json!(false)
     );
     assert!(run.ledger_record.applied_ops.is_some());
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["status"],
-        json!("auto_applied")
+        json!("applied")
     );
 
-    let owner = project_memory_owner(&cg);
     let memory = tracedecay::application::memory::MemoryApplication::new(
-        owner.clone(),
+        project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
         .await
         .unwrap();
-    assert!(pending.is_empty());
-    let applied = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
-        .await
-        .unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].run_id, HIGH_ENTROPY_RUN_ID);
-
-    let typed_proposal = memory
-        .get_project_memory_fact_proposal(
-            tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap(),
-        )
-        .await
-        .unwrap()
-        .expect("auto-applied proposal remains in the canonical authority");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].run_id, HIGH_ENTROPY_RUN_ID);
+    assert!(receipts[0].applied_canonical_fact_id.is_some());
+    assert!(receipts[0].applied_fact_id.is_some());
     assert_eq!(
-        typed_proposal.automation_run_id(),
-        Some(HIGH_ENTROPY_RUN_ID)
-    );
-    let canonical_fact_id = typed_proposal
-        .applied_fact_id()
-        .expect("auto-applied proposal has a canonical fact id")
-        .clone();
-    let projection = memory
-        .get_project_memory_fact(tracedecay_store::ProjectMemoryFactTargetV1::Canonical(
-            tracedecay_store::ProjectMemoryFactIdV1::new(owner, canonical_fact_id).unwrap(),
-        ))
-        .await
-        .unwrap()
-        .expect("auto-applied canonical fact is readable");
-    let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = projection else {
-        panic!("auto-applied fact must retain an available V1 projection");
-    };
-    assert_eq!(
-        fact.fact().payload_access(),
-        tracedecay_domain::PayloadAccessState::Eligible
-    );
-    assert!(
-        fact.payload().is_some(),
-        "canonical active payload is retained"
-    );
-    assert!(!fact.fact().active_assertion_id().as_str().is_empty());
-    assert_eq!(fact.legacy_fact_id(), typed_proposal.legacy_fact_id());
-    assert!(
-        fact.legacy_fact_id().is_some(),
-        "legacy mirror mapping is retained"
+        load_automatic_fact_receipt(&memory, &receipts[0].apply_id)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&receipts[0])
     );
 
     let facts = cg
@@ -701,20 +642,20 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         facts
             .iter()
             .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
-        "dashboard approval must not block accepted session facts from being auto-applied"
+        "the terminal receipt must correspond to a searchable canonical fact"
     );
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn session_reflector_runner_self_manages_partial_noops_without_review_gate() {
+async fn session_reflector_runner_reports_partial_terminal_effects_for_duplicates() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let backend = SessionJsonBackend::new(json!({
         "facts": [
             {
-                "content": "TraceDecay automation should keep partial session memory applies review gated",
+                "content": "TraceDecay automation should report partial session memory effects",
                 "category": "project",
                 "tags": ["automation", "memory"],
                 "entities": ["TraceDecay"],
@@ -723,13 +664,13 @@ async fn session_reflector_runner_self_manages_partial_noops_without_review_gate
                 "reason": "Repeated session evidence supports a partial apply regression"
             },
             {
-                "content": "TraceDecay automation should keep partial session memory applies review gated",
+                "content": "TraceDecay automation should report partial session memory effects",
                 "category": "project",
                 "tags": ["automation", "memory"],
                 "entities": ["TraceDecay"],
                 "trust": 0.76,
                 "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
-                "reason": "Repeated session evidence supports a duplicate proposal no-op"
+                "reason": "Repeated session evidence supports a duplicate semantic no-op"
             }
         ]
     }));
@@ -737,7 +678,6 @@ async fn session_reflector_runner_self_manages_partial_noops_without_review_gate
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             session_reflector: AutomationTaskConfig {
                 enabled: true,
@@ -765,39 +705,95 @@ async fn session_reflector_runner_self_manages_partial_noops_without_review_gate
     .await
     .unwrap();
 
-    assert_eq!(run.report["status"], json!("auto_applied"));
-    assert_eq!(run.report["dry_run"], json!(false));
+    assert_eq!(run.report["status"], json!("partial"));
+    assert_eq!(run.report["receipt"]["applied_count"], json!(1));
+    assert_eq!(run.report["receipt"]["quarantined_count"], json!(0));
     assert_eq!(
-        run.report["session_fact_apply_policy"]["applied_count"],
-        json!(1)
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["fully_applied"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["session_fact_apply_policy"]["approval_required"],
+        run.report["curation_policy"]["effect"]["fully_applied"],
         json!(false)
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["status"],
-        json!("auto_applied")
+        json!("partial")
     );
+}
 
-    let handoff_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
-    assert_eq!(
-        handoff_payload["readiness"]["approval_required"],
-        json!(false)
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let backend = SessionJsonBackend::new(json!({
+        "facts": [{
+            "content": "Terminal receipt input requires calibrated trust",
+            "category": "project",
+            "tags": ["automation"],
+            "entities": ["TraceDecay"],
+            "source_span": {
+                "session_id": "session-reflect-1",
+                "message_id": "session-reflect-1-message-001"
+            },
+            "reason": "The fixture deliberately omits trust"
+        }]
+    }));
+    let config = AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: true,
+                schedule: Some("manual".to_string()),
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
+        ..AutomationConfig::default()
+    };
+
+    let run = run_session_reflector_with_backend(
+        &cg,
+        &config,
+        &backend,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::ManualCli,
+            provider: "cursor".to_string(),
+            query: "durable session reflection".to_string(),
+            evidence_limit: 5,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(run.report["status"], json!("quarantined"));
+    assert_eq!(run.report["receipt"]["applied_count"], json!(0));
+    assert_eq!(run.report["receipt"]["quarantined_count"], json!(1));
+    assert!(
+        run.report["receipt"]["automatic_fact_receipt_ids"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
-    assert_eq!(
-        handoff_payload["readiness"]["auto_apply_allowed"],
-        json!(true)
+    assert_eq!(run.report["quarantined_facts"].as_array().unwrap().len(), 1);
+
+    let memory = tracedecay::application::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    assert!(
+        list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Quarantined), 10)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 
 #[tokio::test]
-async fn session_fact_proposals_replay_same_run_idempotently() {
+async fn session_automatic_facts_replay_same_run_idempotently() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
@@ -823,9 +819,6 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
                 "trust_reason": "same durable fact repeated"
             }
         },
-        "proposal": {
-            "content": "Repeated session evidence should produce one durable fact action"
-        },
         "validation": {
             "dedupe": {
                 "nearest_existing_fact_id": null
@@ -833,37 +826,31 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
         }
     });
 
-    let first = record_session_fact_proposals(
+    let first = record_session_automatic_facts(
         &memory,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
-        &[],
     )
     .await
     .unwrap();
-    let second = record_session_fact_proposals(
+    let second = record_session_automatic_facts(
         &memory,
         "run-a",
         Some("evidence-a"),
         std::slice::from_ref(&accepted),
-        &[],
     )
     .await
     .unwrap();
-    let proposals = memory
-        .list_project_memory_fact_proposals(
-            Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
-            None,
-            10,
-        )
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
         .await
         .unwrap();
 
-    assert_eq!(first.len(), 1);
-    assert_eq!(second.len(), 1);
-    assert_eq!(proposals.proposals().len(), 1);
-    assert_eq!(proposals.proposals()[0].automation_run_id(), Some("run-a"));
+    assert!(first.retry_error.is_none());
+    assert!(second.retry_error.is_none());
+    assert_eq!(first.receipts, second.receipts);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].run_id, "run-a");
 }
 
 #[cfg(feature = "test-transport")]
@@ -1023,7 +1010,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
@@ -1119,7 +1106,7 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &backend,
@@ -1191,19 +1178,21 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         .expect("seeded raw message provides summary ownership");
     db.lcm_publish_immutable_summary_for_test(
         HostAdmissionScope::Project,
-        tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication {
+        tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
             summary_id: "summary.session-reflect-1.no-replay".to_string(),
             predecessor_summary_id: None,
-            draft: tracedecay::sessions::lcm::LcmSummaryNodeDraft {
+            draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft {
                 provider: "cursor".to_string(),
                 conversation_id: "session-reflect-1".to_string(),
                 session_id: "session-reflect-1".to_string(),
                 depth: 0,
                 summary_text: "summary that should not be replayed when summaries are disabled"
                     .to_string(),
-                source_refs: vec![tracedecay::sessions::lcm::LcmSourceRef::RawMessage {
-                    store_id: source.store_id,
-                }],
+                source_refs: vec![
+                    tracedecay_sessions::runtime::lcm::LcmSourceRef::RawMessage {
+                        store_id: source.store_id,
+                    },
+                ],
                 source_token_count: 10,
                 summary_token_count: 5,
                 source_time_start: Some(1_715_000_001),
@@ -1235,7 +1224,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         "Remember TraceDecay automation should manage durable session reflection facts directly.",
     );
 
-    let run = tracedecay::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
         &NoSummaryReplayBackend,
@@ -1449,10 +1438,9 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
 }
 
 #[tokio::test]
-async fn session_fact_proposals_keep_paraphrases_distinct() {
+async fn session_automatic_facts_keep_paraphrases_distinct() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
     let owner = project_memory_owner(&cg);
     let memory = tracedecay::application::memory::MemoryApplication::new(
         owner,
@@ -1472,8 +1460,7 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
                     "source_span": { "session_id": "s", "message_id": "m" },
                     "trust_reason": "repeated evidence"
                 }
-            },
-            "proposal": { "content": content }
+            }
         })
     };
     let batch = vec![
@@ -1495,80 +1482,70 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
         ),
     ];
 
-    let recorded = record_session_fact_proposals(&memory, "run-a", Some("evidence-a"), &batch, &[])
+    let recorded = record_session_automatic_facts(&memory, "run-a", Some("evidence-a"), &batch)
         .await
         .unwrap();
+    assert!(recorded.retry_error.is_none());
     assert_eq!(
-        recorded.len(),
+        recorded.receipts.len(),
         4,
-        "each canonical proposal keeps its original evidence and identity"
+        "each terminal effect keeps its original evidence and identity"
     );
 
     let restated = vec![fact(
         "Require stable aggregate verification and live PR-state rechecks; never \
          merge the batch off one flaky green pass",
     )];
-    let second =
-        record_session_fact_proposals(&memory, "run-b", Some("evidence-b"), &restated, &[])
-            .await
-            .unwrap();
-    assert_eq!(second.len(), 1);
-
-    let proposals = memory
-        .list_project_memory_fact_proposals(
-            Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
-            None,
-            10,
-        )
+    let second = record_session_automatic_facts(&memory, "run-b", Some("evidence-b"), &restated)
         .await
         .unwrap();
-    assert_eq!(proposals.proposals().len(), 5);
+    assert!(second.retry_error.is_none());
+    assert_eq!(second.receipts.len(), 1);
+
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
+        .await
+        .unwrap();
+    assert_eq!(receipts.len(), 5);
     assert_eq!(
-        proposals
-            .proposals()
+        receipts
             .iter()
-            .filter(|proposal| proposal.request().content().contains("flaky green"))
+            .filter(|receipt| receipt.add_fact_request.content.contains("flaky green"))
             .count(),
         4,
-        "paraphrases remain independently reviewable"
+        "paraphrases remain independently applied"
     );
     assert!(
-        proposals
-            .proposals()
+        receipts
             .iter()
-            .any(|proposal| proposal.request().content().contains("cursorDiskKV")),
-        "distinct proposal preserved"
+            .any(|receipt| receipt.add_fact_request.content.contains("cursorDiskKV")),
+        "distinct automatic effect preserved"
     );
     assert_eq!(
-        proposals
-            .proposals()
+        receipts
             .iter()
-            .filter(|proposal| proposal.automation_run_id() == Some("run-a"))
+            .filter(|receipt| receipt.run_id == "run-a")
             .count(),
         4
     );
     assert_eq!(
-        proposals
-            .proposals()
+        receipts
             .iter()
-            .filter(|proposal| proposal.automation_run_id() == Some("run-b"))
+            .filter(|receipt| receipt.run_id == "run-b")
             .count(),
         1
     );
 }
 
 #[tokio::test]
-async fn session_fact_proposals_never_mutate_applied_records() {
+async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let owner = project_memory_owner(&cg);
     let memory = tracedecay::application::memory::MemoryApplication::new(
-        owner.clone(),
+        project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let applied = record_session_fact_proposals(
+    let applied = record_session_automatic_facts(
         &memory,
         "run-old",
         Some("evidence-old"),
@@ -1587,38 +1564,16 @@ async fn session_fact_proposals_never_mutate_applied_records() {
                 }
             }
         })],
-        &[],
     )
     .await
     .unwrap();
-    assert_eq!(applied.len(), 1);
-    let applied_id = tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap();
-    let submitted = memory
-        .get_project_memory_fact_proposal(applied_id.clone())
+    assert!(applied.retry_error.is_none());
+    assert_eq!(applied.receipts.len(), 1);
+    let applied_id = applied.receipts[0].apply_id.clone();
+    let applied_before = load_automatic_fact_receipt(&memory, &applied_id)
         .await
         .unwrap()
-        .expect("submitted authority proposal");
-    memory
-        .promote_project_memory_fact_proposal(
-            tracedecay_store::ProjectMemoryFactProposalPromotionV1::new(
-                owner,
-                applied_id.clone(),
-                submitted.revision(),
-                None,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let applied_before = memory
-        .get_project_memory_fact_proposal(applied_id.clone())
-        .await
-        .unwrap()
-        .expect("applied authority proposal");
-    assert_eq!(
-        applied_before.state(),
-        tracedecay_store::ProjectMemoryFactProposalStateV1::Applied
-    );
+        .expect("applied automatic fact receipt");
 
     let paraphrase = json!({
         "add_fact_request": {
@@ -1633,36 +1588,30 @@ async fn session_fact_proposals_never_mutate_applied_records() {
                 "source_span": { "session_id": "s", "message_id": "m" },
                 "trust_reason": "repeated evidence"
             }
-        },
-        "proposal": { "content": "paraphrase" }
+        }
     });
     let recorded =
-        record_session_fact_proposals(&memory, "run-new", Some("evidence-new"), &[paraphrase], &[])
+        record_session_automatic_facts(&memory, "run-new", Some("evidence-new"), &[paraphrase])
             .await
             .unwrap();
+    assert!(recorded.retry_error.is_none());
     assert_eq!(
-        recorded.len(),
+        recorded.receipts.len(),
         1,
-        "paraphrase of an applied fact enqueues as its own pending proposal"
+        "a paraphrase commits as its own terminal automatic effect"
     );
-    assert_eq!(recorded[0].state, FactProposalState::PendingApproval);
+    assert_eq!(recorded.receipts[0].state, AutomaticFactState::Applied);
 
-    let proposals = memory
-        .list_project_memory_fact_proposals(None, None, 10)
+    let receipts = list_automatic_fact_receipts(&memory, None, 10)
         .await
         .unwrap();
+    assert_eq!(receipts.len(), 2, "new automatic effect committed");
+    let applied_after = load_automatic_fact_receipt(&memory, &applied_id)
+        .await
+        .unwrap()
+        .expect("original automatic fact receipt preserved");
     assert_eq!(
-        proposals.proposals().len(),
-        2,
-        "new pending proposal enqueued"
-    );
-    let applied_after = proposals
-        .proposals()
-        .iter()
-        .find(|proposal| proposal.proposal_id() == &applied_id)
-        .expect("applied record preserved");
-    assert_eq!(
-        applied_after, &applied_before,
-        "recording a paraphrase must not mutate the applied authority record"
+        applied_after, applied_before,
+        "recording a paraphrase must not mutate a terminal receipt"
     );
 }

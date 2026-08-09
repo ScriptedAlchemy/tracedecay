@@ -5,7 +5,7 @@
 
 use crate::support::*;
 #[cfg(feature = "test-transport")]
-use tracedecay::automation::scheduler::{SessionActivity, schedule_decision};
+use tracedecay_agent_hosts::automation::scheduler::{SessionActivity, schedule_decision};
 
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
     CombinedReviewAutomationOptions {
@@ -101,20 +101,16 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         assert_eq!(report_ref["combined_task_key"], json!("combined_review"));
     }
 
-    // Empty combined proposals can commit both ledgers without cross-authority writes.
+    // Empty combined effects leave no automatic fact receipts behind.
     let memory = tracedecay::application::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
         .await
         .unwrap();
-    assert!(pending.is_empty());
-    let proposals = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
-        .await
-        .unwrap();
-    assert!(proposals.is_empty());
+    assert!(receipts.is_empty());
     assert!(
         !profile_root
             .join("agent_managed/skills/automation-run-review")
@@ -139,7 +135,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
 }
 
 #[tokio::test]
-async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
+async fn combined_review_commits_atomic_terminal_effects() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -153,22 +149,34 @@ async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
             .await
             .unwrap();
 
-    let CombinedReviewDispatch::RecordedFailure { error, .. } = dispatch else {
-        panic!("non-atomic combined proposals must fail closed");
+    let CombinedReviewDispatch::Ran(run) = dispatch else {
+        panic!("expected combined terminal effects to commit");
     };
-    assert!(error.to_string().contains("atomic apply authority"));
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(
+        run.session_reflector.ledger_record.status,
+        AutomationRunStatus::Succeeded
+    );
+    assert_eq!(
+        run.skill_writer.ledger_record.status,
+        AutomationRunStatus::Succeeded
+    );
     let memory = tracedecay::application::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
+    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
+        .await
+        .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].run_id, "combined-run-1_facts");
+    assert!(receipts[0].applied_canonical_fact_id.is_some());
     assert!(
-        list_fact_proposals(&memory, None, 10)
-            .await
-            .unwrap()
-            .is_empty()
+        profile_root
+            .join("agent_managed/skills/automation-run-review")
+            .exists()
     );
-    assert!(!profile_root.join("agent_managed").exists());
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
@@ -176,7 +184,7 @@ async fn combined_review_fails_closed_before_cross_authority_proposal_writes() {
     assert!(
         records
             .iter()
-            .all(|record| record.status == AutomationRunStatus::Failed)
+            .all(|record| record.status == AutomationRunStatus::Succeeded)
     );
 }
 
@@ -284,15 +292,16 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = EmptyAutomationSessionRetrieval::new();
 
-    let dispatch = tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
-        &cg,
-        &config,
-        &backend,
-        &retrieval,
-        combined_options(&profile_root),
-    )
-    .await
-    .unwrap();
+    let dispatch =
+        tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(backend.calls(), 0);
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
@@ -319,7 +328,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
 
         let dispatch =
-            tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
+            tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
                 &cg,
                 &config,
                 &backend,
@@ -351,15 +360,16 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
     let retrieval = EmptyAutomationSessionRetrieval::new();
-    let dispatch = tracedecay::automation::runner::run_combined_review_with_backend_and_retrieval(
-        &cg,
-        &config,
-        &backend,
-        &retrieval,
-        combined_options(&profile_root),
-    )
-    .await
-    .unwrap();
+    let dispatch =
+        tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
