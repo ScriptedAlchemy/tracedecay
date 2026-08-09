@@ -41,6 +41,8 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
 use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
 
+const MAX_PENDING_WORKTREE_CLEANUPS: u32 = 4_096;
+
 /// The one exact composition served to invocation routing.
 pub(crate) type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTransactionCoordinator<
     SharedDaemonNativeIntegrationStore,
@@ -182,6 +184,21 @@ impl DaemonNativeIntegrationOwner {
 
     pub(crate) fn store(&self) -> &SharedDaemonNativeIntegrationStore {
         &self.store
+    }
+
+    pub(crate) fn cleanup_recovery_roots(
+        &self,
+    ) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
+        let mut roots = self
+            .store
+            .pending_worktree_cleanups(&self.repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?
+            .into_iter()
+            .map(|transaction| transaction.command.worktree_root)
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
     }
 
     pub(crate) fn authorized_scope_set(
