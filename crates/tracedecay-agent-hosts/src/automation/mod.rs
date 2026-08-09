@@ -6,9 +6,9 @@ mod artifact_payloads;
 mod artifact_policy;
 mod artifact_refs;
 pub mod artifacts;
+pub mod automatic_facts;
 pub mod backend;
 pub mod config;
-pub mod fact_proposals;
 pub mod hermes_skill_bridge;
 pub mod host_receipts;
 mod job_webhook;
@@ -29,7 +29,6 @@ pub mod skill_materialization;
 pub mod skill_targets;
 pub mod skill_usage;
 pub mod skill_writer;
-pub mod staged_notice;
 pub mod text;
 
 /// Build a [`TraceDecayError::Config`] from any message-like value.

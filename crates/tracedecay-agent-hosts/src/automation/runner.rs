@@ -21,13 +21,13 @@ use tracedecay_domain::{
 #[cfg(test)]
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+#[cfg(test)]
+use super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
-#[cfg(test)]
-use super::fact_proposals::{FactProposalState, record_session_fact_proposals};
 use super::lifecycle::{
     AgentRunFinalizer, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
     failed_backend_fallback_report, generated_run_id, task_run_gate, task_skip_reason,
@@ -101,7 +101,7 @@ use retrieval::{
     retrieve_automation_session_evidence,
 };
 #[cfg(test)]
-use session_reflector::{auto_apply_session_fact_proposals, validate_session_fact_proposals};
+use session_reflector::validate_session_fact_candidates;
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
 pub use retrieval::registered_project_automation_retrieval;
@@ -111,8 +111,9 @@ pub use retrieval::{
 };
 pub(crate) use session_reflector::run_user_session_reflector_with_backend_and_retrieval;
 pub use session_reflector::{
-    SessionReflectorAutomationOptions, SessionReflectorAutomationRun,
-    run_session_reflector_with_backend, run_session_reflector_with_backend_and_retrieval,
+    SessionFactCurationOutcome, SessionFactCurationReceipt, SessionReflectorAutomationOptions,
+    SessionReflectorAutomationRun, run_session_reflector_with_backend,
+    run_session_reflector_with_backend_and_retrieval,
 };
 pub use skill_writer::{SkillWriterAutomationOptions, SkillWriterAutomationRun};
 
@@ -972,7 +973,7 @@ async fn run_combined_review_for_retrieval(
     let mut validation_repairs = Vec::new();
     loop {
         let (_, fact_errors) =
-            validate_session_fact_proposals(&memory, &facts, &reflector_bundle.evidence).await?;
+            validate_session_fact_candidates(&memory, &facts, &reflector_bundle.evidence).await?;
         let skill_errors =
             validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills).await?;
         if fact_errors.is_empty() && skill_errors.is_empty() {
@@ -1840,7 +1841,7 @@ mod tests {
 
         let validated = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            validate_session_fact_proposals(&memory, &proposals, &evidence),
+            validate_session_fact_candidates(&memory, &proposals, &evidence),
         )
         .await
         .expect("read-only validation must not wait for writer authority")
@@ -1860,13 +1861,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_session_curation_promotes_once_through_the_fact_authority() {
+    async fn automatic_session_curation_records_one_terminal_effect() {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("memory.db");
         crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(
             &database_path,
-            "automatic session curation promotion test",
+            "automatic session curation receipt test",
         )
         .unwrap();
         let (database, _) = Database::publish_test_runtime(
@@ -1879,34 +1880,37 @@ mod tests {
         let memory =
             MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
                 .unwrap();
-        let records = record_session_fact_proposals(
+        let accepted = json!({
+            "add_fact_request": {
+                "content": "Validated session curation records one terminal effect",
+                "category": "project",
+                "source": "automation-test",
+                "tags": ["automation"],
+                "entities": ["TraceDecay"],
+                "trust": 0.9,
+                "metadata": {}
+            }
+        });
+        let applied = record_session_automatic_facts(
             &memory,
             "run-automatic-session-curation",
             Some(&format!("sha256:{}", "a".repeat(64))),
-            &[json!({
-                "add_fact_request": {
-                    "content": "Validated session curation applies without human approval",
-                    "category": "project",
-                    "source": "automation-test",
-                    "tags": ["automation"],
-                    "entities": ["TraceDecay"],
-                    "trust": 0.9,
-                    "metadata": {}
-                }
-            })],
-            &[],
+            &[accepted.clone()],
         )
         .await
         .unwrap();
+        assert!(applied.retry_error.is_none());
+        assert_eq!(applied.receipts[0].state, AutomaticFactState::Applied);
 
-        let applied = auto_apply_session_fact_proposals(&memory, records.clone()).await;
-        assert!(applied.error.is_none());
-        assert!(applied.newly_promoted);
-        assert_eq!(applied.records[0].state, FactProposalState::Applied);
-
-        let replayed = auto_apply_session_fact_proposals(&memory, records).await;
-        assert!(replayed.error.is_none());
-        assert!(!replayed.newly_promoted);
-        assert_eq!(replayed.records[0].state, FactProposalState::Applied);
+        let replayed = record_session_automatic_facts(
+            &memory,
+            "run-automatic-session-curation",
+            Some(&format!("sha256:{}", "a".repeat(64))),
+            &[accepted],
+        )
+        .await
+        .unwrap();
+        assert!(replayed.retry_error.is_none());
+        assert_eq!(replayed.receipts, applied.receipts);
     }
 }

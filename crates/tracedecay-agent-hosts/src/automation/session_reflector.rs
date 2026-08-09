@@ -11,26 +11,26 @@ use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
 use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
 
-pub(crate) async fn validate_fact_proposals<A: ProjectMemoryFactStore>(
+pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
     let citations = EvidenceCitationSet::from_evidence(evidence);
     let mut accepted = Vec::new();
-    let mut rejected = Vec::new();
+    let mut quarantined = Vec::new();
     for proposal in proposals {
-        match validate_fact_proposal(memory, proposal, &citations).await? {
-            FactProposalValidation::Accepted(value) => accepted.push(value),
-            FactProposalValidation::Rejected(value) => rejected.push(value),
+        match validate_fact_candidate(memory, proposal, &citations).await? {
+            FactCandidateValidation::Accepted(value) => accepted.push(value),
+            FactCandidateValidation::Quarantined(value) => quarantined.push(value),
         }
     }
-    Ok((accepted, rejected))
+    Ok((accepted, quarantined))
 }
 
-enum FactProposalValidation {
+enum FactCandidateValidation {
     Accepted(Value),
-    Rejected(Value),
+    Quarantined(Value),
 }
 
 struct EvidenceCitationSet {
@@ -138,51 +138,57 @@ impl EvidenceCitationSet {
     }
 }
 
-async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
+async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     proposal: &Value,
     citations: &EvidenceCitationSet,
-) -> Result<FactProposalValidation> {
+) -> Result<FactCandidateValidation> {
     let Some(object) = proposal.as_object() else {
-        return Ok(rejected_fact(proposal, "proposal must be a JSON object"));
+        return Ok(quarantined_fact(proposal, "item must be a JSON object"));
     };
     let Some(content) = object
         .get("content")
         .and_then(Value::as_str)
         .and_then(normalized_non_empty)
     else {
-        return Ok(rejected_fact(proposal, "content is required"));
+        return Ok(quarantined_fact(proposal, "content is required"));
     };
     if content.chars().count() > 1_000 {
-        return Ok(rejected_fact(proposal, "content exceeds 1000 characters"));
+        return Ok(quarantined_fact(
+            proposal,
+            "content exceeds 1000 characters",
+        ));
     }
     let Some(category) = object
         .get("category")
         .and_then(Value::as_str)
         .and_then(|value| MemoryCategory::from_proposal_label(value).ok())
     else {
-        return Ok(rejected_fact(proposal, "valid category is required"));
+        return Ok(quarantined_fact(proposal, "valid category is required"));
     };
     let Some(tags) = string_array_field(object.get("tags")) else {
-        return Ok(rejected_fact(proposal, "tags must be an array of strings"));
+        return Ok(quarantined_fact(
+            proposal,
+            "tags must be an array of strings",
+        ));
     };
     let Some(entities) = string_array_field(object.get("entities")) else {
-        return Ok(rejected_fact(
+        return Ok(quarantined_fact(
             proposal,
             "entities must be an array of strings",
         ));
     };
     let Some(trust) = object.get("trust") else {
-        return Ok(rejected_fact(proposal, "trust is required"));
+        return Ok(quarantined_fact(proposal, "trust is required"));
     };
-    let Some(trust) = proposal_trust_value(trust) else {
-        return Ok(rejected_fact(
+    let Some(trust) = candidate_trust_value(trust) else {
+        return Ok(quarantined_fact(
             proposal,
             "trust must be a number between 0 and 1, or one of low, medium, high",
         ));
     };
     if object.contains_key("confidence") {
-        return Ok(rejected_fact(
+        return Ok(quarantined_fact(
             proposal,
             "confidence is not supported; use trust",
         ));
@@ -192,52 +198,53 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
         .and_then(Value::as_str)
         .and_then(normalized_non_empty)
     else {
-        return Ok(rejected_fact(proposal, "reason is required"));
+        return Ok(quarantined_fact(proposal, "reason is required"));
     };
     let Some(source_span) = object.get("source_span") else {
-        return Ok(rejected_fact(proposal, "source_span is required"));
+        return Ok(quarantined_fact(proposal, "source_span is required"));
     };
     if !citations.contains(source_span) {
-        return Ok(rejected_fact(
+        return Ok(quarantined_fact(
             proposal,
             "source_span must cite a bounded session reflection evidence hit",
         ));
     }
-    let exact_duplicate_id = match memory
-        .find_exact_fact_v1_by_content(&content)
-        .await
-        .map_err(|error| {
-            TraceDecayError::database_operation(
-                "validate session reflector exact duplicate through memory authority",
-                error,
-            )
-        })? {
-        None => None,
-        Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
-            let Some(fact_id) = fact.legacy_fact_id() else {
-                return Ok(rejected_unavailable_exact_duplicate(
+    let exact_duplicate_id =
+        match memory
+            .find_exact_fact_by_content(&content)
+            .await
+            .map_err(|error| {
+                TraceDecayError::database_operation(
+                    "validate session reflector exact duplicate through memory authority",
+                    error,
+                )
+            })? {
+            None => None,
+            Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
+                let Some(fact_id) = fact.legacy_fact_id() else {
+                    return Ok(quarantined_unavailable_exact_duplicate(
+                        proposal,
+                        "unavailable",
+                        "unknown",
+                    ));
+                };
+                Some(fact_id)
+            }
+            Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
+                return Ok(quarantined_unavailable_exact_duplicate(
                     proposal,
-                    "unavailable",
-                    "unknown",
+                    compatibility_availability_label(unavailable.availability()),
+                    payload_access_label(unavailable.status().payload_access()),
                 ));
-            };
-            Some(fact_id)
-        }
-        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
-            return Ok(rejected_unavailable_exact_duplicate(
-                proposal,
-                compatibility_availability_label(unavailable.availability()),
-                payload_access_label(unavailable.status().payload_access()),
-            ));
-        }
-    };
+            }
+        };
     if let Some(fact_id) = exact_duplicate_id {
         let reason = format!("exact duplicate of fact #{fact_id}");
-        return Ok(rejected_fact_with_validation(
+        return Ok(quarantined_fact_with_validation(
             proposal,
             &reason,
             &json!({
-                "status": "rejected",
+                "status": "quarantined",
                 "reason": reason,
                 "dedupe": {
                     "exact_duplicate_fact_id": fact_id,
@@ -246,7 +253,7 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
         ));
     }
     let matches = memory
-        .search_facts_untracked_v1(SearchFactsRequest {
+        .search_facts_untracked(SearchFactsRequest {
             query: content.clone(),
             category: Some(category),
             limit: Some(1),
@@ -272,11 +279,11 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
             "near duplicate of fact #{} with score {:.3}",
             existing.fact.fact_id, existing.score
         );
-        return Ok(rejected_fact_with_validation(
+        return Ok(quarantined_fact_with_validation(
             proposal,
             &reason,
             &json!({
-                "status": "rejected",
+                "status": "quarantined",
                 "reason": reason,
                 "dedupe": {
                     "nearest": nearest,
@@ -299,9 +306,9 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
             "trust_reason": reason,
         }),
     };
-    Ok(FactProposalValidation::Accepted(json!({
+    Ok(FactCandidateValidation::Accepted(json!({
         "add_fact_request": request,
-        "proposal": proposal,
+        "item": proposal,
         "validation": {
             "status": "accepted",
             "dedupe": {
@@ -310,7 +317,7 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
             },
             "conflict": {
                 "source": "apply_time_add_fact_diff",
-                "note": "TraceDecay::add_fact reports possible_conflict during explicit approval apply",
+                "note": "TraceDecay::add_fact reports possible_conflict during automatic apply",
             },
         },
     })))
@@ -324,9 +331,9 @@ async fn validate_fact_proposal<A: ProjectMemoryFactStore>(
 ///
 /// Deliberate decision: the prompt forbids string labels, but they are
 /// accepted defensively rather than rejecting an otherwise valid fact. Note
-/// that the "high" representative can clear auto-apply thresholds when
-/// `auto_apply_memory_ops` is enabled — this is intentional.
-fn proposal_trust_value(value: &Value) -> Option<f64> {
+/// that the "high" representative can clear automatic-apply thresholds —
+/// this is intentional.
+fn candidate_trust_value(value: &Value) -> Option<f64> {
     if let Some(trust) = value.as_f64() {
         return (0.0..=1.0).contains(&trust).then_some(trust);
     }
@@ -359,28 +366,28 @@ fn string_array_field(value: Option<&Value>) -> Option<Vec<String>> {
     Some(values)
 }
 
-fn rejected_fact(proposal: &Value, reason: &str) -> FactProposalValidation {
-    rejected_fact_with_validation(
+fn quarantined_fact(proposal: &Value, reason: &str) -> FactCandidateValidation {
+    quarantined_fact_with_validation(
         proposal,
         reason,
         &json!({
-            "status": "rejected",
+            "status": "quarantined",
             "reason": reason,
         }),
     )
 }
 
-fn rejected_unavailable_exact_duplicate(
+fn quarantined_unavailable_exact_duplicate(
     proposal: &Value,
     availability: &str,
     payload_access: &str,
-) -> FactProposalValidation {
+) -> FactCandidateValidation {
     let reason = "exact duplicate is unavailable for safe validation";
-    rejected_fact_with_validation(
+    quarantined_fact_with_validation(
         proposal,
         reason,
         &json!({
-            "status": "rejected",
+            "status": "quarantined",
             "reason": reason,
             "dedupe": {
                 "exact_match": {
@@ -413,13 +420,13 @@ fn payload_access_label(value: Option<PayloadAccessState>) -> &'static str {
     }
 }
 
-fn rejected_fact_with_validation(
+fn quarantined_fact_with_validation(
     proposal: &Value,
     reason: &str,
     validation: &Value,
-) -> FactProposalValidation {
-    FactProposalValidation::Rejected(json!({
-        "proposal": proposal,
+) -> FactCandidateValidation {
+    FactCandidateValidation::Quarantined(json!({
+        "item": proposal,
         "reason": reason,
         "validation": validation,
     }))
