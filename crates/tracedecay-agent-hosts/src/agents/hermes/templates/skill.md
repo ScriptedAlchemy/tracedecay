@@ -90,9 +90,13 @@ selects a TraceDecay installation, store, or project. TraceDecay always uses
 the normal user-profile installation and the same profile-sharded project
 store used by every other host.
 
-Project facts remain sharded: each registered project's `tracedecay.db` owns
-its `memory_facts` and derived banks. Durable preferences and projectless chat
-facts use the profile-level `~/.tracedecay/user-memory.db` store.
+Project facts remain scoped to the canonical project-memory authority selected
+by the active registered project. Durable preferences and projectless chat
+facts use the profile-level user-memory authority. Fact tools are the only
+durable-memory interface; similarity and curation candidates come from the
+bounded verified Grafeo similarity projection with its generation and coverage
+evidence. If that projection is unavailable or stale, report that typed state
+instead of substituting a derived bank or repairing on read.
 `~/.tracedecay/global.db` remains the cross-project registry/usage database,
 not a shared project-fact table with a project tag.
 

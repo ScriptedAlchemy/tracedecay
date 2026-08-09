@@ -2,11 +2,13 @@
 
 **Status:** research + design proposal (2026-07-02; plugin paths refreshed
 2026-07-03).
-**Goal:** make Codex CLI and Cursor use the TraceDecay holographic fact store
-(`tracedecay_fact_store` add/search/probe/reason, `memory_facts` table, HRR
-vectors + trust scores) as their agent memory for both **recall** (facts reach
-the model at the right moment) and **storage** (new durable facts get written),
-instead of — or layered on top of — each agent's native memory mechanism.
+**Goal:** make Codex CLI and Cursor use the canonical TraceDecay fact authority
+(`tracedecay_fact_store_*` plus trust feedback) as their agent memory for both
+**recall** (facts reach the model at the right moment) and **storage** (new
+durable facts get written), instead of — or layered on top of — each agent's
+native memory mechanism. Similarity and dedupe evidence must come from the
+bounded verified Grafeo projection with explicit generation and coverage, not
+from a host-local approximation.
 
 Current plugin source lives under the shared `plugin/` tree: shared skills in
 `plugin/skills/`, Claude commands in `plugin/commands/`, shared agents in
@@ -61,7 +63,7 @@ and the config reference):
 - `[features.memories] custom_tools = true` (nested form) additionally exposes
   memories read/retrieval **tools** to the model — i.e. Codex is moving toward
   model-invocable memory reads, which is exactly the slot a
-  `tracedecay_fact_store` MCP tool already occupies.
+  `tracedecay_fact_store_search` MCP tool already occupies.
 
 ### 1.2 Other context surfaces Codex reads at session start
 
@@ -173,8 +175,8 @@ Writes the Cursor projection of the shared plugin bundle
   `tracedecay hook-cursor-*` (dispatch: `src/hook_cmd.rs`, impls:
   `src/hooks/`).
 - **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
-  steers models to `tracedecay_message_search` / `tracedecay_fact_store`
-  search and the `project-memory` skill.
+  steers models to `tracedecay_message_search` / `tracedecay_fact_store_search`
+  and the `project-memory` skill.
 - **`skills/`** — shared model-invocable skills, excluding the
   `tracedecay-*` dispatcher skills that Cursor exposes as native commands.
 - **`commands/`** — Cursor-native workflow commands from
@@ -229,20 +231,19 @@ transcripts"), so Codex sessions also feed reflection.
 
 ### 3.3 The fact store itself
 
-- Per-project holographic store (`memory_facts` + entities, HRR dim 2048,
-  4 banks, amari_fhrr algebra; `src/memory/{store,retrieval,trust,types}.rs`).
-  `tracedecay_memory_status` on this repo: 9 facts, 113 entities, trust all
-  ≥ 0.75.
-- MCP/CLI surface: `tracedecay_fact_store` with actions
+- Project facts are owned by the canonical project-memory authority and are
+  accessed only through exact fact-store tools. `tracedecay_memory_status` is a
+  read-only authority/coverage report; it does not mutate storage.
+- Similarity and dedupe candidates come from the bounded verified Grafeo
+  projection and retain generation, watermark, and coverage evidence. An
+  unavailable or stale projection is reported as such rather than replaced by
+  a host-local approximation.
+- MCP/CLI surface: exact `tracedecay_fact_store_*` tools for
   add/search/probe/related/reason/contradict/get/update/remove/list, write-time
   near-duplicate & conflict detection, secret rejection, trust calibration
   guidance; `tracedecay_fact_feedback` (helpful/unhelpful trust deltas);
   `tracedecay_memory_status`. Cross-project reads via
   `project_id`/`project_path` selectors (read-only actions).
-- Retrieval API (`src/memory/retrieval.rs::FactRetriever`): `search`,
-  `probe`, `related`, `reason`, `contradict` — directly callable **in-process
-  from the hook binary** (the hooks are the same `tracedecay` binary; no MCP
-  round-trip needed).
 
 ### 3.4 Storage loop: session_reflector (exists, automation disabled by default)
 
@@ -281,7 +282,7 @@ content into agent surfaces on a schedule," which design D reuses for memory.
 | Stage | Codex | Cursor |
 | --- | --- | --- |
 | Facts stored | ✅ fact store (9 facts here) + LCM transcripts | same store |
-| Model *can* recall | ✅ MCP `tracedecay_fact_store` search + skill | ✅ same |
+| Model *can* recall | ✅ MCP `tracedecay_fact_store_search` + skill | ✅ same |
 | Model is *told* to recall | ⚠️ soft steering in SessionStart/UserPromptSubmit context; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
 | Facts *pushed* into context | ❌ none — hook context is index status + hints only | ❌ none |
 | Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
@@ -307,21 +308,21 @@ text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
   after workspace status, run `FactRetriever::search`/`list` for the top-K
   high-trust project facts (e.g. K=8, `min_trust` 0.6, category-diverse,
   newest-first tiebreak) and append a compact `## Project memory` block with
-  fact ids ("rate with tracedecay_fact_feedback, correct with fact_store
+  fact ids ("rate with tracedecay_fact_feedback, correct with exact fact tools
   update"). Reuse the token-budget discipline the context builders already
   have.
 - `UserPromptSubmit`: in `codex_user_prompt_submit_context_for_event`
-  (`src/hooks/codex.rs`), embed the prompt (`prompt_like_text`) via the
-  existing HRR encoder and inject only facts above a similarity × trust
-  threshold, deduped per session the same way tool hints are deduped
-  (`deduped_codex_hint` pattern, `remember_hint_in_process`). Empty result →
-  inject nothing (most prompts).
+  (`src/hooks/codex.rs`), query the verified Grafeo similarity authority with
+  the bounded prompt view and inject only facts whose returned similarity,
+  trust, generation, and coverage satisfy the active policy. Deduplicate per
+  session the same way tool hints are deduped (`deduped_codex_hint` pattern,
+  `remember_hint_in_process`). An unavailable or empty result injects nothing.
 - `SubagentStart`: optionally include the same session-start block so
   subagents inherit memory.
 
 Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
-`src/hooks/steering.rs`, and shared helpers in `src/hooks/mod.rs`,
-`src/memory/retrieval.rs` (`FactRetriever::search/probe`), analytics via
+`src/hooks/steering.rs`, shared helpers in `src/hooks/mod.rs`, and the verified
+memory-similarity application port. Analytics still flow through
 `record_hint_analytics` so injection quality is measurable. No plugin schema
 change; hook hashes change → users re-trust via `/hooks` (already documented
 in the Codex plugin README).
@@ -340,10 +341,10 @@ user asks**" — the opposite of agent-memory behavior. Change the instruction
 (rule Recall bullet in `plugin/rules/tracedecay.mdc` + the
 `plugin/skills/project-memory/SKILL.md` skill, shared across every host) to:
 
-- *Recall:* "before starting non-trivial work, search `tracedecay_fact_store`
+- *Recall:* "before starting non-trivial work, search `tracedecay_fact_store_search`
   for prior decisions" (currently phrased as fallback, not default).
 - *Storage:* "when you learn a durable preference, decision, or pitfall
-  (user corrections especially), store it with `fact_store add` with
+  (user corrections especially), store it with `tracedecay_fact_store_add` with
   calibrated trust" — the add-path already defends against junk
   (near_duplicate / possible_conflict / secret rejection, §3.3).
 
