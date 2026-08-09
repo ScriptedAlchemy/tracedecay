@@ -1,4 +1,5 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::MapAccess, de::SeqAccess, de::Visitor};
+use std::fmt;
 use tracedecay_tool_catalog::{SchemaId, SchemaRef};
 
 use crate::context::{RequestId, ResolvedScope};
@@ -20,10 +21,28 @@ pub const MAX_RETRY_AFTER_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 pub const DEFAULT_RETRY_AFTER_MILLIS: u64 = 250;
 
 /// Versioned schema identity for an application result contract.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct ResultContractRef {
     schema_id: SchemaId,
     schema_revision: u32,
+}
+
+impl<'de> Deserialize<'de> for ResultContractRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema_id: SchemaId,
+            schema_revision: u32,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.schema_id, wire.schema_revision).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ResultContractRef {
@@ -259,7 +278,8 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                 ));
             }
         };
-        let canonical = Self::new(wire.request_id.clone(), source);
+        let canonical =
+            Self::new(wire.request_id.clone(), source).map_err(serde::de::Error::custom)?;
         let record = Self {
             revision: wire.revision,
             kind: wire.kind,
@@ -299,12 +319,61 @@ where
     where
         D: Deserializer<'de>,
     {
-        Option::<T>::deserialize(deserializer).map(Self)
+        struct RequiredNullableVisitor<T>(std::marker::PhantomData<fn() -> T>);
+
+        impl<'de, T> Visitor<'de> for RequiredNullableVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = RequiredNullable<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a nullable value whose field is present")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(RequiredNullable(None))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(RequiredNullable(None))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(Some)
+                    .map(RequiredNullable)
+            }
+
+            fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                T::deserialize(serde::de::value::SeqAccessDeserializer::new(sequence))
+                    .map(Some)
+                    .map(RequiredNullable)
+            }
+        }
+
+        deserializer.deserialize_any(RequiredNullableVisitor(std::marker::PhantomData))
     }
 }
 
 impl ApplicationProblemRecord {
-    fn new(request_id: RequestId, source: ApplicationProblem) -> Self {
+    fn new(
+        request_id: RequestId,
+        source: ApplicationProblem,
+    ) -> Result<Self, ApplicationContractError> {
+        source.validate()?;
         let retry = source.retry();
         let kind = source.kind();
         let retry_scope = match retry {
@@ -321,7 +390,7 @@ impl ApplicationProblemRecord {
             .as_ref()
             .map(|diagnostic| diagnostic.code.clone())
             .unwrap_or_else(|| source.canonical_code().to_owned());
-        Self {
+        let record = Self {
             revision: APPLICATION_PROBLEM_REVISION,
             kind,
             code,
@@ -351,13 +420,16 @@ impl ApplicationProblemRecord {
             legal_actions: source.legal_actions().to_vec(),
             coverage: None,
             source,
-        }
+        };
+        record.validate()?;
+        Ok(record)
     }
 
     /// Validate the wire-visible record against its source problem.  This is
     /// intentionally strict: a record must never lose a committed receipt or
     /// turn an admitted terminal into an unavailable pre-admission failure.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        self.source.validate()?;
         if self.revision != APPLICATION_PROBLEM_REVISION
             || self.kind != self.source.kind()
             || self.terminality != self.kind.terminality()
@@ -519,13 +591,13 @@ impl ApplicationProblemEnvelope {
         contract: ResultContractRef,
         request_id: RequestId,
         problem: ApplicationProblem,
-    ) -> Self {
-        let record = ApplicationProblemRecord::new(request_id.clone(), problem);
-        Self {
+    ) -> Result<Self, ApplicationContractError> {
+        let record = ApplicationProblemRecord::new(request_id.clone(), problem)?;
+        Ok(Self {
             contract,
             request_id,
             problem: Box::new(record),
-        }
+        })
     }
 
     pub fn with_owning_layer(mut self, owning_layer: ProblemOwningLayer) -> Self {
@@ -620,6 +692,7 @@ mod tests {
                 legal_actions: vec![LegalAction::Reconcile],
             },
         )
+        .expect("partial-effect envelope is valid")
         .with_owning_layer(ProblemOwningLayer::Port);
 
         assert!(envelope.problem.is_admitted_terminal());
@@ -635,6 +708,17 @@ mod tests {
         let decoded: ApplicationProblemEnvelope =
             serde_json::from_value(wire.clone()).expect("canonical envelope decodes");
         assert_eq!(decoded, envelope);
+
+        let mut failed_receipt =
+            serde_json::to_value(envelope.problem.source()).expect("standalone problem serializes");
+        failed_receipt["committed_receipt"]["outcome"] = serde_json::json!("failed");
+        assert!(serde_json::from_value::<ApplicationProblem>(failed_receipt).is_err());
+
+        let mut empty_commit =
+            serde_json::to_value(envelope.problem.source()).expect("standalone problem serializes");
+        empty_commit["committed_receipt"]["committed_state"] = serde_json::Value::Null;
+        empty_commit["committed_receipt"]["external_proof"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ApplicationProblem>(empty_commit).is_err());
 
         let mut mismatched_request = wire.clone();
         mismatched_request["request_id"] = serde_json::json!("request.other.fixture");
@@ -664,7 +748,8 @@ mod tests {
                 )
                 .expect("diagnostic"),
             ),
-        );
+        )
+        .expect("reset-required envelope is valid");
         let wire = serde_json::to_value(&envelope).expect("envelope serializes");
         assert_eq!(wire["problem"]["kind"], "reset_required");
         assert_eq!(
@@ -683,6 +768,10 @@ mod tests {
         let decoded: ApplicationProblemEnvelope =
             serde_json::from_value(wire.clone()).expect("canonical envelope decodes");
         assert_eq!(decoded, envelope);
+
+        let mut unknown_contract = wire.clone();
+        unknown_contract["contract"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ApplicationProblemEnvelope>(unknown_contract).is_err());
 
         let mut missing_receipt = wire;
         missing_receipt["problem"]

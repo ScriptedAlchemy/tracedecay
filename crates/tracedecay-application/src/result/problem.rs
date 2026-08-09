@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::EffectReceipt;
+use super::{EffectReceipt, EffectTermination};
 use crate::error::ApplicationContractError;
 
 /// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
@@ -135,8 +135,8 @@ impl ApplicationProblemKind {
 
 /// Application failure or admitted terminal. Resource-addressed denial
 /// intentionally shares one shape with absence and hidden policy outcomes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ApplicationProblem {
     InvalidRequest {
         diagnostic: SafeDiagnostic,
@@ -195,7 +195,227 @@ pub enum ApplicationProblem {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+enum ApplicationProblemWire {
+    InvalidRequest {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    NotFoundOrNotAuthorized {
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Conflict {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    PartialEffect {
+        diagnostic: SafeDiagnostic,
+        committed_receipt: EffectReceipt,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Stale {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Unsupported {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Unavailable {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    ResetRequired {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Saturated {
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    Cancelled {
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    TimedOut {
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+}
+
+impl<'de> Deserialize<'de> for ApplicationProblem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ApplicationProblemWire::deserialize(deserializer)?;
+        Self::from_wire(wire).map_err(serde::de::Error::custom)
+    }
+}
+
 impl ApplicationProblem {
+    fn from_wire(wire: ApplicationProblemWire) -> Result<Self, ApplicationContractError> {
+        let problem = match wire {
+            ApplicationProblemWire::InvalidRequest {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::InvalidRequest {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::NotFoundOrNotAuthorized {
+                retry,
+                legal_actions,
+            } => Self::NotFoundOrNotAuthorized {
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Conflict {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Conflict {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::PartialEffect {
+                diagnostic,
+                committed_receipt,
+                retry,
+                legal_actions,
+            } => Self::PartialEffect {
+                diagnostic,
+                committed_receipt,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Stale {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Stale {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Unsupported {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Unsupported {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Unavailable {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Unavailable {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::ResetRequired {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::ResetRequired {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Saturated {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Saturated {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::Cancelled {
+                retry,
+                legal_actions,
+            } => Self::Cancelled {
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::TimedOut {
+                retry,
+                legal_actions,
+            } => Self::TimedOut {
+                retry,
+                legal_actions,
+            },
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if let Some(diagnostic) = self.diagnostic() {
+            diagnostic.validate()?;
+        }
+
+        match self {
+            Self::PartialEffect {
+                committed_receipt,
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::Reconcile]
+                    || committed_receipt.outcome != EffectTermination::Partial
+                    || (committed_receipt.committed_state.is_none()
+                        && committed_receipt.external_proof.is_none())
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "partial effect terminal",
+                    });
+                }
+                committed_receipt.validate()?;
+            }
+            Self::ResetRequired {
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::Reset]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "reset-required terminal",
+                    });
+                }
+            }
+            Self::InvalidRequest { .. }
+            | Self::NotFoundOrNotAuthorized { .. }
+            | Self::Conflict { .. }
+            | Self::Stale { .. }
+            | Self::Unsupported { .. }
+            | Self::Unavailable { .. }
+            | Self::Saturated { .. }
+            | Self::Cancelled { .. }
+            | Self::TimedOut { .. } => {}
+        }
+        Ok(())
+    }
+
     pub const fn kind(&self) -> ApplicationProblemKind {
         match self {
             Self::InvalidRequest { .. } => ApplicationProblemKind::InvalidRequest,
@@ -378,5 +598,17 @@ mod tests {
         assert_eq!(wire["kind"], "reset_required");
         assert_eq!(wire["retry"], "never");
         assert_eq!(wire["legal_actions"], serde_json::json!(["reset"]));
+
+        let mut unknown = wire.clone();
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ApplicationProblem>(unknown).is_err());
+
+        let mut retrying = wire.clone();
+        retrying["retry"] = serde_json::json!("after_delay");
+        assert!(serde_json::from_value::<ApplicationProblem>(retrying).is_err());
+
+        let mut wrong_action = wire;
+        wrong_action["legal_actions"] = serde_json::json!(["retry"]);
+        assert!(serde_json::from_value::<ApplicationProblem>(wrong_action).is_err());
     }
 }

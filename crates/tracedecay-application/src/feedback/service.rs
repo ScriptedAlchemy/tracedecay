@@ -4,7 +4,7 @@ use crate::diagnostics::{
 };
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
-use crate::result::{ApplicationProblem, ApplicationProblemKind, AuthorityReceipt};
+use crate::result::AuthorityReceipt;
 use crate::storage::findings::truncate_at_char_boundary;
 use tracedecay_domain::feedback::{
     FeedbackAdvisoryProviderStateV1, FeedbackBaselineStateV1, FeedbackContentIdentityV1,
@@ -27,6 +27,7 @@ use super::ports::{
     FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
     FeedbackRuntimeStateV1,
 };
+use super::problem_terminal::terminal_for_problem;
 
 /// Explicit accounting supplied by the caller/runtime that owns clock, token,
 /// and cost measurements. The feedback service never reads a clock or calls a
@@ -2025,67 +2026,9 @@ fn after_checked_runtime_terminal_with_dedupe(
     }
 }
 
-fn terminal_for_problem(
-    problem: &ApplicationProblem,
-) -> (FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>) {
-    terminal_for_problem_kind(problem.kind())
-}
-
-/// Feedback has no separate terminal for an admitted partial effect or a
-/// required storage reset. An admitted partial is incomplete coverage; a
-/// reset is a terminal blocked state until the owning authority is recreated.
-/// Neither condition is a daemon outage or a pre-admission unavailability.
-fn terminal_for_problem_kind(
-    kind: ApplicationProblemKind,
-) -> (FeedbackCycleTerminationV1, Vec<ProviderEvaluationStateV1>) {
-    match kind {
-        ApplicationProblemKind::Cancelled => (
-            FeedbackCycleTerminationV1::Cancelled,
-            vec![ProviderEvaluationStateV1::Cancelled],
-        ),
-        ApplicationProblemKind::TimedOut => (
-            FeedbackCycleTerminationV1::BudgetExceeded,
-            vec![ProviderEvaluationStateV1::TimedOut],
-        ),
-        ApplicationProblemKind::Stale => (
-            FeedbackCycleTerminationV1::StaleReplanRequired,
-            vec![ProviderEvaluationStateV1::Stale],
-        ),
-        ApplicationProblemKind::Unavailable => (
-            FeedbackCycleTerminationV1::DaemonUnavailable,
-            vec![ProviderEvaluationStateV1::Unavailable],
-        ),
-        ApplicationProblemKind::PartialEffect => (
-            FeedbackCycleTerminationV1::IncompleteCoverage,
-            vec![ProviderEvaluationStateV1::Partial],
-        ),
-        ApplicationProblemKind::ResetRequired => (FeedbackCycleTerminationV1::Blocked, Vec::new()),
-        ApplicationProblemKind::InvalidRequest
-        | ApplicationProblemKind::NotFoundOrNotAuthorized
-        | ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::Unsupported
-        | ApplicationProblemKind::Saturated => (FeedbackCycleTerminationV1::Blocked, Vec::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn terminal_problem_mapping_preserves_admitted_partial_and_required_reset() {
-        assert_eq!(
-            terminal_for_problem_kind(ApplicationProblemKind::PartialEffect),
-            (
-                FeedbackCycleTerminationV1::IncompleteCoverage,
-                vec![ProviderEvaluationStateV1::Partial],
-            )
-        );
-        assert_eq!(
-            terminal_for_problem_kind(ApplicationProblemKind::ResetRequired),
-            (FeedbackCycleTerminationV1::Blocked, Vec::new())
-        );
-    }
 
     #[test]
     fn terminal_selection_never_conflates_complete_and_incomplete_truth() {

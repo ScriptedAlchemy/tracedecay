@@ -8,6 +8,7 @@ mod adapters;
 mod catalog;
 mod github_ci_proximity;
 mod ports;
+mod problem_terminal;
 mod read;
 mod service;
 
