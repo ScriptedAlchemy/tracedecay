@@ -680,8 +680,120 @@ fn diagnostic(code: &'static str, message: &'static str) -> SafeDiagnostic {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
     use super::*;
-    use crate::ApplicationProblemKind;
+    use crate::retained_surfaces::{FactReadOptionsV1, FactStoreSearchRequestV1};
+    use crate::{
+        ApplicationProblemEnvelope, ApplicationProblemKind, CancellationContext, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, EffectTermination, IdempotencyKey, ProblemTerminality,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_tool_catalog::{EffectClass, UseCaseId};
+
+    struct ErrorMemoryPort(RetainedSurfaceExecutionErrorV1);
+
+    impl RetainedMemoryExecutionPortV1 for ErrorMemoryPort {
+        fn execute_memory<'a>(
+            &'a self,
+            _context: RetainedSurfaceExecutionContextV1<'a>,
+            request: RetainedMemoryRequestV1<'a>,
+        ) -> RetainedSurfaceExecutionFutureV1<'a> {
+            assert!(matches!(
+                request,
+                RetainedMemoryRequestV1::FactStoreSearch(_)
+            ));
+            let error = self.0.clone();
+            Box::pin(async move { Err(error) })
+        }
+    }
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("fixture identity is valid")
+    }
+
+    fn digest(seed: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
+            .expect("fixture digest is valid")
+    }
+
+    fn scope() -> ResolvedScope {
+        ResolvedScope::new(
+            id::<ProjectId>("project.retained.fixture"),
+            id::<RepositoryId>("repository.retained.fixture"),
+            id::<WorktreeId>("worktree.retained.fixture"),
+            None,
+        )
+        .expect("fixture scope is valid")
+    }
+
+    fn context_for(operation: &ApplicationOperation) -> RequestContext {
+        let scope = scope();
+        let grant = CapabilityGrantSnapshot::new(
+            id::<CapabilityGrantId>("grant.retained.fixture"),
+            1,
+            digest('a'),
+            id::<ActorId>("actor.retained.issuer"),
+            UtcMicros(1),
+            UtcMicros(1_000),
+            scope.clone(),
+            BTreeSet::from([operation.capability_id().clone()]),
+            BTreeSet::from([operation.use_case_id().clone()]),
+            crate::DisclosureClass::Evidence,
+        )
+        .expect("fixture grant is valid");
+        RequestContext::new(
+            id::<ActorId>("actor.retained.requester"),
+            scope,
+            grant,
+            RequestId::new("request.retained.fixture").expect("fixture request id"),
+            Deadline::new(UtcMicros(500)).expect("fixture deadline"),
+            CancellationContext::active("cancel.retained.fixture")
+                .expect("fixture cancellation context"),
+        )
+        .expect("fixture context is valid")
+    }
+
+    fn request() -> RetainedSurfaceRequestV1 {
+        RetainedSurfaceRequestV1::FactStoreSearch(FactStoreSearchRequestV1 {
+            query: "retained fixture".to_owned(),
+            options: FactReadOptionsV1::default(),
+            format: None,
+        })
+    }
+
+    fn partial_receipt() -> EffectReceipt {
+        EffectReceipt {
+            operation: UseCaseId::new("use-case.retained.fixture").expect("fixture use case"),
+            request_id: RequestId::new("request.retained.receipt").expect("fixture request id"),
+            actor: id::<ActorId>("actor.retained.receipt"),
+            scope: scope(),
+            effect_class: EffectClass::Administrative,
+            idempotency_key: IdempotencyKey::new("idempotency.retained.fixture")
+                .expect("fixture idempotency key"),
+            input_digest: digest('a'),
+            expected_state: digest('b'),
+            policy_digest: digest('c'),
+            configuration_digest: digest('d'),
+            catalog_digest: digest('e'),
+            privacy_digest: digest('f'),
+            outcome: EffectTermination::Partial,
+            committed_state: Some(digest('a')),
+            external_proof: None,
+        }
+    }
+
+    fn service_for(error: RetainedSurfaceExecutionErrorV1) -> RetainedSurfaceServiceV1<'static> {
+        RetainedSurfaceServiceV1::new(
+            RetainedSurfacePortsV1::default().with_memory(Arc::new(ErrorMemoryPort(error))),
+        )
+    }
 
     #[test]
     fn runtime_terminal_states_remain_typed() {
@@ -727,6 +839,77 @@ mod tests {
         assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
         assert_eq!(problem.retry(), RetryDirective::Never);
         assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
+    }
+
+    #[tokio::test]
+    async fn memory_dispatch_preserves_partial_effect_receipt_as_an_admitted_terminal() {
+        let operation =
+            retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
+                .expect("fact search has a catalog operation");
+        let context = context_for(&operation);
+        let cancellation = CancellationSignal::active("cancel.retained.partial")
+            .expect("fixture cancellation signal");
+        let receipt = partial_receipt();
+        let service = service_for(RetainedSurfaceExecutionErrorV1::PartialEffect {
+            reason_code: "application.retained.partial-effect".to_owned(),
+            committed_receipt: receipt.clone(),
+            detail: "The lower authority committed before delivery failed.".to_owned(),
+        });
+
+        let problem = service
+            .execute(&context, &cancellation, UtcMicros(2), &request())
+            .await
+            .expect_err("partial lower effect must remain a problem terminal");
+
+        assert_eq!(problem.kind(), ApplicationProblemKind::PartialEffect);
+        assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.legal_actions(), &[LegalAction::Reconcile]);
+        assert_eq!(problem.committed_receipt(), Some(&receipt));
+        let envelope = ApplicationProblemEnvelope::new(
+            operation.result_contract().clone(),
+            context.request_id().clone(),
+            problem,
+        )
+        .expect("partial-effect envelope is valid");
+        envelope
+            .problem
+            .validate()
+            .expect("partial-effect envelope keeps its exact receipt");
+        assert_eq!(envelope.problem.committed_receipt.as_ref(), Some(&receipt));
+    }
+
+    #[tokio::test]
+    async fn memory_dispatch_preserves_reset_required_as_an_admitted_terminal() {
+        let operation =
+            retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
+                .expect("fact search has a catalog operation");
+        let context = context_for(&operation);
+        let cancellation = CancellationSignal::active("cancel.retained.reset")
+            .expect("fixture cancellation signal");
+        let service = service_for(RetainedSurfaceExecutionErrorV1::ProfileResetRequired);
+
+        let problem = service
+            .execute(&context, &cancellation, UtcMicros(2), &request())
+            .await
+            .expect_err("reset-required lower state must remain a problem terminal");
+
+        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
+        assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert_eq!(problem.retry(), RetryDirective::Never);
+        assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
+        assert!(problem.committed_receipt().is_none());
+        let envelope = ApplicationProblemEnvelope::new(
+            operation.result_contract().clone(),
+            context.request_id().clone(),
+            problem,
+        )
+        .expect("reset-required envelope is valid");
+        envelope
+            .problem
+            .validate()
+            .expect("reset-required envelope remains a canonical terminal");
+        assert!(envelope.problem.committed_receipt.is_none());
     }
 
     #[test]
