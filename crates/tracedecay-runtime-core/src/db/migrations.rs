@@ -9,20 +9,38 @@
 use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
 use crate::errors::{Result, TraceDecayError};
 
+mod final_shape;
+
+const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS read_cache (
+        project_id   TEXT NOT NULL,
+        session_id   TEXT NOT NULL,
+        file_path    TEXT NOT NULL,
+        mtime_ns     INTEGER NOT NULL,
+        mode         TEXT NOT NULL,
+        args_hash    TEXT NOT NULL,
+        digest       TEXT NOT NULL,
+        body         BLOB NOT NULL,
+        token_count  INTEGER NOT NULL,
+        created_at   INTEGER NOT NULL,
+        PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_read_cache_session
+        ON read_cache(session_id, created_at);";
+
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
 ///
-/// v30 deletes the write-only derived-vector storage (`memory_banks`,
-/// `memory_bank_dirty`, `memory_v2_banks`, `memory_v2_bank_dirty`,
-/// `memory_v2_assertion_vectors`) per the Plan 39 Task 7 owner decisions of
-/// 2026-08-07; holographic recall re-encodes from canonical fact content at
-/// query time.
-///
-/// v32 removes the superseded SQLite code-graph projection and the V1 memory
-/// mirror. Code topology lives only in the verified Grafeo generation, while
-/// exact memory content, provenance, trust, retention, and feedback live only
-/// in the canonical `memory_v2_*` tables. A current-stamped store containing
-/// either retired projection fails closed before interpretation.
+/// Code topology lives only in the verified Grafeo generation. Exact memory
+/// content, provenance, trust, retention, and feedback live only in the
+/// canonical `memory_v2_*` tables; derived vectors are re-created from that
+/// content. A current-stamped store containing a retired projection fails
+/// closed before interpretation.
 pub const SCHEMA_VERSION: u32 = 32;
 
 /// Reads the current schema version from `PRAGMA user_version`.
@@ -113,34 +131,12 @@ pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
 }
 
 async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS read_cache (
-            project_id   TEXT NOT NULL,
-            session_id   TEXT NOT NULL,
-            file_path    TEXT NOT NULL,
-            mtime_ns     INTEGER NOT NULL,
-            mode         TEXT NOT NULL,
-            args_hash    TEXT NOT NULL,
-            digest       TEXT NOT NULL,
-            body         BLOB NOT NULL,
-            token_count  INTEGER NOT NULL,
-            created_at   INTEGER NOT NULL,
-            PRIMARY KEY (project_id, session_id, file_path, mode, args_hash)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_read_cache_session
-            ON read_cache(session_id, created_at);",
-    )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("failed to create schema: {e}"),
-        operation: "create_schema".to_string(),
-    })?;
+    conn.execute_batch(ROOT_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
 
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
@@ -157,6 +153,7 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
             message: format!("failed to create semantic vector staging schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
+    final_shape::require_exact_final_shape(conn).await?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
@@ -198,7 +195,18 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
                        'node_fingerprints', 'redundancy_pairs',
                        'memory_facts', 'memory_entities',
                        'memory_fact_entities', 'memory_feedback_events',
-                       'memory_oplog', 'memory_fact_relations'
+                       'memory_oplog', 'memory_fact_relations',
+                       'memory_banks', 'memory_bank_dirty',
+                       'memory_v2_banks', 'memory_v2_bank_dirty',
+                       'memory_v2_assertion_vectors',
+                       'memory_v2_legacy_map', 'memory_v2_legacy_quarantine',
+                       'memory_v2_backfill_progress',
+                       'memory_v2_legacy_proposal_map',
+                       'memory_v2_legacy_feedback_event_map',
+                       'memory_v2_feedback_history_repair_progress',
+                       'memory_v2_compatibility_operation_receipts',
+                       'memory_v2_compatibility_banks',
+                       'memory_v2_compatibility_bank_dirty'
                    )
                    OR name GLOB 'nodes_fts*'
                    OR name GLOB 'memory_facts_fts*'
@@ -230,6 +238,58 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
         })
 }
 
+async fn noncanonical_project_memory_proposal_state(
+    conn: &impl QueryExecutor,
+) -> Result<Option<(String, String)>> {
+    let mut rows = conn
+        .query(
+            "SELECT surface, state
+             FROM (
+                 SELECT 'memory_v2_proposal_current.state' AS surface, state
+                 FROM memory_v2_proposal_current
+                 UNION ALL
+                 SELECT 'memory_v2_proposal_transitions.current_state', current_state
+                 FROM memory_v2_proposal_transitions
+                 UNION ALL
+                 SELECT 'memory_v2_proposal_transitions.previous_state', previous_state
+                 FROM memory_v2_proposal_transitions
+                 WHERE previous_state IS NOT NULL
+             )
+             WHERE state NOT IN ('applying', 'applied', 'rejected', 'quarantined')
+             ORDER BY surface, state
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to inspect project-memory proposal states: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read project-memory proposal state probe: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?
+    else {
+        return Ok(None);
+    };
+    let surface = row
+        .get::<String>(0)
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to decode project-memory proposal state surface: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?;
+    let state = row
+        .get::<String>(1)
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to decode project-memory proposal state: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?;
+    Ok(Some((surface, state)))
+}
+
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
@@ -251,25 +311,44 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
     ensure_schema_current_connection(writer.engine_connection()).await
 }
 
+/// Verifies that an already-existing store has the one exact final shape this
+/// binary accepts. This query-only authority intentionally cannot initialize a
+/// fresh file, so read-only mounts cannot change persisted state.
+pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
+    let current = get_version(conn).await?;
+    if current != SCHEMA_VERSION {
+        return Err(unsupported_schema_version(current));
+    }
+    if let Some(object) = retired_sqlite_projection_object(conn).await? {
+        return Err(TraceDecayError::reset_required(
+            "SQLite store",
+            format!(
+                "database schema v{current} still contains retired SQLite projection object \
+                 '{object}'; remove the store directory and let this binary create the exact \
+                 relational shape"
+            ),
+        ));
+    }
+    final_shape::require_exact_final_shape(conn).await?;
+    if let Some((surface, state)) = noncanonical_project_memory_proposal_state(conn).await? {
+        return Err(TraceDecayError::reset_required(
+            "SQLite store",
+            format!(
+                "database schema v{current} contains removed project-memory proposal state \
+                 '{state}' in {surface}; remove the store directory and let this binary create \
+                 the exact automatic-curation shape"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Result<()> {
     let current = get_version(conn).await?;
-    if current == SCHEMA_VERSION {
-        if let Some(object) = retired_sqlite_projection_object(conn).await? {
-            return Err(TraceDecayError::reset_required(
-                "SQLite store",
-                format!(
-                    "database schema v{current} still contains retired SQLite projection object \
-                     '{object}'; remove the store directory and let this binary create the exact \
-                     relational shape"
-                ),
-            ));
-        }
-        return Ok(());
-    }
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    Err(unsupported_schema_version(current))
+    verify_final_schema_connection(conn).await
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use crate::db::engine::Executor;
 use crate::errors::{Result, TraceDecayError};
 
-const EVIDENCE_ASSEMBLY_SCHEMA: &str = r"
+pub(super) const EVIDENCE_ASSEMBLY_SCHEMA: &str = r"
     CREATE TABLE IF NOT EXISTS evidence_source_occurrences (
         occurrence_id TEXT PRIMARY KEY CHECK(length(occurrence_id) > 0),
         owner_digest TEXT NOT NULL CHECK(length(owner_digest) > 0),
@@ -111,7 +111,7 @@ const EVIDENCE_ASSEMBLY_SCHEMA: &str = r"
     );
 ";
 
-const EVIDENCE_ASSEMBLY_IMMUTABILITY: &str = r"
+pub(super) const EVIDENCE_ASSEMBLY_IMMUTABILITY: &str = r"
     CREATE TRIGGER IF NOT EXISTS evidence_source_occurrences_immutable_update
     BEFORE UPDATE ON evidence_source_occurrences BEGIN
         SELECT RAISE(ABORT, 'evidence source occurrences are immutable');

@@ -4,12 +4,8 @@ use crate::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
 
-pub(super) async fn install_final_memory_support(
-    conn: &impl MemoryV2Executor,
-    operation: &str,
-) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_v2_operation_receipts (
+pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS memory_v2_operation_receipts (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             operation_id TEXT NOT NULL CHECK(length(operation_id) > 0),
@@ -213,8 +209,13 @@ pub(super) async fn install_final_memory_support(
             OR NEW.updated_at < OLD.updated_at
         BEGIN
             SELECT RAISE(ABORT, 'memory_v2 fact relation identity is immutable');
-        END;",
-    )
-    .await
-    .map_err(|error| db_error(operation, error))
+        END;";
+
+pub(super) async fn install_final_memory_support(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
+    conn.execute_batch(FINAL_MEMORY_SUPPORT_SCHEMA)
+        .await
+        .map_err(|error| db_error(operation, error))
 }

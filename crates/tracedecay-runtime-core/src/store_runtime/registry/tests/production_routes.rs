@@ -167,6 +167,16 @@ fn seed_db(root: &TempDir, name: &str) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
+async fn seed_final_graph_db(root: &TempDir, name: &str) -> PathBuf {
+    let path = root.path().join(name);
+    let connection = crate::db::engine::TestConnection::open(&path);
+    crate::db::migrations::create_schema_connection(&connection)
+        .await
+        .expect("seed exact final graph schema");
+    drop(connection);
+    path.canonicalize().unwrap()
+}
+
 fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
     StoreRuntimeOpenRequest::new(
         StoreShardIdV1::project_sessions(
@@ -213,7 +223,7 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_db(&root, "profile.db"));
-    resolver.push(seed_db(&root, "project.db"));
+    resolver.push(seed_final_graph_db(&root, "project.db").await);
     resolver.push(seed_db(&root, "sessions.db"));
 
     let registry = StoreRuntimeRegistry::with_config(
@@ -244,8 +254,8 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
 async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
-    resolver.push(seed_db(&root, "profile.db"));
-    resolver.push(seed_db(&root, "project.db"));
+    resolver.push(seed_final_graph_db(&root, "profile.db").await);
+    resolver.push(seed_final_graph_db(&root, "project.db").await);
     let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
     let _profile = open_published(
         &registry,
@@ -274,6 +284,119 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert!(!physical.writer_present);
     assert!(physical.reader_handles > 0);
     assert_health_route(&project, false).await;
+}
+
+#[tokio::test]
+async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publication() {
+    let root = TempDir::new().unwrap();
+    let profile_path = seed_final_graph_db(&root, "profile.db").await;
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    Connection::open(&project_path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 31;")
+        .unwrap();
+
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(profile_path);
+    resolver.push(project_path);
+    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+
+    let result = registry
+        .open(StoreRuntimeOpenRequest::new_read_only(
+            StoreShardIdV1::project(
+                id::<BrainId>("brain.registry"),
+                id::<UserProfileId>("profile.registry"),
+                id::<ProjectId>("project.reader-only-reset"),
+            ),
+            incarnation(),
+            Some(pin),
+        ))
+        .await;
+
+    assert!(matches!(
+        result,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::ResetRequired {
+            authority,
+            reason,
+        }) if authority == "SQLite store" && reason.contains("schema v31")
+    ));
+    assert_eq!(
+        registry
+            .inventory(tracedecay_store::AdmissionConfigV1::default(), None)
+            .entries
+            .len(),
+        1,
+        "the reset-required project runtime must not be published beside the profile authority"
+    );
+}
+
+#[tokio::test]
+async fn writable_existing_open_refuses_tampered_final_shape_before_publication() {
+    let root = TempDir::new().unwrap();
+    let profile_path = seed_db(&root, "profile.db");
+    let project_path = seed_final_graph_db(&root, "project.db").await;
+    Connection::open(&project_path)
+        .unwrap()
+        .execute_batch("DROP INDEX idx_read_cache_session;")
+        .unwrap();
+
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(profile_path);
+    resolver.push(project_path.clone());
+    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+    let _profile = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+    )
+    .await;
+    let pin = match registry.profile_authority_pin(&profile_shard()) {
+        ProfileAuthorityPinResult::Pinned(pin) => pin,
+        other => panic!("profile was not pinned: {other:?}"),
+    };
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &project_path,
+        "writable existing final-shape admission",
+    )
+    .unwrap();
+
+    let result = registry
+        .open(StoreRuntimeOpenRequest::new_authorized(
+            StoreShardIdV1::project(
+                id::<BrainId>("brain.registry"),
+                id::<UserProfileId>("profile.registry"),
+                id::<ProjectId>("project.writer-reset"),
+            ),
+            incarnation(),
+            Some(pin),
+            authority,
+        ))
+        .await;
+
+    assert!(matches!(
+        result,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::ResetRequired {
+            authority,
+            reason,
+        }) if authority == "SQLite store"
+            && reason.contains("missing required index 'idx_read_cache_session'")
+    ));
+    assert_eq!(
+        registry
+            .inventory(tracedecay_store::AdmissionConfigV1::default(), None)
+            .entries
+            .len(),
+        1,
+        "the tampered writable project runtime must not be published"
+    );
 }
 
 #[tokio::test]
@@ -319,7 +442,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     )
     .await;
 
-    assert!(remote.schema_migrated());
+    assert!(remote.schema_initialized());
     let tables: Vec<String> = Connection::open(&remote_path)
         .unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -352,7 +475,7 @@ async fn distinct_logical_shards_cannot_publish_two_writers_for_one_database() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_db(&root, "profile.db"));
-    let shared_path = seed_db(&root, "shared-project.db");
+    let shared_path = seed_final_graph_db(&root, "shared-project.db").await;
     resolver.push(shared_path.clone());
     let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
     let _profile = open_published(

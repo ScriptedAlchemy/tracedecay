@@ -18,7 +18,7 @@ mod tests;
 #[cfg(test)]
 mod types;
 
-pub(in crate::db) use schema::create_schema;
+pub(in crate::db) use schema::{FINAL_SCHEMA_BATCHES, create_schema};
 #[cfg(test)]
 use types::OwnerKey;
 

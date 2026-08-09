@@ -21,7 +21,7 @@ const LEGACY_DISPOSITIONS_TABLE: &str = "retrieval_anchor_dispositions_terminal_
 /// up weaker than production.
 const ANCHORS_SCHEMA: &str = tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL;
 
-const ALIASES_SCHEMA: &str = "
+pub(super) const ALIASES_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS retrieval_anchor_aliases (
         owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
         alias_kind TEXT NOT NULL CHECK(length(alias_kind) > 0),
@@ -34,7 +34,7 @@ const ALIASES_SCHEMA: &str = "
     );
 ";
 
-const AUTHORITY_SCHEMA: &str = "
+pub(super) const AUTHORITY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS retrieval_anchor_dispositions (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         disposition_id TEXT NOT NULL CHECK(length(disposition_id) > 0),
@@ -103,7 +103,7 @@ const AUTHORITY_SCHEMA: &str = "
     );
 ";
 
-const IMMUTABILITY_TRIGGERS: &str = "
+pub(super) const IMMUTABILITY_TRIGGERS: &str = "
     CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
     BEFORE UPDATE ON retrieval_anchors BEGIN
         SELECT RAISE(ABORT, 'retrieval anchors are immutable');

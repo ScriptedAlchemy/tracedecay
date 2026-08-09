@@ -6,17 +6,7 @@ use super::super::{MemoryV2Executor, db_error};
 use super::final_authority::install_final_memory_support;
 use super::proposals::{install_current_projection_indexes, install_proposal_integrity_triggers};
 
-/// Installs the only accepted project-memory persisted shape.
-pub(in crate::db) async fn create_schema(
-    conn: &impl MemoryV2Executor,
-    operation: &str,
-) -> Result<()> {
-    conn.execute_batch("PRAGMA secure_delete = ON")
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_v2_facts (
+pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_facts (
             fact_id TEXT NOT NULL,
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
@@ -204,7 +194,7 @@ pub(in crate::db) async fn create_schema(
             project_id TEXT NOT NULL,
             previous_state TEXT,
             current_state TEXT NOT NULL CHECK(current_state IN (
-                'pending', 'applied', 'rejected', 'quarantined'
+                'applying', 'applied', 'rejected', 'quarantined'
             )),
             reviewer_json TEXT CHECK(reviewer_json IS NULL OR json_valid(reviewer_json)),
             validation_json TEXT CHECK(validation_json IS NULL OR json_valid(validation_json)),
@@ -223,7 +213,7 @@ pub(in crate::db) async fn create_schema(
             FOREIGN KEY(promoted_event_id, promoted_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id),
             CHECK(previous_state IS NULL OR previous_state IN (
-                'pending', 'applied', 'rejected', 'quarantined'
+                'applying', 'applied', 'rejected', 'quarantined'
             )),
             CHECK(
                 (current_state = 'applied'
@@ -240,7 +230,7 @@ pub(in crate::db) async fn create_schema(
             owner_kind TEXT NOT NULL,
             project_id TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'pending', 'applied', 'rejected', 'quarantined'
+                'applying', 'applied', 'rejected', 'quarantined'
             )),
             revision INTEGER NOT NULL CHECK(revision >= 1),
             last_transition_id TEXT NOT NULL,
@@ -333,10 +323,20 @@ pub(in crate::db) async fn create_schema(
         CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_no_delete
         BEFORE DELETE ON memory_v2_proposal_transitions BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
-        END;",
-    )
-    .await
-    .map_err(|error| db_error(operation, error))?;
+        END;";
+
+/// Installs the only accepted project-memory persisted shape.
+pub(in crate::db) async fn create_schema(
+    conn: &impl MemoryV2Executor,
+    operation: &str,
+) -> Result<()> {
+    conn.execute_batch("PRAGMA secure_delete = ON")
+        .await
+        .map_err(|error| db_error(operation, error))?;
+    crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(conn, operation).await?;
+    conn.execute_batch(BASELINE_SCHEMA)
+        .await
+        .map_err(|error| db_error(operation, error))?;
     conn.execute_batch(
         "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
              source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence

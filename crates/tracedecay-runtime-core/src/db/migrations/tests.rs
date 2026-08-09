@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
+use rusqlite::params;
 use tempfile::TempDir;
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
@@ -9,6 +10,7 @@ use crate::db::engine::{Connection, TestConnection};
 
 use super::{SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection};
 
+mod final_shape;
 mod fts;
 
 // ---------------------------------------------------------------------------
@@ -102,6 +104,125 @@ async fn scalar_i64(conn: &Connection, sql: &str) -> i64 {
         .expect("failed to read scalar row")
         .expect("scalar query should return a row");
     row.get(0).expect("failed to read scalar value")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProposalStoreSnapshot {
+    user_version: i64,
+    schema_bytes: Vec<u8>,
+    rows: Vec<(String, Option<String>, String)>,
+}
+
+fn proposal_store_snapshot(path: &Path) -> ProposalStoreSnapshot {
+    let raw = rusqlite::Connection::open(path).expect("open proposal snapshot");
+    let user_version = raw
+        .query_row("PRAGMA user_version", (), |row| row.get(0))
+        .expect("read proposal snapshot version");
+    let schema_bytes = raw
+        .query_row(
+            "SELECT CAST(group_concat(sql, char(0)) AS BLOB)
+             FROM (
+                 SELECT sql
+                 FROM sqlite_master
+                 WHERE name IN (
+                     'memory_v2_proposals',
+                     'memory_v2_proposal_transitions',
+                     'memory_v2_proposal_current'
+                 )
+                 ORDER BY type, name
+             )",
+            (),
+            |row| row.get(0),
+        )
+        .expect("read proposal snapshot schema");
+    let mut statement = raw
+        .prepare(
+            "SELECT current.state, transitions.previous_state, transitions.current_state
+             FROM memory_v2_proposal_current AS current
+             JOIN memory_v2_proposal_transitions AS transitions
+               ON transitions.transition_id = current.last_transition_id
+              AND transitions.proposal_id = current.proposal_id
+              AND transitions.owner_kind = current.owner_kind
+              AND transitions.project_id = current.project_id
+             ORDER BY current.proposal_id",
+        )
+        .expect("prepare proposal snapshot rows");
+    let rows = statement
+        .query_map((), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query proposal snapshot rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("read proposal snapshot rows");
+    ProposalStoreSnapshot {
+        user_version,
+        schema_bytes,
+        rows,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProposalStateSurface {
+    Current,
+    TransitionCurrent,
+    TransitionPrevious,
+}
+
+impl ProposalStateSurface {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Current => "memory_v2_proposal_current.state",
+            Self::TransitionCurrent => "memory_v2_proposal_transitions.current_state",
+            Self::TransitionPrevious => "memory_v2_proposal_transitions.previous_state",
+        }
+    }
+}
+
+fn seed_proposal_state_fixture(
+    path: &Path,
+    current_state: &str,
+    transition_current_state: &str,
+    transition_previous_state: Option<&str>,
+) {
+    let raw = rusqlite::Connection::open(path).expect("open proposal state fixture");
+    raw.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA ignore_check_constraints = ON;",
+    )
+    .expect("enable exact-shape legacy fixture");
+    raw.execute(
+        "INSERT INTO memory_v2_proposals(
+             proposal_id, owner_kind, project_id, owner_json, idempotency_key,
+             request_digest, request_json, evidence_json, submitted_at
+         ) VALUES(
+             'proposal-fixture', 'profile', '', '{}', 'idempotency-fixture',
+             'digest-fixture', '{}', '{}', 1
+         )",
+        (),
+    )
+    .expect("seed proposal fixture");
+    raw.execute(
+        "INSERT INTO memory_v2_proposal_transitions(
+             transition_id, proposal_id, owner_kind, project_id,
+             previous_state, current_state, transition_json, occurred_at
+         ) VALUES(
+             'transition-fixture', 'proposal-fixture', 'profile', '',
+             ?1, ?2, '{}', 1
+         )",
+        params![transition_previous_state, transition_current_state],
+    )
+    .expect("seed proposal transition fixture");
+    raw.execute(
+        "INSERT INTO memory_v2_proposal_current(
+             proposal_id, owner_kind, project_id, state, revision,
+             last_transition_id, updated_at
+         ) VALUES(
+             'proposal-fixture', 'profile', '', ?1, 1,
+             'transition-fixture', 1
+         )",
+        params![current_state],
+    )
+    .expect("seed current proposal fixture");
+    raw.execute_batch("PRAGMA ignore_check_constraints = OFF;")
+        .expect("restore proposal fixture constraints");
 }
 
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
@@ -247,7 +368,7 @@ async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
 }
 
 #[tokio::test]
-async fn a_current_stamp_with_retired_memory_mirror_objects_is_reset_required() {
+async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_required() {
     for retired in [
         "memory_facts",
         "memory_entities",
@@ -257,6 +378,20 @@ async fn a_current_stamp_with_retired_memory_mirror_objects_is_reset_required() 
         "memory_fact_relations",
         "memory_facts_fts",
         "memory_facts_fts_data",
+        "memory_banks",
+        "memory_bank_dirty",
+        "memory_v2_banks",
+        "memory_v2_bank_dirty",
+        "memory_v2_assertion_vectors",
+        "memory_v2_legacy_map",
+        "memory_v2_legacy_quarantine",
+        "memory_v2_backfill_progress",
+        "memory_v2_legacy_proposal_map",
+        "memory_v2_legacy_feedback_event_map",
+        "memory_v2_feedback_history_repair_progress",
+        "memory_v2_compatibility_operation_receipts",
+        "memory_v2_compatibility_banks",
+        "memory_v2_compatibility_bank_dirty",
     ] {
         let (conn, _dir) = create_schema_db().await;
         conn.execute_batch(&format!("CREATE TABLE {retired} (id INTEGER);"))
@@ -265,7 +400,7 @@ async fn a_current_stamp_with_retired_memory_mirror_objects_is_reset_required() 
 
         let error = ensure_schema_current_connection(&conn)
             .await
-            .expect_err("a current stamp must not conceal the retired memory mirror");
+            .expect_err("a current stamp must not conceal retired memory storage");
         assert_eq!(
             error
                 .reset_required_context()
@@ -278,6 +413,76 @@ async fn a_current_stamp_with_retired_memory_mirror_objects_is_reset_required() 
         );
         assert!(table_exists(&conn, retired).await);
         assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    }
+}
+
+#[tokio::test]
+async fn legacy_proposal_states_are_reset_required_on_every_persisted_surface() {
+    for legacy_state in ["pending", "pending_approval"] {
+        for surface in [
+            ProposalStateSurface::Current,
+            ProposalStateSurface::TransitionCurrent,
+            ProposalStateSurface::TransitionPrevious,
+        ] {
+            let (conn, dir) = create_schema_db().await;
+            let (current_state, transition_current_state, transition_previous_state) = match surface
+            {
+                ProposalStateSurface::Current => (legacy_state, "applying", None),
+                ProposalStateSurface::TransitionCurrent => ("applying", legacy_state, None),
+                ProposalStateSurface::TransitionPrevious => {
+                    ("applying", "applying", Some(legacy_state))
+                }
+            };
+            let db_path = dir.path().join("test.db");
+            seed_proposal_state_fixture(
+                &db_path,
+                current_state,
+                transition_current_state,
+                transition_previous_state,
+            );
+            let before = proposal_store_snapshot(&db_path);
+
+            let error = match ensure_schema_current_connection(&conn).await {
+                Ok(()) => panic!("{} accepted {legacy_state}", surface.label()),
+                Err(error) => error,
+            };
+            let (authority, reason) = error
+                .reset_required_context()
+                .expect("legacy proposal state must return typed reset-required");
+            assert_eq!(authority, "SQLite store");
+            assert!(
+                reason.contains(legacy_state),
+                "{} reset reason omitted {legacy_state}: {reason}",
+                surface.label()
+            );
+            assert_eq!(
+                proposal_store_snapshot(&db_path),
+                before,
+                "{} refusal mutated rows, schema bytes, or version",
+                surface.label()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn canonical_proposal_states_remain_admissible_without_mutation() {
+    for state in ["applying", "applied", "rejected", "quarantined"] {
+        let (conn, dir) = create_schema_db().await;
+        let db_path = dir.path().join("test.db");
+        seed_proposal_state_fixture(&db_path, state, state, Some(state));
+        let before = proposal_store_snapshot(&db_path);
+
+        ensure_schema_current_connection(&conn)
+            .await
+            .unwrap_or_else(|error| panic!("canonical state {state} was refused: {error}"));
+
+        assert_eq!(
+            proposal_store_snapshot(&db_path),
+            before,
+            "canonical state {state} admission mutated rows, schema bytes, or version"
+        );
+        assert_eq!(before.user_version, i64::from(SCHEMA_VERSION));
     }
 }
 
@@ -428,8 +633,8 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         );
     }
 
-    // The proposal projection is born with final transition-denial behavior:
-    // no durable applying state can ever be recorded.
+    // The automatic fact lifecycle begins durably in `applying` so an
+    // interrupted automatic promotion can resume without an approval queue.
     conn.execute(
         "INSERT INTO memory_v2_proposals (
             proposal_id, owner_kind, project_id, owner_json, idempotency_key,
@@ -439,7 +644,7 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         (),
     )
     .await
-    .expect("fresh proposal schema must accept a pending submission");
+    .expect("fresh proposal schema must accept an automatic submission");
     let applying = conn
         .execute(
             "INSERT INTO memory_v2_proposal_transitions (
@@ -451,8 +656,8 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         )
         .await;
     assert!(
-        applying.is_err(),
-        "a durable applying transition must be refused"
+        applying.is_ok(),
+        "a durable applying transition must support automatic promotion"
     );
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
 }
