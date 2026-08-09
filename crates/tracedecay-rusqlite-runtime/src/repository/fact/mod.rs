@@ -48,20 +48,6 @@ impl FactExecutor {
         if let Some(assertion) = batch.assertion() {
             insert_assertion(savepoint, &owner, assertion)?;
         }
-        if let Some(mapping) = batch.legacy_mapping() {
-            let changed = savepoint.execute(
-                "UPDATE memory_facts
-                 SET canonical_fact_id = ?1
-                 WHERE fact_id = ?2
-                   AND (canonical_fact_id IS NULL OR canonical_fact_id = ?1)",
-                params![mapping.fact_id().as_str(), mapping.legacy_fact_id()],
-            )?;
-            if changed != 1 {
-                return Err(invalid(
-                    "canonical fact projection row is missing or bound to another fact",
-                ));
-            }
-        }
         for event in batch.events() {
             savepoint.execute(
                 "INSERT INTO memory_v2_lineage_events (
