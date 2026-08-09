@@ -17,51 +17,50 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::work_attempt::{WorkAttemptStorageError, WorkAttemptStoragePort};
+use crate::work_attempt::{
+    CurrentWorkProductAttemptGraphV1, WorkAttemptStorageError, WorkAttemptStoragePort,
+    accepted_attempt_draft,
+    current_work_product_attempt_graph, product_admission_problem,
+    product_attempt_projection_binding,
+};
 use crate::work_attempt_effect::{
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 use crate::work_read::{WorkProjectionPortError, WorkProjectionReadPort};
 use crate::{
     ApplicationContractError, ApplicationProblem, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    RetryDirective, SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
+    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1,
 };
 
 const RETRY_INPUT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-input.v1";
 const RETRY_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-receipt.v1";
 const RETRY_LEASE_DOMAIN: &str = "tracedecay.application.work-retry-lease.v1";
+const WORK_PRODUCT_RETRY_INPUT_DIGEST_DOMAIN: &str =
+    "tracedecay.application.work-product-retry-attempt.final-v2";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkRetrySourceV1 {
     Runtime,
-    Test,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkRetryCauseV1 {
     RuntimeFailure,
-    TestFailure,
 }
 
 impl WorkRetryCauseV1 {
-    const fn belongs_to(self, source: WorkRetrySourceV1) -> bool {
-        matches!(
-            (source, self),
-            (WorkRetrySourceV1::Runtime, Self::RuntimeFailure)
-                | (WorkRetrySourceV1::Test, Self::TestFailure)
-        )
-    }
-
     const fn restart_reason(self) -> WorkRestartReasonV1 {
         match self {
-            Self::RuntimeFailure | Self::TestFailure => WorkRestartReasonV1::FailureObserved,
+            Self::RuntimeFailure => WorkRestartReasonV1::FailureObserved,
         }
     }
 }
 
-/// A selector into an owning runtime or managed-Test evidence authority.
+/// A selector into the owning runtime-terminal evidence authority.
 ///
 /// `evidence_ref` is an opaque local reference. The Work retry owner resolves
 /// it through [`WorkRetryEvidencePortV1`]; callers never submit the evidence
@@ -76,7 +75,8 @@ pub struct WorkRetryFailureSelectorV1 {
 
 impl WorkRetryFailureSelectorV1 {
     fn validate(&self) -> bool {
-        self.cause.belongs_to(self.source)
+        self.source == WorkRetrySourceV1::Runtime
+            && self.cause == WorkRetryCauseV1::RuntimeFailure
             && !self.evidence_ref.is_empty()
             && self.evidence_ref.len() <= 256
             && self.evidence_ref.bytes().all(|byte| {
@@ -114,9 +114,7 @@ pub enum WorkRetryEvidenceErrorV1 {
     Unavailable,
 }
 
-/// Canonical runtime-terminal evidence owner. Managed-Test failures are owned
-/// by their result journal and must be supplied by a composite daemon evidence
-/// port; this owner never relabels runtime evidence as Test evidence.
+/// Canonical runtime-terminal evidence owner.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RuntimeWorkRetryEvidenceV1;
 
@@ -127,9 +125,6 @@ impl WorkRetryEvidencePortV1 for RuntimeWorkRetryEvidenceV1 {
         original: &WorkAttemptV1,
         selector: &WorkRetryFailureSelectorV1,
     ) -> Result<VerifiedWorkRetryFailureV1, WorkRetryEvidenceErrorV1> {
-        if selector.source != WorkRetrySourceV1::Runtime {
-            return Err(WorkRetryEvidenceErrorV1::NotFoundOrNotAuthorized);
-        }
         let terminal = original
             .terminal()
             .ok_or(WorkRetryEvidenceErrorV1::Conflict)?;
@@ -234,11 +229,7 @@ impl WorkRetryReceiptV1 {
     pub fn validate_for_observation(&self) -> bool {
         self.command.validate()
             && self.failure.selector == self.command.failure
-            && self
-                .failure
-                .selector
-                .cause
-                .belongs_to(self.failure.selector.source)
+            && self.failure.selector.validate()
             && self.failure.evidence_digest.validate().is_ok()
             && self.failure.observed_at == self.retry_required_at
             && self.restarted_at.0 >= self.retry_required_at.0
@@ -478,9 +469,13 @@ where
         )
         .map_err(contract_problem)?;
         let binding = WorkAttemptProjectionBindingV1::new(
-            snapshot.generation_id().clone(),
-            snapshot.sequence(),
-            projection.version(),
+            original.projection_binding().graph_version(),
+            original.projection_binding().event_sequence(),
+            original.projection_binding().source_watermark().clone(),
+            original
+                .projection_binding()
+                .recovered_graph_digest()
+                .clone(),
             original.projection_binding().accepted_proposal().clone(),
         )
         .map_err(contract_problem)?;
@@ -542,6 +537,296 @@ where
     }
 }
 
+/// Public retry admission over the verified Work product graph. The legacy
+/// projection reader is deliberately absent: the accepted proposal and
+/// execution admission are re-read from the product graph, then the combined
+/// port commits the accepted-attempt link, retry receipt, and attempt row as
+/// one transaction.
+pub struct WorkProductRetryServiceV1<S, E> {
+    storage: S,
+    evidence: E,
+}
+
+impl<S, E> WorkProductRetryServiceV1<S, E>
+where
+    S: WorkRetryStoragePortV1
+        + WorkAttemptEffectStoragePortV1
+        + WorkGraphReadPortV1
+        + WorkProductOwnerAuthorizationPortV1
+        + WorkProductAttemptAdmissionPortV1,
+    E: WorkRetryEvidencePortV1,
+{
+    pub const fn new(storage: S, evidence: E) -> Self {
+        Self { storage, evidence }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn retry(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        revisions: &WorkProductRevisionPinsV1,
+        topology: &WorkTopologyPolicyV1,
+        command: RetryWorkAttemptCommandV1,
+        restarted_at: UtcMicros,
+    ) -> Result<WorkRetryAttemptOutcomeV1, ApplicationProblem> {
+        admit(context, restarted_at)?;
+        if !command.validate() {
+            return Err(invalid_problem());
+        }
+        let authority = work_authority(context)?;
+        let input_digest = canonical_sha256(&(RETRY_INPUT_DIGEST_DOMAIN, &command))
+            .map_err(|_| invalid_problem())?;
+        let product_digest = canonical_sha256(&(WORK_PRODUCT_RETRY_INPUT_DIGEST_DOMAIN, &command))
+            .map_err(|_| invalid_problem())?;
+        let product = current_work_product_attempt_graph(
+            &self.storage,
+            context,
+            binding,
+            restarted_at,
+        )?;
+        if let Some(replayed) = self
+            .storage
+            .retry_by_command(&authority, &command.command_id)
+            .map_err(storage_problem)?
+        {
+            if replayed.receipt().canonical_input_digest != input_digest {
+                return Err(conflict_problem(
+                    "application.work-retry.idempotency-conflict",
+                    "The Work retry command identity was already used with different input.",
+                ));
+            }
+            let attempt = match &replayed {
+                WorkRetryAttemptOutcomeV1::Created { attempt, .. }
+                | WorkRetryAttemptOutcomeV1::Replayed { attempt, .. } => attempt.clone(),
+            };
+            require_product_retry_admission(&product, &attempt)?;
+            let draft = accepted_attempt_draft(
+                &product,
+                revisions,
+                command.command_id.clone(),
+                product_digest,
+                attempt.projection_binding().graph_version(),
+                attempt.identity(),
+                product.context.observed_at(),
+            )?;
+            let admission = WorkProductRetryAdmissionV1 {
+                admission: WorkProductAttemptAdmissionV1 {
+                    product_context: product.context,
+                    product_draft: draft,
+                    authority,
+                    attempt: attempt.clone(),
+                    concurrency: topology.concurrency.clone(),
+                },
+                retry: WorkRetryWriteV1 {
+                    receipt: replayed.receipt().clone(),
+                    attempt,
+                },
+            };
+            return self
+                .storage
+                .admit_retry(&admission)
+                .map(|(_, outcome)| outcome)
+                .map_err(product_admission_problem);
+        }
+
+        let original = self
+            .storage
+            .load(&authority, &command.original_attempt)
+            .map_err(storage_problem)?;
+        require_retry_effect_safe(&self.storage, &authority, &original)?;
+        let failure = self
+            .evidence
+            .resolve_failure(&authority, &original, &command.failure)
+            .map_err(evidence_problem)?;
+        validate_failure(&command, &original, &failure)?;
+        if failure.observed_at.0 > restarted_at.0 {
+            return Err(conflict_problem(
+                "application.work-retry.failure-conflict",
+                "The retry failure was observed after retry admission.",
+            ));
+        }
+        require_product_retry_admission(&product, &original)?;
+        let attempt = prepare_product_retry_attempt(
+            &self.storage,
+            context,
+            topology,
+            &product,
+            &command,
+            restarted_at,
+            &authority,
+            &original,
+        )?;
+        let retry_required_at = failure.observed_at;
+        let receipt = WorkRetryReceiptV1::new(
+            command.clone(),
+            failure,
+            attempt.identity().clone(),
+            retry_required_at,
+            restarted_at,
+        )
+        .map_err(retry_receipt_problem)?;
+        if receipt.canonical_input_digest != input_digest {
+            return Err(invalid_problem());
+        }
+        let draft = accepted_attempt_draft(
+            &product,
+            revisions,
+            command.command_id.clone(),
+            product_digest,
+            attempt.projection_binding().graph_version(),
+            attempt.identity(),
+            product.context.observed_at(),
+        )?;
+        let admission = WorkProductRetryAdmissionV1 {
+            admission: WorkProductAttemptAdmissionV1 {
+                product_context: product.context,
+                product_draft: draft,
+                authority,
+                attempt: attempt.clone(),
+                concurrency: topology.concurrency.clone(),
+            },
+            retry: WorkRetryWriteV1 { receipt, attempt },
+        };
+        self.storage
+            .admit_retry(&admission)
+            .map(|(_, outcome)| outcome)
+            .map_err(product_admission_problem)
+    }
+}
+
+fn require_product_retry_admission(
+    product: &CurrentWorkProductAttemptGraphV1,
+    attempt: &WorkAttemptV1,
+) -> Result<(), ApplicationProblem> {
+    let item = product
+        .graph
+        .item(attempt.identity().task_id())
+        .ok_or_else(not_found_problem)?;
+    if !item.is_execution_admitted()
+        || item.accepted_proposal() != Some(attempt.projection_binding().accepted_proposal())
+    {
+        return Err(conflict_problem(
+            "application.work-retry.product-conflict",
+            "The canonical Work product graph no longer admits this retry.",
+        ));
+    }
+    Ok(())
+}
+
+fn require_retry_effect_safe<S>(
+    storage: &S,
+    authority: &WorkAuthority,
+    original: &WorkAttemptV1,
+) -> Result<(), ApplicationProblem>
+where
+    S: WorkAttemptEffectStoragePortV1,
+{
+    if original.execution().effect_state() != WorkEffectStateV1::CompoundNonRepeatable {
+        return Ok(());
+    }
+    let holder = storage
+        .load_effect_dispatch(authority, original.identity())
+        .map_err(effect_storage_problem)?;
+    if holder.as_ref().is_some_and(|holder| {
+        holder.resolution() == Some(WorkAttemptEffectResolutionV1::NoEffect)
+    }) {
+        Ok(())
+    } else {
+        Err(conflict_problem(
+            "application.work-retry.effect-unknown",
+            "The original Work attempt has an unresolved non-repeatable effect.",
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_product_retry_attempt<S>(
+    storage: &S,
+    context: &RequestContext,
+    topology: &WorkTopologyPolicyV1,
+    product: &CurrentWorkProductAttemptGraphV1,
+    command: &RetryWorkAttemptCommandV1,
+    restarted_at: UtcMicros,
+    authority: &WorkAuthority,
+    original: &WorkAttemptV1,
+) -> Result<WorkAttemptV1, ApplicationProblem>
+where
+    S: WorkAttemptStoragePort,
+{
+    if original.execution().execution_snapshot().topology() != topology
+        || restarted_at.0 >= original.execution().deadline().0
+    {
+        return Err(conflict_problem(
+            "application.work-retry.admission-conflict",
+            "The original Work admission no longer permits this retry.",
+        ));
+    }
+    let identity = WorkAttemptIdentityV1::new(
+        original.identity().task_id().clone(),
+        original.identity().run_id().clone(),
+        command.new_attempt_id.clone(),
+    )
+    .map_err(contract_problem)?;
+    let binding = product_attempt_projection_binding(
+        product,
+        original.projection_binding().accepted_proposal().clone(),
+    )?;
+    let cancellation_generation = original
+        .execution()
+        .cancellation_generation()
+        .checked_add(1)
+        .ok_or_else(invalid_problem)?;
+    let envelope = WorkExecutionEnvelopeV1::new(
+        identity.clone(),
+        binding.clone(),
+        original.execution().operation().clone(),
+        original.execution().execution_snapshot().clone(),
+        context.scope().project_id.clone(),
+        context.scope().repository_id.clone(),
+        context.scope().worktree_id.clone(),
+        original.execution().worktree_root().to_owned(),
+        original.execution().reference().cloned(),
+        original.execution().commit().clone(),
+        original.execution().instructions().to_owned(),
+        cancellation_generation,
+        original.execution().effect_state(),
+    )
+    .map_err(contract_problem)?;
+    let epoch = storage.next_fence_epoch(authority).map_err(storage_problem)?;
+    let lease_digest =
+        canonical_sha256(&(RETRY_LEASE_DOMAIN, &identity)).map_err(|_| invalid_problem())?;
+    let lease_id = WorkLeaseId::new(format!(
+        "work-retry-lease:{}",
+        lease_digest.as_str().trim_start_matches("sha256:")
+    ))
+    .map_err(|_| invalid_problem())?;
+    let lease = WorkLeaseFenceV1::new(
+        lease_id,
+        WorkFenceEpochV1::new(epoch).map_err(contract_problem)?,
+    )
+    .map_err(contract_problem)?;
+    WorkAttemptV1::new(
+        identity,
+        binding,
+        envelope,
+        lease,
+        WorkAttemptStateV1::RecoveryRequired,
+        None,
+        Vec::new(),
+        WorkCancellationStateV1::None,
+        WorkRecoveryStateV1::RecoveryRequired {
+            source_attempt_id: Some(original.identity().attempt_id().clone()),
+            reason: command.failure.cause.restart_reason(),
+        },
+        original.requested_route().clone(),
+        None,
+        None,
+    )
+    .map_err(contract_problem)
+}
+
+
 fn validate_failure(
     command: &RetryWorkAttemptCommandV1,
     original: &WorkAttemptV1,
@@ -553,41 +838,34 @@ fn validate_failure(
             "The resolved failure does not authorize this Work retry.",
         ));
     }
-    if command.failure.source == WorkRetrySourceV1::Runtime {
-        let Some(terminal) = original.terminal() else {
-            return Err(conflict_problem(
-                "application.work-retry.original-not-terminal",
-                "A runtime retry requires terminal failure evidence.",
-            ));
-        };
-        let (digest, observed_at, eligible) = match terminal {
-            WorkTerminalEvidenceV1::Failed {
-                evidence_digest,
-                observed_at,
-            }
-            | WorkTerminalEvidenceV1::TimedOut {
-                evidence_digest,
-                observed_at,
-            } => (evidence_digest, observed_at, true),
-            WorkTerminalEvidenceV1::Succeeded {
-                evidence_digest,
-                observed_at,
-            }
-            | WorkTerminalEvidenceV1::Cancelled {
-                evidence_digest,
-                observed_at,
-            } => (evidence_digest, observed_at, false),
-        };
-        if !eligible || digest != &failure.evidence_digest || observed_at != &failure.observed_at {
-            return Err(conflict_problem(
-                "application.work-retry.runtime-evidence-conflict",
-                "The runtime failure no longer matches the original terminal receipt.",
-            ));
-        }
-    } else if !original.is_terminal() {
+    let Some(terminal) = original.terminal() else {
         return Err(conflict_problem(
             "application.work-retry.original-not-terminal",
-            "A managed-Test retry requires a terminal original attempt.",
+            "A runtime retry requires terminal failure evidence.",
+        ));
+    };
+    let (digest, observed_at, eligible) = match terminal {
+        WorkTerminalEvidenceV1::Failed {
+            evidence_digest,
+            observed_at,
+        }
+        | WorkTerminalEvidenceV1::TimedOut {
+            evidence_digest,
+            observed_at,
+        } => (evidence_digest, observed_at, true),
+        WorkTerminalEvidenceV1::Succeeded {
+            evidence_digest,
+            observed_at,
+        }
+        | WorkTerminalEvidenceV1::Cancelled {
+            evidence_digest,
+            observed_at,
+        } => (evidence_digest, observed_at, false),
+    };
+    if !eligible || digest != &failure.evidence_digest || observed_at != &failure.observed_at {
+        return Err(conflict_problem(
+            "application.work-retry.runtime-evidence-conflict",
+            "The runtime failure no longer matches the original terminal receipt.",
         ));
     }
     Ok(())
@@ -723,7 +1001,7 @@ mod tests {
     }
 
     fn valid_receipt() -> WorkRetryReceiptV1 {
-        let evidence_digest = canonical_sha256(&("retry-test-evidence", 1_u8)).expect("digest");
+        let evidence_digest = canonical_sha256(&("runtime-retry-evidence", 1_u8)).expect("digest");
         let command = RetryWorkAttemptCommandV1 {
             original_attempt: identity("attempt.original"),
             new_attempt_id: AttemptId::new("attempt.retry".to_owned()).expect("attempt id"),
@@ -759,13 +1037,21 @@ mod tests {
     }
 
     #[test]
-    fn observation_validation_rejects_backdated_failure_and_mismatched_source() {
+    fn retry_failure_wire_refuses_nonruntime_source() {
+        let decoded = serde_json::from_str::<WorkRetryFailureSelectorV1>(
+            r#"{"source":"test","cause":"test_failure","evidence_ref":"test:failure"}"#,
+        );
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn observation_validation_rejects_backdated_failure_and_changed_selector() {
         let mut receipt = valid_receipt();
         receipt.failure.observed_at = UtcMicros(22);
         assert!(!receipt.validate_for_observation());
 
         let mut receipt = valid_receipt();
-        receipt.command.failure.source = WorkRetrySourceV1::Test;
+        receipt.command.failure.evidence_ref = "runtime-terminal:other".to_owned();
         assert!(!receipt.validate_for_observation());
     }
 
@@ -773,10 +1059,6 @@ mod tests {
     fn terminal_failure_retry_uses_truthful_recovery_reason() {
         assert_eq!(
             WorkRetryCauseV1::RuntimeFailure.restart_reason(),
-            WorkRestartReasonV1::FailureObserved,
-        );
-        assert_eq!(
-            WorkRetryCauseV1::TestFailure.restart_reason(),
             WorkRestartReasonV1::FailureObserved,
         );
     }

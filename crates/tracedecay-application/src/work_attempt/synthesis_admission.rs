@@ -168,13 +168,23 @@ where
                 "Work has no accepted proposal to execute.",
             )
         })?;
+        if command.verified_graph_version.graph_version().get() != projection.version().get() {
+            return Err(conflict_problem(
+                "application.work-attempt.graph-version-conflict",
+                "The verified Work graph changed before attempt admission.",
+            ));
+        }
         let identity =
             WorkAttemptIdentityV1::new(command.task_id.clone(), command.run_id, command.attempt_id)
                 .map_err(contract_problem)?;
         let binding = WorkAttemptProjectionBindingV1::new(
-            snapshot.generation_id().clone(),
-            snapshot.sequence(),
-            projection.version(),
+            command.verified_graph_version.graph_version(),
+            command.verified_graph_version.event_sequence(),
+            command.verified_graph_version.source_watermark().clone(),
+            command
+                .verified_graph_version
+                .recovered_graph_digest()
+                .clone(),
             accepted_proposal.clone(),
         )
         .map_err(contract_problem)?;

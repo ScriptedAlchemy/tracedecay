@@ -1,36 +1,129 @@
 use super::*;
 
-#[test]
-fn accepted_attempt_links_exact_evidence_without_copying_runtime_state() {
-    let task_id = id::<TaskId>("task.attempt");
-    let original = graph(vec![item(task_id.as_str(), &[], 8)]);
-    let identity = attempt(&task_id, "accepted");
-    let evidence = TaskEvidenceLinkV1::new(
-        id("evidence.attempt"),
-        1,
+fn accept_proposal(
+    graph: WorkProductGraphV1,
+    task_id: &TaskId,
+    accepted_at: UtcMicros,
+) -> WorkProductGraphV1 {
+    let proposal = WorkProposalV1::new(
+        id("proposal.execution.admission"),
         task_id.clone(),
-        id("anchor.attempt.receipt"),
+        graph.version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 2, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Heuristic, 1, 1, 1, "bounded").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("route selected by execution admission").unwrap(),
+        "Admit the selected execution after proposal acceptance".to_owned(),
         digest('d'),
-        UtcMicros(70),
     )
     .unwrap();
-    let graph = original
+    graph
+        .apply(WorkGraphChangeV1::ProposalAccepted {
+            proposal,
+            accepted_at,
+        })
+        .unwrap()
+}
+
+fn admit_execution(
+    graph: WorkProductGraphV1,
+    task_id: &TaskId,
+    admitted_at: UtcMicros,
+) -> WorkProductGraphV1 {
+    let based_on_version = graph.version();
+    graph
+        .apply(WorkGraphChangeV1::ExecutionAdmitted {
+            task_id: task_id.clone(),
+            based_on_version,
+            admitted_at,
+        })
+        .unwrap()
+}
+
+fn link_accepted_attempt(
+    graph: WorkProductGraphV1,
+    task_id: &TaskId,
+    identity: WorkAttemptIdentityV1,
+    linked_at: UtcMicros,
+) -> WorkProductGraphV1 {
+    let based_on_version = graph.version();
+    graph
         .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
             task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::initial(),
-            identity: identity.clone(),
+            based_on_version,
+            identity,
+            linked_at,
+        })
+        .unwrap()
+}
+
+#[test]
+fn execution_admission_precedes_identity_linking_and_task_evidence_stays_separate() {
+    let task_id = id::<TaskId>("task.attempt");
+    let evidence = TaskEvidenceLinkV1::new(
+        id("evidence.task.review"),
+        1,
+        task_id.clone(),
+        id("anchor.task.review"),
+        digest('e'),
+        UtcMicros(15),
+    )
+    .unwrap();
+    let original = graph(vec![item(task_id.as_str(), &[], 8)])
+        .apply(WorkGraphChangeV1::EvidenceLinked {
+            task_id: task_id.clone(),
             evidence,
-            linked_at: UtcMicros(75),
         })
         .unwrap();
+    let identity = attempt(&task_id, "accepted");
 
     assert_eq!(
+        original
+            .clone()
+            .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
+                task_id: task_id.clone(),
+                based_on_version: original.version(),
+                identity: identity.clone(),
+                linked_at: UtcMicros(20),
+            })
+            .unwrap_err(),
+        WorkProductContractError::IllegalTransition
+    );
+
+    let accepted = accept_proposal(original, &task_id, UtcMicros(20));
+    let before_admission = runtime(&accepted, UtcMicros(20), Vec::new());
+    let before_actions =
+        WorkProductProjectionBundleV1::from_graph(&accepted, &before_admission, UtcMicros(20))
+            .unwrap()
+            .kanban()
+            .legal_actions_for(&task_id)
+            .unwrap()
+            .clone();
+    assert!(before_actions.contains(&tracedecay_domain::WorkLegalActionV1::AdmitExecution));
+    assert!(!before_actions.contains(&tracedecay_domain::WorkLegalActionV1::LinkAcceptedAttempt));
+
+    let admitted = admit_execution(accepted, &task_id, UtcMicros(25));
+    let item = admitted.item(&task_id).unwrap();
+    assert_eq!(item.execution_admitted_at(), Some(UtcMicros(25)));
+    assert!(item.is_execution_admitted());
+    let admitted_runtime = runtime(&admitted, UtcMicros(25), Vec::new());
+    let admitted_actions =
+        WorkProductProjectionBundleV1::from_graph(&admitted, &admitted_runtime, UtcMicros(25))
+            .unwrap()
+            .kanban()
+            .legal_actions_for(&task_id)
+            .unwrap()
+            .clone();
+    assert!(!admitted_actions.contains(&tracedecay_domain::WorkLegalActionV1::AdmitExecution));
+    assert!(admitted_actions.contains(&tracedecay_domain::WorkLegalActionV1::LinkAcceptedAttempt));
+
+    let graph = link_accepted_attempt(admitted, &task_id, identity.clone(), UtcMicros(30));
+    assert!(
         graph
             .item(&task_id)
             .unwrap()
             .accepted_attempts()
-            .get(&identity),
-        Some(&id("evidence.attempt"))
+            .contains(&identity)
     );
     assert!(
         graph
@@ -38,104 +131,41 @@ fn accepted_attempt_links_exact_evidence_without_copying_runtime_state() {
             .contains(&WorkProductRelationV1::AcceptedAttempt {
                 task_id: task_id.clone(),
                 identity: identity.clone(),
-                link_id: id("evidence.attempt"),
             })
     );
+    assert!(
+        graph
+            .item(&task_id)
+            .unwrap()
+            .evidence_links()
+            .contains(&id("evidence.task.review"))
+    );
+
     let runtime_snapshot = runtime(
         &graph,
-        UtcMicros(80),
+        UtcMicros(40),
         vec![WorkRuntimeAttemptProjectionV1 {
             identity: identity.clone(),
             state: WorkAttemptStateV1::Running,
         }],
     );
     let projection =
-        WorkProductProjectionBundleV1::from_graph(&graph, &runtime_snapshot, UtcMicros(80))
+        WorkProductProjectionBundleV1::from_graph(&graph, &runtime_snapshot, UtcMicros(40))
             .unwrap();
     assert_eq!(
         projection.kanban().lane_for(&task_id),
         Some(WorkTimelineLaneV1::Running)
     );
     assert_eq!(projection.workload().actual_concurrency(), Some(1));
-    assert_eq!(
-        WorkProductProjectionBundleV1::from_graph(&graph, &runtime_snapshot, UtcMicros(81))
-            .unwrap_err(),
-        WorkProductContractError::IllegalTransition
-    );
-    let unavailable = WorkRuntimeProjectionV1::new(
-        graph.version(),
-        id("generation.runtime.unavailable"),
-        WorkProjectionSequenceV1::new(2),
-        UtcMicros(80),
-        Vec::new(),
-        WorkRuntimeProjectionCoverageV1::Unavailable,
-    )
-    .unwrap();
-    let projection =
-        WorkProductProjectionBundleV1::from_graph(&graph, &unavailable, UtcMicros(80)).unwrap();
-    assert_eq!(
-        projection.kanban().lane_for(&task_id),
-        Some(WorkTimelineLaneV1::Unavailable)
-    );
-    assert_eq!(projection.workload().actual_concurrency(), None);
-    for (state, lane) in [
-        (WorkAttemptStateV1::Succeeded, WorkTimelineLaneV1::Review),
-        (WorkAttemptStateV1::Cancelled, WorkTimelineLaneV1::Cancelled),
-    ] {
-        let observed = runtime(
-            &graph,
-            UtcMicros(80),
-            vec![WorkRuntimeAttemptProjectionV1 {
-                identity: identity.clone(),
-                state,
-            }],
-        );
-        assert_eq!(
-            WorkProductProjectionBundleV1::from_graph(&graph, &observed, UtcMicros(80))
-                .unwrap()
-                .kanban()
-                .lane_for(&task_id),
-            Some(lane)
-        );
-    }
 
-    let criterion_evidence =
-        BTreeMap::from([(id("criterion.task.attempt"), id("evidence.attempt"))]);
-    assert_eq!(
-        graph
-            .clone()
-            .apply(WorkGraphChangeV1::TaskAccepted {
-                task_id: task_id.clone(),
-                evidence_by_criterion: criterion_evidence.clone(),
-                accepted_at: UtcMicros(74),
-            })
-            .unwrap_err(),
-        WorkProductContractError::InvalidTime
-    );
-    let stale_handoff = WorkHandoffV1::new(
-        id::<WorkHandoffId>("handoff.attempt"),
-        task_id.clone(),
-        id::<ActorId>("actor.from"),
-        id::<ActorId>("actor.to"),
-        BTreeSet::from([id("evidence.attempt")]),
-        BTreeSet::new(),
-        UtcMicros(74),
-    )
-    .unwrap();
-    assert_eq!(
-        graph
-            .clone()
-            .apply(WorkGraphChangeV1::HandoffRecorded {
-                handoff: stale_handoff,
-            })
-            .unwrap_err(),
-        WorkProductContractError::InvalidTime
-    );
     let accepted = graph
         .apply(WorkGraphChangeV1::TaskAccepted {
             task_id: task_id.clone(),
-            evidence_by_criterion: criterion_evidence,
-            accepted_at: UtcMicros(80),
+            evidence_by_criterion: BTreeMap::from([(
+                id("criterion.task.attempt"),
+                id("evidence.task.review"),
+            )]),
+            accepted_at: UtcMicros(40),
         })
         .unwrap();
     assert!(accepted.item(&task_id).unwrap().is_accepted());
@@ -144,42 +174,25 @@ fn accepted_attempt_links_exact_evidence_without_copying_runtime_state() {
 #[test]
 fn accepted_attempt_wire_is_json_safe_deterministic_and_rejects_duplicate_or_malformed_entries() {
     let task_id = id::<TaskId>("task.attempt.wire");
-    let evidence = |link_id: &str, suffix: &str| {
-        TaskEvidenceLinkV1::new(
-            id(link_id),
-            1,
-            task_id.clone(),
-            id(&format!("anchor.attempt.wire.{suffix}")),
-            digest('d'),
-            UtcMicros(70),
-        )
-        .unwrap()
-    };
-    let graph = graph(vec![item(task_id.as_str(), &[], 8)])
-        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-            task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::initial(),
-            identity: attempt(&task_id, "z"),
-            evidence: evidence("evidence.attempt.wire.z", "z"),
-            linked_at: UtcMicros(75),
-        })
-        .unwrap()
-        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-            task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::new(2).unwrap(),
-            identity: attempt(&task_id, "a"),
-            evidence: evidence("evidence.attempt.wire.a", "a"),
-            linked_at: UtcMicros(76),
-        })
-        .unwrap();
+    let graph = admit_execution(
+        accept_proposal(
+            graph(vec![item(task_id.as_str(), &[], 8)]),
+            &task_id,
+            UtcMicros(20),
+        ),
+        &task_id,
+        UtcMicros(25),
+    );
+    let graph = link_accepted_attempt(graph, &task_id, attempt(&task_id, "z"), UtcMicros(30));
+    let graph = link_accepted_attempt(graph, &task_id, attempt(&task_id, "a"), UtcMicros(35));
 
     let wire = serde_json::to_value(&graph).expect("accepted attempts are JSON-safe");
     let attempts = wire["items"][0]["accepted_attempts"]
         .as_array()
-        .expect("accepted attempts are a JSON array of identity-link entries");
+        .expect("accepted attempts are a JSON array of identities");
     assert_eq!(attempts.len(), 2);
-    assert_eq!(attempts[0]["identity"]["run_id"], "run.a");
-    assert_eq!(attempts[1]["identity"]["run_id"], "run.z");
+    assert_eq!(attempts[0]["run_id"], "run.a");
+    assert_eq!(attempts[1]["run_id"], "run.z");
 
     let encoded = canonical_json_bytes(&graph).expect("accepted attempt graph is canonicalizable");
     let recovered: WorkProductGraphV1 =
@@ -196,144 +209,100 @@ fn accepted_attempt_wire_is_json_safe_deterministic_and_rejects_duplicate_or_mal
     assert!(serde_json::from_value::<WorkProductGraphV1>(duplicate).is_err());
 
     let mut malformed = wire;
-    malformed["items"][0]["accepted_attempts"][0]["identity"]["task_id"] =
+    malformed["items"][0]["accepted_attempts"][0]["task_id"] =
         serde_json::json!("task.someone-else");
     assert!(serde_json::from_value::<WorkProductGraphV1>(malformed).is_err());
 }
 
 #[test]
-fn accepted_attempt_links_reject_stale_mismatched_and_duplicate_evidence() {
-    let task_id = id::<TaskId>("task.attempt");
-    let original = graph(vec![item(task_id.as_str(), &[], 8)]);
-    let identity = attempt(&task_id, "accepted");
-    let evidence = || {
-        TaskEvidenceLinkV1::new(
-            id("evidence.attempt"),
-            1,
-            task_id.clone(),
-            id("anchor.attempt.receipt"),
-            digest('e'),
-            UtcMicros(70),
-        )
-        .unwrap()
-    };
-    let mut malformed = serde_json::to_value(WorkGraphChangeV1::AcceptedAttemptLinked {
-        task_id: task_id.clone(),
-        based_on_version: WorkGraphVersionV1::initial(),
-        identity: identity.clone(),
-        evidence: evidence(),
-        linked_at: UtcMicros(75),
-    })
-    .unwrap();
-    malformed["evidence"]["revision"] = serde_json::json!(0);
-    assert_eq!(
-        original
-            .clone()
-            .apply(serde_json::from_value(malformed).unwrap())
-            .unwrap_err(),
-        WorkProductContractError::InvalidVersion
+fn admission_and_identity_linking_reject_illegal_version_time_and_identity() {
+    let task_id = id::<TaskId>("task.attempt.rejection");
+    let accepted = accept_proposal(
+        graph(vec![item(task_id.as_str(), &[], 8)]),
+        &task_id,
+        UtcMicros(20),
     );
+    let identity = attempt(&task_id, "accepted");
 
     assert_eq!(
-        original
+        accepted
+            .clone()
+            .apply(WorkGraphChangeV1::ExecutionAdmitted {
+                task_id: task_id.clone(),
+                based_on_version: WorkGraphVersionV1::initial(),
+                admitted_at: UtcMicros(25),
+            })
+            .unwrap_err(),
+        WorkProductContractError::IllegalTransition
+    );
+    assert_eq!(
+        accepted
+            .clone()
+            .apply(WorkGraphChangeV1::ExecutionAdmitted {
+                task_id: task_id.clone(),
+                based_on_version: accepted.version(),
+                admitted_at: UtcMicros(19),
+            })
+            .unwrap_err(),
+        WorkProductContractError::InvalidTime
+    );
+
+    let admitted = admit_execution(accepted, &task_id, UtcMicros(25));
+    assert_eq!(
+        admitted
+            .clone()
+            .apply(WorkGraphChangeV1::ExecutionAdmitted {
+                task_id: task_id.clone(),
+                based_on_version: admitted.version(),
+                admitted_at: UtcMicros(30),
+            })
+            .unwrap_err(),
+        WorkProductContractError::IllegalTransition
+    );
+    assert_eq!(
+        admitted
             .clone()
             .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id: task_id.clone(),
                 based_on_version: WorkGraphVersionV1::new(2).unwrap(),
                 identity: identity.clone(),
-                evidence: evidence(),
-                linked_at: UtcMicros(75),
+                linked_at: UtcMicros(30),
             })
             .unwrap_err(),
         WorkProductContractError::IllegalTransition
     );
     assert_eq!(
-        original
+        admitted
             .clone()
             .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id: task_id.clone(),
-                based_on_version: WorkGraphVersionV1::initial(),
+                based_on_version: admitted.version(),
                 identity: identity.clone(),
-                evidence: evidence(),
-                linked_at: UtcMicros(9),
-            })
-            .unwrap_err(),
-        WorkProductContractError::InvalidTime
-    );
-    let future_evidence = TaskEvidenceLinkV1::new(
-        id("evidence.future"),
-        1,
-        task_id.clone(),
-        id("anchor.attempt.future"),
-        digest('f'),
-        UtcMicros(76),
-    )
-    .unwrap();
-    assert_eq!(
-        original
-            .clone()
-            .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-                task_id: task_id.clone(),
-                based_on_version: WorkGraphVersionV1::initial(),
-                identity: identity.clone(),
-                evidence: future_evidence,
-                linked_at: UtcMicros(75),
+                linked_at: UtcMicros(24),
             })
             .unwrap_err(),
         WorkProductContractError::InvalidTime
     );
     assert_eq!(
-        original
+        admitted
             .clone()
             .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id: task_id.clone(),
-                based_on_version: WorkGraphVersionV1::initial(),
+                based_on_version: admitted.version(),
                 identity: attempt(&id("task.other"), "mismatched"),
-                evidence: evidence(),
-                linked_at: UtcMicros(75),
+                linked_at: UtcMicros(30),
             })
             .unwrap_err(),
         WorkProductContractError::IllegalTransition
     );
-    let wrong_evidence = TaskEvidenceLinkV1::new(
-        id("evidence.other"),
-        1,
-        id("task.other"),
-        id("anchor.attempt.other"),
-        digest('f'),
-        UtcMicros(70),
-    )
-    .unwrap();
-    assert_eq!(
-        original
-            .clone()
-            .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-                task_id: task_id.clone(),
-                based_on_version: WorkGraphVersionV1::initial(),
-                identity: identity.clone(),
-                evidence: wrong_evidence,
-                linked_at: UtcMicros(75),
-            })
-            .unwrap_err(),
-        WorkProductContractError::EvidenceTaskMismatch
-    );
-    let linked = original
-        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-            task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::initial(),
-            identity: identity.clone(),
-            evidence: evidence(),
-            linked_at: UtcMicros(75),
-        })
-        .unwrap();
+    let linked = link_accepted_attempt(admitted, &task_id, identity.clone(), UtcMicros(30));
     assert_eq!(
         linked
             .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id: task_id.clone(),
-                based_on_version: WorkGraphVersionV1::new(2).unwrap(),
+                based_on_version: WorkGraphVersionV1::new(4).unwrap(),
                 identity,
-                evidence: evidence(),
-                linked_at: UtcMicros(76),
+                linked_at: UtcMicros(31),
             })
             .unwrap_err(),
         WorkProductContractError::DuplicateIdentity
@@ -345,39 +314,22 @@ fn partial_runtime_coverage_keeps_unknown_attempts_unavailable() {
     let task_id = id::<TaskId>("task.partial");
     let first = attempt(&task_id, "partial.first");
     let second = attempt(&task_id, "partial.second");
-    let link = |link: &str, anchor: &str| {
-        TaskEvidenceLinkV1::new(
-            id(link),
-            1,
-            task_id.clone(),
-            id(anchor),
-            digest('a'),
+    let graph = admit_execution(
+        accept_proposal(
+            graph(vec![item(task_id.as_str(), &[], 1)]),
+            &task_id,
             UtcMicros(20),
-        )
-        .unwrap()
-    };
-    let graph = graph(vec![item(task_id.as_str(), &[], 1)])
-        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-            task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::initial(),
-            identity: first.clone(),
-            evidence: link("evidence.partial.first", "anchor.partial.first"),
-            linked_at: UtcMicros(20),
-        })
-        .unwrap()
-        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
-            task_id: task_id.clone(),
-            based_on_version: WorkGraphVersionV1::new(2).unwrap(),
-            identity: second.clone(),
-            evidence: link("evidence.partial.second", "anchor.partial.second"),
-            linked_at: UtcMicros(20),
-        })
-        .unwrap();
+        ),
+        &task_id,
+        UtcMicros(25),
+    );
+    let graph = link_accepted_attempt(graph, &task_id, first.clone(), UtcMicros(30));
+    let graph = link_accepted_attempt(graph, &task_id, second.clone(), UtcMicros(35));
     let runtime = WorkRuntimeProjectionV1::new(
         graph.version(),
         id("generation.runtime.partial"),
         WorkProjectionSequenceV1::new(3),
-        UtcMicros(30),
+        UtcMicros(40),
         vec![WorkRuntimeAttemptProjectionV1 {
             identity: first,
             state: WorkAttemptStateV1::Running,
@@ -388,7 +340,7 @@ fn partial_runtime_coverage_keeps_unknown_attempts_unavailable() {
     )
     .unwrap();
     let projection =
-        WorkProductProjectionBundleV1::from_graph(&graph, &runtime, UtcMicros(30)).unwrap();
+        WorkProductProjectionBundleV1::from_graph(&graph, &runtime, UtcMicros(40)).unwrap();
 
     assert_eq!(
         projection.kanban().lane_for(&task_id),

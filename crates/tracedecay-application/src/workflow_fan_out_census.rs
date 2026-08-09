@@ -151,10 +151,9 @@ pub fn derive_workflow_fan_out_census(
     let (work_generation, accepted_width, admitted_width, generation_exact) =
         classify_work_projection(&children, evidence.work_snapshot)?;
     let generation_id = generation_exact.as_ref();
-    let generation_mismatch = attempts.values().any(|attempt| {
-        generation_id
-            .is_some_and(|generation| attempt.projection_binding().generation_id() != generation)
-    });
+    let generation_mismatch = attempts
+        .values()
+        .any(|attempt| !attempt_matches_work_snapshot(attempt, evidence.work_snapshot));
     let interval_started_at = evidence
         .previous
         .map_or(evidence.observed_at, |previous| previous.observed_at);
@@ -168,9 +167,9 @@ pub fn derive_workflow_fan_out_census(
     let active_observed = attempts
         .values()
         .filter(|attempt| {
-            generation_id.is_some_and(|generation| {
-                attempt.projection_binding().generation_id() == generation
-            }) && attempt_active_in_interval(attempt, interval_started_at, evidence.observed_at)
+            generation_id.is_some()
+                && attempt_matches_work_snapshot(attempt, evidence.work_snapshot)
+                && attempt_active_in_interval(attempt, interval_started_at, evidence.observed_at)
         })
         .count();
     let active_width = exact_or_partial_count(
@@ -503,9 +502,8 @@ fn provider_capacities(
                     .3 += 1;
             }
             if let Some(attempt) = attempts.get(&child.attempt_identity)
-                && generation.is_some_and(|expected| {
-                    attempt.projection_binding().generation_id() == expected
-                })
+                && generation.is_some()
+                && attempt_matches_work_snapshot(attempt, work_snapshot)
             {
                 if attempt_active_in_interval(attempt, interval_started_at, observed_at) {
                     let active_provider = attempt
@@ -773,6 +771,20 @@ fn exact_or_partial_count(
         WorkflowCensusCountV1::Known { value: observed }
     } else {
         WorkflowCensusCountV1::Partial { observed, reason }
+    })
+}
+
+fn attempt_matches_work_snapshot(
+    attempt: &WorkAttemptV1,
+    snapshot: Option<&WorkProjectionSnapshotV1>,
+) -> bool {
+    snapshot.is_some_and(|snapshot| {
+        snapshot.projections().iter().any(|projection| {
+            projection.task_id() == attempt.identity().task_id()
+                && projection.version().get() == attempt.projection_binding().graph_version().get()
+                && projection.accepted_proposal()
+                    == Some(attempt.projection_binding().accepted_proposal())
+        })
     })
 }
 

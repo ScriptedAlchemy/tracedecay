@@ -20,7 +20,7 @@ use tracedecay_domain::WorkAttemptV1;
 
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CancelWorkAttemptCommand,
     CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
     ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
@@ -263,12 +263,12 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::DecideWorkProposalRequestV1",
             "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
-        available::<AdmitExecutionCommand, WorkProjection>(
+        available::<AdmitWorkExecutionRequestV1, WorkProductMutationReceiptV1>(
             "admit_execution",
             "/application/work/admit-execution",
             EffectClass::Administrative,
-            "tracedecay_application::AdmitExecutionCommand",
-            "tracedecay_domain::WorkProjection",
+            "tracedecay_application::AdmitWorkExecutionRequestV1",
+            "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
         available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
@@ -817,6 +817,23 @@ mod tests {
         );
         assert_eq!(
             create.result_schema().rust_type_path(),
+            "tracedecay_application::WorkProductMutationReceiptV1"
+        );
+
+        let admit = registry
+            .get(
+                &tracedecay_tool_catalog::OperationId::new("operation.work.admit_execution")
+                    .unwrap(),
+            )
+            .unwrap()
+            .binding()
+            .unwrap();
+        assert_eq!(
+            admit.request_schema().rust_type_path(),
+            "tracedecay_application::AdmitWorkExecutionRequestV1"
+        );
+        assert_eq!(
+            admit.result_schema().rust_type_path(),
             "tracedecay_application::WorkProductMutationReceiptV1"
         );
     }

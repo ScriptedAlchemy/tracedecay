@@ -26,7 +26,7 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationProblem,
     CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
     ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
@@ -267,7 +267,7 @@ impl WorkOperation {
             Self::ReviewProposal | Self::AcceptProposal => {
                 schema_name::<DecideWorkProposalRequestV1>()
             }
-            Self::AdmitExecution => schema_name::<AdmitExecutionCommand>(),
+            Self::AdmitExecution => schema_name::<AdmitWorkExecutionRequestV1>(),
             Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
             Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
@@ -307,12 +307,10 @@ impl WorkOperation {
             Self::Snapshot => schema_name::<WorkProjectionSnapshotV1>(),
             Self::Delta => schema_name::<WorkProjectionDeltaV1>(),
             Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
-            Self::Create | Self::ReviewProposal | Self::AcceptProposal => {
+            Self::Create | Self::ReviewProposal | Self::AcceptProposal | Self::AdmitExecution => {
                 schema_name::<WorkProductMutationReceiptV1>()
             }
-            Self::ReplanDependencies | Self::AdmitExecution | Self::AcceptTask => {
-                schema_name::<WorkProjection>()
-            }
+            Self::ReplanDependencies | Self::AcceptTask => schema_name::<WorkProjection>(),
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
@@ -423,19 +421,6 @@ where
 {
     Router::new()
         .route("/work/{operation}", post(core_operation::<O>))
-        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
-        .with_state(owner)
-}
-
-/// Build the same Work routes relative to the mount point.
-///
-/// The dashboard nests this at `/api/work`.
-pub fn work_core_router<O>(owner: O) -> Router
-where
-    O: WorkApplicationOwner,
-{
-    Router::new()
-        .route("/{operation}", post(core_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
 }
@@ -632,11 +617,12 @@ mod tests {
     }
 
     #[test]
-    fn task_creation_and_proposal_decisions_publish_product_receipts() {
+    fn task_creation_proposal_decisions_and_execution_admission_publish_product_receipts() {
         for operation in [
             WorkOperation::Create,
             WorkOperation::ReviewProposal,
             WorkOperation::AcceptProposal,
+            WorkOperation::AdmitExecution,
         ] {
             assert_eq!(
                 operation.result_schema_name(),
@@ -657,5 +643,9 @@ mod tests {
                 operation.operation_key()
             );
         }
+        assert_eq!(
+            WorkOperation::AdmitExecution.request_schema_name(),
+            "AdmitWorkExecutionRequestV1"
+        );
     }
 }

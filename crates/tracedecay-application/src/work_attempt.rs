@@ -11,22 +11,24 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AttemptId, CommitId, ManifestDigest, ProjectId, RefId, RepositoryId, RunId, RuntimeEvidenceRef,
-    SessionId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId,
-    WorkEffectStateV1, WorkExecutionSnapshot, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
-    WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkTopologyPolicyV1, WorkflowOperationRef,
-    WorktreeId, canonical_sha256,
+    AttemptId, CommitId, ManifestDigest, ObservationSourceIdentityV1, ProjectId, RefId,
+    RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkAttemptIdentityV1,
+    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1,
+    WorkCancellationEscalationV1, WorkCancellationRequestId, WorkCancellationRequestV1,
+    WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot,
+    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteV1,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
+    WorkTopologyPolicyV1, WorkflowOperationRef, WorktreeId, canonical_sha256,
 };
 
 use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
 use crate::work_read::WorkProjectionReadPort;
 use crate::{ApplicationProblem, RequestAdmission, RequestContext};
+use crate::{VerifiedWorkGraphVersionV1, WorkProductSelectionScopeV1};
 
 mod capacity;
 mod problem;
+mod product_admission;
 mod synthesis_admission;
 pub use capacity::{
     MAX_WORK_ATTEMPT_CAPACITY_TASKS, WorkAttemptCapacityScopeV1, WorkAttemptCapacityV1,
@@ -36,6 +38,11 @@ use problem::{
     conflict_problem, contract_problem, denied_problem, invalid_problem,
     list_page_contract_problem, not_found_problem, projection_problem, stale_cursor_problem,
     storage_problem,
+};
+pub use product_admission::WorkProductAttemptServiceV1;
+pub(crate) use product_admission::{
+    CurrentWorkProductAttemptGraphV1, accepted_attempt_draft, current_work_product_attempt_graph,
+    product_admission_problem, product_attempt_projection_binding,
 };
 pub use synthesis_admission::{
     WorkAttemptAdmissionKind, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
@@ -274,10 +281,11 @@ pub struct WorkAttemptEvidenceRecordV1 {
     pub outcome: WorkAttemptProviderOutcomeV1,
     pub stdout: Option<WorkAttemptStreamSummaryV1>,
     pub stderr: Option<WorkAttemptStreamSummaryV1>,
-    /// Native provider session/thread identity, when the provider reported
-    /// one. Admission cannot supply this value and no fallback is fabricated.
+    /// Native provider-qualified session/thread identity, when the provider
+    /// reported one. Admission cannot supply this value and no fallback is
+    /// fabricated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_session_id: Option<SessionId>,
+    pub provider_session: Option<ObservationSourceIdentityV1>,
     /// Present only when the pinned preferred backend was disqualified before
     /// startup. `None` means the attempt ran on its first-choice backend.
     pub provider_fallback: Option<WorkProviderFallbackRecordV1>,
@@ -302,6 +310,8 @@ impl WorkAttemptEvidenceRecordV1 {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StartWorkAttemptCommand {
+    pub selection: WorkProductSelectionScopeV1,
+    pub verified_graph_version: VerifiedWorkGraphVersionV1,
     pub task_id: TaskId,
     pub run_id: RunId,
     pub attempt_id: AttemptId,
@@ -1038,7 +1048,7 @@ where
             outcome: WorkAttemptProviderOutcomeV1::Cancelled,
             stdout: None,
             stderr: None,
-            provider_session_id: None,
+            provider_session: None,
             // Route selection happens in the daemon runtime, which is not on
             // this path: a cancellation observed by the authority itself
             // never re-decides a backend.

@@ -1,36 +1,27 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use super::{AcceptedAttemptWireV1, TaskEvidenceLinkId, WorkAttemptIdentityV1};
+use super::WorkAttemptIdentityV1;
 
 pub fn serialize<S>(
-    attempts: &BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId>,
+    attempts: &BTreeSet<WorkAttemptIdentityV1>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    attempts
-        .iter()
-        .map(|(identity, link_id)| AcceptedAttemptWireV1 {
-            identity: identity.clone(),
-            link_id: link_id.clone(),
-        })
-        .collect::<Vec<_>>()
-        .serialize(serializer)
+    attempts.iter().collect::<Vec<_>>().serialize(serializer)
 }
 
-pub fn deserialize<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId>, D::Error>
+pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeSet<WorkAttemptIdentityV1>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let entries = Vec::<AcceptedAttemptWireV1>::deserialize(deserializer)?;
-    let mut attempts = BTreeMap::new();
-    for entry in entries {
-        if attempts.insert(entry.identity, entry.link_id).is_some() {
+    let entries = Vec::<WorkAttemptIdentityV1>::deserialize(deserializer)?;
+    let mut attempts = BTreeSet::new();
+    for identity in entries {
+        if !attempts.insert(identity) {
             return Err(de::Error::custom("duplicate accepted attempt identity"));
         }
     }

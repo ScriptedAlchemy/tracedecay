@@ -41,7 +41,6 @@ pub enum WorkProductRelationV1 {
     AcceptedAttempt {
         task_id: TaskId,
         identity: WorkAttemptIdentityV1,
-        link_id: TaskEvidenceLinkId,
     },
     Handoff {
         task_id: TaskId,
@@ -178,11 +177,15 @@ pub enum WorkGraphChangeV1 {
         proposal: WorkProposalV1,
         accepted_at: UtcMicros,
     },
+    ExecutionAdmitted {
+        task_id: TaskId,
+        based_on_version: WorkGraphVersionV1,
+        admitted_at: UtcMicros,
+    },
     AcceptedAttemptLinked {
         task_id: TaskId,
         based_on_version: WorkGraphVersionV1,
         identity: WorkAttemptIdentityV1,
-        evidence: TaskEvidenceLinkV1,
         linked_at: UtcMicros,
     },
     TaskAccepted {
@@ -282,6 +285,14 @@ impl WorkProductGraphV1 {
         &self.evidence
     }
 
+    pub fn proposal_decisions(&self) -> &[WorkProposalDecisionV1] {
+        &self.proposal_decisions
+    }
+
+    pub fn relation_replan_decisions(&self) -> &[WorkRelationReplanDecisionV1] {
+        &self.relation_replan_decisions
+    }
+
     pub fn relations(&self) -> Vec<WorkProductRelationV1> {
         let mut relations = Vec::new();
         relations.extend(self.plans.iter().map(|plan| {
@@ -319,11 +330,10 @@ impl WorkProductGraphV1 {
                     effect: item.task_id().clone(),
                 }
             }));
-            relations.extend(item.accepted_attempts().iter().map(|(identity, link_id)| {
+            relations.extend(item.accepted_attempts().iter().map(|identity| {
                 WorkProductRelationV1::AcceptedAttempt {
                     task_id: item.task_id().clone(),
                     identity: identity.clone(),
-                    link_id: link_id.clone(),
                 }
             }));
             relations.extend(item.handoffs().iter().map(|handoff| {
@@ -555,11 +565,28 @@ impl WorkProductGraphV1 {
                     decided_at: accepted_at,
                 });
             }
+            WorkGraphChangeV1::ExecutionAdmitted {
+                task_id,
+                based_on_version,
+                admitted_at,
+            } => {
+                if based_on_version != self.version {
+                    return Err(WorkProductContractError::IllegalTransition);
+                }
+                let item = self.item_mut(&task_id)?;
+                if item.accepted_proposal.is_none() || item.execution_admitted_at.is_some() {
+                    return Err(WorkProductContractError::IllegalTransition);
+                }
+                if admitted_at < item.updated_at() {
+                    return Err(WorkProductContractError::InvalidTime);
+                }
+                item.execution_admitted_at = Some(admitted_at);
+                item.input.updated_at = admitted_at;
+            }
             WorkGraphChangeV1::AcceptedAttemptLinked {
                 task_id,
                 based_on_version,
                 identity,
-                evidence,
                 linked_at,
             } => {
                 if identity.task_id() != &task_id {
@@ -568,39 +595,17 @@ impl WorkProductGraphV1 {
                 if based_on_version != self.version {
                     return Err(WorkProductContractError::IllegalTransition);
                 }
-                let evidence = TaskEvidenceLinkV1::new(
-                    evidence.link_id().clone(),
-                    evidence.revision(),
-                    evidence.task_id().clone(),
-                    evidence.anchor_id().clone(),
-                    evidence.evidence_digest().clone(),
-                    evidence.observed_at(),
-                )?;
-                if evidence.task_id() != &task_id {
-                    return Err(WorkProductContractError::EvidenceTaskMismatch);
-                }
-                if evidence.observed_at() > linked_at {
-                    return Err(WorkProductContractError::InvalidTime);
-                }
-                if self
-                    .evidence
-                    .iter()
-                    .any(|prior| prior.link_id() == evidence.link_id())
-                {
-                    return Err(WorkProductContractError::DuplicateIdentity);
-                }
                 let item = self.item_mut(&task_id)?;
                 if linked_at < item.updated_at() {
                     return Err(WorkProductContractError::InvalidTime);
                 }
-                if item.accepted_attempts.contains_key(&identity) {
+                if !item.is_execution_admitted() {
+                    return Err(WorkProductContractError::IllegalTransition);
+                }
+                if !item.accepted_attempts.insert(identity) {
                     return Err(WorkProductContractError::DuplicateIdentity);
                 }
-                item.accepted_attempts
-                    .insert(identity, evidence.link_id().clone());
-                item.evidence_links.insert(evidence.link_id().clone());
                 item.input.updated_at = linked_at;
-                self.evidence.push(evidence);
             }
             WorkGraphChangeV1::TaskAccepted {
                 task_id,
@@ -844,9 +849,15 @@ impl WorkProductGraphV1 {
 fn validate_item_state(item: &WorkItemV1) -> Result<(), WorkProductContractError> {
     WorkItemV1::new(item.input.clone())?;
     if item.accepted_proposal.is_some() != item.accepted_route.is_some()
-        || item.accepted_attempts.iter().any(|(identity, link_id)| {
-            identity.task_id() != item.task_id() || !item.evidence_links.contains(link_id)
-        })
+        || item.execution_admitted_at.is_some() && item.accepted_proposal.is_none()
+        || item
+            .execution_admitted_at
+            .is_some_and(|admitted_at| admitted_at > item.updated_at())
+        || item
+            .accepted_attempts
+            .iter()
+            .any(|identity| identity.task_id() != item.task_id())
+        || !item.accepted_attempts.is_empty() && !item.is_execution_admitted()
         || item
             .handoffs
             .iter()

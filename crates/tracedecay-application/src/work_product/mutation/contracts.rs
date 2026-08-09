@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, ManifestDigest,
-    PolicyRevisionId, ProposalId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros,
-    WorkAttemptIdentityV1, WorkCommandId, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1,
-    WorkItemV1, WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
+    PolicyRevisionId, ProposalId, TaskEvidenceLinkId, TaskId, UtcMicros, WorkAttemptIdentityV1,
+    WorkCommandId, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1, WorkItemV1,
+    WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
     WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
     WorkProductSourceWatermarkV1, WorkProposalDispositionV1, WorkProposalV1,
     WorkRelationReplanProposalV1,
@@ -265,11 +265,14 @@ mutation_request!(AcceptWorkTaskRequestV1 {
     task_id: TaskId,
     evidence_by_criterion: BTreeMap<AcceptanceCriterionId, TaskEvidenceLinkId>,
 });
+mutation_request!(AdmitWorkExecutionRequestV1 {
+    task_id: TaskId,
+    based_on_version: WorkGraphVersionV1,
+});
 mutation_request!(LinkAcceptedWorkAttemptRequestV1 {
     task_id: TaskId,
     based_on_version: WorkGraphVersionV1,
     identity: WorkAttemptIdentityV1,
-    evidence: TaskEvidenceLinkV1,
 });
 mutation_request!(RecordWorkHandoffRequestV1 {
     handoff: WorkHandoffV1
@@ -304,10 +307,12 @@ pub enum WorkProductChangeDraftV1 {
         task_id: TaskId,
         evidence_by_criterion: BTreeMap<AcceptanceCriterionId, TaskEvidenceLinkId>,
     },
+    AdmitExecution {
+        task_id: TaskId,
+    },
     LinkAcceptedAttempt {
         task_id: TaskId,
         identity: WorkAttemptIdentityV1,
-        evidence: TaskEvidenceLinkV1,
     },
     RecordHandoff {
         handoff: WorkHandoffV1,
@@ -337,6 +342,7 @@ pub enum WorkProductMutationRequestV1 {
     DecideRelationReplan(DecideWorkRelationReplanRequestV1),
     ApplyRelationReplan(ApplyWorkRelationReplanRequestV1),
     AcceptTask(AcceptWorkTaskRequestV1),
+    AdmitExecution(AdmitWorkExecutionRequestV1),
     LinkAcceptedAttempt(LinkAcceptedWorkAttemptRequestV1),
     RecordHandoff(RecordWorkHandoffRequestV1),
 }
@@ -351,6 +357,7 @@ impl WorkProductMutationRequestV1 {
             Self::DecideRelationReplan(request) => &request.mutation,
             Self::ApplyRelationReplan(request) => &request.mutation,
             Self::AcceptTask(request) => &request.mutation,
+            Self::AdmitExecution(request) => &request.mutation,
             Self::LinkAcceptedAttempt(request) => &request.mutation,
             Self::RecordHandoff(request) => &request.mutation,
         }

@@ -8,11 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
-    RefId, RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkArtifactId,
-    WorkCancellationRequestId, WorkExecutionLimits, WorkExecutionSnapshot, WorkLeaseId,
-    WorkProjection, WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId,
-    WorkVersion, WorkflowOperationRef, WorktreeId,
+    AttemptId, CommitId, ManifestDigest, ProjectId, ProposalId, ProviderId, RefId, RepositoryId,
+    RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkArtifactId, WorkCancellationRequestId,
+    WorkExecutionLimits, WorkExecutionSnapshot, WorkGraphVersionV1, WorkLeaseId,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductSourceWatermarkV1,
+    WorkProviderRouteId, WorkflowOperationRef, WorktreeId,
 };
 
 pub const MAX_WORK_ATTEMPT_ARTIFACTS: usize = 256;
@@ -149,9 +149,13 @@ pub struct WorkProviderRouteV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAttemptProjectionBindingV1 {
-    generation_id: ProjectionGenerationId,
-    sequence: WorkProjectionSequenceV1,
-    work_version: WorkVersion,
+    graph_version: WorkGraphVersionV1,
+    /// Exact immutable product event that verified this graph version.
+    event_sequence: WorkProductEventSequenceV1,
+    /// Source-frontier identity preserved from the verified product graph.
+    source_watermark: WorkProductSourceWatermarkV1,
+    /// Digest of the graph recovered and verified at admission.
+    recovered_graph_digest: ManifestDigest,
     /// Exact accepted proposal the attempt was admitted against. A superseded
     /// or cleared proposal is a different binding, not a compatible refresh.
     accepted_proposal: ProposalId,
@@ -159,29 +163,38 @@ pub struct WorkAttemptProjectionBindingV1 {
 
 impl WorkAttemptProjectionBindingV1 {
     pub fn new(
-        generation_id: ProjectionGenerationId,
-        sequence: WorkProjectionSequenceV1,
-        work_version: WorkVersion,
+        graph_version: WorkGraphVersionV1,
+        event_sequence: WorkProductEventSequenceV1,
+        source_watermark: WorkProductSourceWatermarkV1,
+        recovered_graph_digest: ManifestDigest,
         accepted_proposal: ProposalId,
     ) -> Result<Self, WorkRuntimeContractError> {
+        recovered_graph_digest
+            .validate()
+            .map_err(|_| WorkRuntimeContractError::ProjectionMismatch)?;
         Ok(Self {
-            generation_id,
-            sequence,
-            work_version,
+            graph_version,
+            event_sequence,
+            source_watermark,
+            recovered_graph_digest,
             accepted_proposal,
         })
     }
 
-    pub fn generation_id(&self) -> &ProjectionGenerationId {
-        &self.generation_id
+    pub const fn graph_version(&self) -> WorkGraphVersionV1 {
+        self.graph_version
     }
 
-    pub const fn sequence(&self) -> WorkProjectionSequenceV1 {
-        self.sequence
+    pub const fn event_sequence(&self) -> WorkProductEventSequenceV1 {
+        self.event_sequence
     }
 
-    pub const fn work_version(&self) -> WorkVersion {
-        self.work_version
+    pub fn source_watermark(&self) -> &WorkProductSourceWatermarkV1 {
+        &self.source_watermark
+    }
+
+    pub fn recovered_graph_digest(&self) -> &ManifestDigest {
+        &self.recovered_graph_digest
     }
 
     pub fn accepted_proposal(&self) -> &ProposalId {
@@ -1084,41 +1097,22 @@ impl WorkAttemptV1 {
         self.state.is_terminal()
     }
 
-    pub fn validate_projection(
+    pub fn validate_graph_admission(
         &self,
-        projection: &WorkProjection,
+        graph: &WorkProductGraphV1,
     ) -> Result<(), WorkRuntimeContractError> {
-        // Exact identity fencing: a newer work version, a superseded proposal,
-        // or a different task is a different admission surface, not a refresh of
-        // this attempt. Softening any of these to "at least" would let a
-        // replanned or superseded snapshot keep executing under the old lease.
-        if self.identity.task_id() != projection.task_id()
-            || self.projection_binding.work_version() != projection.version()
-            || projection.accepted_proposal() != Some(self.projection_binding.accepted_proposal())
+        let item = graph
+            .item(self.identity.task_id())
+            .ok_or(WorkRuntimeContractError::ProjectionMismatch)?;
+        if self.projection_binding.graph_version() != graph.version()
+            || item.accepted_proposal() != Some(self.projection_binding.accepted_proposal())
         {
             return Err(WorkRuntimeContractError::ProjectionMismatch);
         }
-        if !projection.is_execution_admitted() {
+        if !item.is_execution_admitted() || !item.accepted_attempts().contains(self.identity()) {
             return Err(WorkRuntimeContractError::ExecutionNotAdmitted);
         }
         Ok(())
-    }
-
-    pub fn validate_snapshot(
-        &self,
-        snapshot: &WorkProjectionSnapshotV1,
-    ) -> Result<(), WorkRuntimeContractError> {
-        if self.projection_binding.generation_id() != snapshot.generation_id()
-            || self.projection_binding.sequence() > snapshot.sequence()
-        {
-            return Err(WorkRuntimeContractError::ProjectionMismatch);
-        }
-        let projection = snapshot
-            .projections()
-            .iter()
-            .find(|projection| projection.task_id() == self.identity.task_id())
-            .ok_or(WorkRuntimeContractError::ProjectionMismatch)?;
-        self.validate_projection(projection)
     }
 
     #[allow(clippy::too_many_arguments)]

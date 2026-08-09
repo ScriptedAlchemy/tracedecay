@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use tracedecay_domain::{
-    ActorId, MAX_WORK_PRODUCT_EVENT_EVIDENCE, ManifestDigest, TaskEvidenceLinkV1, UtcMicros,
-    WorkCommandId, WorkGraphChangeV1, WorkGraphVersionV1, WorkProductEventPayloadV1,
-    WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
-    WorkProductSourceWatermarkV1, WorkProposalDispositionV1, canonical_sha256,
+    ActorId, MAX_WORK_PRODUCT_EVENT_EVIDENCE, ManifestDigest, UtcMicros, WorkCommandId,
+    WorkGraphChangeV1, WorkGraphVersionV1, WorkProductEventPayloadV1, WorkProductEventV1,
+    WorkProductGraphV1, WorkProductProfileScopeV1, WorkProductSourceWatermarkV1,
+    WorkProposalDispositionV1, canonical_sha256,
 };
 
 use crate::{RequestAdmission, RequestContext};
@@ -71,6 +71,9 @@ where
             }
             WorkProductMutationRequestV1::AcceptTask(request) => {
                 self.accept_task(context, binding, request)
+            }
+            WorkProductMutationRequestV1::AdmitExecution(request) => {
+                self.admit_execution(context, binding, request)
             }
             WorkProductMutationRequestV1::LinkAcceptedAttempt(request) => {
                 self.link_accepted_attempt(context, binding, request)
@@ -186,20 +189,25 @@ where
                 evidence_by_criterion,
                 mutation,
             }),
-            WorkProductChangeDraftV1::LinkAcceptedAttempt {
-                task_id,
-                identity,
-                evidence,
-            } => WorkProductMutationRequestV1::LinkAcceptedAttempt(
-                LinkAcceptedWorkAttemptRequestV1 {
+            WorkProductChangeDraftV1::AdmitExecution { task_id } => {
+                WorkProductMutationRequestV1::AdmitExecution(AdmitWorkExecutionRequestV1 {
                     selection,
                     task_id,
                     based_on_version: expected_graph_version,
-                    identity,
-                    evidence,
                     mutation,
-                },
-            ),
+                })
+            }
+            WorkProductChangeDraftV1::LinkAcceptedAttempt { task_id, identity } => {
+                WorkProductMutationRequestV1::LinkAcceptedAttempt(
+                    LinkAcceptedWorkAttemptRequestV1 {
+                        selection,
+                        task_id,
+                        based_on_version: expected_graph_version,
+                        identity,
+                        mutation,
+                    },
+                )
+            }
             WorkProductChangeDraftV1::RecordHandoff { handoff } => {
                 WorkProductMutationRequestV1::RecordHandoff(RecordWorkHandoffRequestV1 {
                     selection,
@@ -373,8 +381,28 @@ where
         )
     }
 
-    /// Links one exact accepted attempt identity to canonical task evidence.
-    /// It does not dispatch work and cannot accept the task.
+    pub fn admit_execution(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        request: AdmitWorkExecutionRequestV1,
+    ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+        let admitted_at = request.mutation.occurred_at;
+        self.commit_change(
+            context,
+            binding,
+            request.selection,
+            request.mutation,
+            WorkGraphChangeV1::ExecutionAdmitted {
+                task_id: request.task_id,
+                based_on_version: request.based_on_version,
+                admitted_at,
+            },
+        )
+    }
+
+    /// Links one exact admitted attempt identity. Terminal evidence remains
+    /// owned by the attempt and task evidence is linked independently.
     pub fn link_accepted_attempt(
         &self,
         context: &RequestContext,
@@ -391,7 +419,6 @@ where
                 task_id: request.task_id,
                 based_on_version: request.based_on_version,
                 identity: request.identity,
-                evidence: request.evidence,
                 linked_at,
             },
         )
@@ -672,27 +699,23 @@ fn validate_change_request(
     expected_graph_version: WorkGraphVersionV1,
     occurred_at: UtcMicros,
 ) -> Result<(), WorkProductApplicationErrorV1> {
+    if let WorkGraphChangeV1::ExecutionAdmitted {
+        based_on_version,
+        admitted_at,
+        ..
+    } = change
+        && (*admitted_at != occurred_at || *based_on_version != expected_graph_version)
+    {
+        return Err(WorkProductApplicationErrorV1::InvalidRequest);
+    }
     if let WorkGraphChangeV1::AcceptedAttemptLinked {
         task_id,
         based_on_version,
         identity,
-        evidence,
         linked_at,
     } = change
     {
-        let canonical_evidence = TaskEvidenceLinkV1::new(
-            evidence.link_id().clone(),
-            evidence.revision(),
-            evidence.task_id().clone(),
-            evidence.anchor_id().clone(),
-            evidence.evidence_digest().clone(),
-            evidence.observed_at(),
-        )
-        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
         if identity.task_id() != task_id
-            || evidence.task_id() != task_id
-            || canonical_evidence != *evidence
-            || evidence.observed_at() > *linked_at
             || *linked_at != occurred_at
             || *based_on_version != expected_graph_version
         {

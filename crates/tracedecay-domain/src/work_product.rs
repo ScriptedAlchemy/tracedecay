@@ -837,24 +837,15 @@ pub struct WorkItemV1 {
     input: WorkItemInputV1,
     accepted_proposal: Option<ProposalId>,
     accepted_route: Option<WorkRouteDecisionV1>,
+    execution_admitted_at: Option<UtcMicros>,
     evidence_links: BTreeSet<TaskEvidenceLinkId>,
     accepted_criteria: BTreeMap<AcceptanceCriterionId, TaskEvidenceLinkId>,
     #[serde(with = "accepted_attempt_wire")]
-    #[schemars(with = "Vec<AcceptedAttemptWireV1>")]
-    accepted_attempts: BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId>,
+    #[schemars(with = "Vec<WorkAttemptIdentityV1>")]
+    accepted_attempts: BTreeSet<WorkAttemptIdentityV1>,
     handoffs: Vec<WorkHandoffV1>,
     accepted_at: Option<UtcMicros>,
     archived_at: Option<UtcMicros>,
-}
-
-/// JSON-safe entry for the accepted-attempt relation. The domain keeps a map
-/// for exact identity lookup, while persisted/wire state uses a sorted array
-/// because a structured identity cannot be a JSON object key.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct AcceptedAttemptWireV1 {
-    identity: WorkAttemptIdentityV1,
-    link_id: TaskEvidenceLinkId,
 }
 
 mod accepted_attempt_wire;
@@ -885,9 +876,10 @@ impl WorkItemV1 {
             input,
             accepted_proposal: None,
             accepted_route: None,
+            execution_admitted_at: None,
             evidence_links: BTreeSet::new(),
             accepted_criteria: BTreeMap::new(),
-            accepted_attempts: BTreeMap::new(),
+            accepted_attempts: BTreeSet::new(),
             handoffs: Vec::new(),
             accepted_at: None,
             archived_at: None,
@@ -950,7 +942,15 @@ impl WorkItemV1 {
         self.accepted_route.as_ref()
     }
 
-    pub fn accepted_attempts(&self) -> &BTreeMap<WorkAttemptIdentityV1, TaskEvidenceLinkId> {
+    pub const fn execution_admitted_at(&self) -> Option<UtcMicros> {
+        self.execution_admitted_at
+    }
+
+    pub const fn is_execution_admitted(&self) -> bool {
+        self.execution_admitted_at.is_some()
+    }
+
+    pub fn accepted_attempts(&self) -> &BTreeSet<WorkAttemptIdentityV1> {
         &self.accepted_attempts
     }
 

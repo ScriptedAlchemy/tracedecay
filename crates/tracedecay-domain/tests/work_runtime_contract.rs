@@ -5,16 +5,18 @@ use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
     ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
     UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
-    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestId,
     WorkCancellationRequestV1, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
     WorkEvent, WorkEventKind, WorkExecutableReference, WorkExecutionEnvelopeV1,
     WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFenceEpochV1, WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProjection,
-    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
+    WorkFenceEpochV1, WorkFilesystemPolicy, WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1,
+    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1,
+    WorkPlanId, WorkPlanV1, WorkProductGraphV1, WorkProjectionSequenceV1, WorkProposalV1,
     WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
-    WorkVersion, WorkflowOperationRef, WorktreeId, safe_work_topology_policy_v1,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkRouteDecisionV1, WorkSandboxPolicy,
+    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1,
+    WorkflowOperationRef, WorktreeId, safe_work_topology_policy_v1,
 };
 
 fn id<T>(value: &str) -> T
@@ -54,7 +56,7 @@ fn binding() -> WorkAttemptProjectionBindingV1 {
     WorkAttemptProjectionBindingV1::new(
         id::<ProjectionGenerationId>("generation.work.runtime"),
         WorkProjectionSequenceV1::new(7),
-        WorkVersion::new(3).unwrap(),
+        WorkGraphVersionV1::new(4).unwrap(),
         id::<ProposalId>("proposal.work.runtime"),
     )
     .unwrap()
@@ -118,56 +120,92 @@ fn execution(
     .unwrap()
 }
 
-fn projection() -> WorkProjection {
-    let authority = WorkAuthority::new(
-        id::<ProjectId>("project.work.runtime"),
-        id::<RepositoryId>("repository.work.runtime"),
-        id::<WorktreeId>("worktree.work.runtime"),
-        id::<ActorId>("actor.work.runtime"),
-        digest('a'),
-    )
-    .unwrap();
-    let task_id = id::<TaskId>("task.work.runtime");
-    let proposal_id = id::<ProposalId>("proposal.work.runtime");
-    WorkProjection::rebuild(&[
-        WorkEvent::new(
-            task_id.clone(),
-            WorkVersion::initial(),
-            authority.clone(),
-            UtcMicros(1),
-            id("command.work.runtime.1"),
-            digest('b'),
-            WorkEventKind::Created {
+fn admitted_graph(identity: WorkAttemptIdentityV1) -> WorkProductGraphV1 {
+    let task_id = identity.task_id().clone();
+    let graph = WorkProductGraphV1::new(
+        WorkGraphVersionV1::initial(),
+        vec![
+            WorkInitiativeV1::new(
+                id("initiative.work.runtime"),
+                "Work runtime".to_owned(),
+                UtcMicros(1),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkPlanV1::new(
+                id::<WorkPlanId>("plan.work.runtime"),
+                id("initiative.work.runtime"),
+                "Runtime plan".to_owned(),
+                UtcMicros(2),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkMilestoneV1::new(
+                id("milestone.work.runtime"),
+                id("plan.work.runtime"),
+                "Runtime milestone".to_owned(),
+                UtcMicros(3),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkItemV1::new(WorkItemInputV1 {
+                task_id: task_id.clone(),
+                hierarchy: WorkHierarchyV1::new(
+                    id("initiative.work.runtime"),
+                    id("plan.work.runtime"),
+                    id("milestone.work.runtime"),
+                ),
                 title: "Execute Work runtime".to_owned(),
                 dependencies: BTreeSet::new(),
-            },
-        )
-        .unwrap(),
-        WorkEvent::new(
-            task_id.clone(),
-            WorkVersion::new(2).unwrap(),
-            authority.clone(),
-            UtcMicros(2),
-            id("command.work.runtime.2"),
-            digest('c'),
-            WorkEventKind::ProposalAccepted {
-                proposal_id,
-                proposal_digest: digest('d'),
-            },
-        )
-        .unwrap(),
-        WorkEvent::new(
+                informational_relations: BTreeSet::new(),
+                causal_candidates: BTreeSet::new(),
+                acceptance_criteria: Vec::new(),
+                effort: 1,
+                scheduled_at: None,
+                deadline: None,
+                created_at: UtcMicros(1),
+                updated_at: UtcMicros(1),
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let proposal = WorkProposalV1::new(
+        id::<ProposalId>("proposal.work.runtime"),
+        task_id.clone(),
+        graph.version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Heuristic, 1, 1, 1, "bounded").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("execution admission pins the provider").unwrap(),
+        "Admit the runtime attempt".to_owned(),
+        digest('f'),
+    )
+    .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProposalAccepted {
+            proposal,
+            accepted_at: UtcMicros(2),
+        })
+        .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ExecutionAdmitted {
+            task_id: task_id.clone(),
+            based_on_version: graph.version(),
+            admitted_at: UtcMicros(3),
+        })
+        .unwrap();
+    graph
+        .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
             task_id,
-            WorkVersion::new(3).unwrap(),
-            authority,
-            UtcMicros(3),
-            id("command.work.runtime.3"),
-            digest('e'),
-            WorkEventKind::ExecutionAdmitted,
-        )
-        .unwrap(),
-    ])
-    .unwrap()
+            based_on_version: graph.version(),
+            identity,
+            linked_at: UtcMicros(4),
+        })
+        .unwrap()
 }
 
 fn running() -> WorkAttemptV1 {
@@ -197,7 +235,8 @@ fn attempt_identity_fence_and_projection_binding_are_validated() {
     assert!(serde_json::from_value::<WorkFenceEpochV1>(json!(0)).is_err());
 
     let attempt = running();
-    attempt.validate_projection(&projection()).unwrap();
+    let admitted = admitted_graph(attempt.identity().clone());
+    attempt.validate_graph_admission(&admitted).unwrap();
 
     let wrong_identity = WorkAttemptIdentityV1::new(
         id("task.work.other"),
@@ -221,16 +260,16 @@ fn attempt_identity_fence_and_projection_binding_are_validated() {
         None,
     )
     .unwrap();
-    assert!(wrong_task.validate_projection(&projection()).is_err());
-
-    let snapshot = WorkProjectionSnapshotV1::new(
-        id("generation.work.runtime"),
-        WorkProjectionSequenceV1::new(7),
-        vec![projection()],
-        WorkProjectionCoverageV1::complete(1, 1).unwrap(),
-    )
-    .unwrap();
-    attempt.validate_snapshot(&snapshot).unwrap();
+    assert!(wrong_task.validate_graph_admission(&admitted).is_err());
+    assert_eq!(
+        attempt.projection_binding().graph_version(),
+        admitted.version()
+    );
+    assert_eq!(
+        attempt.projection_binding().generation_id().as_str(),
+        "generation.work.runtime"
+    );
+    assert_eq!(attempt.projection_binding().sequence().get(), 7);
 }
 
 #[test]
