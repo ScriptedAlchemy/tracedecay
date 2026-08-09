@@ -9,13 +9,12 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, RunId, RuntimeEvidenceRef,
-    TaskId, UtcMicros, WorktreeId,
+    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorktreeId,
 };
 
 use super::{
-    MAX_WORK_RUNTIME_EVIDENCE, WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority, WorkContractError,
-    WorkEvent, WorkEventKind, WorkProjection, WorkProjectionStateV1, WorkVersion,
+    WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority, WorkContractError, WorkEvent, WorkEventKind,
+    WorkProjection, WorkProjectionStateV1, WorkVersion,
 };
 
 /// The pre-fold implementation, kept verbatim as the equivalence oracle.
@@ -40,14 +39,12 @@ fn reference_rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkContra
         dependencies: dependencies.clone(),
         accepted_proposal: None,
         execution_admitted: false,
-        runtime_evidence: Vec::new(),
         task_accepted: false,
         history_len: 0,
     };
     let mut expected_version = WorkVersion::initial();
     let mut previous_time = first.occurred_at();
     let mut commands = BTreeSet::new();
-    let mut runs = BTreeSet::new();
 
     for event in history {
         if event.task_id() != &projection.task_id || event.authority() != &projection.authority {
@@ -88,15 +85,6 @@ fn reference_rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkContra
                     return Err(WorkContractError::InvalidTransition);
                 }
                 projection.execution_admitted = true;
-            }
-            WorkEventKind::RuntimeEvidenceAttached { evidence } => {
-                if projection.runtime_evidence.len() == MAX_WORK_RUNTIME_EVIDENCE {
-                    return Err(WorkContractError::TooMuchRuntimeEvidence);
-                }
-                if !runs.insert(evidence.run_id().clone()) {
-                    return Err(WorkContractError::DuplicateRuntimeEvidence);
-                }
-                projection.runtime_evidence.push(evidence.clone());
             }
             WorkEventKind::TaskAccepted => projection.task_accepted = true,
         }
@@ -205,12 +193,6 @@ fn accepted(proposal: &str) -> WorkEventKind {
     }
 }
 
-fn evidence(run: &str, terminal: bool) -> WorkEventKind {
-    WorkEventKind::RuntimeEvidenceAttached {
-        evidence: RuntimeEvidenceRef::new(id::<RunId>(run), digest('d'), terminal).unwrap(),
-    }
-}
-
 #[test]
 fn folding_a_full_lifecycle_matches_the_full_rebuild() {
     assert_equivalent(&[
@@ -223,9 +205,7 @@ fn folding_a_full_lifecycle_matches_the_full_rebuild() {
         ),
         event(3, accepted("proposal.work.fold.first")),
         event(4, WorkEventKind::ExecutionAdmitted),
-        event(5, evidence("run.work.fold.first", false)),
-        event(6, evidence("run.work.fold.second", true)),
-        event(7, WorkEventKind::TaskAccepted),
+        event(5, WorkEventKind::TaskAccepted),
     ]);
 }
 
@@ -282,39 +262,6 @@ fn folding_rejects_every_history_the_full_rebuild_rejects() {
             WorkEventKind::TaskAccepted,
         ),
     ]);
-    assert_equivalent(&[
-        event(1, created()),
-        event(2, accepted("proposal.work.fold.first")),
-        event(3, evidence("run.work.fold.repeated", false)),
-        event(4, evidence("run.work.fold.repeated", false)),
-    ]);
-}
-
-#[test]
-fn folding_matches_the_full_rebuild_at_the_runtime_evidence_bound() {
-    let mut history = vec![event(1, created())];
-    for ordinal in 0..=MAX_WORK_RUNTIME_EVIDENCE {
-        let version = (ordinal + 2) as u64;
-        history.push(event(
-            version,
-            evidence(&format!("run.work.fold.{ordinal}"), false),
-        ));
-    }
-
-    let capped = &history[..=MAX_WORK_RUNTIME_EVIDENCE];
-    assert_equivalent(capped);
-    assert_eq!(
-        WorkProjection::rebuild(capped)
-            .unwrap()
-            .runtime_evidence()
-            .len(),
-        MAX_WORK_RUNTIME_EVIDENCE
-    );
-    assert_equivalent(&history);
-    assert_eq!(
-        WorkProjection::rebuild(&history),
-        Err(WorkContractError::TooMuchRuntimeEvidence)
-    );
 }
 
 #[test]
@@ -323,8 +270,7 @@ fn every_prefix_of_a_history_folds_to_its_own_rebuild() {
         event(1, created()),
         event(2, accepted("proposal.work.fold.first")),
         event(3, WorkEventKind::ExecutionAdmitted),
-        event(4, evidence("run.work.fold.first", false)),
-        event(5, WorkEventKind::TaskAccepted),
+        event(4, WorkEventKind::TaskAccepted),
     ];
 
     for length in 1..=history.len() {

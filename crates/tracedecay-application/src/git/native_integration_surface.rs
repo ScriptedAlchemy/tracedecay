@@ -33,14 +33,14 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
-    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority,
-    IdempotencyContract, InverseContract, InverseUnavailableReason, LifecycleClass, PrivacyClass,
-    OperationId, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
-    RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension,
-    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
-    UseCaseId, CodecBindingKey,
+    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, IdempotencyContract, InverseContract, InverseUnavailableReason,
+    LifecycleClass, OperationId, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
+    TerminalStateContract, UseCaseId,
 };
 
 use crate::CancellationSignal;
@@ -741,13 +741,15 @@ pub fn native_integration_surface_catalog_contribution()
 
 /// Daemon-owned public HTTP bindings for native worktree administration.
 ///
-/// The six stack transaction operations remain CLI/MCP-only; only specs that
-/// carry an actual current HTTP surface can enter this executable registry.
+/// Native integration stack mutation remains CLI/MCP-only. Only worktree
+/// operations whose canonical surface includes HTTP are projected here, so
+/// the API router and official SDKs consume the same catalog authority.
 pub fn native_worktree_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
     let contribution = native_integration_surface_catalog_contribution()?;
     let service_id = ServiceId::new("service.application.native-integration")?;
     let mut bindings = Vec::new();
+
     for spec in NATIVE_INTEGRATION_SPECS
         .iter()
         .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
@@ -760,7 +762,7 @@ pub fn native_worktree_executable_binding_registry()
             .ok_or(ApplicationContractError::Inconsistent {
                 field: "native worktree executable capability",
             })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
+        let executable_schema = contribution.executable_schema(&capability_id).ok_or(
             ApplicationContractError::Inconsistent {
                 field: "native worktree executable schema",
             },
@@ -780,8 +782,8 @@ pub fn native_worktree_executable_binding_registry()
                 manifest,
                 OperationId::new(format!("operation.application.{}", spec.operation))?,
                 service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
+                executable_schema.request_schema().clone(),
+                executable_schema.result_schema().clone(),
                 CodecBindingKey::new(format!(
                     "codec.application.native-integration.{}.json.v1",
                     spec.operation
@@ -793,7 +795,8 @@ pub fn native_worktree_executable_binding_registry()
             )?,
         ));
     }
-    ExecutableBindingRegistryV1::new(bindings).map_err(Into::into)
+
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 /// Resolve one native-integration wire operation to its canonical application

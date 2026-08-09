@@ -203,6 +203,7 @@ pub struct WorktreeCleanupRemoveRequestV1 {
     pub scope_set_digest: ManifestDigest,
     pub target: NativeWorktreeTargetV1,
     pub inspection_digest: ManifestDigest,
+    pub confirmed_at: UtcMicros,
     pub confirmation_digest: ManifestDigest,
 }
 

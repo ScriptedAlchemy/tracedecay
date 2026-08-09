@@ -28,7 +28,8 @@ use tracedecay_domain::{
 };
 
 use crate::work_attempt::{
-    StartWorkAttemptCommand, WorkProductAttemptServiceV1, WorkSynthesisAdmissionStoragePort,
+    StartWorkAttemptCommand, WorkProductSynthesisAttemptServiceV1,
+    WorkSynthesisAdmissionStoragePort,
 };
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
 use crate::{
@@ -193,7 +194,7 @@ pub enum WorkSynthesisAttemptV1 {
 /// Every source outcome is read from the attempt authority — never trusted
 /// from the caller — and preserved verbatim in the admission record.
 pub fn admit_work_synthesis_against_registered_topology<S>(
-    attempts: &WorkProductAttemptServiceV1<S>,
+    attempts: &WorkProductSynthesisAttemptServiceV1<S>,
     context: &RequestContext,
     product_binding: &WorkProductBindingV1,
     revisions: &WorkProductRevisionPinsV1,

@@ -10,7 +10,6 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 
-use crate::work_synthesis::{WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1};
 use crate::{
     ApplicationProblem, RequestAdmission, RequestContext, WorkGraphReadPortV1,
     WorkGraphReadRequestV1, WorkGraphReadV1, WorkProductApplicationErrorV1,
@@ -23,8 +22,8 @@ use crate::{
 
 use super::{
     StartWorkAttemptCommand, WorkAttemptAdmissionKind, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
-    conflict_problem, contract_problem, denied_problem, not_found_problem, storage_problem,
+    WorkAttemptStoragePort, conflict_problem, contract_problem, denied_problem, not_found_problem,
+    storage_problem,
 };
 
 const WORK_PRODUCT_START_INPUT_DIGEST_DOMAIN: &str =
@@ -33,10 +32,6 @@ const WORK_PRODUCT_START_COMMAND_DOMAIN: &str =
     "tracedecay.application.work-product-start-attempt-command.final-v2";
 const WORK_PRODUCT_START_LEASE_DOMAIN: &str =
     "tracedecay.application.work-product-start-attempt-lease.final-v2";
-const WORK_PRODUCT_SYNTHESIS_COMMAND_DOMAIN: &str =
-    "tracedecay.application.work-product-synthesis-command.final-v2";
-const WORK_PRODUCT_SYNTHESIS_LEASE_DOMAIN: &str =
-    "tracedecay.application.work-product-synthesis-lease.final-v2";
 
 /// The exact product graph head and authorized product context a public
 /// attempt admission is bound to. This is assembled before the combined port
@@ -47,205 +42,44 @@ pub(crate) struct CurrentWorkProductAttemptGraphV1 {
     pub(crate) graph: tracedecay_domain::WorkProductGraphV1,
 }
 
-struct PreparedWorkProductSynthesisV1 {
-    product: CurrentWorkProductAttemptGraphV1,
-    authority: WorkAuthority,
-    identity: WorkAttemptIdentityV1,
-    binding: WorkAttemptProjectionBindingV1,
+pub(crate) fn admit_product_attempt_request(
+    context: &RequestContext,
+    binding: &WorkProductBindingV1,
+    observed_at: UtcMicros,
+) -> Result<(), ApplicationProblem> {
+    if !context.allows(binding.capability_id(), binding.use_case_id()) {
+        return Err(not_found_problem());
+    }
+    match context.admission_at(observed_at) {
+        RequestAdmission::Admitted => Ok(()),
+        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
+        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
+    }
 }
 
-impl<S> WorkProductAttemptServiceV1<S>
-where
-    S: WorkSynthesisAdmissionStoragePort
-        + WorkGraphReadPortV1
-        + WorkProductOwnerAuthorizationPortV1
-        + WorkProductAttemptAdmissionPortV1,
-{
-    /// Reads one source attempt under the exact caller authority.
-    pub(crate) fn status(
-        &self,
-        context: &RequestContext,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        let authority = crate::work::work_authority(context)?;
-        self.storage
-            .load(&authority, identity)
-            .map_err(storage_problem)
-    }
-
-    /// Replays only a synthesis whose request and current graph admission
-    /// binding remain exact. A changed accepted proposal is a conflict, not a
-    /// stale synthesis silently returned as current work.
-    pub(crate) fn replay(
-        &self,
-        context: &RequestContext,
-        product_binding: &WorkProductBindingV1,
-        command: &StartWorkAttemptCommand,
-        request_digest: &ManifestDigest,
-    ) -> Result<Option<WorkSynthesisAdmissionV1>, ApplicationProblem> {
-        let prepared = self.prepare(context, product_binding, command)?;
-        match self
-            .storage
-            .load_synthesis(&prepared.authority, &prepared.identity)
-        {
-            Ok(record) if &record.request_digest == request_digest => {
-                if record.result.attempt.projection_binding() != &prepared.binding {
-                    return Err(conflict_problem(
-                        "application.work-attempt.identity-conflict",
-                        "The Work attempt identity was already used with different content.",
-                    ));
-                }
-                Ok(Some(record.result))
-            }
-            Ok(_) => Err(storage_problem(WorkAttemptStorageError::AttemptConflict)),
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => Ok(None),
-            Err(error) => Err(storage_problem(error)),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn admit<F>(
-        &self,
-        context: &RequestContext,
-        product_binding: &WorkProductBindingV1,
-        revisions: &WorkProductRevisionPinsV1,
-        topology: &tracedecay_domain::WorkTopologyPolicyV1,
-        command: StartWorkAttemptCommand,
-        request_digest: ManifestDigest,
-        build_result: F,
-    ) -> Result<WorkSynthesisAdmissionV1, ApplicationProblem>
-    where
-        F: FnOnce(WorkAttemptV1) -> WorkSynthesisAdmissionV1,
-    {
-        let prepared = self.prepare(context, product_binding, &command)?;
-        match self
-            .storage
-            .load_synthesis(&prepared.authority, &prepared.identity)
-        {
-            Ok(record) if record.request_digest == request_digest => {
-                if record.result.attempt.projection_binding() != &prepared.binding {
-                    return Err(conflict_problem(
-                        "application.work-attempt.identity-conflict",
-                        "The Work attempt identity was already used with different content.",
-                    ));
-                }
-                return Ok(record.result);
-            }
-            Ok(_) => return Err(storage_problem(WorkAttemptStorageError::AttemptConflict)),
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {}
-            Err(error) => return Err(storage_problem(error)),
-        }
-        let requested_route = command.execution_snapshot.route().clone();
-        let envelope = WorkExecutionEnvelopeV1::new(
-            prepared.identity.clone(),
-            prepared.binding.clone(),
-            command.operation,
-            command.execution_snapshot,
-            context.scope().project_id.clone(),
-            context.scope().repository_id.clone(),
-            context.scope().worktree_id.clone(),
-            command.worktree_root,
-            command.reference,
-            command.commit,
-            command.instructions,
-            1,
-            command.effect_state,
-        )
-        .map_err(contract_problem)?;
-        let lease =
-            mint_product_synthesis_lease(&self.storage, &prepared.authority, &prepared.identity)?;
-        let attempt = WorkAttemptV1::new(
-            prepared.identity.clone(),
-            prepared.binding.clone(),
-            envelope,
-            lease,
-            WorkAttemptStateV1::Leased,
-            None,
-            Vec::new(),
-            WorkCancellationStateV1::None,
-            WorkRecoveryStateV1::Fresh,
-            requested_route,
-            None,
-            None,
-        )
-        .map_err(contract_problem)?;
-        let synthesis = WorkSynthesisAdmissionRecordV1 {
-            request_digest: request_digest.clone(),
-            result: build_result(attempt.clone()),
-        };
-        let draft = accepted_attempt_draft(
-            &prepared.product,
-            revisions,
-            synthesis_command_id(&prepared.identity)?,
-            request_digest,
-            attempt.projection_binding().graph_version(),
-            &prepared.identity,
-            prepared.product.context.observed_at(),
-        )?;
-        let admission = crate::WorkProductSynthesisAdmissionV1 {
-            admission: WorkProductAttemptAdmissionV1 {
-                product_context: prepared.product.context,
-                product_draft: draft,
-                authority: prepared.authority,
-                attempt,
-                concurrency: topology.concurrency.clone(),
-            },
-            synthesis: synthesis.clone(),
-        };
-        match self
-            .storage
-            .admit_synthesis(&admission)
-            .map_err(product_admission_problem)?
-            .1
-        {
-            WorkSynthesisInsertOutcome::Inserted => Ok(synthesis.result),
-            WorkSynthesisInsertOutcome::Replayed(result) => Ok(*result),
-        }
-    }
-
-    fn prepare(
-        &self,
-        context: &RequestContext,
-        product_binding: &WorkProductBindingV1,
-        command: &StartWorkAttemptCommand,
-    ) -> Result<PreparedWorkProductSynthesisV1, ApplicationProblem> {
-        let product = current_work_product_attempt_graph(
-            &self.storage,
-            context,
-            product_binding,
-            command.occurred_at,
-        )?;
-        let item = product
-            .graph
-            .item(&command.task_id)
-            .ok_or_else(not_found_problem)?;
-        if !item.is_execution_admitted() {
-            return Err(denied_problem(
-                "application.work-attempt.execution-not-admitted",
-                "Work execution has not been admitted for this task.",
-            ));
-        }
-        let accepted_proposal = item.accepted_proposal().cloned().ok_or_else(|| {
-            denied_problem(
-                "application.work-attempt.no-accepted-proposal",
-                "Work has no accepted proposal to execute.",
-            )
-        })?;
-        let authority = crate::work::work_authority(context)?;
-        let identity = WorkAttemptIdentityV1::new(
-            command.task_id.clone(),
-            command.run_id.clone(),
-            command.attempt_id.clone(),
-        )
-        .map_err(contract_problem)?;
-        let binding = product_attempt_projection_binding(&product, accepted_proposal)?;
-        Ok(PreparedWorkProductSynthesisV1 {
-            product,
-            authority,
-            identity,
-            binding,
-        })
-    }
+pub(crate) fn replayed_attempt_matches_command(
+    context: &RequestContext,
+    command: &StartWorkAttemptCommand,
+    identity: &WorkAttemptIdentityV1,
+    attempt: &WorkAttemptV1,
+) -> Result<bool, ApplicationProblem> {
+    let expected = WorkExecutionEnvelopeV1::new(
+        identity.clone(),
+        attempt.projection_binding().clone(),
+        command.operation.clone(),
+        command.execution_snapshot.clone(),
+        context.scope().project_id.clone(),
+        context.scope().repository_id.clone(),
+        context.scope().worktree_id.clone(),
+        command.worktree_root.clone(),
+        command.reference.clone(),
+        command.commit.clone(),
+        command.instructions.clone(),
+        1,
+        command.effect_state,
+    )
+    .map_err(contract_problem)?;
+    Ok(attempt.identity() == identity && attempt.execution() == &expected)
 }
 
 /// Reads the current verified product graph under the exact relation scope
@@ -260,14 +94,7 @@ pub(crate) fn current_work_product_attempt_graph<S>(
 where
     S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
 {
-    if !context.allows(binding.capability_id(), binding.use_case_id()) {
-        return Err(not_found_problem());
-    }
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => {}
-        RequestAdmission::Cancelled => return Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => return Err(ApplicationProblem::timed_out_before_admission()),
-    }
+    admit_product_attempt_request(context, binding, observed_at)?;
     let selection =
         WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
             project_id: context.scope().project_id.clone(),
@@ -453,6 +280,33 @@ where
         topology: &tracedecay_domain::WorkTopologyPolicyV1,
         command: StartWorkAttemptCommand,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        admit_product_attempt_request(context, binding, command.occurred_at)?;
+        let authority = crate::work::work_authority(context)?;
+        let identity = WorkAttemptIdentityV1::new(
+            command.task_id.clone(),
+            command.run_id.clone(),
+            command.attempt_id.clone(),
+        )
+        .map_err(contract_problem)?;
+        match self.storage.load(&authority, &identity) {
+            Ok(existing) => {
+                let admission_kind = self
+                    .storage
+                    .load_admission_kind(&authority, &identity)
+                    .map_err(storage_problem)?;
+                if admission_kind != WorkAttemptAdmissionKind::Ordinary
+                    || !replayed_attempt_matches_command(context, &command, &identity, &existing)?
+                {
+                    return Err(conflict_problem(
+                        "application.work-attempt.identity-conflict",
+                        "The Work attempt identity was already used with different content.",
+                    ));
+                }
+                return Ok(existing);
+            }
+            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {}
+            Err(error) => return Err(storage_problem(error)),
+        }
         let product = current_work_product_attempt_graph(
             &self.storage,
             context,
@@ -475,13 +329,6 @@ where
                 "Work has no accepted proposal to execute.",
             )
         })?;
-        let authority = crate::work::work_authority(context)?;
-        let identity = WorkAttemptIdentityV1::new(
-            command.task_id.clone(),
-            command.run_id.clone(),
-            command.attempt_id.clone(),
-        )
-        .map_err(contract_problem)?;
         let binding = product_attempt_projection_binding(&product, accepted_proposal)?;
         let requested_route = command_requested_route(&command);
         let digest = canonical_sha256(&(WORK_PRODUCT_START_INPUT_DIGEST_DOMAIN, &command))
@@ -502,44 +349,21 @@ where
             command.effect_state,
         )
         .map_err(contract_problem)?;
-        let attempt = match self.storage.load(&authority, &identity) {
-            Ok(existing) => {
-                let admission_kind = self
-                    .storage
-                    .load_admission_kind(&authority, &identity)
-                    .map_err(storage_problem)?;
-                if admission_kind == WorkAttemptAdmissionKind::Synthesis
-                    || !existing.execution().same_admission_content(&envelope)
-                    || existing.projection_binding().accepted_proposal()
-                        != binding.accepted_proposal()
-                {
-                    return Err(conflict_problem(
-                        "application.work-attempt.identity-conflict",
-                        "The Work attempt identity was already used with different content.",
-                    ));
-                }
-                existing
-            }
-            Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {
-                let lease = mint_product_lease(&self.storage, &authority, &identity)?;
-                WorkAttemptV1::new(
-                    identity.clone(),
-                    binding,
-                    envelope,
-                    lease,
-                    WorkAttemptStateV1::Leased,
-                    None,
-                    Vec::new(),
-                    WorkCancellationStateV1::None,
-                    WorkRecoveryStateV1::Fresh,
-                    requested_route,
-                    None,
-                    None,
-                )
-                .map_err(contract_problem)?
-            }
-            Err(error) => return Err(storage_problem(error)),
-        };
+        let attempt = WorkAttemptV1::new(
+            identity.clone(),
+            binding,
+            envelope,
+            mint_product_lease(&self.storage, &authority, &identity)?,
+            WorkAttemptStateV1::Leased,
+            None,
+            Vec::new(),
+            WorkCancellationStateV1::None,
+            WorkRecoveryStateV1::Fresh,
+            requested_route,
+            None,
+            None,
+        )
+        .map_err(contract_problem)?;
         let command_id = start_command_id(&identity)?;
         let draft = accepted_attempt_draft(
             &product,
@@ -608,40 +432,6 @@ fn start_command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, A
         digest.as_str().trim_start_matches("sha256:")
     ))
     .map_err(|_| invalid_start_problem())
-}
-
-fn synthesis_command_id(
-    identity: &WorkAttemptIdentityV1,
-) -> Result<WorkCommandId, ApplicationProblem> {
-    let digest = canonical_sha256(&(WORK_PRODUCT_SYNTHESIS_COMMAND_DOMAIN, identity))
-        .map_err(|_| invalid_start_problem())?;
-    WorkCommandId::new(format!(
-        "work-product-synthesis:{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| invalid_start_problem())
-}
-
-fn mint_product_synthesis_lease<S>(
-    storage: &S,
-    authority: &WorkAuthority,
-    identity: &WorkAttemptIdentityV1,
-) -> Result<WorkLeaseFenceV1, ApplicationProblem>
-where
-    S: WorkAttemptStoragePort,
-{
-    let digest = canonical_sha256(&(WORK_PRODUCT_SYNTHESIS_LEASE_DOMAIN, identity))
-        .map_err(|_| invalid_start_problem())?;
-    let lease_id = WorkLeaseId::new(format!(
-        "work-product-synthesis-lease:{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| invalid_start_problem())?;
-    let epoch = storage
-        .next_fence_epoch(authority)
-        .map_err(storage_problem)?;
-    let epoch = WorkFenceEpochV1::new(epoch).map_err(contract_problem)?;
-    WorkLeaseFenceV1::new(lease_id, epoch).map_err(contract_problem)
 }
 
 fn owner_problem(error: WorkProductOwnerAuthorizationErrorV1) -> ApplicationProblem {

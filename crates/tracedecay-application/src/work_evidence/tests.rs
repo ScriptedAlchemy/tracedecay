@@ -470,7 +470,10 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert_eq!(requests[0].task_id.as_str(), "task.work-evidence");
     assert_eq!(requests[0].verified_version, verified());
     assert_eq!(requests[0].attempt, attempt);
-    assert_eq!(requests[0].accepted_attempts, BTreeSet::from([attempt.clone()]));
+    assert_eq!(
+        requests[0].accepted_attempts,
+        BTreeSet::from([attempt.clone()])
+    );
     assert_eq!(requests[0].source, provider_session);
     assert_eq!(requests[0].temporal, TemporalModeV1::Forensic);
     assert_eq!(requests[0].continuation, None);

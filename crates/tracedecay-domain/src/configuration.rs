@@ -625,7 +625,6 @@ pub struct AutomationSettingsV1 {
     pub model_id: Option<String>,
     pub timeout_secs: u64,
     pub scheduler_tick_secs: u64,
-    pub export_memory_digest: bool,
     pub combine_due_tasks: bool,
     pub allow_job_commands: bool,
     pub tasks: AutomationTaskSetV1,
@@ -665,19 +664,79 @@ impl AutomationSettingsV1 {
 
 impl Default for AutomationSettingsV1 {
     fn default() -> Self {
+        let scheduled_task = |interval_secs, min_idle_secs| AutomationTaskSettingsV1 {
+            enabled: true,
+            schedule: Some("interval".to_owned()),
+            interval_secs: Some(interval_secs),
+            cooldown_secs: Some(300),
+            min_idle_secs,
+            stale_lock_secs: Some(3_600),
+        };
         Self {
             schema_version: Self::SCHEMA_VERSION,
-            enabled: false,
-            backend: AutomationBackendV1::Disabled,
+            enabled: true,
+            backend: AutomationBackendV1::CodexAppServer,
             host_mode: AutomationHostModeV1::Standalone,
-            model_id: None,
+            model_id: Some("gpt-5.6-mini".to_owned()),
             timeout_secs: 60,
             scheduler_tick_secs: 60,
-            export_memory_digest: true,
             combine_due_tasks: true,
             allow_job_commands: false,
-            tasks: AutomationTaskSetV1::default(),
+            tasks: AutomationTaskSetV1 {
+                memory_curator: scheduled_task(900, None),
+                session_reflector: scheduled_task(900, None),
+                skill_writer: scheduled_task(3_600, Some(900)),
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod automation_settings_tests {
+    use super::{AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1};
+
+    #[test]
+    fn fresh_v2_settings_schedule_the_required_curation_loop() {
+        let settings = AutomationSettingsV1::default();
+
+        assert!(settings.enabled);
+        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
+        assert_eq!(settings.host_mode, AutomationHostModeV1::Standalone);
+        assert_eq!(settings.model_id.as_deref(), Some("gpt-5.6-mini"));
+        assert_eq!(settings.scheduler_tick_secs, 60);
+        assert!(settings.combine_due_tasks);
+
+        assert_eq!(
+            (
+                settings.tasks.memory_curator.enabled,
+                settings.tasks.memory_curator.schedule.as_deref(),
+                settings.tasks.memory_curator.interval_secs,
+                settings.tasks.memory_curator.cooldown_secs,
+                settings.tasks.memory_curator.min_idle_secs,
+            ),
+            (true, Some("interval"), Some(900), Some(300), None)
+        );
+        assert_eq!(
+            (
+                settings.tasks.session_reflector.enabled,
+                settings.tasks.session_reflector.schedule.as_deref(),
+                settings.tasks.session_reflector.interval_secs,
+                settings.tasks.session_reflector.cooldown_secs,
+                settings.tasks.session_reflector.min_idle_secs,
+            ),
+            (true, Some("interval"), Some(900), Some(300), None)
+        );
+        assert_eq!(
+            (
+                settings.tasks.skill_writer.enabled,
+                settings.tasks.skill_writer.schedule.as_deref(),
+                settings.tasks.skill_writer.interval_secs,
+                settings.tasks.skill_writer.cooldown_secs,
+                settings.tasks.skill_writer.min_idle_secs,
+            ),
+            (true, Some("interval"), Some(3_600), Some(300), Some(900))
+        );
+        settings.validate().expect("fresh V2 automation settings");
     }
 }
 

@@ -10,7 +10,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{OpaqueCursor, OperationBudgetUsage};
 
-use super::RetrievalRequestMeta;
+use super::{ResultProjection, RetrievalOrder, RetrievalRequestMeta};
 
 pub const MAX_SYMBOL_GRAPH_DEPTH: u32 = 10;
 pub const MAX_SYMBOL_GRAPH_QUERY_BYTES: usize = 4_096;
@@ -37,6 +37,38 @@ impl SymbolGraphScope {
         }
         Ok(())
     }
+}
+
+/// Public query controls shared by the callable code surfaces.
+///
+/// The HTTP and MCP adapters use one continuation field; the transport page
+/// limit is applied by the owner while decoding this request. Keeping the
+/// public wire DTO here prevents a root-adapter-only schema from drifting away
+/// from the executable SDK contract.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CallableCodeSurfaceMetaV1 {
+    pub projection: ResultProjection,
+    pub order: RetrievalOrder,
+    /// Opaque continuation token. The public schema exposes its bounded string
+    /// representation rather than the internal identifier type.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub cursor: Option<OpaqueCursor>,
+}
+
+/// Exact public input accepted by `tracedecay_code_symbol_search`.
+///
+/// Its query text is deliberately sanitized only after the public request is
+/// admitted; a sanitized query view carries runtime-only provenance and is
+/// never exposed as a second SDK request model.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeSymbolSearchSurfaceRequestV1 {
+    pub query: String,
+    pub scope: SymbolGraphScope,
+    pub lazy_index_ignored_dependencies: bool,
+    pub meta: CallableCodeSurfaceMetaV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]

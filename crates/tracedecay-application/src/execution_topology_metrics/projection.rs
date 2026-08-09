@@ -215,7 +215,7 @@ pub(super) struct ExecutionTopologyEvidenceV1 {
     pub(super) duplicates: BTreeMap<DuplicateReceiptKeyV1, (Option<DuplicateRowV1>, i64)>,
     pub(super) blocked: Vec<BlockedRowV1>,
     pub(super) reruns: Vec<RerunRowV1>,
-    pub(super) leaks: BTreeMap<String, (u64, Option<LeakRowV1>, i64)>,
+    pub(super) leaks: BTreeMap<String, (Option<LeakRowV1>, i64)>,
     pub(super) fanout: Vec<FanoutRowV1>,
     pub(super) github_stack_capability: Option<GitHubStackCapabilityRowV1>,
     pub(super) invalid_events: u64,
@@ -411,7 +411,7 @@ impl ExecutionTopologyEvidenceV1 {
                 });
             }
             ObservabilityPayloadV1::WorkExecutionLeak(leak) => {
-                self.absorb_leak(leak, event_time_micros);
+                self.absorb_leak(trace_id, leak, event_time_micros);
             }
             ObservabilityPayloadV1::WorkDeliveryFanout(fanout) => {
                 self.fanout.push(FanoutRowV1 {
@@ -463,6 +463,7 @@ impl ExecutionTopologyEvidenceV1 {
 
     fn absorb_leak(
         &mut self,
+        trace_id: &str,
         leak: &tracedecay_domain::WorkExecutionLeakObservedV1,
         event_time_micros: i64,
     ) {
@@ -472,27 +473,17 @@ impl ExecutionTopologyEvidenceV1 {
             coverage: leak.coverage,
             event_time_micros,
         };
-        match self.leaks.get(&leak.adjudication_ref) {
-            Some((revision, _, _)) if *revision > leak.adjudication_revision => {}
-            Some((revision, existing, existing_time))
-                if *revision == leak.adjudication_revision =>
-            {
-                if existing.is_some_and(|existing| existing != row) {
-                    self.leaks.insert(
-                        leak.adjudication_ref.clone(),
-                        (
-                            leak.adjudication_revision,
-                            None,
-                            (*existing_time).max(event_time_micros),
-                        ),
-                    );
-                }
-            }
-            _ => {
+        match self.leaks.get(trace_id) {
+            Some((existing, existing_time)) if existing.as_ref() != Some(&row) => {
                 self.leaks.insert(
-                    leak.adjudication_ref.clone(),
-                    (leak.adjudication_revision, Some(row), event_time_micros),
+                    trace_id.to_owned(),
+                    (None, (*existing_time).max(event_time_micros)),
                 );
+            }
+            Some(_) => {}
+            None => {
+                self.leaks
+                    .insert(trace_id.to_owned(), (Some(row), event_time_micros));
             }
         }
     }
@@ -618,10 +609,8 @@ mod aggregation_tests {
         );
     }
 
-    fn leak(revision: u64, recovery: WorkExecutionLeakRecoveryV1) -> WorkExecutionLeakObservedV1 {
+    fn leak(recovery: WorkExecutionLeakRecoveryV1) -> WorkExecutionLeakObservedV1 {
         WorkExecutionLeakObservedV1 {
-            adjudication_ref: "leak-adjudication:fixture".to_owned(),
-            adjudication_revision: revision,
             kind: WorkExecutionLeakKindV1::AttemptWithoutLiveOwner,
             detection_horizon_micros: 60_000_000,
             recovery,
@@ -631,22 +620,36 @@ mod aggregation_tests {
     }
 
     #[test]
-    fn leak_adjudication_is_revision_monotone_and_order_independent() {
+    fn leak_aggregation_is_trace_keyed_and_order_independent() {
         for rows in [
             vec![
-                leak(1, WorkExecutionLeakRecoveryV1::Pending),
-                leak(2, WorkExecutionLeakRecoveryV1::Recovered),
+                (
+                    "trace.leak.alpha",
+                    leak(WorkExecutionLeakRecoveryV1::Pending),
+                ),
+                (
+                    "trace.leak.beta",
+                    leak(WorkExecutionLeakRecoveryV1::Recovered),
+                ),
             ],
             vec![
-                leak(2, WorkExecutionLeakRecoveryV1::Recovered),
-                leak(1, WorkExecutionLeakRecoveryV1::Pending),
+                (
+                    "trace.leak.beta",
+                    leak(WorkExecutionLeakRecoveryV1::Recovered),
+                ),
+                (
+                    "trace.leak.alpha",
+                    leak(WorkExecutionLeakRecoveryV1::Pending),
+                ),
             ],
         ] {
             let mut evidence = ExecutionTopologyEvidenceV1::default();
-            for row in &rows {
-                evidence.absorb_leak(row, 0);
+            for (trace_id, row) in &rows {
+                evidence.absorb_leak(trace_id, row, 0);
             }
-            let (_, row, _) = evidence.leaks.get("leak-adjudication:fixture").unwrap();
+            let (row, _) = evidence.leaks.get("trace.leak.alpha").unwrap();
+            assert_eq!(row.unwrap().recovery, WorkExecutionLeakRecoveryV1::Pending);
+            let (row, _) = evidence.leaks.get("trace.leak.beta").unwrap();
             assert_eq!(
                 row.unwrap().recovery,
                 WorkExecutionLeakRecoveryV1::Recovered
@@ -655,10 +658,22 @@ mod aggregation_tests {
     }
 
     #[test]
-    fn conflicting_latest_leak_revision_remains_unknown() {
-        let mut evidence = ExecutionTopologyEvidenceV1::default();
-        evidence.absorb_leak(&leak(2, WorkExecutionLeakRecoveryV1::Recovered), 0);
-        evidence.absorb_leak(&leak(2, WorkExecutionLeakRecoveryV1::Failed), 0);
-        assert!(evidence.leaks["leak-adjudication:fixture"].1.is_none());
+    fn conflicting_trace_keyed_leaks_remain_unknown_regardless_of_arrival_order() {
+        for rows in [
+            vec![
+                leak(WorkExecutionLeakRecoveryV1::Recovered),
+                leak(WorkExecutionLeakRecoveryV1::Failed),
+            ],
+            vec![
+                leak(WorkExecutionLeakRecoveryV1::Failed),
+                leak(WorkExecutionLeakRecoveryV1::Recovered),
+            ],
+        ] {
+            let mut evidence = ExecutionTopologyEvidenceV1::default();
+            for row in &rows {
+                evidence.absorb_leak("trace.leak.alpha", row, 0);
+            }
+            assert!(evidence.leaks["trace.leak.alpha"].0.is_none());
+        }
     }
 }

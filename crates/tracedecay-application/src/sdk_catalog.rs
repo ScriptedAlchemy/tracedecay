@@ -16,8 +16,11 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     ApplicationContractError, application_catalog_contributions,
-    configuration_executable_binding_registry, context_scout_executable_binding_registry,
-    handoff_executable_binding_registry, multi_root::multi_root_executable_binding_registry,
+    code_search_executable_binding_registry, configuration_executable_binding_registry,
+    context_scout_executable_binding_registry,
+    git::{git_surface_executable_binding_registry, native_worktree_executable_binding_registry},
+    handoff_executable_binding_registry,
+    multi_root::multi_root_executable_binding_registry,
     retained_surface_executable_binding_registry, work_executable_binding_registry,
     workflow_executable_binding_registry,
 };
@@ -32,6 +35,9 @@ use crate::{
 fn mounted_executable_binding_registries()
 -> Result<Vec<ExecutableBindingRegistryV1>, ApplicationContractError> {
     Ok(vec![
+        git_surface_executable_binding_registry()?,
+        native_worktree_executable_binding_registry()?,
+        code_search_executable_binding_registry()?,
         work_executable_binding_registry()?,
         workflow_executable_binding_registry()?,
         configuration_executable_binding_registry()?,
@@ -217,6 +223,9 @@ fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidati
             reason: "must identify one product family and operation",
         });
     }
+    if let Some(code_search_operation) = operation.strip_prefix("application.code_") {
+        return Ok(format!("code_{code_search_operation}"));
+    }
     Ok(operation.replace('.', "_"))
 }
 
@@ -362,6 +371,101 @@ mod tests {
             workflow.sdk_method().as_str(),
             "workflow_register_definition"
         );
+    }
+
+    #[test]
+    fn sdk_registry_selects_the_mounted_http_transport_for_every_code_search() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        let mounted =
+            crate::code_search_executable_binding_registry().expect("mounted code-search registry");
+        let expected = crate::application_catalog_contributions()
+            .expect("application catalog")
+            .into_iter()
+            .flat_map(|contribution| contribution.bindings().to_vec())
+            .filter(|binding| {
+                binding.surface() == BindingSurface::Http
+                    && matches!(
+                        binding.status(),
+                        tracedecay_tool_catalog::BindingStatus::Current
+                    )
+                    && !binding.is_alias()
+                    && binding.operation().as_str().starts_with("code_")
+            })
+            .map(|binding| format!("operation.application.{}", binding.operation().as_str()))
+            .collect::<BTreeSet<_>>();
+        let actual = mounted
+            .iter()
+            .map(|availability| availability.operation_id().as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "every cataloged code-search HTTP route");
+
+        for availability in mounted.iter() {
+            let mounted_binding = availability
+                .binding()
+                .expect("mounted code-search executable");
+            let operation_id = mounted_binding.operation_id();
+            let operation = operation_id
+                .as_str()
+                .strip_prefix("operation.application.")
+                .expect("application operation ID");
+            let binding = registry
+                .get(operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} must be SDK-callable"));
+            assert_eq!(binding.binding(), mounted_binding);
+            assert_eq!(binding.sdk_method().as_str(), operation);
+            assert!(matches!(
+                binding.transport(),
+                SdkTransportBindingV1::Http { route_path }
+                    if route_path == &format!("/application/code/{operation}")
+            ));
+        }
+    }
+
+    #[test]
+    fn sdk_registry_projects_github_stack_and_native_worktrees_over_http() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        for (operation, route) in [
+            (
+                "github_stack_signal_expand",
+                "/application/github-stack/signal-expand",
+            ),
+            (
+                "worktree_inventory",
+                "/application/native-integration/worktree_inventory",
+            ),
+            (
+                "worktree_cleanup_inspect",
+                "/application/native-integration/worktree_cleanup_inspect",
+            ),
+            (
+                "worktree_cleanup_confirm",
+                "/application/native-integration/worktree_cleanup_confirm",
+            ),
+            (
+                "worktree_cleanup_remove",
+                "/application/native-integration/worktree_cleanup_remove",
+            ),
+            (
+                "worktree_cleanup_reconcile",
+                "/application/native-integration/worktree_cleanup_reconcile",
+            ),
+        ] {
+            let operation_id = OperationId::new(format!("operation.application.{operation}"))
+                .expect("operation ID");
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} must be SDK-callable"));
+            assert!(matches!(
+                binding.transport(),
+                SdkTransportBindingV1::Http { route_path } if route_path == route
+            ));
+            assert_eq!(
+                binding.sdk_method().as_str(),
+                format!("application_{operation}")
+            );
+        }
     }
 
     #[test]

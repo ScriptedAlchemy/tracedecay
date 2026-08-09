@@ -1,11 +1,7 @@
-//! TaskId-rooted composition over canonical Work relations and owning evidence
-//! authorities.
+//! TaskId-rooted composition over canonical Work relations and evidence owners.
 //!
-//! This operation deliberately does not add `TaskId` to the temporal query
-//! kernel. Work authorizes and resolves the task/version root; a sealed
-//! provider attempt supplies a provider-qualified session identity, and the
-//! session owner performs the narrative read under its normal temporal
-//! contract.
+//! Work admits the task/version/attempt join; session retrieval retains that
+//! identity through compact ranking and selected-anchor hydration.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -16,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CalibrationProfileId, ComponentRevision, ManifestDigest, ObservationSourceIdentityV1,
-    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
-    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, TemporalModeV1, UtcMicros,
-    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkItemV1,
-    WorkProductRelationV1, WorkProposalDecisionV1, WorkRelationReplanDecisionV1,
+    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId, TaskEvidenceLinkId,
+    TaskEvidenceLinkV1, TaskId, TemporalModeV1, UtcMicros, WorkArtifactRefV1,
+    WorkAttemptIdentityV1, WorkAuthority, WorkItemV1, WorkProductRelationV1,
+    WorkProposalDecisionV1, WorkRelationReplanDecisionV1,
 };
 
 use crate::work::work_authority;
@@ -742,9 +738,10 @@ where
             expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
                 attempt: request.attempt.clone(),
             }),
-            continuation: request.continuation.clone().map(|continuation| {
-                WorkEvidenceContinuationV1::TaskSession { continuation }
-            }),
+            continuation: request
+                .continuation
+                .clone()
+                .map(|continuation| WorkEvidenceContinuationV1::TaskSession { continuation }),
             observed_at: request.observed_at,
         };
         let root = self
@@ -755,8 +752,8 @@ where
         {
             return Err(WorkTaskSessionReauthorizationErrorV1::Stale);
         }
-        let authority = work_authority(context)
-            .map_err(|_| WorkTaskSessionReauthorizationErrorV1::Denied)?;
+        let authority =
+            work_authority(context).map_err(|_| WorkTaskSessionReauthorizationErrorV1::Denied)?;
         let receipt = self
             .attempts
             .attempt_receipt(&authority, &request.attempt)

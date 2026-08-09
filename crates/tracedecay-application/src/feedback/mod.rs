@@ -5,6 +5,7 @@
 //! delivery adapter, task relation, or durable overlay path.
 
 mod adapters;
+mod advisory_surface;
 mod catalog;
 mod github_ci_proximity;
 mod ports;
@@ -18,6 +19,10 @@ pub use catalog::{
 };
 
 pub use adapters::GenerationBoundFeedbackDiagnosticsAdapter;
+pub use advisory_surface::{
+    FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackAdvisoryCycleSurfaceResultV1,
+    FeedbackAdvisoryCycleWireV1, FeedbackAdvisoryFindingHandleV1,
+};
 pub use github_ci_proximity::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
@@ -43,7 +48,8 @@ pub use read::{
     FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1, FeedbackExpandResultV1,
     FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackHandleRequestV1,
     FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadOperationsV1, FeedbackReadPort,
-    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
+    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService, TestResultProjectionV1,
+    TestResultsResultV1, TestResultsSurfaceRequestV1,
 };
 pub use service::{
     FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleControl,

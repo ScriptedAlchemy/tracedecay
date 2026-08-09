@@ -39,6 +39,7 @@ pub use native_integration_surface::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
     native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
+    native_worktree_executable_binding_registry,
 };
 pub use public_wire::{
     GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,

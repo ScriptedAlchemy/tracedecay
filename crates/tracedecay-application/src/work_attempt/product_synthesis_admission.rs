@@ -16,9 +16,10 @@ use crate::{
 use super::{
     CurrentWorkProductAttemptGraphV1, StartWorkAttemptCommand, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
-    accepted_attempt_draft, conflict_problem, contract_problem, current_work_product_attempt_graph,
-    denied_problem, not_found_problem, product_admission_problem,
-    product_attempt_projection_binding, storage_problem,
+    accepted_attempt_draft, admit_product_attempt_request, conflict_problem, contract_problem,
+    current_work_product_attempt_graph, denied_problem, not_found_problem,
+    product_admission_problem, product_attempt_projection_binding,
+    replayed_attempt_matches_command, storage_problem,
 };
 
 const COMMAND_DOMAIN: &str = "tracedecay.application.work-product-synthesis-command.final-v2";
@@ -63,13 +64,16 @@ where
         command: &StartWorkAttemptCommand,
         request_digest: &ManifestDigest,
     ) -> Result<Option<WorkSynthesisAdmissionV1>, ApplicationProblem> {
-        let prepared = self.prepare(context, binding, command)?;
-        match self
-            .storage
-            .load_synthesis(&prepared.authority, &prepared.identity)
-        {
+        admit_product_attempt_request(context, binding, command.occurred_at)?;
+        let (authority, identity) = attempt_authority_and_identity(context, command)?;
+        match self.storage.load_synthesis(&authority, &identity) {
             Ok(record) if &record.request_digest == request_digest => {
-                if record.result.attempt.projection_binding() != &prepared.binding {
+                if !replayed_attempt_matches_command(
+                    context,
+                    command,
+                    &identity,
+                    &record.result.attempt,
+                )? {
                     return Err(identity_conflict());
                 }
                 Ok(Some(record.result))
@@ -94,13 +98,16 @@ where
     where
         F: FnOnce(WorkAttemptV1) -> WorkSynthesisAdmissionV1,
     {
-        let prepared = self.prepare(context, binding, &command)?;
-        match self
-            .storage
-            .load_synthesis(&prepared.authority, &prepared.identity)
-        {
+        admit_product_attempt_request(context, binding, command.occurred_at)?;
+        let (authority, identity) = attempt_authority_and_identity(context, &command)?;
+        match self.storage.load_synthesis(&authority, &identity) {
             Ok(record) if record.request_digest == request_digest => {
-                if record.result.attempt.projection_binding() != &prepared.binding {
+                if !replayed_attempt_matches_command(
+                    context,
+                    &command,
+                    &identity,
+                    &record.result.attempt,
+                )? {
                     return Err(identity_conflict());
                 }
                 return Ok(record.result);
@@ -109,6 +116,7 @@ where
             Err(WorkAttemptStorageError::NotFoundOrNotAuthorized) => {}
             Err(error) => return Err(storage_problem(error)),
         }
+        let prepared = self.prepare(context, binding, &command, authority, identity)?;
         let requested_route = command.execution_snapshot.route().clone();
         let envelope = WorkExecutionEnvelopeV1::new(
             prepared.identity.clone(),
@@ -180,6 +188,8 @@ where
         context: &RequestContext,
         binding: &WorkProductBindingV1,
         command: &StartWorkAttemptCommand,
+        authority: WorkAuthority,
+        identity: WorkAttemptIdentityV1,
     ) -> Result<PreparedSynthesisV1, ApplicationProblem> {
         let product = current_work_product_attempt_graph(
             &self.storage,
@@ -203,13 +213,6 @@ where
                 "Work has no accepted proposal to execute.",
             )
         })?;
-        let authority = crate::work::work_authority(context)?;
-        let identity = WorkAttemptIdentityV1::new(
-            command.task_id.clone(),
-            command.run_id.clone(),
-            command.attempt_id.clone(),
-        )
-        .map_err(contract_problem)?;
         let binding = product_attempt_projection_binding(&product, proposal)?;
         Ok(PreparedSynthesisV1 {
             product,
@@ -218,6 +221,20 @@ where
             binding,
         })
     }
+}
+
+fn attempt_authority_and_identity(
+    context: &RequestContext,
+    command: &StartWorkAttemptCommand,
+) -> Result<(WorkAuthority, WorkAttemptIdentityV1), ApplicationProblem> {
+    let authority = crate::work::work_authority(context)?;
+    let identity = WorkAttemptIdentityV1::new(
+        command.task_id.clone(),
+        command.run_id.clone(),
+        command.attempt_id.clone(),
+    )
+    .map_err(contract_problem)?;
+    Ok((authority, identity))
 }
 
 fn command_id(identity: &WorkAttemptIdentityV1) -> Result<WorkCommandId, ApplicationProblem> {

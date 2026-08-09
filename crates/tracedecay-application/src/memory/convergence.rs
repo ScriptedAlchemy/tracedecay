@@ -4,15 +4,15 @@ use std::future::Future;
 
 /// Truthful state returned after one bounded derived-memory repair pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DerivedMemoryConvergenceStateV1 {
+pub enum DerivedMemoryConvergenceState {
     Converged,
     /// More durable repair work remains for the daemon scheduler.
     Pending,
 }
 
-/// Store-neutral progress for compatibility feedback-history repair.
+/// Store-neutral progress for feedback-history repair.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum DerivedMemoryFeedbackHistoryRepairV1 {
+pub enum DerivedMemoryFeedbackHistoryRepair {
     /// The repair authority did not report a progress state.
     #[default]
     Unknown,
@@ -29,26 +29,26 @@ pub enum DerivedMemoryFeedbackHistoryRepairV1 {
 
 /// Store-neutral projection of one bounded repair pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DerivedMemoryRepairStatsV1 {
+pub struct DerivedMemoryRepairStats {
     missing_vectors_repaired: u64,
     banks_rebuilt: u64,
-    feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1,
+    feedback_history_repair: DerivedMemoryFeedbackHistoryRepair,
     saturated: bool,
 }
 
-impl DerivedMemoryRepairStatsV1 {
+impl DerivedMemoryRepairStats {
     pub const fn new(missing_vectors_repaired: u64, banks_rebuilt: u64, saturated: bool) -> Self {
         Self {
             missing_vectors_repaired,
             banks_rebuilt,
-            feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1::Unknown,
+            feedback_history_repair: DerivedMemoryFeedbackHistoryRepair::Unknown,
             saturated,
         }
     }
 
     pub fn with_feedback_history_repair(
         mut self,
-        feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1,
+        feedback_history_repair: DerivedMemoryFeedbackHistoryRepair,
     ) -> Self {
         self.feedback_history_repair = feedback_history_repair;
         self
@@ -62,7 +62,7 @@ impl DerivedMemoryRepairStatsV1 {
         self.banks_rebuilt
     }
 
-    pub const fn feedback_history_repair(self) -> DerivedMemoryFeedbackHistoryRepairV1 {
+    pub const fn feedback_history_repair(self) -> DerivedMemoryFeedbackHistoryRepair {
         self.feedback_history_repair
     }
 
@@ -78,26 +78,26 @@ pub trait DerivedMemoryRepairPort: Send + Sync {
     fn repair_derived_memory(
         &self,
         action: &str,
-    ) -> impl Future<Output = Result<DerivedMemoryRepairStatsV1, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<DerivedMemoryRepairStats, Self::Error>> + Send;
 }
 
 /// Receipt for one bounded pass plus its truthful convergence state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DerivedMemoryConvergenceReportV1 {
-    state: DerivedMemoryConvergenceStateV1,
-    stats: DerivedMemoryRepairStatsV1,
+pub struct DerivedMemoryConvergenceReport {
+    state: DerivedMemoryConvergenceState,
+    stats: DerivedMemoryRepairStats,
 }
 
-impl DerivedMemoryConvergenceReportV1 {
-    pub const fn state(self) -> DerivedMemoryConvergenceStateV1 {
+impl DerivedMemoryConvergenceReport {
+    pub const fn state(self) -> DerivedMemoryConvergenceState {
         self.state
     }
 
     pub const fn is_pending(self) -> bool {
-        matches!(self.state, DerivedMemoryConvergenceStateV1::Pending)
+        matches!(self.state, DerivedMemoryConvergenceState::Pending)
     }
 
-    pub const fn stats(self) -> DerivedMemoryRepairStatsV1 {
+    pub const fn stats(self) -> DerivedMemoryRepairStats {
         self.stats
     }
 
@@ -114,22 +114,22 @@ impl DerivedMemoryConvergenceReportV1 {
 pub async fn converge_derived_memory<P>(
     port: &P,
     action: &str,
-) -> Result<DerivedMemoryConvergenceReportV1, P::Error>
+) -> Result<DerivedMemoryConvergenceReport, P::Error>
 where
     P: DerivedMemoryRepairPort,
 {
     let stats = port.repair_derived_memory(action).await?;
     let feedback_pending = matches!(
         stats.feedback_history_repair(),
-        DerivedMemoryFeedbackHistoryRepairV1::Unknown
-            | DerivedMemoryFeedbackHistoryRepairV1::Incomplete { .. }
+        DerivedMemoryFeedbackHistoryRepair::Unknown
+            | DerivedMemoryFeedbackHistoryRepair::Incomplete { .. }
     );
     let state = if stats.saturated() || feedback_pending {
-        DerivedMemoryConvergenceStateV1::Pending
+        DerivedMemoryConvergenceState::Pending
     } else {
-        DerivedMemoryConvergenceStateV1::Converged
+        DerivedMemoryConvergenceState::Converged
     };
-    Ok(DerivedMemoryConvergenceReportV1 { state, stats })
+    Ok(DerivedMemoryConvergenceReport { state, stats })
 }
 
 #[cfg(test)]
@@ -138,7 +138,7 @@ mod tests {
 
     struct RepairPort {
         saturated: bool,
-        feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1,
+        feedback_history_repair: DerivedMemoryFeedbackHistoryRepair,
     }
 
     impl DerivedMemoryRepairPort for RepairPort {
@@ -147,8 +147,8 @@ mod tests {
         async fn repair_derived_memory(
             &self,
             _action: &str,
-        ) -> Result<DerivedMemoryRepairStatsV1, Self::Error> {
-            Ok(DerivedMemoryRepairStatsV1::new(2, 1, self.saturated)
+        ) -> Result<DerivedMemoryRepairStats, Self::Error> {
+            Ok(DerivedMemoryRepairStats::new(2, 1, self.saturated)
                 .with_feedback_history_repair(self.feedback_history_repair))
         }
     }
@@ -158,25 +158,22 @@ mod tests {
         let pending = futures_lite_block_on(converge_derived_memory(
             &RepairPort {
                 saturated: true,
-                feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1::NotRequired,
+                feedback_history_repair: DerivedMemoryFeedbackHistoryRepair::NotRequired,
             },
             "repair",
         ))
         .unwrap();
-        assert_eq!(pending.state(), DerivedMemoryConvergenceStateV1::Pending);
+        assert_eq!(pending.state(), DerivedMemoryConvergenceState::Pending);
 
         let converged = futures_lite_block_on(converge_derived_memory(
             &RepairPort {
                 saturated: false,
-                feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1::NotRequired,
+                feedback_history_repair: DerivedMemoryFeedbackHistoryRepair::NotRequired,
             },
             "repair",
         ))
         .unwrap();
-        assert_eq!(
-            converged.state(),
-            DerivedMemoryConvergenceStateV1::Converged
-        );
+        assert_eq!(converged.state(), DerivedMemoryConvergenceState::Converged);
     }
 
     #[test]
@@ -184,7 +181,7 @@ mod tests {
         let report = futures_lite_block_on(converge_derived_memory(
             &RepairPort {
                 saturated: false,
-                feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+                feedback_history_repair: DerivedMemoryFeedbackHistoryRepair::Incomplete {
                     processed: 3,
                     remaining: Some(7),
                 },
@@ -195,22 +192,22 @@ mod tests {
 
         assert_eq!(
             report.stats().feedback_history_repair(),
-            DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+            DerivedMemoryFeedbackHistoryRepair::Incomplete {
                 processed: 3,
                 remaining: Some(7),
             }
         );
-        assert_eq!(report.state(), DerivedMemoryConvergenceStateV1::Pending);
+        assert_eq!(report.state(), DerivedMemoryConvergenceState::Pending);
 
         let unknown = futures_lite_block_on(converge_derived_memory(
             &RepairPort {
                 saturated: false,
-                feedback_history_repair: DerivedMemoryFeedbackHistoryRepairV1::Unknown,
+                feedback_history_repair: DerivedMemoryFeedbackHistoryRepair::Unknown,
             },
             "repair",
         ))
         .unwrap();
-        assert_eq!(unknown.state(), DerivedMemoryConvergenceStateV1::Pending);
+        assert_eq!(unknown.state(), DerivedMemoryConvergenceState::Pending);
     }
 
     fn futures_lite_block_on<F: Future>(future: F) -> F::Output {

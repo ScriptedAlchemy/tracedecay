@@ -6,19 +6,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ConfigurationRevisionId, ManifestDigest, ProposalId, RuntimeEvidenceRef, TaskId, UtcMicros,
-    WorkAuthority, WorkCommandId, WorkContractError, WorkEvent, WorkEventKind, WorkProjection,
-    WorkProjectionStateV1, WorkVersion, canonical_sha256,
+    ConfigurationRevisionId, ManifestDigest, ProposalId, TaskId, UtcMicros, WorkAuthority,
+    WorkCommandId, WorkContractError, WorkEvent, WorkEventKind, WorkProjection, WorkVersion,
+    canonical_sha256,
 };
 use tracedecay_policy::work_loop::{
-    WorkBudgetEnvelopeV1, WorkContentLocationLimitV1, WorkEvidenceFrontierV1, WorkPriorOutcomeV1,
-    WorkProposalCancellationV1, WorkProposalDecisionV1, WorkProposalEvaluator,
-    WorkProposalEvaluatorV1, WorkProposalPolicyInputV1, WorkRouteCandidateV1, WorkRouteOverrideV1,
+    WorkBudgetEnvelopeV1, WorkContentLocationLimitV1, WorkPriorOutcomeV1, WorkRouteCandidateV1,
+    WorkRouteOverrideV1,
 };
 
 use crate::{
-    ApplicationProblem, CancellationState, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
+    SafeDiagnostic,
 };
 
 const WORK_INPUT_DIGEST_DOMAIN: &str = "tracedecay.application.work-command.v1";
@@ -113,7 +112,7 @@ impl WorkRoutingSnapshotV1 {
     /// identity are one route. Prior outcomes order by `(route_id,
     /// observed_at)`. Nothing is added, reweighted, or filtered here: exclusion
     /// and ranking are the evaluator's, and this only fixes the order.
-    fn canonicalize(mut self) -> Self {
+    pub(crate) fn canonicalize(mut self) -> Self {
         self.eligible_routes
             .sort_by(|left, right| left.route_id.cmp(&right.route_id));
         self.eligible_routes
@@ -230,49 +229,11 @@ pub struct AdmitExecutionCommand {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AttachRuntimeEvidenceCommand {
-    pub task_id: TaskId,
-    pub evidence: RuntimeEvidenceRef,
-    pub expected_version: WorkVersion,
-    pub command_id: WorkCommandId,
-    pub occurred_at: UtcMicros,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AcceptTaskCommand {
     pub task_id: TaskId,
     pub expected_version: WorkVersion,
     pub command_id: WorkCommandId,
     pub occurred_at: UtcMicros,
-}
-
-/// Read-only proposal generation is pinned to the current Work version.
-///
-/// The optional live Git frontier is supplied by the caller's Git evidence
-/// authority; the application never derives it from the Work history, and the
-/// evaluator never merges it with the local frontier.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GenerateProposalRequest {
-    pub task_id: TaskId,
-    pub proposal_id: ProposalId,
-    #[serde(default)]
-    pub live_git_evidence: Option<WorkEvidenceFrontierV1>,
-    pub occurred_at: UtcMicros,
-}
-
-/// One explained, read-only proposal. The digest binds acceptance to the
-/// evaluated decision content, so a stale or altered proposal cannot be
-/// accepted against a moved Work version.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GeneratedWorkProposal {
-    pub task_id: TaskId,
-    pub proposal_id: ProposalId,
-    pub proposal_digest: ManifestDigest,
-    pub based_on_version: WorkVersion,
-    pub decision: WorkProposalDecisionV1,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -368,97 +329,6 @@ where
         )
     }
 
-    /// Generates one explained, read-only proposal for the task's current
-    /// version by evaluating an immutable snapshot through the work-loop
-    /// policy evaluator. Nothing is appended; acceptance, rejection,
-    /// supersession, replanning, and admission remain separate commands.
-    ///
-    /// The snapshot carries the authority's routing state as well as its Work
-    /// facts, so the evaluator can shape, size, decompose, and rank routes
-    /// without reading storage, reading a clock, or discovering a provider. An
-    /// authority holding no routing state contributes an empty route set, and
-    /// the returned decision records `NoEligibleRoutes`; that is a decision,
-    /// not a failure, and generation still succeeds.
-    pub fn generate_proposal(
-        &self,
-        context: &RequestContext,
-        configuration_digest: ManifestDigest,
-        routing_authority: &dyn WorkRoutingSnapshotPortV1,
-        request: GenerateProposalRequest,
-    ) -> Result<GeneratedWorkProposal, ApplicationProblem> {
-        admit(context, request.occurred_at)?;
-        let authority = work_authority(context)?;
-        let history = self.load_history(&authority, &request.task_id)?;
-        let state = WorkProjectionStateV1::rebuild(&history).map_err(domain_problem)?;
-        let projection = state.projection();
-        let unresolved = self.active_dependencies(&authority, projection.dependencies())?;
-        let local_digest =
-            work_input_digest(&("tracedecay.application.work-local-evidence.v1", projection))?;
-        let dependency_count = bounded_count(projection.dependencies().len())?;
-        let unresolved_dependency_count = bounded_count(unresolved.len())?;
-        let runtime_evidence_count = bounded_count(projection.runtime_evidence().len())?;
-        let terminal_runtime_evidence_count = bounded_count(
-            projection
-                .runtime_evidence()
-                .iter()
-                .filter(|evidence| evidence.is_terminal())
-                .count(),
-        )?;
-        // Routing evidence comes from the concrete authority mounted for this
-        // request, then is canonicalized here so policy receives one
-        // authorized, order-stable snapshot and never discovers a provider.
-        let routing = routing_authority
-            .routing_snapshot(context, &request.task_id)
-            .map_err(routing_problem)?
-            .canonicalize();
-        let input = WorkProposalPolicyInputV1 {
-            task_id: request.task_id.clone(),
-            based_on_version: projection.version().get(),
-            dependency_count,
-            unresolved_dependency_count,
-            accepted_proposal_present: projection.accepted_proposal().is_some(),
-            execution_admitted: projection.is_execution_admitted(),
-            task_accepted: projection.is_task_accepted(),
-            runtime_evidence_count,
-            terminal_runtime_evidence_count,
-            local_evidence: Some(WorkEvidenceFrontierV1 {
-                watermark: state.occurred_at(),
-                digest: local_digest,
-            }),
-            live_git_evidence: request.live_git_evidence,
-            policy_revision: context.grant().revision,
-            policy_digest: context.grant().digest.clone(),
-            configuration_digest,
-            configuration_revision: routing.configuration_revision,
-            deadline: context.deadline().expires_at,
-            cancellation: match context.cancellation().state {
-                CancellationState::Active => WorkProposalCancellationV1::Active,
-                CancellationState::Cancelled { requested_at } => {
-                    WorkProposalCancellationV1::Cancelled { requested_at }
-                }
-            },
-            evaluated_at: request.occurred_at,
-            eligible_routes: routing.eligible_routes,
-            budget: routing.budget,
-            content_location: routing.content_location,
-            prior_outcomes: routing.prior_outcomes,
-            human_override: routing.human_override,
-        };
-        let decision = WorkProposalEvaluatorV1::default().evaluate(&input);
-        let proposal_digest = work_input_digest(&(
-            "tracedecay.application.work-proposal.v1",
-            &request.proposal_id,
-            &decision,
-        ))?;
-        Ok(GeneratedWorkProposal {
-            task_id: request.task_id,
-            proposal_id: request.proposal_id,
-            proposal_digest,
-            based_on_version: projection.version(),
-            decision,
-        })
-    }
-
     pub fn accept_proposal(
         &self,
         context: &RequestContext,
@@ -517,34 +387,6 @@ where
             input_digest,
             command.occurred_at,
             WorkEventKind::ExecutionAdmitted,
-        )
-    }
-
-    pub(crate) fn attach_runtime_evidence(
-        &self,
-        context: &RequestContext,
-        command: AttachRuntimeEvidenceCommand,
-    ) -> Result<WorkProjection, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
-        let authority = work_authority(context)?;
-        let input_digest = work_input_digest(&(
-            WORK_INPUT_DIGEST_DOMAIN,
-            "attach_runtime_evidence",
-            &command.task_id,
-            &command.evidence,
-            command.expected_version,
-            command.occurred_at,
-        ))?;
-        self.append_mutation(
-            authority,
-            command.task_id,
-            command.expected_version,
-            command.command_id,
-            input_digest,
-            command.occurred_at,
-            WorkEventKind::RuntimeEvidenceAttached {
-                evidence: command.evidence,
-            },
         )
     }
 
@@ -770,15 +612,6 @@ pub(crate) fn work_authority(
     .map_err(domain_problem)
 }
 
-fn bounded_count(value: usize) -> Result<u32, ApplicationProblem> {
-    u32::try_from(value).map_err(|_| {
-        invalid_problem(
-            "application.work.invalid-history",
-            "The Work history exceeds its declared bounds.",
-        )
-    })
-}
-
 fn work_input_digest<T: Serialize>(value: &T) -> Result<ManifestDigest, ApplicationProblem> {
     canonical_sha256(value).map_err(|_| {
         invalid_problem(
@@ -822,18 +655,6 @@ fn storage_problem(error: WorkStorageError) -> ApplicationProblem {
             code: "application.work.storage-unavailable".to_owned(),
             message: "The Work authority is unavailable.".to_owned(),
         }),
-    }
-}
-
-fn routing_problem(error: WorkRoutingSnapshotErrorV1) -> ApplicationProblem {
-    match error {
-        WorkRoutingSnapshotErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkRoutingSnapshotErrorV1::Unavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work.routing-unavailable".to_owned(),
-                message: "The Work proposal routing authority is unavailable.".to_owned(),
-            })
-        }
     }
 }
 

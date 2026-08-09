@@ -2,16 +2,17 @@ use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey,
     ContributionContractRef, ContributionId, CoverageContractRef, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, OmissionContractRef, PaginationContract, PrivacyClass,
-    ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract, RetrievalFamily,
-    RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, ScoringContractRef, SortContract, SortContractId,
-    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TemporalMode,
-    TerminalState, TerminalStateContract,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
+    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority,
+    IdempotencyContract, LifecycleClass, OmissionContractRef, OperationId, PaginationContract,
+    PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
+    RetrievalFamily, RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
+    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef, ServiceId, SortContract,
+    SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
 };
 
 use crate::current_bindings;
@@ -67,9 +68,75 @@ pub fn application_catalog_contributions()
         crate::context_scout::context_scout_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
         crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
+        crate::observatory_surface::observatory_read_catalog_contribution()?,
         crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])
+}
+
+/// Public HTTP executables for the complete code-query route family.
+///
+/// Code-query schemas and lifecycles remain owned by their three canonical
+/// catalog contributions. This registry joins only current structured HTTP
+/// bindings and preserves the daemon owner for primitive-backed versus
+/// callable-code-backed queries.
+pub fn code_search_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contributions = [
+        (
+            symbol_search_contribution()?,
+            ServiceId::new("service.application.primitive")?,
+        ),
+        (
+            primitive_read_contribution()?,
+            ServiceId::new("service.application.primitive")?,
+        ),
+        (
+            super::callable_code_catalog_contribution()?,
+            ServiceId::new("service.application.callable-code")?,
+        ),
+    ];
+    let mut bindings = Vec::new();
+    for (contribution, service_id) in contributions {
+        for http_binding in contribution.bindings().iter().filter(|binding| {
+            binding.surface() == BindingSurface::Http
+                && matches!(binding.status(), BindingStatus::Current)
+                && !binding.is_alias()
+                && binding.operation().as_str().starts_with("code_")
+        }) {
+            let capability_id = http_binding.capability_id();
+            let manifest = contribution
+                .capabilities()
+                .iter()
+                .find(|manifest| manifest.capability_id() == capability_id)
+                .ok_or(ApplicationContractError::Inconsistent {
+                    field: "code search executable capability",
+                })?;
+            let schema = contribution.executable_schema(capability_id).ok_or(
+                ApplicationContractError::Inconsistent {
+                    field: "code search executable schema",
+                },
+            )?;
+            let operation = http_binding.operation().as_str();
+            bindings.push(ExecutableBindingAvailabilityV1::available(
+                ExecutableBindingV1::daemon_owned(
+                    manifest,
+                    OperationId::new(format!("operation.application.{operation}"))?,
+                    service_id.clone(),
+                    schema.request_schema().clone(),
+                    schema.result_schema().clone(),
+                    CodecBindingKey::new(format!(
+                        "codec.application.code-search.{operation}.json.v1"
+                    ))?,
+                    RouteExposureV1::Public {
+                        binding_id: http_binding.binding_id().clone(),
+                        route_path: format!("/application/code/{operation}"),
+                    },
+                )?,
+            ));
+        }
+    }
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 struct PrimitiveReadSpec {

@@ -84,14 +84,8 @@ impl VerifiedWorkLeakEvidenceV1 {
             && verdict_matches_coverage(self.kind, self.recovery, self.coverage)
     }
 
-    fn observability_payload(
-        &self,
-        adjudication_ref: String,
-        adjudication_revision: u64,
-    ) -> WorkExecutionLeakObservedV1 {
+    fn observability_payload(&self) -> WorkExecutionLeakObservedV1 {
         WorkExecutionLeakObservedV1 {
-            adjudication_ref,
-            adjudication_revision,
             kind: self.kind,
             detection_horizon_micros: self.detection_horizon_micros,
             recovery: self.recovery,
@@ -201,9 +195,7 @@ impl WorkLeakAdjudicationReceiptV1 {
     pub fn observability_payload(
         &self,
     ) -> Result<WorkExecutionLeakObservedV1, tracedecay_domain::research::DomainError> {
-        Ok(self
-            .evidence
-            .observability_payload(self.adjudication_ref()?.as_str().to_owned(), self.revision))
+        Ok(self.evidence.observability_payload())
     }
 }
 
@@ -475,5 +467,22 @@ mod tests {
         let mut receipt = valid_receipt();
         receipt.evidence.kind = WorkExecutionLeakKindV1::Unknown;
         assert!(!receipt.validate_for_observation());
+    }
+
+    #[test]
+    fn observation_payload_is_evidence_derived() {
+        let receipt = valid_receipt();
+        let payload = receipt
+            .observability_payload()
+            .expect("observation payload");
+
+        assert_eq!(payload.kind, receipt.evidence.kind);
+        assert_eq!(
+            payload.detection_horizon_micros,
+            receipt.evidence.detection_horizon_micros
+        );
+        assert_eq!(payload.recovery, receipt.evidence.recovery);
+        assert_eq!(payload.owner_class, receipt.evidence.owner_class);
+        assert_eq!(payload.coverage, receipt.evidence.coverage);
     }
 }

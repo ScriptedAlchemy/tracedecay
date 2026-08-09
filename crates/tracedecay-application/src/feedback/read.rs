@@ -15,7 +15,9 @@ use tracedecay_domain::feedback::{
     FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackResultId, FeedbackScopeV1,
     FeedbackTargetV1,
 };
-use tracedecay_domain::{CommitId, RetrievalAnchorId, SymbolOccurrenceId, UtcMicros};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, RetrievalAnchorId, SymbolOccurrenceId, UtcMicros,
+};
 
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
@@ -207,6 +209,42 @@ pub struct CanonicalAffectedTestsProjectionV1 {
     pub state: Option<FeedbackImpactStateV1>,
 }
 
+/// The admitted project selects the retained managed test run, so this exact
+/// request intentionally carries no caller-selectable scope or identity.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultsSurfaceRequestV1 {}
+
+/// One result emitted by the daemon-managed test-run authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultProjectionV1 {
+    pub test: String,
+    pub passed: bool,
+}
+
+/// Exact retained managed-test-run projection returned by `test_results`.
+///
+/// The daemon resolves the admitted project, then verifies that the retained
+/// head and code generation are current before it serializes this payload.
+/// `result_offset` and `available_results` retain the authoritative page
+/// position, while `receipt` is present only after the managed run terminates.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultsResultV1 {
+    pub operation_id: String,
+    pub generation: u64,
+    pub head_commit_id: Option<CommitId>,
+    pub code_generation_id: Option<CodeGenerationId>,
+    pub results: Vec<TestResultProjectionV1>,
+    pub completed: u64,
+    pub total: Option<u64>,
+    pub termination: Option<OperationTermination>,
+    pub receipt: Option<OperationReceipt>,
+    pub result_offset: u64,
+    pub available_results: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FeedbackReadPortContext<'a> {
     pub request: &'a RequestContext,
@@ -324,7 +362,7 @@ where
         context: &RequestContext,
         request: FeedbackDiagnosticsReadRequestV1,
         observed_at: UtcMicros,
-    ) -> ApplicationResult<FeedbackDiagnosticsReadResultV1> {
+    ) -> Result<ApplicationResult<FeedbackDiagnosticsReadResultV1>, ApplicationContractError> {
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.diagnostics);
         }
@@ -368,7 +406,7 @@ where
         context: &RequestContext,
         request: FeedbackGetRequestV1,
         observed_at: UtcMicros,
-    ) -> ApplicationResult<FeedbackGetResultV1> {
+    ) -> Result<ApplicationResult<FeedbackGetResultV1>, ApplicationContractError> {
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.get);
         }
@@ -412,7 +450,7 @@ where
         context: &RequestContext,
         request: FeedbackExpandRequestV1,
         observed_at: UtcMicros,
-    ) -> ApplicationResult<FeedbackExpandResultV1> {
+    ) -> Result<ApplicationResult<FeedbackExpandResultV1>, ApplicationContractError> {
         if request.validate().is_err() {
             return problem_envelope(
                 context,
@@ -460,7 +498,7 @@ where
         context: &RequestContext,
         request: FeedbackListRequestV1,
         observed_at: UtcMicros,
-    ) -> ApplicationResult<FeedbackListResultV1> {
+    ) -> Result<ApplicationResult<FeedbackListResultV1>, ApplicationContractError> {
         if request.validate().is_err() {
             return invalid_request(context, &self.operations.list);
         }
@@ -605,7 +643,7 @@ fn scope_matches(context: &RequestContext, scope: &FeedbackScopeV1) -> bool {
 fn invalid_request<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem_envelope(
         context,
         operation,
@@ -613,8 +651,7 @@ fn invalid_request<T>(
             diagnostic: SafeDiagnostic::new(
                 "application.feedback.invalid-request",
                 "The feedback read request is invalid.",
-            )
-            .expect("static safe diagnostic is valid"),
+            )?,
             retry: RetryDirective::Never,
             legal_actions: Vec::<LegalAction>::new(),
         },
@@ -624,17 +661,14 @@ fn invalid_request<T>(
 fn invalid_port_evidence<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem_envelope(
         context,
         operation,
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "application.feedback.invalid-port-evidence",
-                "The feedback read result could not be verified.",
-            )
-            .expect("static safe diagnostic is valid"),
-        ),
+        ApplicationProblem::unavailable(SafeDiagnostic::new(
+            "application.feedback.invalid-port-evidence",
+            "The feedback read result could not be verified.",
+        )?),
     )
 }
 
@@ -642,12 +676,12 @@ fn problem_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     problem: ApplicationProblem,
-) -> ApplicationResult<T> {
-    Err(ApplicationProblemEnvelope::new(
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    Ok(Err(ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         context.request_id().clone(),
         problem,
-    ))
+    )?))
 }
 
 fn evidence_envelope<T>(
@@ -656,7 +690,7 @@ fn evidence_envelope<T>(
     authority: AuthorityReceipt,
     outcome: RetrievalPortOutcome<T>,
     started_at: UtcMicros,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     let (termination, evidence) = match outcome {
         RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
         RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
@@ -679,12 +713,12 @@ fn evidence_envelope<T>(
         Ok(packet) => packet,
         Err(_) => return invalid_port_evidence(context, operation),
     };
-    Ok(ApplicationEnvelope::evidence(
+    Ok(Ok(ApplicationEnvelope::evidence(
         operation.result_contract().clone(),
         context.request_id().clone(),
         context.scope().clone(),
         packet,
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -706,7 +740,8 @@ mod invocation_tests {
     use super::{
         CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
         FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackFindingReadV1,
-        FeedbackGetResultV1, FeedbackHandleRequestV1, FeedbackListResultV1,
+        FeedbackGetResultV1, FeedbackHandleRequestV1, FeedbackListResultV1, TestResultsResultV1,
+        TestResultsSurfaceRequestV1,
     };
     use crate::OpaqueCursor;
 
@@ -752,6 +787,20 @@ mod invocation_tests {
             ],
             state: Some(FeedbackImpactStateV1::Partial),
         });
+        assert_json_round_trip(TestResultsSurfaceRequestV1::default());
+        assert_json_round_trip(TestResultsResultV1 {
+            operation_id: "operation.feedback-test-results".to_owned(),
+            generation: 1,
+            head_commit_id: None,
+            code_generation_id: None,
+            results: Vec::new(),
+            completed: 0,
+            total: None,
+            termination: None,
+            receipt: None,
+            result_offset: 0,
+            available_results: 0,
+        });
     }
 
     #[test]
@@ -786,6 +835,20 @@ mod invocation_tests {
             affected_tests: Vec::new(),
             evidence_anchors: Vec::new(),
             state: None,
+        });
+        assert_unknown_field_rejected(&TestResultsSurfaceRequestV1::default());
+        assert_unknown_field_rejected(&TestResultsResultV1 {
+            operation_id: "operation.feedback-test-results".to_owned(),
+            generation: 1,
+            head_commit_id: None,
+            code_generation_id: None,
+            results: Vec::new(),
+            completed: 0,
+            total: None,
+            termination: None,
+            receipt: None,
+            result_offset: 0,
+            available_results: 0,
         });
         let mut nested = serde_json::to_value(FeedbackGetResultV1 {
             finding: finding_read(),

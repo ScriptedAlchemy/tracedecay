@@ -1,23 +1,8 @@
 use tracedecay_domain::WorkRuntimeContractError;
 
-use crate::work_read::WorkProjectionPortError;
 use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
 use super::WorkAttemptStorageError;
-
-pub(super) fn projection_problem(error: WorkProjectionPortError) -> ApplicationProblem {
-    match error {
-        WorkProjectionPortError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-attempt.projection-unavailable".to_owned(),
-            message: "The Work projection authority is unavailable.".to_owned(),
-        }),
-        WorkProjectionPortError::StaleCursor => conflict_problem(
-            "application.work-attempt.stale-projection",
-            "The Work projection changed while admitting this attempt.",
-        ),
-        WorkProjectionPortError::NotFoundOrNotAuthorized => not_found_problem(),
-    }
-}
 
 pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {

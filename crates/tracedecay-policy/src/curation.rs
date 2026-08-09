@@ -4,7 +4,8 @@
 //! This evaluator never validates, mutates, or writes an effect receipt.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{DomainError, ManifestDigest, canonical_sha256};
+use tracedecay_domain::configuration::{ConfigurationRevisionId, UserProfileId};
+use tracedecay_domain::{ActorId, DomainError, ManifestDigest, ProjectId, canonical_sha256};
 
 pub const CURATION_APPLY_EVALUATOR_ID_V1: &str = "tracedecay.curation-apply.v1";
 pub const CURATION_APPLY_EVALUATOR_REVISION_V1: u64 = 1;
@@ -27,7 +28,18 @@ pub enum CurationValidationDispositionV1 {
 /// Immutable admission facts for one exact curation output.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct CurationApplyAuthorityV1 {
+    pub actor_id: ActorId,
+    pub project_id: Option<ProjectId>,
+    pub profile_id: UserProfileId,
+    pub configuration_revision_id: ConfigurationRevisionId,
+}
+
+/// Immutable admission facts for one exact curation output.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CurationApplyPolicyInputV1 {
+    pub authority: CurationApplyAuthorityV1,
     pub subject: CurationApplySubjectV1,
     pub evidence_digest: Option<ManifestDigest>,
     pub output_digest: ManifestDigest,
@@ -39,6 +51,7 @@ pub struct CurationApplyPolicyInputV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CurationApplyDispositionV1 {
     Allow,
+    Deny,
     NotApplicable,
     Indeterminate,
 }
@@ -47,6 +60,7 @@ pub enum CurationApplyDispositionV1 {
 #[serde(rename_all = "snake_case")]
 pub enum CurationApplyReasonCodeV1 {
     InvalidInput,
+    UnauthorizedActor,
     NoCandidate,
     EvidenceUnavailable,
     Allowed,
@@ -60,6 +74,7 @@ pub struct CurationApplyDecisionV1 {
     pub evaluator_revision: u64,
     pub evaluator_digest: ManifestDigest,
     pub input_digest: ManifestDigest,
+    pub authority: CurationApplyAuthorityV1,
     pub subject: CurationApplySubjectV1,
     pub evidence_digest: Option<ManifestDigest>,
     pub output_digest: ManifestDigest,
@@ -88,7 +103,26 @@ pub fn evaluate_curation_apply(
     input: &CurationApplyPolicyInputV1,
 ) -> Result<CurationApplyDecisionV1, DomainError> {
     let input_digest = canonical_sha256(input)?;
-    let (disposition, ordered_reason_codes) = if input.output_digest.validate().is_err()
+    let authority_is_invalid = input.authority.actor_id.validate().is_err()
+        || input.authority.profile_id.validate().is_err()
+        || input
+            .authority
+            .configuration_revision_id
+            .validate()
+            .is_err()
+        || input
+            .authority
+            .project_id
+            .as_ref()
+            .is_some_and(|project_id| project_id.validate().is_err());
+    let actor_matches_subject = input.authority.actor_id.as_str()
+        == match input.subject {
+            CurationApplySubjectV1::MemoryCurator => "automation:memory-curator",
+            CurationApplySubjectV1::SessionReflector => "automation:session-reflector",
+            CurationApplySubjectV1::SkillWriter => "automation:skill-writer",
+        };
+    let (disposition, ordered_reason_codes) = if authority_is_invalid
+        || input.output_digest.validate().is_err()
         || input.configuration_digest.validate().is_err()
         || input
             .evidence_digest
@@ -96,8 +130,13 @@ pub fn evaluate_curation_apply(
             .is_some_and(|digest| digest.validate().is_err())
     {
         (
-            CurationApplyDispositionV1::Indeterminate,
+            CurationApplyDispositionV1::Deny,
             vec![CurationApplyReasonCodeV1::InvalidInput],
+        )
+    } else if !actor_matches_subject {
+        (
+            CurationApplyDispositionV1::Deny,
+            vec![CurationApplyReasonCodeV1::UnauthorizedActor],
         )
     } else if input.validation == CurationValidationDispositionV1::NoCandidate {
         (
@@ -123,6 +162,7 @@ pub fn evaluate_curation_apply(
         evaluator_revision,
         &evaluator_digest,
         &input_digest,
+        &input.authority,
         input.subject,
         &input.evidence_digest,
         &input.output_digest,
@@ -136,6 +176,7 @@ pub fn evaluate_curation_apply(
         evaluator_revision,
         evaluator_digest,
         input_digest,
+        authority: input.authority.clone(),
         subject: input.subject,
         evidence_digest: input.evidence_digest.clone(),
         output_digest: input.output_digest.clone(),

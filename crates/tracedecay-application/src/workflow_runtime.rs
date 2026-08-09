@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot, WorkLeaseFenceV1, WorkflowDefinition,
+    WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot, WorkInitiativeV1, WorkItemV1,
+    WorkLeaseFenceV1, WorkMilestoneV1, WorkPlanV1, WorkProposalV1, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId,
     canonical_sha256,
 };
@@ -38,8 +39,13 @@ pub struct WorkflowExecutionFence {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowFanOutInput {
-    pub identity: String,
+    pub instructions: String,
     pub input_digest: ManifestDigest,
+    pub initiative: WorkInitiativeV1,
+    pub plan: WorkPlanV1,
+    pub milestone: WorkMilestoneV1,
+    pub item: WorkItemV1,
+    pub proposal: WorkProposalV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -130,8 +136,6 @@ pub struct WorkflowPlannedChild {
     pub proposal_command_id: WorkCommandId,
     pub admit_command_id: WorkCommandId,
     pub evidence_command_id: WorkCommandId,
-    pub proposal_id: tracedecay_domain::ProposalId,
-    pub proposal_digest: ManifestDigest,
     pub input: WorkflowFanOutInput,
 }
 
@@ -258,21 +262,28 @@ pub fn prepare_workflow_fan_out(
     }
 
     let mut inputs = request.inputs.clone();
-    inputs.sort_by(|left, right| left.identity.cmp(&right.identity));
+    inputs.sort_by(|left, right| left.item.task_id().cmp(right.item.task_id()));
     let mut identities = BTreeSet::new();
     for input in &inputs {
-        if input.identity.is_empty()
-            || input.identity.trim() != input.identity
-            || input.identity.len() > 512
-            || input.identity.chars().any(char::is_control)
+        let task_id = input.item.task_id();
+        if input.instructions.is_empty()
+            || input.instructions.trim() != input.instructions
+            || input.instructions.len() > 512
+            || input.instructions.chars().any(char::is_control)
+            || input.proposal.task_id() != task_id
+            || input.plan.initiative_id() != input.initiative.id()
+            || input.milestone.plan_id() != input.plan.id()
+            || input.item.hierarchy().initiative_id() != input.initiative.id()
+            || input.item.hierarchy().plan_id() != input.plan.id()
+            || input.item.hierarchy().milestone_id() != input.milestone.id()
         {
             return Err(WorkflowFanOutRuntimeError::InvalidChildIdentity(
-                input.identity.clone(),
+                task_id.as_str().to_owned(),
             ));
         }
-        if !identities.insert(input.identity.clone()) {
+        if !identities.insert(task_id.clone()) {
             return Err(WorkflowFanOutRuntimeError::DuplicateChildIdentity(
-                input.identity.clone(),
+                task_id.as_str().to_owned(),
             ));
         }
     }
@@ -302,12 +313,11 @@ pub fn prepare_workflow_fan_out(
             "tracedecay.application.workflow-child.v3",
             &identity,
             ordinal,
-            &input.identity,
+            &input,
         ))
         .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
         let suffix = child_digest.as_str();
-        let task_id = TaskId::new(format!("workflow-child:{suffix}"))
-            .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
+        let task_id = input.item.task_id().clone();
         let attempt_digest = canonical_sha256(&(
             "tracedecay.application.workflow-child-attempt.v1",
             &identity,
@@ -331,17 +341,6 @@ pub fn prepare_workflow_fan_out(
             proposal_command_id: command_id("proposal", suffix)?,
             admit_command_id: command_id("admit", suffix)?,
             evidence_command_id: command_id("evidence", suffix)?,
-            proposal_id: tracedecay_domain::ProposalId::new(format!(
-                "workflow-child-proposal:{suffix}"
-            ))
-            .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
-            proposal_digest: canonical_sha256(&(
-                "tracedecay.application.workflow-child-proposal.v1",
-                &child_digest,
-                &input.input_digest,
-                &request.provider,
-            ))
-            .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
             input,
         });
     }
@@ -399,9 +398,12 @@ pub fn durable_workflow_fan_out_plan(
                 create_command_id: child.create_command_id.clone(),
                 proposal_command_id: child.proposal_command_id.clone(),
                 admit_command_id: child.admit_command_id.clone(),
-                proposal_id: child.proposal_id.clone(),
-                proposal_digest: child.proposal_digest.clone(),
-                instructions: child.input.identity.clone(),
+                initiative: child.input.initiative.clone(),
+                plan: child.input.plan.clone(),
+                milestone: child.input.milestone.clone(),
+                item: child.input.item.clone(),
+                proposal: child.input.proposal.clone(),
+                instructions: child.input.instructions.clone(),
             })
             .collect(),
     })

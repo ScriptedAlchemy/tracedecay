@@ -13,7 +13,6 @@ use crate::{
 
 pub const MAX_WORK_TITLE_BYTES: usize = 512;
 pub const MAX_WORK_DEPENDENCIES: usize = 256;
-pub const MAX_WORK_RUNTIME_EVIDENCE: usize = 256;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkContractError {
@@ -41,10 +40,6 @@ pub enum WorkContractError {
     DuplicateCommand,
     #[error("work event is invalid for the current state")]
     InvalidTransition,
-    #[error("runtime evidence exceeds the bound of {MAX_WORK_RUNTIME_EVIDENCE}")]
-    TooMuchRuntimeEvidence,
-    #[error("runtime evidence repeats a run identity")]
-    DuplicateRuntimeEvidence,
     #[error("work projection history does not match its version")]
     InvalidProjectionHistory,
     #[error("work projection fold state was written at an unsupported version")]
@@ -212,9 +207,6 @@ pub enum WorkEventKind {
         proposal_digest: ManifestDigest,
     },
     ExecutionAdmitted,
-    RuntimeEvidenceAttached {
-        evidence: RuntimeEvidenceRef,
-    },
     TaskAccepted,
 }
 
@@ -350,7 +342,6 @@ pub struct WorkProjection {
     dependencies: BTreeSet<TaskId>,
     accepted_proposal: Option<ProposalId>,
     execution_admitted: bool,
-    runtime_evidence: Vec<RuntimeEvidenceRef>,
     task_accepted: bool,
     history_len: usize,
 }
@@ -388,10 +379,6 @@ impl WorkProjection {
         self.execution_admitted
     }
 
-    pub fn runtime_evidence(&self) -> &[RuntimeEvidenceRef] {
-        &self.runtime_evidence
-    }
-
     pub const fn is_task_accepted(&self) -> bool {
         self.task_accepted
     }
@@ -415,7 +402,6 @@ impl<'de> Deserialize<'de> for WorkProjection {
             dependencies: BTreeSet<TaskId>,
             accepted_proposal: Option<ProposalId>,
             execution_admitted: bool,
-            runtime_evidence: Vec<RuntimeEvidenceRef>,
             task_accepted: bool,
             history_len: usize,
         }
@@ -432,21 +418,6 @@ impl<'de> Deserialize<'de> for WorkProjection {
         if wire.dependencies.contains(&wire.task_id) {
             return Err(serde::de::Error::custom(WorkContractError::SelfDependency));
         }
-        if wire.runtime_evidence.len() > MAX_WORK_RUNTIME_EVIDENCE {
-            return Err(serde::de::Error::custom(
-                WorkContractError::TooMuchRuntimeEvidence,
-            ));
-        }
-        let mut run_ids = BTreeSet::new();
-        if wire
-            .runtime_evidence
-            .iter()
-            .any(|evidence| !run_ids.insert(evidence.run_id().clone()))
-        {
-            return Err(serde::de::Error::custom(
-                WorkContractError::DuplicateRuntimeEvidence,
-            ));
-        }
         if usize::try_from(wire.version.get()).ok() != Some(wire.history_len) {
             return Err(serde::de::Error::custom(
                 WorkContractError::InvalidProjectionHistory,
@@ -461,7 +432,6 @@ impl<'de> Deserialize<'de> for WorkProjection {
             dependencies: wire.dependencies,
             accepted_proposal: wire.accepted_proposal,
             execution_admitted: wire.execution_admitted,
-            runtime_evidence: wire.runtime_evidence,
             task_accepted: wire.task_accepted,
             history_len: wire.history_len,
         })
@@ -553,20 +523,6 @@ impl WorkProjectionStateV1 {
                 }
                 next.projection.execution_admitted = true;
             }
-            WorkEventKind::RuntimeEvidenceAttached { evidence } => {
-                if next.projection.runtime_evidence.len() == MAX_WORK_RUNTIME_EVIDENCE {
-                    return Err(WorkContractError::TooMuchRuntimeEvidence);
-                }
-                if next
-                    .projection
-                    .runtime_evidence
-                    .iter()
-                    .any(|admitted| admitted.run_id() == evidence.run_id())
-                {
-                    return Err(WorkContractError::DuplicateRuntimeEvidence);
-                }
-                next.projection.runtime_evidence.push(evidence.clone());
-            }
             WorkEventKind::TaskAccepted => next.projection.task_accepted = true,
         }
 
@@ -599,7 +555,6 @@ impl WorkProjectionStateV1 {
                 dependencies: dependencies.clone(),
                 accepted_proposal: None,
                 execution_admitted: false,
-                runtime_evidence: Vec::new(),
                 task_accepted: false,
                 history_len: 1,
             },

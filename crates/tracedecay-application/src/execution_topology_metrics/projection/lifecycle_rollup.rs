@@ -113,7 +113,6 @@ pub(in crate::execution_topology_metrics) struct LifecycleBlockedCandidateV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(in crate::execution_topology_metrics) struct LifecycleLeakCandidateV1 {
-    pub(super) revision: u64,
     pub(super) row: Option<super::LeakRowV1>,
     pub(super) created_at_micros: i64,
 }
@@ -307,12 +306,11 @@ impl ExecutionTopologyEvidenceV1 {
                 },
             );
         }
-        for (receipt, (revision, row, event_time_micros)) in &self.leaks {
+        for (receipt, (row, event_time_micros)) in &self.leaks {
             let key = protected_key("execution-topology.leak", receipt)?;
             carry.leaks.insert(
                 key,
                 LifecycleLeakCandidateV1 {
-                    revision: *revision,
                     row: *row,
                     created_at_micros: *event_time_micros,
                 },
@@ -613,8 +611,6 @@ impl ExecutionTopologyLifecycleCarryV1 {
                 None => {
                     self.leaks.insert(key, incoming);
                 }
-                Some(existing) if existing.revision > incoming.revision => {}
-                Some(existing) if existing.revision < incoming.revision => *existing = incoming,
                 Some(existing) => {
                     if existing.row != incoming.row {
                         existing.row = None;
@@ -856,4 +852,65 @@ pub(in crate::execution_topology_metrics) fn apply_carry_to_rollup(
         *entry = entry.saturating_add(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::super::LeakRowV1;
+    use super::*;
+    use tracedecay_domain::{
+        CoverageStateV1, WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1,
+    };
+
+    fn leak_candidate(
+        recovery: WorkExecutionLeakRecoveryV1,
+        event_time_micros: i64,
+    ) -> LifecycleLeakCandidateV1 {
+        LifecycleLeakCandidateV1 {
+            row: Some(LeakRowV1 {
+                kind: WorkExecutionLeakKindV1::AttemptWithoutLiveOwner,
+                recovery,
+                coverage: CoverageStateV1::Known,
+                event_time_micros,
+            }),
+            created_at_micros: event_time_micros,
+        }
+    }
+
+    fn leak_carry(
+        recovery: WorkExecutionLeakRecoveryV1,
+        event_time_micros: i64,
+    ) -> ExecutionTopologyLifecycleCarryV1 {
+        let mut carry = ExecutionTopologyLifecycleCarryV1::default();
+        carry.leaks.insert(
+            format!("sha256:{}", "a".repeat(64)),
+            leak_candidate(recovery, event_time_micros),
+        );
+        carry
+    }
+
+    #[test]
+    fn conflicting_leak_carry_rows_are_unknown_regardless_of_merge_order() {
+        for (first, second) in [
+            (
+                WorkExecutionLeakRecoveryV1::Recovered,
+                WorkExecutionLeakRecoveryV1::Failed,
+            ),
+            (
+                WorkExecutionLeakRecoveryV1::Failed,
+                WorkExecutionLeakRecoveryV1::Recovered,
+            ),
+        ] {
+            let mut carry = leak_carry(first, 10);
+            carry.merge(leak_carry(second, 20)).unwrap();
+
+            let candidate = carry
+                .leaks
+                .get(&format!("sha256:{}", "a".repeat(64)))
+                .unwrap();
+            assert!(candidate.row.is_none());
+            assert_eq!(candidate.created_at_micros, 20);
+        }
+    }
 }

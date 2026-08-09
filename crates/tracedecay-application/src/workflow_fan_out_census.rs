@@ -313,7 +313,7 @@ fn classify_work_projection(
         .filter(|child| {
             snapshot.projections().iter().any(|projection| {
                 projection.task_id() == &child.task_id
-                    && projection.accepted_proposal() == Some(&child.proposal_id)
+                    && projection.accepted_proposal() == Some(child.proposal.proposal_id())
             })
         })
         .count();
@@ -322,7 +322,7 @@ fn classify_work_projection(
         .filter(|child| {
             snapshot.projections().iter().any(|projection| {
                 projection.task_id() == &child.task_id
-                    && projection.accepted_proposal() == Some(&child.proposal_id)
+                    && projection.accepted_proposal() == Some(child.proposal.proposal_id())
                     && projection.is_execution_admitted()
             })
         })
@@ -492,7 +492,7 @@ fn provider_capacities(
                     WorkProjectionCoverageV1::Complete { .. }
                 ) && snapshot.projections().iter().any(|projection| {
                     projection.task_id() == &child.task_id
-                        && projection.accepted_proposal() == Some(&child.proposal_id)
+                        && projection.accepted_proposal() == Some(child.proposal.proposal_id())
                         && projection.is_execution_admitted()
                 })
             }) {

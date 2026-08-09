@@ -5,9 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CommitId, ManifestDigest, ProposalId, RefId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkAuthority, WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot, WorkflowDefinition,
-    WorkflowOperationRef, WorkflowStepId,
+    CommitId, ManifestDigest, RefId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority,
+    WorkCommandId, WorkEffectStateV1, WorkExecutionSnapshot, WorkInitiativeV1, WorkItemV1,
+    WorkMilestoneV1, WorkPlanV1, WorkProposalV1, WorkflowDefinition, WorkflowOperationRef,
+    WorkflowStepId,
 };
 
 use super::WorkflowRunStateError;
@@ -28,8 +29,11 @@ pub struct WorkflowFanOutChildPlanV1 {
     pub create_command_id: WorkCommandId,
     pub proposal_command_id: WorkCommandId,
     pub admit_command_id: WorkCommandId,
-    pub proposal_id: ProposalId,
-    pub proposal_digest: ManifestDigest,
+    pub initiative: WorkInitiativeV1,
+    pub plan: WorkPlanV1,
+    pub milestone: WorkMilestoneV1,
+    pub item: WorkItemV1,
+    pub proposal: WorkProposalV1,
     pub instructions: String,
 }
 
@@ -78,10 +82,16 @@ impl WorkflowFanOutPlanV1 {
             || self.children.len() > width
             || identities.len() != self.children.len()
             || usize::from(self.maximum_parallel.get()) > self.children.len()
-            || self
-                .children
-                .iter()
-                .any(|child| child.attempt_identity.task_id() != &child.task_id)
+            || self.children.iter().any(|child| {
+                child.attempt_identity.task_id() != &child.task_id
+                    || child.item.task_id() != &child.task_id
+                    || child.proposal.task_id() != &child.task_id
+                    || child.plan.initiative_id() != child.initiative.id()
+                    || child.milestone.plan_id() != child.plan.id()
+                    || child.item.hierarchy().initiative_id() != child.initiative.id()
+                    || child.item.hierarchy().plan_id() != child.plan.id()
+                    || child.item.hierarchy().milestone_id() != child.milestone.id()
+            })
         {
             return Err(WorkflowRunStateError::InvalidDefinition);
         }

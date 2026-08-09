@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use tracedecay_domain::{
     ActorId, MAX_WORK_DEPENDENCIES, MAX_WORK_TITLE_BYTES, ManifestDigest, ProjectId, ProposalId,
-    RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkAuthority, WorkEvent,
-    WorkEventKind, WorkProjection, WorkVersion, WorktreeId,
+    RepositoryId, TaskId, UtcMicros, WorkAuthority, WorkEvent, WorkEventKind, WorkProjection,
+    WorkVersion, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -95,7 +95,7 @@ fn created_work_is_bounded() {
 }
 
 #[test]
-fn projection_rebuild_is_deterministic_and_runtime_evidence_does_not_accept_work() {
+fn projection_rebuild_is_deterministic_and_proposal_acceptance_does_not_accept_work() {
     let proposal_id = id::<ProposalId>("proposal.work.fixture");
     let history = vec![
         event(
@@ -112,22 +112,14 @@ fn projection_rebuild_is_deterministic_and_runtime_evidence_does_not_accept_work
                 proposal_digest: digest('c'),
             },
         ),
-        event(
-            3,
-            WorkEventKind::RuntimeEvidenceAttached {
-                evidence: RuntimeEvidenceRef::new(id("run.work.fixture"), digest('d'), true)
-                    .unwrap(),
-            },
-        ),
     ];
 
     let first = WorkProjection::rebuild(&history).unwrap();
     let second = WorkProjection::rebuild(&history).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(first.version(), WorkVersion::new(3).unwrap());
+    assert_eq!(first.version(), WorkVersion::new(2).unwrap());
     assert_eq!(first.accepted_proposal(), Some(&proposal_id));
-    assert_eq!(first.runtime_evidence().len(), 1);
     assert!(!first.is_task_accepted());
 }
 
