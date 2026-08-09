@@ -29,6 +29,7 @@ pub mod query_authority;
 pub mod request;
 pub mod rerank;
 pub mod semantic;
+pub mod task_session;
 
 pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
