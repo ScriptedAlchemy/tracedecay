@@ -31,20 +31,11 @@ use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCu
 use tracedecay_graph_db::GraphNamespace;
 
 use self::execution::{
-    AuthorizedTaskSessionExecutionRequestV1, AuthorizedTemporalExecutionRequest,
-    SessionTemporalExecutionError, SessionTemporalExecutionPort, SessionTemporalExecutionReport,
-    TaskSessionExecutionOmissionReasonV1, TaskSessionExecutionOmissionV1,
-    TaskSessionRankSelectorV1, TaskSessionReauthorizationStageV1,
-    TaskSessionSelectionCallbackErrorV1, TaskSessionTemporalExecutionFutureV1,
-    TaskSessionTemporalExecutionOutcomeV1, TaskSessionTemporalExecutionPortV1,
-    TaskSessionTemporalExecutionReportV1, TemporalExecutionFuture,
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
 use crate::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
-use tracedecay_query::retrieval::evidence_lanes::{
-    CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
-    TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
-};
 use tracedecay_sessions::lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
@@ -56,13 +47,12 @@ use tracedecay_sessions::runtime::git_correlation::{
 use tracedecay_store::SessionMessageRecord;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use tracedecay_temporal_query::hydrate_temporal_candidate_selection;
+use tracedecay_temporal_query::execute_temporal_kernel;
 use tracedecay_temporal_query::hydration::hydrate_selected;
 use tracedecay_temporal_query::ports::{
     BindingDigest, ExecutionControl, KernelVersions, TemporalExecutionSnapshot,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
-use tracedecay_temporal_query::{execute_temporal_candidate_export, execute_temporal_kernel};
 
 pub use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub use self::direct::ResolvedDirectAnchor;
@@ -687,164 +677,6 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
     }
 }
 
-impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExecution<'_> {
-    fn execute_task_session<'a, E>(
-        &'a self,
-        request: AuthorizedTaskSessionExecutionRequestV1,
-        selector: &'a dyn TaskSessionRankSelectorV1,
-        estimator: &'a E,
-    ) -> TaskSessionTemporalExecutionFutureV1<'a>
-    where
-        E: VersionedTokenEstimator + Sync + 'a,
-    {
-        Box::pin(async move {
-            let (read_snapshot, snapshot) = self.freeze(request.temporal()).await?;
-            let authenticator =
-                GlobalDbCursorKeyProvider::from_registered_snapshot(&read_snapshot, &snapshot)
-                    .await
-                    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let storage_root = self
-                .db
-                .db_path()
-                .parent()
-                .ok_or(SessionTemporalExecutionError::Unavailable)?;
-            let (relation_scope, relation_store) = self
-                .db
-                .session_relation_store()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            let kernel_request = request.temporal().clone().into_kernel_request(snapshot);
-            let read = GlobalDbTemporalReadPort::new_registered_with_relations(
-                &read_snapshot,
-                relation_scope,
-                relation_store.clone(),
-            );
-            let hydration = GlobalDbTemporalHydrationPort::for_registered_snapshot_with_relations(
-                &read_snapshot,
-                storage_root,
-                relation_scope,
-                relation_store,
-            );
-            let export = execute_temporal_candidate_export(&kernel_request, &read, &authenticator)
-                .await
-                .map_err(SessionTemporalExecutionError::Kernel)?;
-            let plan23 = TaskSessionPlan23BindingV1::from_export(&export)
-                .map_err(|error| task_session_callback_contract(error.to_string()))?;
-            let candidate_port = CanonicalTaskSessionCandidateExportPortV1::new(
-                &export,
-                request.retriever_revision().clone(),
-                request.score_domain().clone(),
-                request.policy_revision().clone(),
-            );
-            let lane_request = TaskSessionLaneRequestV1::new(
-                request.retrieval(),
-                request.query(),
-                request.binding(),
-                &plan23,
-                request.control(),
-            );
-            let lane_outcome = TaskSessionLaneRetrieverV1::new(&candidate_port)
-                .execute(&lane_request)
-                .map_err(|error| task_session_callback_contract(error.to_string()))?;
-
-            if let Some(omission) = task_session_reauthorize(
-                selector,
-                request.binding(),
-                TaskSessionReauthorizationStageV1::BeforeSelection,
-            )? {
-                return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
-            }
-            let selection = match selector.select(
-                request.binding(),
-                request.retrieval(),
-                request.query(),
-                &lane_outcome,
-            ) {
-                Ok(selection) => selection,
-                Err(error) => {
-                    if let Some(omission) = task_session_callback_omission(
-                        TaskSessionReauthorizationStageV1::BeforeSelection,
-                        error,
-                    )? {
-                        return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
-                    }
-                    return Err(task_session_callback_contract(
-                        "task/session selector returned no outcome".to_owned(),
-                    ));
-                }
-            };
-            if selection.selected_anchors().len()
-                > request.retrieval().budget.max_hydrated_results as usize
-            {
-                return Err(SessionTemporalExecutionError::BudgetExhausted);
-            }
-            if let Some(omission) = task_session_reauthorize(
-                selector,
-                request.binding(),
-                TaskSessionReauthorizationStageV1::BeforeHydration,
-            )? {
-                return Ok(TaskSessionTemporalExecutionOutcomeV1::Omitted(omission));
-            }
-            let result = hydrate_temporal_candidate_selection(
-                &kernel_request,
-                export,
-                selection.selected_anchors(),
-                &hydration,
-                estimator,
-            )
-            .await
-            .map_err(SessionTemporalExecutionError::Kernel)?;
-            let source_coverage = result
-                .snapshot
-                .source_coverage()
-                .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-            Ok(TaskSessionTemporalExecutionOutcomeV1::Complete(
-                TaskSessionTemporalExecutionReportV1 {
-                    binding: request.binding().clone(),
-                    selection,
-                    temporal: SessionTemporalExecutionReport::from_source_coverage(
-                        result,
-                        source_coverage,
-                    ),
-                },
-            ))
-        })
-    }
-}
-
-fn task_session_reauthorize(
-    selector: &dyn TaskSessionRankSelectorV1,
-    binding: &tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1,
-    stage: TaskSessionReauthorizationStageV1,
-) -> Result<Option<TaskSessionExecutionOmissionV1>, SessionTemporalExecutionError> {
-    match selector.reauthorize(binding, stage) {
-        Ok(()) => Ok(None),
-        Err(error) => task_session_callback_omission(stage, error),
-    }
-}
-
-fn task_session_callback_omission(
-    stage: TaskSessionReauthorizationStageV1,
-    error: TaskSessionSelectionCallbackErrorV1,
-) -> Result<Option<TaskSessionExecutionOmissionV1>, SessionTemporalExecutionError> {
-    let reason = match error {
-        TaskSessionSelectionCallbackErrorV1::Denied => TaskSessionExecutionOmissionReasonV1::Denied,
-        TaskSessionSelectionCallbackErrorV1::Stale => TaskSessionExecutionOmissionReasonV1::Stale,
-        TaskSessionSelectionCallbackErrorV1::Unavailable => {
-            TaskSessionExecutionOmissionReasonV1::Unavailable
-        }
-        TaskSessionSelectionCallbackErrorV1::Invalid(detail) => {
-            return Err(task_session_callback_contract(detail));
-        }
-    };
-    Ok(Some(TaskSessionExecutionOmissionV1 { stage, reason }))
-}
-
-fn task_session_callback_contract(detail: String) -> SessionTemporalExecutionError {
-    SessionTemporalExecutionError::Kernel(
-        tracedecay_temporal_query::TemporalKernelError::CandidateExportContract(detail),
-    )
-}
-
 fn map_control_error(
     error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
@@ -960,47 +792,5 @@ mod cursor_access_tests {
             map_lcm_cursor_error(CursorError::KeyUnavailable),
             SessionTemporalExecutionError::Unavailable
         ));
-    }
-
-    #[test]
-    fn rank_final_revocation_is_a_typed_hydration_omission() {
-        let omission = task_session_callback_omission(
-            TaskSessionReauthorizationStageV1::BeforeHydration,
-            TaskSessionSelectionCallbackErrorV1::Denied,
-        )
-        .expect("typed callback outcome")
-        .expect("revocation omission");
-        assert_eq!(
-            omission,
-            TaskSessionExecutionOmissionV1 {
-                stage: TaskSessionReauthorizationStageV1::BeforeHydration,
-                reason: TaskSessionExecutionOmissionReasonV1::Denied,
-            },
-        );
-
-        let unavailable = task_session_callback_omission(
-            TaskSessionReauthorizationStageV1::BeforeHydration,
-            TaskSessionSelectionCallbackErrorV1::Unavailable,
-        )
-        .expect("typed callback outcome")
-        .expect("unavailable omission");
-        assert_eq!(
-            unavailable.reason,
-            TaskSessionExecutionOmissionReasonV1::Unavailable,
-        );
-
-        let stale = task_session_callback_omission(
-            TaskSessionReauthorizationStageV1::BeforeSelection,
-            TaskSessionSelectionCallbackErrorV1::Stale,
-        )
-        .expect("typed callback outcome")
-        .expect("stale graph omission");
-        assert_eq!(
-            stale,
-            TaskSessionExecutionOmissionV1 {
-                stage: TaskSessionReauthorizationStageV1::BeforeSelection,
-                reason: TaskSessionExecutionOmissionReasonV1::Stale,
-            },
-        );
     }
 }

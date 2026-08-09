@@ -20,7 +20,7 @@ pub use refresh::{
 };
 pub use retrieval::{
     SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,
-    SessionTemporalQueryError, TaskSessionRetrievalOutcomeV1,
+    SessionTemporalQueryError,
 };
 pub use serving::{
     SessionProjectionServingState, SessionProjectionServingStatus, SessionProjectionStaleReason,

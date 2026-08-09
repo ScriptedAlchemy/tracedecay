@@ -24,11 +24,9 @@ use tracedecay_domain::{
     SourceOccurrenceId, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::ports::{RetrievalPortError, contract_error};
 
-pub use super::task_session::*;
 pub use tracedecay_domain::{
     TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
 };
@@ -38,8 +36,7 @@ pub use tracedecay_domain::{
 pub struct EvidenceLaneExecutionControlV1 {
     started_at: Instant,
     deadline: Option<Instant>,
-    cancellation: Option<CancellationSignal>,
-    temporal: Option<ExecutionControl>,
+    cancellation: CancellationSignal,
 }
 
 impl EvidenceLaneExecutionControlV1 {
@@ -47,43 +44,13 @@ impl EvidenceLaneExecutionControlV1 {
         Self {
             started_at: Instant::now(),
             deadline,
-            cancellation: Some(cancellation),
-            temporal: None,
-        }
-    }
-
-    pub fn from_temporal(control: ExecutionControl) -> Self {
-        Self {
-            started_at: Instant::now(),
-            deadline: None,
-            cancellation: None,
-            temporal: Some(control),
+            cancellation,
         }
     }
 
     fn terminal<E>(&self) -> Option<RetrieverOutcome<RetrieverBatch<E>>> {
-        if self
-            .cancellation
-            .as_ref()
-            .is_some_and(CancellationSignal::is_cancelled)
-        {
+        if self.cancellation.is_cancelled() {
             return Some(RetrieverOutcome::Cancelled);
-        }
-        if let Some(error) = self
-            .temporal
-            .as_ref()
-            .and_then(|control| control.checkpoint().err())
-        {
-            return Some(match error {
-                TemporalPortError::Cancelled => RetrieverOutcome::Cancelled,
-                TemporalPortError::DeadlineExceeded => RetrieverOutcome::TimedOut(self.usage()),
-                TemporalPortError::BudgetExceeded { .. } => {
-                    RetrieverOutcome::BudgetExceeded(self.usage())
-                }
-                _ => RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                    detail: "temporal execution control rejected task/session lane work".to_owned(),
-                }),
-            });
         }
         let now = Instant::now();
         if self.deadline.is_some_and(|deadline| now >= deadline) {
@@ -781,7 +748,7 @@ impl<'a, P: DiagnosticCandidateReadPortV1 + ?Sized> DiagnosticLaneRetrieverV1<'a
     }
 }
 
-pub(super) trait LaneEvidenceBinding {
+trait LaneEvidenceBinding {
     fn candidate_anchor(&self) -> &RetrievalAnchorId;
     fn source_occurrence(&self) -> &SourceOccurrenceId;
     fn authorization_revision(&self) -> &AuthorizationRevision;
@@ -824,7 +791,7 @@ impl LaneEvidenceBinding for DiagnosticLaneEvidenceV1 {
     }
 }
 
-pub(super) fn execute_lane<E>(
+fn execute_lane<E>(
     lane: RetrieverKind,
     request: &RetrievalRequest,
     control: &EvidenceLaneExecutionControlV1,

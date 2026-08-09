@@ -691,7 +691,7 @@ mod tests {
         RequestId, ResolvedScope,
     };
     use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
-    use tracedecay_tool_catalog::{EffectClass, UseCaseId};
+    use tracedecay_tool_catalog::EffectClass;
 
     struct ErrorMemoryPort(RetainedSurfaceExecutionErrorV1);
 
@@ -768,12 +768,15 @@ mod tests {
         })
     }
 
-    fn partial_receipt() -> EffectReceipt {
+    fn partial_receipt(
+        operation: &ApplicationOperation,
+        context: &RequestContext,
+    ) -> EffectReceipt {
         EffectReceipt {
-            operation: UseCaseId::new("use-case.retained.fixture").expect("fixture use case"),
-            request_id: RequestId::new("request.retained.receipt").expect("fixture request id"),
-            actor: id::<ActorId>("actor.retained.receipt"),
-            scope: scope(),
+            operation: operation.use_case_id().clone(),
+            request_id: context.request_id().clone(),
+            actor: context.actor().clone(),
+            scope: context.scope().clone(),
             effect_class: EffectClass::Administrative,
             idempotency_key: IdempotencyKey::new("idempotency.retained.fixture")
                 .expect("fixture idempotency key"),
@@ -847,9 +850,9 @@ mod tests {
             retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
                 .expect("fact search has a catalog operation");
         let context = context_for(&operation);
-        let cancellation = CancellationSignal::active("cancel.retained.partial")
+        let cancellation = CancellationSignal::active("cancel.retained.fixture")
             .expect("fixture cancellation signal");
-        let receipt = partial_receipt();
+        let receipt = partial_receipt(&operation, &context);
         let service = service_for(RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code: "application.retained.partial-effect".to_owned(),
             committed_receipt: receipt.clone(),
@@ -885,7 +888,7 @@ mod tests {
             retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
                 .expect("fact search has a catalog operation");
         let context = context_for(&operation);
-        let cancellation = CancellationSignal::active("cancel.retained.reset")
+        let cancellation = CancellationSignal::active("cancel.retained.fixture")
             .expect("fixture cancellation signal");
         let service = service_for(RetainedSurfaceExecutionErrorV1::ProfileResetRequired);
 

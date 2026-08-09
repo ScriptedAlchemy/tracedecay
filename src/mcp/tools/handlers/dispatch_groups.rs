@@ -669,7 +669,7 @@ pub(super) async fn dispatch_memory_operation(
 pub(super) async fn execute_project_retained_application_tool(
     request: CatalogBoundRetainedMcpRequest,
     cg: &TraceDecay,
-    scope_prefix: Option<&str>,
+    _scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     active_lcm_context: session::LcmHandlerContext<'_>,
     options: &ToolCallRegistryOptions<'_>,
@@ -733,18 +733,6 @@ pub(super) async fn execute_project_retained_application_tool(
         | RetainedSurfaceOperation::LcmExpand
         | RetainedSurfaceOperation::LcmExpandQuery => {
             dispatch_lcm_tool(request.operation, request.arguments, active_lcm_context).await
-        }
-        RetainedSurfaceOperation::SessionStart => {
-            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
-                message: "health-delta observation authority is unavailable".to_owned(),
-            })?;
-            health::handle_session_start(cg, db.as_ref(), request.arguments, scope_prefix).await
-        }
-        RetainedSurfaceOperation::SessionEnd => {
-            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
-                message: "health-delta observation authority is unavailable".to_owned(),
-            })?;
-            health::handle_session_end(cg, db.as_ref(), request.arguments, scope_prefix).await
         }
     }
 }

@@ -780,36 +780,6 @@ Expected: Also returns already-tested symbols ranked by risk score — useful fo
 
 ---
 
-## tracedecay_session_start
-
-> Save a health baseline before I start working.
-
-Test:
-```
-tracedecay_session_start()
-```
-Expected: Returns `{status: "baseline_saved", quality_signal: N, files_analyzed: N}`. Also writes `.tracedecay/session_baseline.json` in the project root with the full health snapshot for later comparison.
-
----
-
-## tracedecay_session_end
-
-> Compare current health against the baseline — did my changes degrade the codebase?
-
-Test after a prior `tracedecay_session_start`:
-```
-tracedecay_session_end()
-```
-Expected: Returns `{pass: true/false, signal_before: N, signal_after: N, delta: N, files_analyzed: N, degraded_dimensions: [...], dimensions: {per_dim with before/after/delta/direction}}`. The baseline file is removed after `session_end` completes.
-
-Test without a baseline:
-```
-tracedecay_session_end()
-```
-Expected: Returns `{status: "no_baseline", message: "No session baseline found. Call tracedecay_session_start first."}`.
-
----
-
 ## tracedecay_read
 
 > Read a file with mode-aware compression. Modes: `full`, `lines`, `map`, `signatures`. Cross-session cached.
@@ -1101,4 +1071,4 @@ tracedecay_field_sites()                              # missing field → error
 
 ---
 
-> **Note:** Most tools are read-only and safe to call in parallel. The exceptions mutate state and should not be parallelised: the edit tools (`tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_insert_at_symbol`, `tracedecay_replace_symbol`, `tracedecay_ast_grep_rewrite`) modify source files; the session and memory tools (`tracedecay_session_start`, `tracedecay_session_end`, `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`) write to `.tracedecay/`; and `tracedecay_run_affected_tests` runs a `cargo` test subprocess.
+> **Note:** Most tools are read-only and safe to call in parallel. The exceptions mutate state and should not be parallelised: the edit tools (`tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_insert_at_symbol`, `tracedecay_replace_symbol`, `tracedecay_ast_grep_rewrite`) modify source files; the memory tools (`tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`) write to `.tracedecay/`; and `tracedecay_run_affected_tests` runs a `cargo` test subprocess.

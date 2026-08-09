@@ -31,9 +31,6 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::resolution::SummaryLineageRejection;
 use tracedecay_temporal_query::{TemporalKernelError, TemporalKernelResult};
 
-mod task_session;
-pub use task_session::TaskSessionRetrievalOutcomeV1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionRetrievalConfiguration {
     schema_version: u32,
@@ -298,17 +295,139 @@ where
         binding: &SessionRequestBinding,
         query: SessionTemporalQuery,
     ) -> SessionRetrievalOutcome<TemporalKernelResult> {
-        let admitted = match self.admit_execution(context, binding, &query) {
-            Ok(admitted) => admitted,
-            Err(failure) => return failure.into_outcome(),
+        if application_request_interruption(context, binding.cancellation()).is_some() {
+            return SessionRetrievalOutcome::Cancelled;
+        }
+        let Ok(authorization) = SessionScopeAuthorizationRequest::new(
+            context.actor().clone(),
+            binding.identity().clone(),
+            query.session_id.clone(),
+            query.provider.clone(),
+            query.temporal_mode,
+            query.grain,
+            SessionAccess::Hydrate,
+        )
+        .map(|request| request.with_retrieval_scope(query.retrieval_scope.clone())) else {
+            return SessionRetrievalOutcome::Unavailable;
         };
-        let expected_execution = admitted.execution.clone();
+        let grant = match self.authorizer.authorize(context, binding, &authorization) {
+            Ok(grant) => grant,
+            Err(SessionAuthorizationError::Denied) => return SessionRetrievalOutcome::Denied,
+            Err(
+                SessionAuthorizationError::WrongScope
+                | SessionAuthorizationError::WrongTarget
+                | SessionAuthorizationError::WrongAccess
+                | SessionAuthorizationError::UnresolvedGitRoute
+                | SessionAuthorizationError::UnresolvedApplicationScope,
+            ) => {
+                return SessionRetrievalOutcome::WrongScope;
+            }
+            Err(SessionAuthorizationError::WrongContext) => {
+                return SessionRetrievalOutcome::Denied;
+            }
+            Err(
+                SessionAuthorizationError::Unavailable
+                | SessionAuthorizationError::InvalidGrantId
+                | SessionAuthorizationError::InvalidProviderScope
+                | SessionAuthorizationError::ZeroRevision,
+            ) => {
+                return SessionRetrievalOutcome::Unavailable;
+            }
+        };
+        if let Err(error) = grant.validate(context, binding, &authorization) {
+            return match error {
+                SessionAuthorizationError::WrongScope
+                | SessionAuthorizationError::WrongTarget
+                | SessionAuthorizationError::WrongAccess
+                | SessionAuthorizationError::UnresolvedGitRoute
+                | SessionAuthorizationError::UnresolvedApplicationScope => {
+                    SessionRetrievalOutcome::WrongScope
+                }
+                SessionAuthorizationError::WrongContext | SessionAuthorizationError::Denied => {
+                    SessionRetrievalOutcome::Denied
+                }
+                SessionAuthorizationError::InvalidGrantId
+                | SessionAuthorizationError::InvalidProviderScope
+                | SessionAuthorizationError::ZeroRevision
+                | SessionAuthorizationError::Unavailable => SessionRetrievalOutcome::Unavailable,
+            };
+        }
+        if !within_request_budgets(binding, &query)
+            || self.estimator.version() != query.context_budget.estimator_version
+        {
+            return SessionRetrievalOutcome::BudgetExhausted;
+        }
+        if application_request_interruption(context, binding.cancellation()).is_some() {
+            return SessionRetrievalOutcome::Cancelled;
+        }
+
+        let root_digest = digest_root(grant.scope().authorized_root().identity());
+        let grant_digest = digest_grant(&grant);
+        let access_digest = digest_policy(grant.policy_digest());
+        let filter_digest = digest_filters(&query);
+        let request_digest = digest_request(
+            context,
+            binding,
+            &query,
+            &grant,
+            self.configuration,
+            &root_digest,
+            &grant_digest,
+        );
+        let control = ExecutionControl::new(Some(execution_deadline(context))).with_work_limit(
+            usize::try_from(binding.budgets().max_work_units()).unwrap_or(usize::MAX),
+        );
+        let cancellation_control = control.clone();
+        if binding.cancellation().is_cancelled() || context.cancellation().is_cancelled() {
+            control.cancel();
+        }
+        let snapshot_request = match tracedecay_temporal_query::ports::TemporalSnapshotRequest::new(
+            query.session_id.clone(),
+            root_digest,
+            request_digest,
+            access_digest,
+            query.temporal_mode,
+            query.grain,
+        )
+        .and_then(|request| request.with_filter_digest(filter_digest.clone()))
+        .and_then(|request| request.with_semantic_filter(query.semantic_filter.clone()))
+        .and_then(|request| {
+            temporal_authorized_root(grant.scope().authorized_root().identity())
+                .and_then(|root| request.with_authorized_root(root))
+        })
+        .map(|request| {
+            request.with_retrieval_scope(temporal_retrieval_scope(&query.retrieval_scope))
+        })
+        .and_then(|request| request.with_provider_scope(query.provider.clone()))
+        {
+            Ok(request) => request
+                .with_limits(query.execution_limits)
+                .with_execution_control(control),
+            Err(_) => return SessionRetrievalOutcome::Unavailable,
+        };
+        let configuration_digest = sha256_binding(binding.configuration_digest().as_bytes());
+        let execution = AuthorizedTemporalExecutionRequest::new(
+            snapshot_request,
+            query.query.clone(),
+            query.cursor.clone(),
+            query.limit,
+            query.diversity,
+            query.context_budget.clone(),
+            self.configuration.schema_version,
+            self.configuration.ranking_version,
+            configuration_digest,
+        );
+        let execution = match query.direct_anchor.clone() {
+            Some(anchor_id) => execution.with_direct_anchor(anchor_id),
+            None => execution,
+        };
+        let expected_execution = execution.clone();
         let Ok(result) = run_application_request_interruptible(
             context,
             binding.cancellation(),
-            self.execution.execute(admitted.execution, &self.estimator),
+            self.execution.execute(execution, &self.estimator),
             || {
-                admitted.cancellation_control.cancel();
+                cancellation_control.cancel();
             },
         )
         .await
