@@ -801,10 +801,15 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         },
         started,
         terminal,
+        Some("provider-request-1".to_owned()),
     )
     .expect("settled provider timing");
     assert_eq!(resource.scheduled_latency_micros, 5);
     assert_eq!(resource.service_latency_micros, 30);
+    assert_eq!(
+        resource.provider_request_id.as_deref(),
+        Some("provider-request-1")
+    );
     assert_eq!(
         resource.activation_outcome,
         Some(OperationActivationOutcomeV1::Committed)

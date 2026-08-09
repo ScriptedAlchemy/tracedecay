@@ -61,11 +61,12 @@ use tracedecay_application::{
     WorkAttemptStreamSummaryV1, WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1,
 };
 use tracedecay_domain::{
-    WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1,
+    ObservationSourceIdentityV1, WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference,
+    WorkFallbackTopology, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1,
 };
 use tracedecay_sessions::runtime::codex_app_server::{
-    CodexAppServerCancellation, CodexAppServerSummaryConfig, run_work_with_codex_app_server,
+    CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
+    run_work_with_codex_app_server,
 };
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, record_terminal_attempt_product_views,
@@ -616,7 +617,7 @@ async fn execute_provider_with_environment<S>(
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
             if let Some(observation) =
-                work_operation_resource_observation(&settled, timing, started, terminal)
+                work_operation_resource_observation(&settled, timing, started, terminal, None)
             {
                 let _ =
                     record_work_operation_resource(observability_producer, &settled, observation);
@@ -636,9 +637,15 @@ async fn execute_provider_with_environment<S>(
 /// result is carried through so the terminal classification stays in one
 /// place.
 enum AppServerEnding {
-    Session(Result<Result<String, String>, tokio::task::JoinError>),
+    Session(Result<Result<AppServerSessionOutput, String>, tokio::task::JoinError>),
     TimedOut,
     Cancelled,
+}
+
+struct AppServerSessionOutput {
+    answer: String,
+    source: ObservationSourceIdentityV1,
+    provider_request_id: String,
 }
 
 /// Runs one attempt over the Codex app-server JSON-RPC transport.
@@ -684,8 +691,6 @@ async fn execute_app_server<S>(
             return;
         }
     };
-    let started = std::time::Instant::now();
-
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
@@ -705,6 +710,8 @@ async fn execute_app_server<S>(
             route.provider_id()
         })
         .clone();
+    let launch_receipt = CodexAppServerLaunchReceipt::default();
+    let blocking_launch_receipt = launch_receipt.clone();
     let mut session = tokio::task::spawn_blocking(move || {
         run_work_with_codex_app_server(
             &prompt,
@@ -714,6 +721,7 @@ async fn execute_app_server<S>(
             &cwd,
             wall,
             &admitted_environment,
+            &blocking_launch_receipt,
         )
         .and_then(|summary| {
             let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
@@ -727,7 +735,11 @@ async fn execute_app_server<S>(
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!("Codex app-server session identity is invalid: {error}"),
             })?;
-            Ok((summary.text, source))
+            Ok(AppServerSessionOutput {
+                answer: summary.text,
+                source,
+                provider_request_id: summary.provider_request_id,
+            })
         })
         .map_err(|error| error.to_string())
     });
@@ -761,6 +773,7 @@ async fn execute_app_server<S>(
 
     let mut text = None;
     let mut provider_session = None;
+    let mut provider_request_id = None;
     let outcome = match ending {
         AppServerEnding::TimedOut => {
             let _ = session.await;
@@ -770,9 +783,10 @@ async fn execute_app_server<S>(
             let _ = session.await;
             WorkAttemptProviderOutcomeV1::Cancelled
         }
-        AppServerEnding::Session(Ok(Ok((answer, source)))) => {
-            text = Some(answer);
-            provider_session = Some(source);
+        AppServerEnding::Session(Ok(Ok(output))) => {
+            text = Some(output.answer);
+            provider_session = Some(output.source);
+            provider_request_id = Some(output.provider_request_id);
             WorkAttemptProviderOutcomeV1::Exited { code: 0 }
         }
         AppServerEnding::Session(Ok(Err(error))) => {
@@ -811,9 +825,15 @@ async fn execute_app_server<S>(
     match attempts.settle(context, &identity, &evidence) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
-            if let Some(observation) =
-                work_operation_resource_observation(&settled, timing, started, terminal)
-            {
+            if let Some(observation) = launch_receipt.started_at().and_then(|started| {
+                work_operation_resource_observation(
+                    &settled,
+                    timing,
+                    started,
+                    terminal,
+                    provider_request_id,
+                )
+            }) {
                 let _ =
                     record_work_operation_resource(observability_producer, &settled, observation);
             }

@@ -135,6 +135,34 @@ pub struct CodexAppServerSummary {
     pub model: Option<String>,
     /// Provider-native thread identity returned by the admitted thread/start.
     pub thread_id: String,
+    /// Provider-native turn identity used by Codex token-usage notifications.
+    pub provider_request_id: String,
+}
+
+/// Same-process receipt for the exact app-server child launch boundary.
+///
+/// The Work runtime keeps this receipt while the blocking protocol client is
+/// active, including timeout and cancellation paths. A missing timestamp means
+/// the provider process never started.
+#[derive(Clone, Default)]
+pub struct CodexAppServerLaunchReceipt {
+    started_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl CodexAppServerLaunchReceipt {
+    pub fn started_at(&self) -> Option<Instant> {
+        *self
+            .started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn record_started(&self, started_at: Instant) {
+        *self
+            .started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(started_at);
+    }
 }
 
 impl Default for CodexAppServerSummaryConfig {
@@ -188,7 +216,16 @@ pub fn run_prompt_with_codex_app_server(
     config: &CodexAppServerSummaryConfig,
     thread_source: &str,
 ) -> Result<CodexAppServerSummary> {
-    run_prompt_with_optional_cancellation(prompt, config, thread_source, None, None, None, None)
+    run_prompt_with_optional_cancellation(
+        prompt,
+        config,
+        thread_source,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Runs a Work attempt through Codex app-server with only the environment
@@ -203,6 +240,7 @@ pub fn run_work_with_codex_app_server(
     cwd: &Path,
     timeout: Duration,
     admitted_environment: &BTreeMap<String, OsString>,
+    launch_receipt: &CodexAppServerLaunchReceipt,
 ) -> Result<CodexAppServerSummary> {
     run_prompt_with_optional_cancellation(
         prompt,
@@ -212,6 +250,7 @@ pub fn run_work_with_codex_app_server(
         Some(cwd),
         Some(timeout),
         Some(admitted_environment),
+        Some(launch_receipt),
     )
 }
 
@@ -223,6 +262,7 @@ fn run_prompt_with_optional_cancellation(
     cwd: Option<&Path>,
     timeout: Option<Duration>,
     admitted_environment: Option<&BTreeMap<String, OsString>>,
+    launch_receipt: Option<&CodexAppServerLaunchReceipt>,
 ) -> Result<CodexAppServerSummary> {
     let model = configured_model(config);
     let mut command = codex_app_server_command(&config.codex_bin);
@@ -241,6 +281,9 @@ fn run_prompt_with_optional_cancellation(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let child = spawn_codex_app_server(&mut command, &config.codex_bin)?;
+    if let Some(launch_receipt) = launch_receipt {
+        launch_receipt.record_started(Instant::now());
+    }
     let process_group = child.id();
     let mut child = ChildGuard {
         child,
@@ -556,10 +599,20 @@ fn wait_for_turn_summary(
                 }
             }
             Some("turn/completed") => {
+                let provider_request_id = value
+                    .pointer("/params/turn/id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: format!(
+                            "codex app-server turn/completed lacked a provider turn id: {value}"
+                        ),
+                    })?
+                    .to_owned();
                 return Ok(CodexAppServerSummary {
                     text,
                     model,
                     thread_id,
+                    provider_request_id,
                 });
             }
             _ => {}
@@ -766,7 +819,10 @@ mod tests {
         assert!(
             tx.send(Ok(json!({
                 "method": "turn/completed",
-                "params": {"threadId": thread_id}
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {"id": "turn-provider-request"}
+                }
             })
             .to_string()))
                 .is_ok()
@@ -783,6 +839,7 @@ mod tests {
         assert_eq!(summary.text, "summary text");
         assert_eq!(summary.model.as_deref(), Some("gpt-5.5-codex-actual"));
         assert_eq!(summary.thread_id, thread_id);
+        assert_eq!(summary.provider_request_id, "turn-provider-request");
     }
 
     #[test]
@@ -804,7 +861,7 @@ mod tests {
         let admitted_key = format!("TRACEDECAY_WORK_ADMITTED_{}", std::process::id());
         let ambient_secret = format!("TRACEDECAY_WORK_SECRET_{}", std::process::id());
         let script = format!(
-            "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\"}}'; exit 0 ;;\n  esac\ndone\n",
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${{{admitted_key}:-missing}}\" \"${{{ambient_secret}:-missing}}\" \"${{{child_marker}:-missing}}\" > {marker}\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"id\":0'*) printf '%s\\n' '{{\"id\":0,\"result\":{{}}}}' ;;\n    *'\"id\":1'*) printf '%s\\n' '{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"work-thread\"}}}}}}' ;;\n    *'\"id\":2'*) printf '%s\\n' '{{\"method\":\"item/completed\",\"params\":{{\"item\":{{\"content\":[{{\"type\":\"output_text\",\"text\":\"work result\"}}]}}}}}}'; printf '%s\\n' '{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"work-turn\"}}}}}}'; exit 0 ;;\n  esac\ndone\n",
             marker = marker.display(),
             child_marker = CODEX_SUMMARY_CHILD_ENV,
         );
@@ -839,6 +896,7 @@ mod tests {
             model: None,
             timeout: Duration::from_secs(2),
         };
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
         let result = run_work_with_codex_app_server(
             "Return a work result.",
             &config,
@@ -847,6 +905,7 @@ mod tests {
             temporary.path(),
             Duration::from_secs(2),
             &admitted_environment,
+            &launch_receipt,
         );
         // SAFETY: return the process environment to the state this test found.
         unsafe {
@@ -862,6 +921,8 @@ mod tests {
 
         let summary = result.expect("work app-server protocol should complete");
         assert_eq!(summary.text, "work result");
+        assert_eq!(summary.provider_request_id, "work-turn");
+        assert!(launch_receipt.started_at().is_some());
         assert_eq!(
             std::fs::read_to_string(&marker).expect("child environment marker"),
             "admitted-value|missing|1"

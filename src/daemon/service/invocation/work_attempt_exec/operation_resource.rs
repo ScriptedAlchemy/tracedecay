@@ -29,6 +29,7 @@ pub(super) fn work_operation_resource_observation(
     timing: AttemptAdmissionTimingV1,
     started: Instant,
     terminal: Instant,
+    provider_request_id: Option<String>,
 ) -> Option<OperationResourceObservedV1> {
     let scheduled_latency_micros = duration_micros(timing.admitted, timing.scheduled)?;
     let admitted_elapsed_micros = scheduled_latency_micros;
@@ -43,9 +44,7 @@ pub(super) fn work_operation_resource_observation(
         _ => return None,
     };
     Some(OperationResourceObservedV1 {
-        // Provider-native request identity is unavailable on these execution
-        // paths. Thread and local JSON-RPC identifiers are not usage IDs.
-        provider_request_id: None,
+        provider_request_id,
         scheduled_latency_micros,
         service_latency_micros,
         process_rss_bytes: None,
