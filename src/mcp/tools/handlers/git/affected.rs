@@ -11,15 +11,23 @@ pub(crate) trait AffectedTestDependents: Sync {
     -> AffectedDependentsFuture<'a>;
 }
 
-impl AffectedTestDependents for TraceDecay {
+struct VerifiedAffectedTestDependents<'a> {
+    graph: &'a TraceDecay,
+    query: &'a crate::tracedecay::queries::graph::VerifiedGraphQuery,
+}
+
+impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
     fn get_file_dependents_batch<'a>(
         &'a self,
         files: &'a [String],
     ) -> AffectedDependentsFuture<'a> {
         Box::pin(async move {
-            let mut dependents: FileDependentsByFile = HashMap::new();
+            let mut dependents = FileDependentsByFile::new();
             for file in files {
-                dependents.insert(file.clone(), self.get_file_dependents(file).await?);
+                dependents.insert(
+                    file.clone(),
+                    self.graph.get_file_dependents(self.query, file).await?,
+                );
             }
             Ok(dependents)
         })
@@ -118,7 +126,11 @@ pub(crate) async fn collect_affected_test_files<D: AffectedTestDependents + ?Siz
 }
 
 /// Handles `tracedecay_affected` tool calls.
-pub(crate) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_affected(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let files = require_string_array_arg(&args, "files")?;
     let max_depth = clamped_depth_arg(&args, "depth", 5, 10);
 
@@ -126,8 +138,12 @@ pub(crate) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
     let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
 
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    let dependents = VerifiedAffectedTestDependents {
+        graph: cg,
+        query: graph,
+    };
     let traversal = collect_affected_test_files(
-        cg,
+        &dependents,
         &files,
         max_depth,
         custom_glob.as_ref(),

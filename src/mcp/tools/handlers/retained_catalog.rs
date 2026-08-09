@@ -100,14 +100,14 @@ pub(super) async fn dispatch_profile_retained_application_tool(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    let admission = options
+    let authority = options
         .session_authorities
-        .profile_retained_admission
+        .profile_retained_authority
         .ok_or_else(|| {
             TraceDecayError::project_route(
-                "profile_retained_admission_unavailable",
+                "profile_retained_authority_unavailable",
                 true,
-                "profile retained admission is unavailable for this authenticated connection",
+                "profile retained authority is unavailable for this authenticated connection",
             )
         })?;
     execute_profile_retained_mcp_tool(
@@ -115,7 +115,7 @@ pub(super) async fn dispatch_profile_retained_application_tool(
         tool_name,
         args,
         cg.store_runtime_registry().as_ref(),
-        admission,
+        authority,
         options.session_authorities.profile_lcm,
         options.application_request_id,
         options.application_deadline,
@@ -131,7 +131,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     tool_name: &str,
     mut args: Value,
     runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-    admission: &crate::daemon::retained_owner::ProfileRetainedAdmissionV1,
+    authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
     protocol_request_id: Option<tracedecay_application::RequestId>,
     protocol_deadline: Option<tracedecay_application::Deadline>,
@@ -200,11 +200,11 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     let result = crate::daemon::retained_owner::execute_profile_retained_application(
         crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
             runtime_registry: Some(runtime_registry),
-            session_identity: admission.session_identity().clone(),
-            configuration_digest: admission.configuration_digest().clone(),
+            session_identity: authority.session_identity().clone(),
+            configuration_digest: authority.configuration_digest().clone(),
             lcm_authority,
         },
-        admission,
+        authority,
         typed_request,
         request_id,
         deadline,

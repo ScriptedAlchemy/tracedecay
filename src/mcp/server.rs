@@ -153,6 +153,8 @@ pub(crate) type CodeIndexPublicationIdentityResolver =
 
 pub(crate) type CodeGraphProjectionReadPort =
     Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
+pub(crate) type CodeGraphReadAdmissionPort =
+    Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
 
 /// Code-index search boundary contracts, owned by the query kernel.
 ///
@@ -307,9 +309,10 @@ pub struct McpServer {
     global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    /// Authenticated profile identity and policy grant pinned at server
-    /// construction. Profile-retained handlers can only narrow this admission.
-    profile_retained_admission: Option<crate::daemon::retained_owner::ProfileRetainedAdmissionV1>,
+    /// Authenticated durable profile/session authority pinned at server
+    /// construction. Each retained request receives its own bounded grant.
+    profile_retained_authority:
+        Option<crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
@@ -379,6 +382,7 @@ pub struct McpServer {
     /// Daemon-owned exact sealed-generation branch comparison bridge.
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
+    code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -763,6 +767,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
+            code_graph_read_admission_port,
             code_index_search_authority,
             retained_project_graph_resolver,
             dashboard_graph_interactive_resolver,
@@ -948,33 +953,22 @@ impl McpServer {
                     root.expected_runtime_shard()?,
                 )
             });
-        let profile_retained_admission = match profile_identity
+        let profile_retained_authority = match profile_identity
             .as_ref()
             .zip(profile_session_retrieval_root.as_ref())
         {
             Some((identity, root)) => {
-                let admission =
-                    crate::daemon::retained_owner::profile_retained_configuration_digest(
-                        identity.brain_id(),
-                        identity.profile_id(),
+                let authority =
+                    crate::daemon::retained_owner::profile_retained_connection_authority(
+                        identity,
                         root.identity(),
-                    )
-                    .and_then(|configuration_digest| {
-                        crate::daemon::retained_owner::issue_profile_retained_policy_admission(
-                            identity.brain_id(),
-                            identity.profile_id().clone(),
-                            root.identity(),
-                            &configuration_digest,
-                            tracedecay_application::now_micros(),
-                            tracedecay_domain::UtcMicros(i64::MAX),
-                        )
-                    });
-                match admission {
-                    Ok(admission) => Some(admission),
+                    );
+                match authority {
+                    Ok(authority) => Some(authority),
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
-                            "profile retained connection admission is unavailable"
+                            "profile retained connection authority is unavailable"
                         );
                         None
                     }
@@ -1003,7 +997,7 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
-            profile_retained_admission,
+            profile_retained_authority,
             session_db,
             registry_db,
             project_registry_reads,
@@ -1039,6 +1033,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
+            code_graph_read_admission_port,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),

@@ -27,4 +27,14 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
             FeedbackArgumentRejectionClassV1::Unsupported,
         ))
     );
+
+    let contract_violation = DaemonInvocationResponse::problem(
+        "request.application-contract",
+        DaemonInvocationProblem::ApplicationContractViolation,
+    );
+    assert_eq!(invocation_rejected_argument(&contract_violation), None);
+    assert_eq!(
+        invocation_response_outcome(&contract_violation),
+        FeedbackOutcomeV1::Unavailable
+    );
 }

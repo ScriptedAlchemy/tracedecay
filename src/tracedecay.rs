@@ -27,7 +27,7 @@ mod lifecycle;
 mod locking;
 mod move_symbol;
 mod project_runtime_port;
-mod queries;
+pub(crate) mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};

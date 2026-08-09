@@ -938,7 +938,7 @@ impl McpServer {
                 source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
-                code_graph_request_context_factory: self.code_graph_request_context_factory.clone(),
+                code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 dashboard_graph_interactive_resolver: self
                     .dashboard_graph_interactive_resolver
@@ -950,7 +950,7 @@ impl McpServer {
                     self.user_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.as_ref())
-                .with_profile_retained_admission(self.profile_retained_admission.as_ref())
+                .with_profile_retained_authority(self.profile_retained_authority.as_ref())
                 .with_registered_databases(
                     self.registered_session_db.as_ref(),
                     self.registered_user_session_db.as_ref(),
@@ -1790,6 +1790,20 @@ mod git_read_control_tests {
         ));
         assert!(tool_supports_live_cancellation("tracedecay_admin_cli"));
         assert!(tool_supports_live_cancellation("tracedecay_pr_context"));
+        for tool_name in [
+            "tracedecay_dead_code",
+            "tracedecay_circular",
+            "tracedecay_affected",
+            "tracedecay_simplify_scan",
+            "tracedecay_dependency_depth",
+            "tracedecay_health",
+            "tracedecay_dsm",
+        ] {
+            assert!(
+                tool_supports_live_cancellation(tool_name),
+                "{tool_name} must carry the caller cancellation signal into the verified graph"
+            );
+        }
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",

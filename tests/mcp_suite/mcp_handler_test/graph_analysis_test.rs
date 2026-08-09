@@ -1904,8 +1904,6 @@ pub fn caller() { called(); }
 /// `calls` edges count for file-level dependency depth.
 #[tokio::test]
 async fn dependency_depth_excludes_implements_and_extends() {
-    // Public helper exposed from the lib for unit-test inspection.
-    use tracedecay::graph::queries::GraphQueryManager;
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -1937,20 +1935,32 @@ pub trait T {}
     let (cg, _env) = init_test_project(project).await;
     cg.index_all().await.unwrap();
 
-    let qm = GraphQueryManager::new(cg.db());
-    let adj = qm.build_file_adjacency(None).await.unwrap();
-    // Neither a.rs nor b.rs imports the other; the only edges between
-    // them would come from implements/extends junk. After the fix, adj
-    // should report no cross-file deps between the two leaf files.
-    let from_a = adj.get("src/a.rs").cloned().unwrap_or_default();
-    let from_b = adj.get("src/b.rs").cloned().unwrap_or_default();
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_dependency_depth",
+        json!({"limit": 100}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let chains = output["chains"]
+        .as_array()
+        .expect("dependency-depth response should contain chains");
     assert!(
-        !from_a.contains("src/b.rs"),
-        "src/a.rs must not depend on src/b.rs; got adj={from_a:?}"
-    );
-    assert!(
-        !from_b.contains("src/a.rs"),
-        "src/b.rs must not depend on src/a.rs; got adj={from_b:?}"
+        chains.iter().all(|entry| {
+            let chain = entry["chain"]
+                .as_array()
+                .expect("dependency-depth chain should be an array");
+            !chain.windows(2).any(|pair| {
+                matches!(
+                    (pair[0].as_str(), pair[1].as_str()),
+                    (Some("src/a.rs"), Some("src/b.rs")) | (Some("src/b.rs"), Some("src/a.rs"))
+                )
+            })
+        }),
+        "derive/trait metadata must not create a dependency between leaf files: {output}"
     );
 }
 

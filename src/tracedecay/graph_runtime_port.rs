@@ -15,14 +15,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::retrieval::HealthDeltaResult;
 use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::DependencyImportUse;
 use tracedecay_usecases::tracedecay::{
     BranchDiagnostics, EditDiagnosticRecord, GraphFuture, GraphRequestControl, GraphRuntimePort,
     GraphValueFuture, PlannedSourceEditFile, SourceEditGraphReadV1,
@@ -165,10 +162,6 @@ impl GraphRuntimePort for TraceDecay {
         Box::pin(TraceDecay::get_files_with_test_annotations(self))
     }
 
-    fn get_file_dependents<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<String>> {
-        Box::pin(TraceDecay::get_file_dependents(self, file))
-    }
-
     fn node_at_location<'a>(
         &'a self,
         file: &'a str,
@@ -183,23 +176,6 @@ impl GraphRuntimePort for TraceDecay {
 
     fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)> {
         Box::pin(TraceDecay::storage_page_counts(self))
-    }
-
-    fn dependency_import_uses<'a>(
-        &'a self,
-        query: &'a str,
-        limit: usize,
-        path_prefix: Option<&'a str>,
-        control: GraphRequestControl<'a>,
-    ) -> GraphFuture<'a, Vec<DependencyImportUse>> {
-        Box::pin(async move {
-            ensure_dependency_hint_request_active(control)?;
-            let imports = TraceDecay::db(self)
-                .dependency_import_uses(query, limit, path_prefix)
-                .await?;
-            ensure_dependency_hint_request_active(control)?;
-            Ok(imports)
-        })
     }
 
     fn lazy_index_ignored_dependency_files<'a>(
@@ -288,23 +264,6 @@ impl GraphRuntimePort for TraceDecay {
                 message: format!("redundancy payload failed typed decode: {error}"),
             })
         })
-    }
-
-    /// Adapter: the pinned health delta is computed by the graph health
-    /// engine, which already takes the engine and the observation database
-    /// directly. The MCP session handlers call the same function.
-    fn health_delta<'a>(
-        &'a self,
-        observation_database: &'a RegisteredGlobalDb,
-        before_cursor: Option<&'a str>,
-        path_prefix: Option<&'a str>,
-    ) -> GraphFuture<'a, HealthDeltaResult> {
-        Box::pin(crate::graph::health::delta::compute_health_delta_result(
-            self,
-            observation_database,
-            before_cursor,
-            path_prefix,
-        ))
     }
 
     fn replace_symbol<'a>(

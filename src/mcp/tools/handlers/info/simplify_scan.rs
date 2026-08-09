@@ -5,6 +5,7 @@ use super::*;
 /// Handles `tracedecay_simplify_scan` tool calls.
 pub(crate) async fn handle_simplify_scan(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     _scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -99,7 +100,7 @@ pub(crate) async fn handle_simplify_scan(
         }
 
         // 4. Coupling: check file fan_in
-        let file_deps = cg.get_file_dependents(file).await?;
+        let file_deps = cg.get_file_dependents(graph, file).await?;
         if file_deps.len() > 15 {
             coupling_warnings.push(json!({
                 "file": file,

@@ -29,7 +29,11 @@ struct BoundedCycle {
 }
 
 /// Handles `tracedecay_circular` tool calls.
-pub(crate) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_circular(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let limit = args
         .get("limit")
         .and_then(Value::as_u64)
@@ -43,7 +47,7 @@ pub(crate) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
             (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
         });
 
-    let all_cycles = cg.find_circular_dependencies().await?;
+    let all_cycles = cg.find_circular_dependencies(graph).await?;
     let cycle_count = all_cycles.len();
     let (cycles, omitted) = bound_cycles(all_cycles, limit, member_limit);
 

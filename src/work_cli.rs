@@ -590,6 +590,12 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::Reset],
         },
+        DaemonInvocationProblem::ApplicationContractViolation => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "work_application_contract_violation".to_owned(),
+                message: "The Work result violated its canonical contract".to_owned(),
+            })
+        }
         DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "work_authority_unavailable".to_owned(),
             message: "The owning Work authority is unavailable".to_owned(),

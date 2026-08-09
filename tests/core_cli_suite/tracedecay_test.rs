@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, is_test_file};
-use tracedecay::types::{EdgeKind, NodeKind};
+use tracedecay::types::EdgeKind;
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
@@ -320,66 +320,6 @@ async fn test_get_all_edges() {
     let edges = cg.get_all_edges().await.unwrap();
     // foo() calls bar(), so there should be at least one edge
     assert!(!edges.is_empty(), "should have at least one edge");
-}
-
-// ---------------------------------------------------------------------------
-// get_file_dependents
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_file_dependents() {
-    let (_dir, cg) = setup().await;
-    // utils.rs calls foo from lib.rs, so lib.rs has utils.rs as a dependent
-    // (or utils depends on lib). Let's check if lib.rs has dependents.
-    let dependents = cg.get_file_dependents("src/lib.rs").await.unwrap();
-    // The cross-file resolution may or may not work depending on extractor,
-    // but the method should not panic.
-    // dependents is a Vec<String> of file paths
-    assert!(
-        dependents.is_empty() || dependents.iter().any(|d| d.contains("utils")),
-        "dependents of lib.rs should either be empty (if resolution didn't link) or contain utils.rs"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// find_dead_code
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_find_dead_code_functions() {
-    let (_dir, cg) = setup().await;
-    let dead = cg
-        .find_dead_code(&[NodeKind::Function], false)
-        .await
-        .unwrap();
-    // The method should return successfully. Private functions without
-    // incoming call edges appear as dead code. The exact results depend
-    // on the extractor's edge generation (e.g., contains edges may give
-    // nodes incoming edges). Verify the method runs and returns only
-    // non-pub, non-main, non-test nodes.
-    for node in &dead {
-        assert_ne!(node.name, "main", "main should be excluded from dead code");
-        assert!(
-            !node.name.starts_with("test"),
-            "test functions should be excluded from dead code",
-        );
-        assert_ne!(
-            node.visibility,
-            tracedecay::types::Visibility::Pub,
-            "pub items should be excluded from dead code",
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_find_dead_code_custom_kinds() {
-    let (_dir, cg) = setup().await;
-    // Look for dead structs — our test project has none, should return empty
-    let dead = cg.find_dead_code(&[NodeKind::Struct], false).await.unwrap();
-    assert!(
-        dead.is_empty(),
-        "test project has no structs, so no dead struct code expected",
-    );
 }
 
 // ---------------------------------------------------------------------------

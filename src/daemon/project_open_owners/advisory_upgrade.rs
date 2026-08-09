@@ -198,6 +198,7 @@ async fn register_advisory_owner_from_state(
     let database = state.database.clone();
     let session_db = Arc::clone(&state.session_db);
     let graph = Arc::clone(&state.graph);
+    let code_graph = Arc::clone(&state.code_graph);
     let scope = state.scope.clone();
     let access = state.access.clone();
     let lsp_session_factory = Arc::clone(&state.lsp_session_factory);
@@ -212,6 +213,7 @@ async fn register_advisory_owner_from_state(
             database,
             session_db,
             graph,
+            code_graph,
             scope,
             access,
             feedback_scope,

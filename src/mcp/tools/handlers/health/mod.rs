@@ -20,15 +20,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::graph::health::delta::compute_health_delta_result;
-use crate::graph::health::snapshot::{
-    HealthSnapshot, compute_health_snapshot, session_dimension_values,
-};
 use crate::graph::health::{
     dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
 };
-use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
 

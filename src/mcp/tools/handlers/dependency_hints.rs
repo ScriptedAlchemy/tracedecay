@@ -4,8 +4,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_usecases::tracedecay::{GraphRequestControl, GraphRuntimePort};
 
-use crate::dependency_imports::{DependencyImportCandidate, candidates_from_type_only_import};
-use crate::errors::Result;
+use crate::dependency_imports::DependencyImportCandidate;
+use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::render::{self, Md};
 use crate::tracedecay::TraceDecay;
 
@@ -83,58 +83,18 @@ pub(super) async fn lazy_index_ignored_dependency_candidates(
 }
 
 async fn ignored_dependency_candidates(
-    cg: &TraceDecay,
-    query: &str,
-    limit: usize,
-    scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    _cg: &TraceDecay,
+    _query: &str,
+    _limit: usize,
+    _scope_prefix: Option<&str>,
+    _deadline: Option<&tracedecay_application::Deadline>,
+    _cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Vec<DependencyImportCandidate>> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
-    let candidate_limit = limit.clamp(1, 20);
-    let query_lower = query.to_ascii_lowercase();
-    let imports = GraphRuntimePort::dependency_import_uses(
-        cg,
-        query,
-        candidate_limit,
-        scope_prefix,
-        GraphRequestControl {
-            deadline,
-            cancellation,
-        },
-    )
-    .await?;
-    let mut seen = BTreeSet::new();
-    let mut candidates = Vec::new();
-    for candidate in imports.into_iter().flat_map(|import_use| {
-        candidates_from_type_only_import(
-            &import_use.signature,
-            &import_use.module,
-            &import_use.file_path,
-            import_use.line,
-        )
-    }) {
-        let haystack = format!("{} {}", candidate.module, candidate.symbol).to_ascii_lowercase();
-        if !haystack.contains(&query_lower) {
-            continue;
-        }
-        if !seen.insert((
-            candidate.module.clone(),
-            candidate.symbol.clone(),
-            candidate.import_file.clone(),
-            candidate.line,
-        )) {
-            continue;
-        }
-        candidates.push(candidate);
-        if candidates.len() >= candidate_limit {
-            break;
-        }
-    }
-    Ok(candidates)
+    Err(TraceDecayError::ProjectRoute {
+        reason_code: "code-graph-import-evidence-unavailable".to_owned(),
+        retryable: false,
+        detail: "the verified code graph does not publish type-only import evidence".to_owned(),
+    })
 }
 
 fn candidate_entry_paths(project_root: &Path, module: &str) -> Vec<String> {

@@ -17,6 +17,62 @@ use super::{
     edit, git, graph, grep, health, hook_runtime, info, redundancy, session, skills, workflow,
 };
 
+fn graph_read_unavailable(detail: &str) -> TraceDecayError {
+    TraceDecayError::ProjectRoute {
+        reason_code: "verified-code-graph-read-unavailable".to_owned(),
+        retryable: false,
+        detail: detail.to_owned(),
+    }
+}
+
+async fn admitted_graph_query(
+    cg: &TraceDecay,
+    options: &ToolCallRegistryOptions<'_>,
+    operation_name: &str,
+) -> Result<crate::tracedecay::queries::graph::VerifiedGraphQuery> {
+    let projection = options
+        .code_graph_projection_read_port
+        .as_deref()
+        .ok_or_else(|| {
+            graph_read_unavailable("the exact project graph projection is not mounted")
+        })?;
+    let admission = options
+        .code_graph_read_admission_port
+        .as_deref()
+        .ok_or_else(|| {
+            graph_read_unavailable("the exact project graph admission is not mounted")
+        })?;
+    let request_id = options
+        .application_request_id
+        .clone()
+        .ok_or_else(|| graph_read_unavailable("the caller request identity is unavailable"))?;
+    let deadline = options
+        .application_deadline
+        .clone()
+        .ok_or_else(|| graph_read_unavailable("the caller deadline is unavailable"))?;
+    let cancellation = options
+        .application_cancellation
+        .as_ref()
+        .ok_or_else(|| graph_read_unavailable("the caller cancellation signal is unavailable"))?;
+    let operation =
+        tracedecay_application::retrieval::catalog::primitive_read_operation(operation_name)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid graph read operation: {error}"),
+            })?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("unregistered graph read operation: {operation_name}"),
+            })?;
+    cg.open_verified_graph_query(
+        projection,
+        admission,
+        &operation,
+        request_id,
+        deadline,
+        cancellation,
+    )
+    .await
+}
+
 /// The hard ceiling every MCP tool call is bounded by, regardless of dispatch
 /// group, when admission carried no client deadline.
 ///
@@ -217,7 +273,10 @@ pub(super) async fn dispatch_info_tools(
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
         "tracedecay_port_status" => info::handle_port_status(cg, args).await,
         "tracedecay_port_order" => info::handle_port_order(cg, args).await,
-        "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
+        "tracedecay_simplify_scan" => {
+            let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
+            info::handle_simplify_scan(cg, &graph, args, scope_prefix).await
+        }
         "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
         "tracedecay_body" => {
             info::handle_body(
@@ -331,8 +390,14 @@ pub(super) async fn dispatch_analysis_tools(
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
-        "tracedecay_dead_code" => analysis::handle_dead_code(cg, args, scope_prefix).await,
-        "tracedecay_circular" => analysis::handle_circular(cg, args).await,
+        "tracedecay_dead_code" => {
+            let graph = admitted_graph_query(cg, &options, "health_read").await?;
+            analysis::handle_dead_code(cg, &graph, args, scope_prefix).await
+        }
+        "tracedecay_circular" => {
+            let graph = admitted_graph_query(cg, &options, "health_read").await?;
+            analysis::handle_circular(cg, &graph, args).await
+        }
         "tracedecay_hotspots" => analysis::handle_hotspots(cg, args, scope_prefix).await,
         "tracedecay_unused_imports" => {
             analysis::handle_unused_imports(cg, args, scope_prefix).await
@@ -384,7 +449,10 @@ pub(super) async fn dispatch_git_tools(
 
     let handler = async {
         match tool_name {
-            "tracedecay_affected" => git::handle_affected(cg, args).await,
+            "tracedecay_affected" => {
+                let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
+                git::handle_affected(cg, &graph, args).await
+            }
             "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
             "tracedecay_changelog" => git::handle_changelog(cg, args).await,
             "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
@@ -507,9 +575,13 @@ pub(super) async fn dispatch_health_tools(
         "tracedecay_test_map" => health::handle_test_map(cg, args, scope_prefix).await,
         "tracedecay_gini" => health::handle_gini(cg, args, scope_prefix).await,
         "tracedecay_dependency_depth" => {
-            health::handle_dependency_depth(cg, args, scope_prefix).await
+            let graph = admitted_graph_query(cg, &options, "health_read").await?;
+            health::handle_dependency_depth(cg, &graph, args, scope_prefix).await
         }
-        "tracedecay_health" => health::handle_health(cg, args, scope_prefix).await,
+        "tracedecay_health" => {
+            let graph = admitted_graph_query(cg, &options, "health_read").await?;
+            health::handle_health(cg, &graph, args, scope_prefix).await
+        }
         "tracedecay_redundancy" => redundancy::handle_redundancy(cg, args, scope_prefix).await,
         "tracedecay_runtime" => {
             health::handle_runtime(
@@ -521,7 +593,10 @@ pub(super) async fn dispatch_health_tools(
             )
             .await
         }
-        "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
+        "tracedecay_dsm" => {
+            let graph = admitted_graph_query(cg, &options, "health_read").await?;
+            health::handle_dsm(cg, &graph, args, scope_prefix).await
+        }
         "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
         _ => Err(unknown_tool_error(tool_name)),
     }
@@ -630,6 +705,8 @@ pub(super) async fn dispatch_session_workflow_tools(
                 args,
                 options.retained_project_graph_resolver.clone(),
                 options.dashboard_graph_interactive_resolver.clone(),
+                options.code_graph_read_admission_port.clone(),
+                options.code_graph_projection_read_port.clone(),
                 options.registered_project_session_db.clone(),
                 options.daemon_user_profile_id.clone(),
                 options.profile_root.map(std::path::Path::to_path_buf),

@@ -1,12 +1,77 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::context::ContextBuilder;
 use crate::errors::Result;
 use crate::graph::{GraphQueryManager, GraphTraverser};
 use crate::tracedecay::TraceDecay;
 use crate::types::*;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_graph_db::GraphCancellation;
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
+    CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
+};
+
+pub(crate) struct VerifiedGraphQuery {
+    reader: CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+}
+
+impl VerifiedGraphQuery {
+    pub(crate) fn from_reader(
+        reader: CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Self {
+        Self {
+            reader,
+            cancellation,
+        }
+    }
+
+    pub(crate) fn manager(&self) -> GraphQueryManager<'_> {
+        GraphQueryManager::new(&self.reader, Arc::clone(&self.cancellation))
+    }
+}
 
 impl TraceDecay {
+    pub(crate) async fn open_verified_graph_query(
+        &self,
+        projection: &dyn CodeGraphProjectionReadPort,
+        admission: &dyn CodeGraphReadAdmissionPort,
+        operation: &tracedecay_application::ApplicationOperation,
+        request_id: tracedecay_application::RequestId,
+        deadline: tracedecay_application::Deadline,
+        cancellation: &tracedecay_application::CancellationSignal,
+    ) -> Result<VerifiedGraphQuery> {
+        let observed_at = tracedecay_application::now_micros();
+        let context = admission
+            .admit(CodeGraphReadAdmissionRequest::new(
+                operation,
+                request_id,
+                deadline,
+                cancellation,
+                observed_at,
+            ))
+            .await
+            .map_err(map_code_graph_read_runtime_error)?;
+        let graph_cancellation = application_graph_cancellation(cancellation);
+        let verified = projection
+            .open(CodeGraphReadRequest::new(
+                &context,
+                observed_at,
+                Arc::clone(&graph_cancellation),
+            ))
+            .await
+            .map_err(map_code_graph_read_runtime_error)?;
+        let reader = verified
+            .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
+            .map_err(map_code_graph_read_runtime_error)?;
+        Ok(VerifiedGraphQuery::from_reader(reader, graph_cancellation))
+    }
+
     /// Returns aggregate statistics about the code graph.
     pub async fn get_stats(&self) -> Result<GraphStats> {
         self.db.get_stats().await
@@ -102,30 +167,18 @@ impl TraceDecay {
         traverser.get_call_graph(node_id, depth).await
     }
 
-    /// Finds potentially dead code (nodes with no incoming edges).
-    ///
-    /// When `include_public` is `false` (the default), `pub` items are
-    /// excluded — they may be referenced by code outside the indexed
-    /// scope. Pass `true` to also surface pub items with zero indexed
-    /// callers (useful for workspace-internal audits).
-    pub async fn find_dead_code(
-        &self,
-        kinds: &[NodeKind],
-        include_public: bool,
-    ) -> Result<Vec<Node>> {
-        let qm = GraphQueryManager::new(&self.db);
-        qm.find_dead_code(kinds, include_public, None).await
-    }
-
     /// Returns a bounded dead-code page for interactive tools.
-    pub async fn find_dead_code_bounded(
+    pub(crate) async fn find_dead_code_bounded(
         &self,
+        graph: &VerifiedGraphQuery,
         kinds: &[NodeKind],
         include_public: bool,
         limit: usize,
-    ) -> Result<Vec<Node>> {
-        let qm = GraphQueryManager::new(&self.db);
-        qm.find_dead_code(kinds, include_public, Some(limit)).await
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        graph
+            .manager()
+            .find_dead_code(kinds, include_public, Some(limit))
+            .await
     }
 
     /// Returns all nodes for a given file, ordered by start line.
@@ -374,9 +427,19 @@ impl TraceDecay {
     }
 
     /// Detects circular dependencies at the file level.
-    pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
-        let qm = GraphQueryManager::new(&self.db);
-        qm.find_circular_dependencies().await
+    pub(crate) async fn find_circular_dependencies(
+        &self,
+        graph: &VerifiedGraphQuery,
+    ) -> Result<Vec<Vec<String>>> {
+        graph.manager().find_circular_dependencies().await
+    }
+
+    pub(crate) async fn build_verified_file_adjacency(
+        &self,
+        graph: &VerifiedGraphQuery,
+        path_prefix: Option<&str>,
+    ) -> Result<HashMap<String, HashSet<String>>> {
+        graph.manager().build_file_adjacency(path_prefix).await
     }
 
     /// Builds an AI-ready context for a given task description.
@@ -400,9 +463,12 @@ impl TraceDecay {
     }
 
     /// Returns file paths that depend on the given file.
-    pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
-        let qm = GraphQueryManager::new(&self.db);
-        qm.get_file_dependents(file_path).await
+    pub(crate) async fn get_file_dependents(
+        &self,
+        graph: &VerifiedGraphQuery,
+        file_path: &str,
+    ) -> Result<Vec<String>> {
+        graph.manager().get_file_dependents(file_path).await
     }
 
     /// Returns a map of file path to approximate token count (size / 4).

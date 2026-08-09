@@ -2472,7 +2472,32 @@ pub(crate) enum DaemonInvocationProblem {
     UnsupportedRevision,
     NotFoundOrNotAuthorized,
     ResetRequired,
+    ApplicationContractViolation,
     Unavailable,
+}
+
+#[cfg(test)]
+mod invocation_problem_tests {
+    use super::{DaemonInvocationProblem, DaemonInvocationResponse};
+
+    #[test]
+    fn application_contract_violation_round_trips_without_diagnostics() {
+        let response = DaemonInvocationResponse::problem(
+            "request.application-contract",
+            DaemonInvocationProblem::ApplicationContractViolation,
+        );
+        let wire = serde_json::to_value(&response).expect("daemon invocation response wire");
+        assert_eq!(wire["status"], "problem");
+        assert_eq!(wire["problem"], "application_contract_violation");
+        assert!(wire.get("diagnostic").is_none());
+        assert!(wire.get("message").is_none());
+        assert_eq!(
+            serde_json::from_value::<DaemonInvocationResponse>(wire)
+                .expect("daemon invocation response")
+                .outcome,
+            response.outcome
+        );
+    }
 }
 
 /// Response envelope paired with one invocation request id.
