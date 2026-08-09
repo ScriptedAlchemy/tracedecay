@@ -129,6 +129,20 @@ pub(super) enum ProjectOpenTaskClaim {
     Saturated,
 }
 
+/// Result of waiting for the route's tracked full-capability project open.
+///
+/// Core publication is intentionally independent from this wait: ordinary
+/// project requests may use the core server while dependent owners finish,
+/// whereas LSP admission needs the exact route's owner set to be complete.
+#[derive(Debug)]
+pub(super) enum ProjectOpenWaitOutcome {
+    Completed,
+    NotTracked,
+    Failed(TraceDecayError),
+    Cancelled,
+    TimedOut,
+}
+
 fn project_route_matches_identity(
     route: &ProjectRouteKey,
     profile_root: &Path,
@@ -433,6 +447,65 @@ impl ProjectOpenTasks {
             ProjectOpenTaskState::Opening
             | ProjectOpenTaskState::Ready
             | ProjectOpenTaskState::Failed(_) => None,
+        }
+    }
+
+    /// Waits for the exact route's tracked project-open task to publish its
+    /// full owner set. This is deliberately a route-local operation: callers
+    /// must re-read the canonical route after it returns rather than carrying
+    /// a core publication's stale project identity into LSP admission.
+    pub(super) async fn wait_for_lsp_upgrade(
+        &self,
+        route: &ProjectRouteKey,
+        deadline: &tracedecay_application::Deadline,
+        request_cancellation: &CancellationToken,
+    ) -> ProjectOpenWaitOutcome {
+        let mut state = {
+            let registry = self.registry.lock().await;
+            let Some(entry) = registry.routes.get(route) else {
+                return ProjectOpenWaitOutcome::NotTracked;
+            };
+            entry.state.clone()
+        };
+
+        loop {
+            if request_cancellation.is_cancelled() {
+                return ProjectOpenWaitOutcome::Cancelled;
+            }
+            let now = tracedecay_application::clock::now_micros();
+            if deadline.is_elapsed_at(now) {
+                return ProjectOpenWaitOutcome::TimedOut;
+            }
+            match state.borrow().clone() {
+                ProjectOpenTaskState::Ready => return ProjectOpenWaitOutcome::Completed,
+                ProjectOpenTaskState::Failed(failure) => {
+                    return ProjectOpenWaitOutcome::Failed(failure.to_error());
+                }
+                ProjectOpenTaskState::Opening => {}
+            }
+
+            let remaining_micros = deadline.expires_at.0.saturating_sub(now.0);
+            let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
+                return ProjectOpenWaitOutcome::TimedOut;
+            };
+            let sleep = tokio::time::sleep(Duration::from_micros(remaining_micros));
+            tokio::pin!(sleep);
+            tokio::select! {
+                biased;
+                _ = request_cancellation.cancelled() => {
+                    return ProjectOpenWaitOutcome::Cancelled;
+                }
+                _ = &mut sleep => {
+                    return ProjectOpenWaitOutcome::TimedOut;
+                }
+                changed = state.changed() => {
+                    if changed.is_err() {
+                        return ProjectOpenWaitOutcome::Failed(TraceDecayError::Config {
+                            message: "project open task ended before reporting an outcome".to_owned(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -752,6 +825,157 @@ mod typed_failure_tests {
                 ref authority,
                 ref reason,
             } if authority == "workflow" && reason == "partial workflow schema"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod lsp_upgrade_tests {
+    use super::*;
+
+    fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
+        ProjectRouteKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_path: PathBuf::from(project_path),
+            scope_prefix: scope_prefix.map(str::to_owned),
+        }
+    }
+
+    fn open_deadline() -> tracedecay_application::Deadline {
+        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            tracedecay_application::clock::now_micros()
+                .0
+                .saturating_add(5_000_000),
+        ))
+        .expect("valid test deadline")
+    }
+
+    #[tokio::test]
+    async fn lsp_wait_stays_pending_after_core_publication_until_full_open_finishes() {
+        let tasks = ProjectOpenTasks::default();
+        let route = route("/workspace", None);
+        let full_open = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::clone(&full_open);
+        assert!(matches!(
+            tasks
+                .start(route.clone(), async move {
+                    release.notified().await;
+                    Ok(())
+                })
+                .await,
+            ProjectOpenTaskClaim::InFlight(_)
+        ));
+        let cancellation = CancellationToken::new();
+        let deadline = open_deadline();
+        let wait = tasks.wait_for_lsp_upgrade(&route, &deadline, &cancellation);
+        tokio::pin!(wait);
+        tokio::select! {
+            _outcome = &mut wait => panic!("full-open wait completed before the tracked task"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+        full_open.notify_one();
+        assert!(matches!(wait.await, ProjectOpenWaitOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn lsp_wait_observes_cancellation_and_deadline_before_full_open() {
+        let tasks = ProjectOpenTasks::default();
+        let route = route("/workspace", None);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let open_release = Arc::clone(&release);
+        assert!(matches!(
+            tasks
+                .start(route.clone(), async move {
+                    open_release.notified().await;
+                    Ok(())
+                })
+                .await,
+            ProjectOpenTaskClaim::InFlight(_)
+        ));
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancellation_deadline = open_deadline();
+        assert!(matches!(
+            tasks
+                .wait_for_lsp_upgrade(&route, &cancellation_deadline, &cancellation)
+                .await,
+            ProjectOpenWaitOutcome::Cancelled
+        ));
+
+        let expired =
+            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+                .expect("valid expired test deadline");
+        assert!(matches!(
+            tasks
+                .wait_for_lsp_upgrade(&route, &expired, &CancellationToken::new())
+                .await,
+            ProjectOpenWaitOutcome::TimedOut
+        ));
+        release.notify_one();
+    }
+
+    #[tokio::test]
+    async fn lsp_wait_requires_exact_route_identity_for_linked_worktrees() {
+        let tasks = ProjectOpenTasks::default();
+        let base_route = route("/workspace", None);
+        let linked_route = route("/workspace", Some("packages/api"));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let open_release = Arc::clone(&release);
+        assert!(matches!(
+            tasks
+                .start(base_route.clone(), async move {
+                    open_release.notified().await;
+                    Ok(())
+                })
+                .await,
+            ProjectOpenTaskClaim::InFlight(_)
+        ));
+
+        let linked_deadline = open_deadline();
+        assert!(matches!(
+            tasks
+                .wait_for_lsp_upgrade(&linked_route, &linked_deadline, &CancellationToken::new(),)
+                .await,
+            ProjectOpenWaitOutcome::NotTracked
+        ));
+        release.notify_one();
+        let completion_deadline = open_deadline();
+        assert!(matches!(
+            tasks
+                .wait_for_lsp_upgrade(&base_route, &completion_deadline, &CancellationToken::new(),)
+                .await,
+            ProjectOpenWaitOutcome::Completed
+        ));
+    }
+
+    #[tokio::test]
+    async fn lsp_wait_preserves_a_typed_full_open_failure() {
+        let tasks = ProjectOpenTasks::default();
+        let route = route("/workspace", None);
+        assert!(matches!(
+            tasks
+                .start(route.clone(), async {
+                    Err(TraceDecayError::ResetRequired {
+                        authority: "lsp".to_owned(),
+                        reason: "owner registration was rejected".to_owned(),
+                    })
+                })
+                .await,
+            ProjectOpenTaskClaim::InFlight(_)
+        ));
+
+        let failure_deadline = open_deadline();
+        let outcome = tasks
+            .wait_for_lsp_upgrade(&route, &failure_deadline, &CancellationToken::new())
+            .await;
+        assert!(matches!(
+            outcome,
+            ProjectOpenWaitOutcome::Failed(TraceDecayError::ResetRequired {
+                authority,
+                reason,
+            }) if authority == "lsp" && reason == "owner registration was rejected"
         ));
     }
 }
