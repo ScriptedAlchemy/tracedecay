@@ -1,4 +1,4 @@
-#![allow(clippy::duplicate_mod, clippy::type_complexity)] // shared corpus module + complex fixture type
+#![allow(clippy::duplicate_mod, clippy::type_complexity)]
 //! Anchor-retargeting acceptance coverage for the fact provenance contract:
 //! moving refs, rewriting a branch, or removing a checkout must never retarget
 //! retained commit/tree/blob or captured-state anchors, and unavailable git
@@ -20,8 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::application::memory::EvidenceAnchorResolver;
+use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::research::{
     AttributionGap, GitTruthManifest, LogSafeText, ResearchAnchorSubjectV1,
     ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
@@ -32,21 +31,21 @@ use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, BlobId,
     CanonicalObservationIdV1, CapabilityId, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, CommitId,
-    ComponentVersion, CoverageReportV1, DomainError, DurableClaudeObservationV1,
-    EvidenceAvailabilityV1, EvidenceClass, FactOwnerV1, GenerationBoundRepositoryProvenanceV1,
-    ObservationScopeV1, PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectId, ProjectionGenerationId, RefId, RepositoryCaptureId,
-    RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId,
-    TreeId, UtcMicros, VectorWatermark, WorktreeId,
+    ComponentVersion, CoverageReportV1, DurableClaudeObservationV1, EvidenceAvailabilityV1,
+    EvidenceClass, FactOwnerV1, GenerationBoundRepositoryProvenanceV1, ObservationScopeV1,
+    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectId, ProjectionGenerationId, RefId, RepositoryCaptureId, RepositoryEvidenceV1,
+    RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, ResolutionAuthorizationV1,
+    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptV1, SanitizerDispositionV1,
+    ScopeResolutionId, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationStore, ObservationWrite,
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
+use tracedecay_usecases::memory::EvidenceAnchorResolver;
 
 use crate::common::git_program;
 
@@ -57,13 +56,7 @@ mod support;
 use support::valid_fixture;
 
 const FIXTURE: &str = "tests/fixtures/v2/research-anchor-manifest.json";
-const CAPTURED_AT_MICROS: i64 = 1_762_000_000_000_000;
-const AUTHORIZATION_DIGEST: &str =
-    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-// Fixture scaffolding mirrored from `research_anchors.rs`: the shared
-// `support` module decodes the frozen manifest through these exact types via
-// `use super::*`, so the two modules must keep the same names in scope.
 #[derive(Debug)]
 struct ResearchAnchorFixtureV1 {
     envelope: ResearchBundleEnvelopeV1,
@@ -138,6 +131,10 @@ unsafe impl SanitizationReceiptResolverV1 for CaptureReceiptResolver {
         }
     }
 }
+
+const CAPTURED_AT_MICROS: i64 = 1_762_000_000_000_000;
+const AUTHORIZATION_DIGEST: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// Real on-disk git checkout used to move, rewrite, and delete refs between
 /// capture and resolution. The caller owns the enclosing `TempDir`.
@@ -613,7 +610,7 @@ fn exact_commit_tree_and_blob_anchor_ids_track_objects_not_refs() {
         canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(AUTHORIZATION_DIGEST)
             .unwrap(),
     };
-    let exact_anchor = |target: RetrievalAnchorTargetV2| {
+    let exact_anchor = |target: RetrievalAnchorTargetV2, payload_access| {
         RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
             target,
             owner: ObservationScopeV1::Project {
@@ -631,7 +628,7 @@ fn exact_commit_tree_and_blob_anchor_ids_track_objects_not_refs() {
             source_observations: vec![],
             source_anchors: vec![],
             authorization: authorization.clone(),
-            payload_access: PayloadAccessState::Eligible,
+            payload_access,
             retention_class: RetentionClass::new("retention.anchor-retargeting").unwrap(),
             durability: AnchorDurabilityClass::DurableEvidence,
         })
@@ -641,15 +638,21 @@ fn exact_commit_tree_and_blob_anchor_ids_track_objects_not_refs() {
         repository_id: repository_id.clone(),
         commit_id: CommitId::new(commit).unwrap(),
     };
-    let commit_anchor = exact_anchor(commit_target(&commit_a));
-    let tree_anchor = exact_anchor(RetrievalAnchorTargetV2::ExactRepositoryTree {
-        repository_id: repository_id.clone(),
-        tree_id: TreeId::new(&tree_a).unwrap(),
-    });
-    let blob_anchor = exact_anchor(RetrievalAnchorTargetV2::ExactRepositoryBlob {
-        repository_id: repository_id.clone(),
-        blob_id: BlobId::new(&blob_a).unwrap(),
-    });
+    let commit_anchor = exact_anchor(commit_target(&commit_a), PayloadAccessState::Eligible);
+    let tree_anchor = exact_anchor(
+        RetrievalAnchorTargetV2::ExactRepositoryTree {
+            repository_id: repository_id.clone(),
+            tree_id: TreeId::new(&tree_a).unwrap(),
+        },
+        PayloadAccessState::Eligible,
+    );
+    let blob_anchor = exact_anchor(
+        RetrievalAnchorTargetV2::ExactRepositoryBlob {
+            repository_id: repository_id.clone(),
+            blob_id: BlobId::new(&blob_a).unwrap(),
+        },
+        PayloadAccessState::Eligible,
+    );
     let anchor_ids = (
         commit_anchor.anchor_id().clone(),
         tree_anchor.anchor_id().clone(),
@@ -660,7 +663,7 @@ fn exact_commit_tree_and_blob_anchor_ids_track_objects_not_refs() {
     // the owner and the exact retained object, so it cannot be rekeyed.
     let commit_b = checkout.commit("moved object target");
     assert_ne!(commit_a, commit_b);
-    let rebuilt = exact_anchor(commit_target(&commit_a));
+    let rebuilt = exact_anchor(commit_target(&commit_a), PayloadAccessState::Eligible);
     assert_eq!(rebuilt.anchor_id(), &anchor_ids.0);
     assert!(matches!(
         rebuilt.target(),
@@ -669,10 +672,19 @@ fn exact_commit_tree_and_blob_anchor_ids_track_objects_not_refs() {
     ));
 
     // An anchor derived from the moved ref names a different object entirely.
-    let retargeted = exact_anchor(commit_target(&commit_b));
+    let retargeted = exact_anchor(commit_target(&commit_b), PayloadAccessState::Eligible);
     assert_ne!(retargeted.anchor_id(), &anchor_ids.0);
     assert_ne!(retargeted.anchor_id(), &anchor_ids.1);
     assert_ne!(retargeted.anchor_id(), &anchor_ids.2);
+
+    // Redaction and deletion update payload availability without changing the
+    // owner-bound identity of the retained object.
+    let redacted = exact_anchor(commit_target(&commit_a), PayloadAccessState::Redacted);
+    let deleted = exact_anchor(commit_target(&commit_a), PayloadAccessState::Deleted);
+    assert_eq!(redacted.anchor_id(), &anchor_ids.0);
+    assert_eq!(deleted.anchor_id(), &anchor_ids.0);
+    assert_eq!(redacted.payload_access(), PayloadAccessState::Redacted);
+    assert_eq!(deleted.payload_access(), PayloadAccessState::Deleted);
 }
 
 #[test]

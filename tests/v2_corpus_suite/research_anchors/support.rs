@@ -1,6 +1,18 @@
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
+use tracedecay_domain::{
+    AccessPolicyDigest, AnchorResolutionStateV2, AnchorSourceGenerationV2,
+    AuthorizedAnchorResolutionV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
+    CanonicalObservationRelationsV1, CapabilityId, CoverageReportV1, EvidenceClass, ManifestDigest,
+    ObservationId, ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceRangeV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
+    ProjectionGenerationId, ProviderId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecord, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    ScopeResolutionId, SessionId, UtcMicros, VectorWatermark,
+};
 
 use super::*;
 
@@ -211,4 +223,81 @@ pub(super) fn assert_duplicate_field_rejected(json: &str, field: &str) {
         message.contains(&format!("duplicate field `{field}`")),
         "expected duplicate `{field}` to be rejected, got: {message}"
     );
+}
+
+const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+pub(super) fn canonical_envelope() -> CanonicalObservationEnvelopeV1 {
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("provider.corpus").unwrap(),
+        "message",
+        ObservationId::new("record.corpus").unwrap(),
+        CanonicalObservationRelationsV1::new(SessionId::new("session.corpus").unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "synthetic corpus evidence"}),
+            model: Some("model.corpus".into()),
+            timestamp: Some(1_762_000_000),
+        }],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SnapshotOrder,
+            ObservationSourceRangeV1::new(4, 5).unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
+pub(super) fn canonical_anchor() -> RetrievalAnchorRecord {
+    let observation_id = CanonicalObservationIdV1::new(DIGEST_A).unwrap();
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
+        owner: ObservationScopeV1::Project {
+            project_id: ProjectId::new("project.corpus").unwrap(),
+        },
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(1_762_000_000_000_000),
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV2::Observation(
+            ObservationSourceGenerationV1::new(7).unwrap(),
+        ),
+        projection_generation: ProjectionGenerationId::new("projection.corpus").unwrap(),
+        projection_watermark: VectorWatermark {
+            components: BTreeMap::from([(ShardId::new("shard.corpus").unwrap(), 7)]),
+        },
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![observation_id],
+        source_anchors: vec![],
+        authorization: ResolutionAuthorizationV1 {
+            resolved_scope_id: ScopeResolutionId::new("scope.corpus").unwrap(),
+            privacy_domain_id: PrivacyDomainId::new("privacy.corpus").unwrap(),
+            access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
+            capability_id: CapabilityId::new("capability.corpus").unwrap(),
+            canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+        },
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.corpus").unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap()
+}
+
+pub(super) fn authorized_resolution(
+    anchor: &RetrievalAnchorRecord,
+    payload_access: PayloadAccessState,
+    observed: VectorWatermark,
+) -> AuthorizedAnchorResolutionV2 {
+    let watermark =
+        FrozenWatermarkResolutionV1::new(anchor.projection_watermark().clone(), observed);
+    AuthorizedAnchorResolutionV2::new(
+        anchor.anchor_id().clone(),
+        anchor.authorization().clone(),
+        watermark.clone(),
+        anchor.coverage().clone(),
+        AnchorResolutionStateV2::classify(payload_access, watermark.drift),
+        payload_access,
+        ManifestDigest::new(DIGEST_B).unwrap(),
+    )
+    .unwrap()
 }

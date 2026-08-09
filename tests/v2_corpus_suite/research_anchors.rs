@@ -12,6 +12,10 @@ use tracedecay_domain::research::{
     RetrievalRecipeV1, SanitizationReceiptRefV1, SanitizationReceiptResolverV1, SanitizedTextRefV1,
     ShardDispositionV1, ShardId, WatermarkDriftV1,
 };
+use tracedecay_domain::{
+    AnchorResolutionStateV2, AuthorizedAnchorResolutionV2, CanonicalObservationEnvelopeV1,
+    RetrievalAnchorRecord,
+};
 
 #[allow(clippy::duplicate_mod)]
 #[path = "research_anchors/support.rs"]
@@ -910,4 +914,183 @@ fn private_chronological_exports_and_judgments_require_external_owner_only_stora
         );
         assert_unknown_field_rejected(&mutated, forbidden);
     }
+}
+
+#[test]
+fn canonical_observation_envelope_round_trips_and_validates() {
+    let envelope = canonical_envelope();
+    let encoded = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(
+        serde_json::from_value::<CanonicalObservationEnvelopeV1>(encoded).unwrap(),
+        envelope
+    );
+    envelope.validate().unwrap();
+}
+
+#[test]
+fn canonical_observation_envelope_rejects_unknown_and_duplicate_wire_fields() {
+    let mut unknown = serde_json::to_value(canonical_envelope()).unwrap();
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("raw_payload".into(), Value::String("private text".into()));
+    assert_decode_rejected::<CanonicalObservationEnvelopeV1>(
+        unknown,
+        "unknown field `raw_payload`",
+    );
+
+    let encoded = serde_json::to_string(&canonical_envelope()).unwrap();
+    let duplicate = encoded.replacen("\"version\":1", "\"version\":1,\"version\":1", 1);
+    assert!(
+        serde_json::from_str::<CanonicalObservationEnvelopeV1>(&duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate field `version`")
+    );
+}
+
+#[test]
+fn canonical_retrieval_anchor_round_trips_with_derived_identity() {
+    let anchor = canonical_anchor();
+    let encoded = serde_json::to_value(&anchor).unwrap();
+
+    assert!(anchor.anchor_id().as_str().starts_with("retrieval.v2."));
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorRecord>(encoded).unwrap(),
+        anchor
+    );
+    anchor.validate().unwrap();
+}
+
+#[test]
+fn canonical_retrieval_anchor_rejects_payload_unknown_fields_and_claimed_ids() {
+    let anchor = canonical_anchor();
+
+    let mut root_unknown = serde_json::to_value(&anchor).unwrap();
+    root_unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("payload".into(), Value::String("private text".into()));
+    assert_decode_rejected::<RetrievalAnchorRecord>(root_unknown, "unknown field `payload`");
+
+    let mut target_unknown = serde_json::to_value(&anchor).unwrap();
+    target_unknown["target"]
+        .as_object_mut()
+        .unwrap()
+        .insert("source_text".into(), Value::String("private text".into()));
+    assert_decode_rejected::<RetrievalAnchorRecord>(target_unknown, "unknown field `source_text`");
+
+    let mut forged_id = serde_json::to_value(&anchor).unwrap();
+    forged_id["anchor_id"] = Value::String("retrieval.v2.forged".into());
+    assert_decode_rejected::<RetrievalAnchorRecord>(forged_id, "manifest digest does not match");
+
+    let encoded = serde_json::to_string(&anchor).unwrap();
+    let field = format!("\"anchor_id\":\"{}\"", anchor.anchor_id().as_str());
+    let duplicate = encoded.replacen(&field, &format!("{field},{field}"), 1);
+    assert!(
+        serde_json::from_str::<RetrievalAnchorRecord>(&duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate field `anchor_id`")
+    );
+}
+
+#[test]
+fn authorized_resolution_preserves_freshness_and_access_as_typed_state() {
+    let anchor = canonical_anchor();
+    let current = authorized_resolution(
+        &anchor,
+        PayloadAccessState::Eligible,
+        anchor.projection_watermark().clone(),
+    );
+    assert_eq!(current.state(), AnchorResolutionStateV2::Current);
+    assert_eq!(current.watermark().drift, WatermarkDriftV1::Exact);
+
+    let mut ahead = anchor.projection_watermark().clone();
+    ahead
+        .components
+        .insert(ShardId::new("shard.corpus.ahead").unwrap(), 8);
+    let drifted = authorized_resolution(&anchor, PayloadAccessState::Eligible, ahead);
+    assert_eq!(
+        drifted.state(),
+        AnchorResolutionStateV2::Drifted {
+            drift: WatermarkDriftV1::ObservedAhead,
+        }
+    );
+
+    for (access, expected) in [
+        (
+            PayloadAccessState::Redacted,
+            AnchorResolutionStateV2::Redacted,
+        ),
+        (
+            PayloadAccessState::RetentionExpired,
+            AnchorResolutionStateV2::Expired,
+        ),
+        (
+            PayloadAccessState::Deleted,
+            AnchorResolutionStateV2::Deleted,
+        ),
+        (
+            PayloadAccessState::Unavailable,
+            AnchorResolutionStateV2::Unavailable,
+        ),
+        (
+            PayloadAccessState::Ambiguous,
+            AnchorResolutionStateV2::Ambiguous,
+        ),
+    ] {
+        let resolution =
+            authorized_resolution(&anchor, access, anchor.projection_watermark().clone());
+        assert_eq!(resolution.state(), expected);
+        resolution.validate().unwrap();
+    }
+}
+
+#[test]
+fn authorized_resolution_rejects_unknown_fields_and_incoherent_states() {
+    let anchor = canonical_anchor();
+    let resolution = authorized_resolution(
+        &anchor,
+        PayloadAccessState::Redacted,
+        anchor.projection_watermark().clone(),
+    );
+
+    let mut unknown = serde_json::to_value(&resolution).unwrap();
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert("payload".into(), Value::String("private text".into()));
+    assert_decode_rejected::<AuthorizedAnchorResolutionV2>(unknown, "unknown field `payload`");
+
+    let mut incoherent = serde_json::to_value(&resolution).unwrap();
+    incoherent["state"] = serde_json::json!({"kind": "current"});
+    assert_decode_rejected::<AuthorizedAnchorResolutionV2>(incoherent, "anchor resolution state");
+
+    let frozen = anchor.projection_watermark().clone();
+    let mut observed = frozen.clone();
+    *observed.components.values_mut().next().unwrap() += 1;
+    assert_eq!(
+        observed.partial_cmp_components(&frozen),
+        Some(Ordering::Greater)
+    );
+    let mut invalid_drift =
+        serde_json::to_value(FrozenWatermarkResolutionV1::new(frozen, observed)).unwrap();
+    invalid_drift["drift"] = Value::String("exact".into());
+    assert_decode_rejected::<FrozenWatermarkResolutionV1>(invalid_drift, "frozen resolution drift");
+}
+
+fn assert_decode_rejected<T>(value: Value, expected: &str)
+where
+    T: serde::de::DeserializeOwned,
+{
+    let error = match serde_json::from_value::<T>(value) {
+        Ok(_) => panic!("wire value unexpectedly decoded"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains(expected),
+        "expected `{expected}` to be rejected, got: {error}"
+    );
 }
