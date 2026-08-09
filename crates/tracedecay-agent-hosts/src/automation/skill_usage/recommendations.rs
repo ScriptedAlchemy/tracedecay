@@ -16,7 +16,7 @@ pub fn stale_skill_recommendations(
 pub fn skill_improvement_recommendations(
     summaries: &[SkillUsageSummary],
 ) -> Vec<SkillImprovementRecommendation> {
-    let now_unix = crate::tracedecay::current_timestamp();
+    let now_unix = tracedecay_runtime_core::tracedecay::current_timestamp();
     summaries
         .iter()
         .map(|summary| skill_improvement_recommendation(summary, now_unix))
@@ -36,7 +36,7 @@ fn stale_skill_recommendation(
             evidence,
         );
     }
-    if summary.provenance_source == Some(ManagedSkillSource::UserDraft) {
+    if summary.provenance_source == Some(ManagedSkillSource::User) {
         return keep_recommendation(
             summary,
             "user-authored skills require explicit user action before archive",
@@ -120,7 +120,7 @@ fn skill_improvement_recommendation(
             evidence,
         );
     }
-    if summary.provenance_source == Some(ManagedSkillSource::UserDraft) {
+    if summary.provenance_source == Some(ManagedSkillSource::User) {
         return no_improvement_recommendation(
             summary,
             "user-authored skills require explicit user direction before patch recommendations",
@@ -248,7 +248,6 @@ fn usage_evidence(summary: &SkillUsageSummary) -> Vec<String> {
 
 fn optional_state_key(state: Option<ManagedSkillState>) -> &'static str {
     match state {
-        Some(ManagedSkillState::PendingApproval) => "pending_approval",
         Some(ManagedSkillState::Active) => "active",
         Some(ManagedSkillState::Disabled) => "disabled",
         Some(ManagedSkillState::Archived) => "archived",
@@ -259,7 +258,7 @@ fn optional_state_key(state: Option<ManagedSkillState>) -> &'static str {
 fn source_key(source: ManagedSkillSource) -> &'static str {
     match source {
         ManagedSkillSource::AutomationRun => "automation_run",
-        ManagedSkillSource::UserDraft => "user_draft",
+        ManagedSkillSource::User => "user",
         ManagedSkillSource::Import => "import",
     }
 }

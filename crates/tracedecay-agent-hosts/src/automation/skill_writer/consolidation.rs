@@ -430,7 +430,7 @@ mod tests {
                 metadata: pending_metadata,
                 body_markdown: "staged body".to_string(),
                 support_files: Vec::new(),
-                resulting_state: None,
+                resulting_state: ManagedSkillState::Active,
                 staged_reason: None,
             });
         }

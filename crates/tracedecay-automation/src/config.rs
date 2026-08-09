@@ -1,4 +1,11 @@
 use serde::{Deserialize, Deserializer, Serialize};
+pub use tracedecay_domain::configuration::{
+    AutomationBackendV1 as AutomationBackend, AutomationHostModeV1 as AutomationHostMode,
+    AutomationMemoryApplyPolicyV1 as AutomationMemoryApplyPolicy,
+    AutomationSettingsV1 as AutomationConfig,
+    AutomationSkillActivationPolicyV1 as AutomationSkillActivationPolicy,
+    AutomationTaskSetV1 as AutomationTaskSet, AutomationTaskSettingsV1 as AutomationTaskConfig,
+};
 
 use crate::{AutomationError, Result, config_error};
 
@@ -33,125 +40,6 @@ impl Default for RetentionConfig {
             session_messages_days: default_legacy_session_days(),
             lcm_raw_messages_days: default_legacy_session_days(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationBackend {
-    #[default]
-    Disabled,
-    CodexAppServer,
-    ExternalCommand,
-}
-
-impl AutomationBackend {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::CodexAppServer => "codex_app_server",
-            Self::ExternalCommand => "external_command",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AutomationHostMode {
-    #[default]
-    Standalone,
-    #[serde(alias = "hermes_hosted")]
-    DelegatedHost,
-}
-
-impl AutomationHostMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standalone => "standalone",
-            Self::DelegatedHost => "delegated_host",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct AutomationTaskConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub schedule: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cooldown_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_idle_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_lock_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct AutomationTaskSet {
-    #[serde(default)]
-    pub memory_curator: AutomationTaskConfig,
-    #[serde(default)]
-    pub session_reflector: AutomationTaskConfig,
-    #[serde(default)]
-    pub skill_writer: AutomationTaskConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AutomationConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub backend: AutomationBackend,
-    #[serde(default)]
-    pub host_mode: AutomationHostMode,
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
-    #[serde(default = "default_scheduler_tick_secs")]
-    pub scheduler_tick_secs: u64,
-    /// Applies validated accepted memory-curation operations when true.
-    /// Legacy configurations that set this false retain proposal-only
-    /// behavior; the default remains autonomous apply.
-    #[serde(default = "default_true")]
-    pub auto_apply_memory_ops: bool,
-    #[serde(default)]
-    pub auto_enable_skills: bool,
-    #[serde(default = "default_true")]
-    pub export_memory_digest: bool,
-    #[serde(default = "default_true")]
-    pub combine_due_tasks: bool,
-    #[serde(default)]
-    pub allow_job_commands: bool,
-    #[serde(default)]
-    pub retention: RetentionConfig,
-    #[serde(default)]
-    pub tasks: AutomationTaskSet,
-}
-
-impl Default for AutomationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            backend: AutomationBackend::Disabled,
-            host_mode: AutomationHostMode::Standalone,
-            timeout_secs: default_timeout_secs(),
-            scheduler_tick_secs: default_scheduler_tick_secs(),
-            auto_apply_memory_ops: true,
-            auto_enable_skills: false,
-            export_memory_digest: true,
-            combine_due_tasks: true,
-            allow_job_commands: false,
-            retention: RetentionConfig::default(),
-            tasks: AutomationTaskSet::default(),
-        }
-    }
-}
-
-impl AutomationConfig {
-    pub fn is_default(&self) -> bool {
-        self == &Self::default()
     }
 }
 
@@ -204,33 +92,17 @@ pub struct AutomationConfigPatch {
     #[serde(
         default,
         deserialize_with = "deserialize_clearable_field",
-        skip_serializing
+        skip_serializing_if = "Option::is_none"
     )]
-    pub model: Option<Option<String>>,
+    pub model_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_tick_secs: Option<u64>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_clearable_field",
-        skip_serializing
-    )]
-    pub max_tokens: Option<Option<u32>>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_clearable_field",
-        skip_serializing
-    )]
-    pub temperature: Option<Option<f32>>,
-    #[serde(default, skip_serializing)]
-    pub require_dashboard_approval: Option<bool>,
-    /// Legacy-compatible memory apply gate. `true` applies validated accepted
-    /// operations autonomously; `false` retains them as proposals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_apply_memory_ops: Option<bool>,
+    pub memory_apply_policy: Option<AutomationMemoryApplyPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_enable_skills: Option<bool>,
+    pub skill_activation_policy: Option<AutomationSkillActivationPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_memory_digest: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,18 +115,6 @@ pub struct AutomationConfigPatch {
     pub session_reflector: AutomationTaskPatch,
     #[serde(default)]
     pub skill_writer: AutomationTaskPatch,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_timeout_secs() -> u64 {
-    60
-}
-
-fn default_scheduler_tick_secs() -> u64 {
-    DEFAULT_SCHEDULER_TICK_SECS
 }
 
 #[allow(clippy::option_option)]
@@ -281,21 +141,25 @@ pub fn effective_config(
 }
 
 pub fn default_user_automation_config() -> AutomationConfig {
-    let task = || AutomationTaskConfig {
+    let task = |interval_secs| AutomationTaskConfig {
         enabled: true,
-        schedule: Some("manual".to_string()),
+        schedule: Some("interval".to_string()),
+        interval_secs: Some(interval_secs),
+        cooldown_secs: Some(300),
+        min_idle_secs: Some(30),
+        stale_lock_secs: Some(3_600),
         ..AutomationTaskConfig::default()
     };
     AutomationConfig {
+        schema_version: AutomationConfig::SCHEMA_VERSION,
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
-        auto_enable_skills: true,
+        model_id: Some("gpt-5.6-mini".to_owned()),
         tasks: AutomationTaskSet {
-            memory_curator: task(),
-            session_reflector: task(),
-            skill_writer: task(),
+            memory_curator: task(3_600),
+            session_reflector: task(900),
+            skill_writer: task(900),
         },
         ..AutomationConfig::default()
     }
@@ -311,6 +175,9 @@ pub fn merge_project_config(
 }
 
 pub fn validate_config(config: &AutomationConfig) -> Result<()> {
+    config
+        .validate()
+        .map_err(|error| config_error(format!("invalid automation settings: {error}")))?;
     if config.timeout_secs == 0 {
         return Err(config_error(
             "automation timeout_secs must be greater than zero",
@@ -337,17 +204,20 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
     if let Some(host_mode) = patch.host_mode {
         config.host_mode = host_mode;
     }
+    if let Some(model_id) = &patch.model_id {
+        config.model_id.clone_from(model_id);
+    }
     if let Some(timeout_secs) = patch.timeout_secs {
         config.timeout_secs = timeout_secs;
     }
     if let Some(scheduler_tick_secs) = patch.scheduler_tick_secs {
         config.scheduler_tick_secs = scheduler_tick_secs;
     }
-    if let Some(auto_apply_memory_ops) = patch.auto_apply_memory_ops {
-        config.auto_apply_memory_ops = auto_apply_memory_ops;
+    if let Some(memory_apply_policy) = patch.memory_apply_policy {
+        config.memory_apply_policy = memory_apply_policy;
     }
-    if let Some(auto_enable_skills) = patch.auto_enable_skills {
-        config.auto_enable_skills = auto_enable_skills;
+    if let Some(skill_activation_policy) = patch.skill_activation_policy {
+        config.skill_activation_policy = skill_activation_policy;
     }
     if let Some(export_memory_digest) = patch.export_memory_digest {
         config.export_memory_digest = export_memory_digest;
@@ -391,13 +261,14 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     merge_optional_field(&mut config.enabled, patch.enabled);
     merge_optional_field(&mut config.backend, patch.backend);
     merge_optional_field(&mut config.host_mode, patch.host_mode);
+    merge_optional_field(&mut config.model_id, patch.model_id);
     merge_optional_field(&mut config.timeout_secs, patch.timeout_secs);
     merge_optional_field(&mut config.scheduler_tick_secs, patch.scheduler_tick_secs);
+    merge_optional_field(&mut config.memory_apply_policy, patch.memory_apply_policy);
     merge_optional_field(
-        &mut config.auto_apply_memory_ops,
-        patch.auto_apply_memory_ops,
+        &mut config.skill_activation_policy,
+        patch.skill_activation_policy,
     );
-    merge_optional_field(&mut config.auto_enable_skills, patch.auto_enable_skills);
     merge_optional_field(&mut config.export_memory_digest, patch.export_memory_digest);
     merge_optional_field(&mut config.combine_due_tasks, patch.combine_due_tasks);
     merge_optional_field(&mut config.allow_job_commands, patch.allow_job_commands);
@@ -717,8 +588,6 @@ mod tests {
         assert_eq!(config.host_mode, AutomationHostMode::Standalone);
         assert_eq!(config.timeout_secs, 60);
         assert_eq!(config.scheduler_tick_secs, 60);
-        assert!(config.auto_apply_memory_ops);
-        assert!(!config.auto_enable_skills);
         assert!(!config.tasks.memory_curator.enabled);
         assert!(!config.tasks.session_reflector.enabled);
         assert!(!config.tasks.skill_writer.enabled);
@@ -748,7 +617,7 @@ mod tests {
         let merged = merge_project_config(Some(current), patch);
 
         assert_eq!(merged.enabled, Some(true));
-        assert_eq!(merged.model, None);
+        assert_eq!(merged.model_id, None);
         assert_eq!(merged.timeout_secs, Some(120));
         assert_eq!(merged.scheduler_tick_secs, Some(20));
         assert_eq!(merged.memory_curator.enabled, Some(true));
@@ -797,25 +666,15 @@ mod tests {
     #[test]
     fn clearable_patch_fields_preserve_explicit_null() {
         let patch: AutomationConfigPatch = serde_json::from_value(serde_json::json!({
-            "model": null,
+            "model_id": null,
             "memory_curator": {
                 "schedule": null
             }
         }))
         .unwrap();
 
-        assert_eq!(patch.model, Some(None));
+        assert_eq!(patch.model_id, Some(None));
         assert_eq!(patch.memory_curator.schedule, Some(None));
-    }
-
-    #[test]
-    fn delegated_host_accepts_legacy_alias() {
-        let config: AutomationConfig = serde_json::from_value(serde_json::json!({
-            "host_mode": "hermes_hosted"
-        }))
-        .unwrap();
-
-        assert_eq!(config.host_mode, AutomationHostMode::DelegatedHost);
     }
 
     #[test]

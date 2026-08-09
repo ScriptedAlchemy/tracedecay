@@ -1,6 +1,6 @@
-//! Surfacing of staged automation output (R5, Hermes parity).
+//! Surfacing of automation output requiring operator attention.
 //!
-//! Automation runs may stage fact proposals and skill drafts for review.
+//! Automation runs may quarantine failures or retain session fact proposals.
 
 use std::path::{Path, PathBuf};
 
@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use tracedecay_store::ProjectMemoryFactStore;
 
 use super::config_error;
-use super::managed_skills::{ManagedSkillState, list_managed_skills};
+use super::managed_skills::list_managed_skills;
 use super::run_ledger::load_run_records;
-use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
+use tracedecay_usecases::memory::MemoryApplication;
 
 const NOTICE_STATE_FILENAME: &str = "automation_notice_seen.json";
 
@@ -164,21 +164,11 @@ pub async fn count_pending_fact_proposals<A: ProjectMemoryFactStore>(
     }
 }
 
-/// Managed skills awaiting review in the user profile store.
-///
-/// A profile with no managed-skill store yet is a genuine zero (nothing has
-/// ever been staged); only a real read failure is reported as unreadable.
+/// Managed-skill approval queues no longer exist. Store read failures remain
+/// typed so stale hosts do not fabricate a healthy review count.
 pub async fn count_pending_managed_skills(profile_root: &Path) -> PendingReviewCount {
     match list_managed_skills(profile_root).await {
-        Ok(skills) => PendingReviewCount::Counted(
-            skills
-                .iter()
-                .filter(|skill| {
-                    skill.metadata.state == ManagedSkillState::PendingApproval
-                        || skill.pending_update.is_some()
-                })
-                .count(),
-        ),
+        Ok(_) => PendingReviewCount::Counted(0),
         Err(error) => PendingReviewCount::unreadable(format!(
             "the managed skill store could not be read: {error}"
         )),

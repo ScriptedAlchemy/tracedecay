@@ -6,9 +6,8 @@ pub(super) async fn handle_automation_skills_command(
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::managed_skills::{
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate,
-        approve_managed_skill, archive_managed_skill, create_managed_skill_draft,
-        disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
-        update_managed_skill,
+        archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
+        load_managed_skill, restore_managed_skill, update_managed_skill,
     };
 
     let profile_root = tracedecay::storage::default_profile_root()?;
@@ -46,7 +45,7 @@ pub(super) async fn handle_automation_skills_command(
             }
             return Ok(());
         }
-        AutomationSkillsAction::Draft {
+        AutomationSkillsAction::Create {
             id,
             title,
             summary,
@@ -54,7 +53,8 @@ pub(super) async fn handle_automation_skills_command(
             body,
             pinned,
         } => {
-            let skill = create_managed_skill_draft(
+            refresh_exports = true;
+            let skill = create_managed_skill(
                 &profile_root,
                 ManagedSkillDraft {
                     id,
@@ -66,7 +66,7 @@ pub(super) async fn handle_automation_skills_command(
                     body_markdown: body,
                     support_files: Vec::new(),
                     provenance: ManagedSkillProvenance {
-                        source: ManagedSkillSource::UserDraft,
+                        source: ManagedSkillSource::User,
                         actor: "cli".to_string(),
                         run_id: None,
                     },
@@ -92,6 +92,7 @@ pub(super) async fn handle_automation_skills_command(
             body,
             pinned,
         } => {
+            refresh_exports = true;
             update_managed_skill(
                 &profile_root,
                 &id,
@@ -105,10 +106,6 @@ pub(super) async fn handle_automation_skills_command(
                 },
             )
             .await?
-        }
-        AutomationSkillsAction::Approve { id } => {
-            refresh_exports = true;
-            approve_managed_skill(&profile_root, &id).await?
         }
         AutomationSkillsAction::Disable { id } => {
             refresh_exports = true;

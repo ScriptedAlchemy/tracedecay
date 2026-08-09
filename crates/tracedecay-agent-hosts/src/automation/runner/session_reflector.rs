@@ -8,7 +8,6 @@ use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
-use crate::application::memory::MemoryApplication;
 use crate::automation::apply_policy::MemoryApplyPolicy;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
@@ -26,10 +25,12 @@ use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger
 use crate::automation::session_reflector::validate_fact_proposals;
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
+use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
-use crate::tracedecay::{TraceDecay, current_timestamp};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_usecases::memory::MemoryApplication;
 
 use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
@@ -178,6 +179,7 @@ pub(super) async fn validate_session_fact_proposals<A: ProjectMemoryFactStore>(
 pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
+    export_memory_digest: bool,
     proposal_records: Vec<FactProposalRecord>,
 ) -> Result<(Vec<FactProposalRecord>, bool)> {
     let mut applied = Vec::with_capacity(proposal_records.len());
@@ -196,21 +198,33 @@ pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>
         {
             Ok(result) => result,
             Err(error) => {
-                refresh_auto_apply_digest_for_new_promotions(memory, digest_root, newly_promoted)
-                    .await;
+                refresh_auto_apply_digest_for_new_promotions(
+                    memory,
+                    digest_root,
+                    export_memory_digest,
+                    newly_promoted,
+                )
+                .await;
                 return Err(error);
             }
         };
         newly_promoted |= result.newly_promoted;
         applied.push(result.record);
     }
-    refresh_auto_apply_digest_for_new_promotions(memory, digest_root, newly_promoted).await;
+    refresh_auto_apply_digest_for_new_promotions(
+        memory,
+        digest_root,
+        export_memory_digest,
+        newly_promoted,
+    )
+    .await;
     Ok((applied, newly_promoted))
 }
 
 async fn refresh_auto_apply_digest_for_new_promotions<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
+    export_memory_digest: bool,
     newly_promoted: bool,
 ) {
     if !newly_promoted {
@@ -220,6 +234,7 @@ async fn refresh_auto_apply_digest_for_new_promotions<A: ProjectMemoryFactStore>
         crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
             memory,
             digest_root,
+            export_memory_digest,
         )
         .await;
     }
@@ -277,6 +292,7 @@ pub(super) struct ProposedAgentOutput<'a> {
 pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     digest_root: Option<&std::path::Path>,
+    config: &AutomationConfig,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
@@ -301,11 +317,12 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         &rejected_facts,
     )
     .await?;
-    let auto_apply_facts = MemoryApplyPolicy::should_apply(accepted_count);
+    let auto_apply_facts = MemoryApplyPolicy::should_apply(config, accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
         let (records, _) = auto_apply_session_fact_proposals(
             memory,
             digest_root,
+            config.export_memory_digest,
             std::mem::take(&mut proposal_records),
         )
         .await?;
@@ -325,39 +342,21 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         .filter(|record| record.state == FactProposalState::Applied)
         .map(|record| record.proposal_id.clone())
         .collect();
-    let applied_canonical_fact_ids: Vec<String> = applied_fact_proposals
+    let applied_fact_ids: Vec<String> = applied_fact_proposals
         .iter()
         .filter(|record| record.state == FactProposalState::Applied)
-        .filter_map(|record| record.applied_canonical_fact_id.clone())
-        .collect();
-    let applied_legacy_fact_ids: Vec<i64> = applied_fact_proposals
-        .iter()
-        .filter(|record| record.state == FactProposalState::Applied)
-        .filter_map(|record| record.applied_fact_id)
+        .filter_map(|record| record.applied_fact_id.clone())
         .collect();
     let applied_count = applied_proposal_ids.len();
     let fully_applied = accepted_count > 0 && applied_count == accepted_count;
     let mut session_fact_apply_policy =
-        MemoryApplyPolicy::session_facts(accepted_count, applied_count, auto_apply_facts).to_json();
+        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count).to_json();
     if let Some(object) = session_fact_apply_policy.as_object_mut() {
         object.insert(
             "applied_proposal_ids".to_string(),
             json!(applied_proposal_ids),
         );
-        object.insert(
-            "applied_canonical_fact_ids".to_string(),
-            json!(applied_canonical_fact_ids),
-        );
-        // Compatibility-only numeric mappings. Canonical IDs above are the
-        // primary fact identities reported by session reflection.
-        object.insert(
-            "applied_legacy_fact_ids".to_string(),
-            json!(applied_legacy_fact_ids),
-        );
-        object.insert(
-            "applied_fact_ids".to_string(),
-            json!(applied_legacy_fact_ids),
-        );
+        object.insert("applied_fact_ids".to_string(), json!(applied_fact_ids));
         object.insert("applied_count".to_string(), json!(applied_count));
         object.insert("fully_applied".to_string(), json!(fully_applied));
     }
@@ -527,6 +526,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     let (report, record) = match finalize_session_reflector_success(
         memory,
         digest_root,
+        config,
         &finalizer,
         ProposedAgentOutput {
             response: &response,

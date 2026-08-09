@@ -669,7 +669,7 @@ fn stage_managed_skill_update_unlocked(
         metadata: staged.metadata.clone(),
         body_markdown: staged.body_markdown.clone(),
         support_files: staged.support_files.clone(),
-        resulting_state: None,
+        resulting_state: ManagedSkillState::Active,
         staged_reason: None,
     };
     let mut persisted = skill;
@@ -734,7 +734,7 @@ fn stage_managed_skill_archive_unlocked(
         metadata: staged.metadata.clone(),
         body_markdown: staged.body_markdown.clone(),
         support_files: staged.support_files.clone(),
-        resulting_state: Some(ManagedSkillState::Archived),
+        resulting_state: ManagedSkillState::Archived,
         staged_reason: reason,
     };
     let mut persisted = skill;
@@ -800,7 +800,7 @@ async fn record_skill_patch_best_effort(profile_root: &Path, skill: &ManagedSkil
         super::skill_usage::SkillUsageEvent {
             skill_name: skill.metadata.id.clone(),
             action: super::skill_usage::SkillUsageAction::Patch,
-            timestamp: crate::tracedecay::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             target: Some(target.to_string()),
         },
         Some(skill),
@@ -815,14 +815,19 @@ pub async fn approve_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
     let lock = lock_skill_store_async(profile_root).await?;
     let skill = load_managed_skill_unlocked(profile_root, id)?;
     let (approved, patch_target) = match skill.pending_update {
-        None => {
+        None if skill.metadata.state == ManagedSkillState::PendingApproval => {
             let mut active = skill;
             active.set_state(ManagedSkillState::Active);
             persist_skill_transaction_unlocked(profile_root, &[&active])?;
             (active, "lifecycle")
         }
+        None => {
+            return Err(config_error(format!(
+                "managed skill '{id}' is not pending approval"
+            )));
+        }
         Some(pending) => {
-            let resulting_state = pending.resulting_state.unwrap_or(ManagedSkillState::Active);
+            let resulting_state = pending.resulting_state;
             let patch_target = match resulting_state {
                 ManagedSkillState::Archived => "approve_staged_archive",
                 _ => "approve_staged_update",

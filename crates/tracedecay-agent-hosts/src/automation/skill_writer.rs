@@ -7,9 +7,9 @@ use super::artifacts::sha256_bytes;
 use super::config::AutomationConfig;
 use super::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_consolidation,
-    approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-    list_managed_skills, stage_managed_skill_archive, stage_managed_skill_update,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, create_managed_skill_draft,
+    default_managed_skill_targets, list_managed_skills, stage_managed_skill_archive,
+    stage_managed_skill_update,
 };
 use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
@@ -41,7 +41,6 @@ pub(crate) async fn validate_and_apply_skill_proposals(
     profile_root: &Path,
     run_id: &str,
     proposals: &[Value],
-    auto_enable_skills: bool,
 ) -> Result<SkillProposalOutcome> {
     let mut existing_skills = list_managed_skills(profile_root)
         .await?
@@ -53,7 +52,6 @@ pub(crate) async fn validate_and_apply_skill_proposals(
     let mut updated = Vec::new();
     let mut consolidations = Vec::new();
     let mut rejected = Vec::new();
-    let mut refresh_exports = false;
     for proposal in proposals {
         match skill_proposal_action(proposal) {
             Ok(SkillProposalAction::Create) => {
@@ -62,22 +60,12 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                         existing_ids.insert(draft.id.clone());
                         match create_managed_skill_draft(profile_root, draft).await {
                             Ok(skill) => {
-                                let skill = if auto_enable_skills {
-                                    let approved =
-                                        approve_managed_skill(profile_root, &skill.metadata.id)
-                                            .await?;
-                                    refresh_exports = true;
-                                    approved
-                                } else {
-                                    skill
-                                };
                                 existing_skills.insert(skill.metadata.id.clone(), skill.clone());
                                 created.push(accepted_skill_proposal_record(
                                     &skill,
                                     proposal,
                                     SkillProposalAction::Create,
                                     None,
-                                    auto_enable_skills,
                                 ));
                             }
                             Err(err) => rejected.push(rejected_skill(proposal, &err.to_string())),
@@ -93,22 +81,12 @@ pub(crate) async fn validate_and_apply_skill_proposals(
                             .await
                         {
                             Ok(skill) => {
-                                let skill = if auto_enable_skills {
-                                    let approved =
-                                        approve_managed_skill(profile_root, &skill.metadata.id)
-                                            .await?;
-                                    refresh_exports = true;
-                                    approved
-                                } else {
-                                    skill
-                                };
                                 existing_skills.insert(id, skill.clone());
                                 updated.push(accepted_skill_proposal_record(
                                     &skill,
                                     proposal,
                                     SkillProposalAction::Update,
                                     Some(&base_checksum),
-                                    auto_enable_skills,
                                 ));
                             }
                             Err(err) => rejected.push(rejected_skill(proposal, &err.to_string())),
@@ -120,41 +98,6 @@ pub(crate) async fn validate_and_apply_skill_proposals(
             Ok(SkillProposalAction::Archive) => {
                 match skill_archive_from_proposal(proposal, &existing_skills) {
                     Ok(archive) => {
-                        if auto_enable_skills {
-                            if let Err(reason) = ensure_skill_not_referenced_by_scheduled_job(
-                                profile_root,
-                                &archive.skill_id,
-                            ) {
-                                rejected.push(rejected_skill(proposal, &reason));
-                                continue;
-                            }
-                            match apply_managed_skill_consolidation(
-                                profile_root,
-                                None,
-                                None,
-                                None,
-                                &archive.skill_id,
-                                &archive.base_checksum,
-                                &archive.reason,
-                            )
-                            .await
-                            {
-                                Ok(result) => {
-                                    existing_skills
-                                        .insert(archive.skill_id.clone(), result.source.clone());
-                                    consolidations.push(applied_consolidation_record(
-                                        SkillProposalAction::Archive,
-                                        proposal,
-                                        &result,
-                                    ));
-                                    refresh_exports = true;
-                                }
-                                Err(err) => {
-                                    rejected.push(rejected_skill(proposal, &err.to_string()));
-                                }
-                            }
-                            continue;
-                        }
                         match stage_managed_skill_archive(
                             profile_root,
                             &archive.skill_id,
@@ -181,42 +124,6 @@ pub(crate) async fn validate_and_apply_skill_proposals(
             }
             Ok(SkillProposalAction::Merge) => {
                 match skill_merge_from_proposal(proposal, &existing_skills) {
-                    Ok(merge) if auto_enable_skills => {
-                        if let Err(reason) = ensure_skill_not_referenced_by_scheduled_job(
-                            profile_root,
-                            &merge.source_skill_id,
-                        ) {
-                            rejected.push(rejected_skill(proposal, &reason));
-                            continue;
-                        }
-                        match apply_managed_skill_consolidation(
-                            profile_root,
-                            Some(&merge.target_skill_id),
-                            Some(&merge.base_checksum),
-                            merge.update.clone(),
-                            &merge.source_skill_id,
-                            &merge.source_base_checksum,
-                            &merge.reason,
-                        )
-                        .await
-                        {
-                            Ok(result) => {
-                                existing_skills
-                                    .insert(merge.source_skill_id.clone(), result.source.clone());
-                                if let Some(target) = &result.target {
-                                    existing_skills
-                                        .insert(merge.target_skill_id.clone(), target.clone());
-                                }
-                                consolidations.push(applied_consolidation_record(
-                                    SkillProposalAction::Merge,
-                                    proposal,
-                                    &result,
-                                ));
-                                refresh_exports = true;
-                            }
-                            Err(err) => rejected.push(rejected_skill(proposal, &err.to_string())),
-                        }
-                    }
                     Ok(merge) => match stage_skill_merge(profile_root, &merge).await {
                         Ok((source_skill, target_skill)) => {
                             existing_skills
@@ -241,14 +148,6 @@ pub(crate) async fn validate_and_apply_skill_proposals(
             Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
         }
     }
-    if refresh_exports {
-        let export_result = refresh_managed_skill_exports_after_auto_enable(profile_root);
-        for record in &mut consolidations {
-            if record.get("approval_status").and_then(Value::as_str) == Some("auto_applied") {
-                record["journal"]["export_result"] = export_result.clone();
-            }
-        }
-    }
     Ok(SkillProposalOutcome {
         created,
         updated,
@@ -257,99 +156,9 @@ pub(crate) async fn validate_and_apply_skill_proposals(
     })
 }
 
-fn applied_consolidation_record(
-    action: SkillProposalAction,
-    proposal: &Value,
-    result: &super::managed_skills::SkillConsolidationResult,
-) -> Value {
-    json!({
-        "action": action.as_str(),
-        "proposal_action": action.as_str(),
-        "reason": proposal.get("reason").cloned().unwrap_or(Value::Null),
-        "approval_status": "auto_applied",
-        "resulting_state": "archived",
-        "archived_skill_id": result.source.metadata.id,
-        "source_skill_id": result.source.metadata.id,
-        "target_skill_id": result.target.as_ref().map(|skill| skill.metadata.id.clone()),
-        "absorbed_into": result.source.metadata.absorbed_into,
-        "target_update_staged": false,
-        "journal": {
-            "provenance": result.source.metadata.provenance,
-            "target_before_checksum": result.target_before_checksum,
-            "target_after_checksum": result.target_after_checksum,
-            "source_before_checksum": result.source_before_checksum,
-            "source_after_checksum": result.source_after_checksum,
-            "export_refresh": "requested_once_after_batch",
-        }
-    })
-}
-
-fn ensure_skill_not_referenced_by_scheduled_job(
-    profile_root: &Path,
-    skill_id: &str,
-) -> std::result::Result<(), String> {
-    fn visit(dir: &Path, skill_id: &str, depth: usize) -> std::result::Result<bool, String> {
-        if depth > 5 {
-            return Ok(false);
-        }
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Ok(false);
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if visit(&path, skill_id, depth + 1)? {
-                    return Ok(true);
-                }
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == "automation_jobs.json")
-            {
-                let bytes = std::fs::read(&path).map_err(|error| {
-                    format!(
-                        "cannot verify scheduled job references in '{}': {error}",
-                        path.display()
-                    )
-                })?;
-                let value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
-                    format!(
-                        "cannot verify scheduled job references in '{}': {error}",
-                        path.display()
-                    )
-                })?;
-                if value
-                    .get("jobs")
-                    .and_then(Value::as_array)
-                    .is_some_and(|jobs| {
-                        jobs.iter().any(|job| {
-                            job.get("skill_ids")
-                                .and_then(Value::as_array)
-                                .is_some_and(|ids| {
-                                    ids.iter().any(|id| id.as_str() == Some(skill_id))
-                                })
-                        })
-                    })
-                {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-    if visit(profile_root, skill_id, 0)? {
-        Err(format!(
-            "managed skill '{skill_id}' is referenced by a scheduled job"
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 pub(crate) fn activation_policy(config: &AutomationConfig) -> &'static str {
-    if config.auto_enable_skills {
-        "auto_enable_after_validation"
-    } else {
-        "pending_approval_only"
+    match config.skill_activation_policy {
+        super::config::AutomationSkillActivationPolicy::DraftForApproval => "draft_for_approval",
     }
 }
 
@@ -524,7 +333,6 @@ fn accepted_skill_proposal_record(
     proposal: &Value,
     action: SkillProposalAction,
     base_checksum: Option<&str>,
-    auto_enable_skills: bool,
 ) -> Value {
     let mut record = serde_json::to_value(skill).unwrap_or_else(|_| json!({}));
     if let Some(object) = record.as_object_mut() {
@@ -540,7 +348,7 @@ fn accepted_skill_proposal_record(
         );
         object.insert(
             "approval_status".to_string(),
-            json!(accepted_skill_approval_status(action, auto_enable_skills)),
+            json!(accepted_skill_approval_status(action)),
         );
         if let Some(base_checksum) = base_checksum {
             object.insert("base_checksum".to_string(), json!(base_checksum));
@@ -549,46 +357,8 @@ fn accepted_skill_proposal_record(
     record
 }
 
-fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value {
-    let Some(home) = crate::agents::home_dir() else {
-        return json!({"status": "skipped", "reason": "home_unavailable"});
-    };
-    if !crate::agents::uses_default_user_profile(&home, profile_root) {
-        return json!({"status": "skipped", "reason": "non_default_profile_root"});
-    }
-    let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
-    let project_root = crate::automation::skill_materialization::resolve_project_root(&start);
-    let reports =
-        crate::agents::export_managed_skills_to_agent_hosts(&home, &project_root, profile_root);
-    for report in &reports {
-        if let Some(error) = &report.error {
-            tracing::warn!(
-                agent = %report.agent,
-                error = %error,
-                "failed to refresh managed skill exports after auto-enable"
-            );
-        }
-    }
-    // Auto-applied (policy-off) skills also materialize their host-loadable
-    // SKILL.md files, matching the manual approve path.
-    crate::automation::skill_materialization::reconcile_after_activation(
-        profile_root,
-        &project_root,
-    );
-    json!({
-        "status": if reports.iter().any(|report| report.error.is_some()) { "partial_failure" } else { "succeeded" },
-        "reports": reports,
-        "materialization_reconciled": true,
-    })
-}
-
-fn accepted_skill_approval_status(
-    action: SkillProposalAction,
-    auto_enable_skills: bool,
-) -> &'static str {
-    if auto_enable_skills {
-        "auto_enabled"
-    } else if action == SkillProposalAction::Update {
+fn accepted_skill_approval_status(action: SkillProposalAction) -> &'static str {
+    if action == SkillProposalAction::Update {
         "staged_update"
     } else {
         "pending_approval"

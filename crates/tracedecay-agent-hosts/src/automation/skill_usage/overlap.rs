@@ -43,12 +43,7 @@ pub fn skill_overlap_candidates(
 ) -> Vec<SkillOverlapCandidate> {
     let eligible: Vec<&ManagedSkill> = skills
         .iter()
-        .filter(|skill| {
-            matches!(
-                skill.metadata.state,
-                ManagedSkillState::Active | ManagedSkillState::PendingApproval
-            )
-        })
+        .filter(|skill| matches!(skill.metadata.state, ManagedSkillState::Active))
         .collect();
     let mut candidates = Vec::new();
     for (index, a) in eligible.iter().enumerate() {

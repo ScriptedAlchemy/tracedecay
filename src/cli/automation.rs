@@ -3,7 +3,7 @@ use clap::{Subcommand, ValueEnum};
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum AutomationAction {
-    /// Read or mutate the project automation sidecar config.
+    /// Read or mutate canonical project automation settings.
     Config {
         #[command(subcommand)]
         action: AutomationConfigAction,
@@ -98,12 +98,6 @@ pub enum AutomationConfigAction {
         /// Scheduler polling cadence in seconds.
         #[arg(long)]
         scheduler_tick_secs: Option<u64>,
-        /// Allow accepted memory operations to apply automatically when policy permits.
-        #[arg(long)]
-        auto_apply_memory_ops: Option<bool>,
-        /// Allow generated skills to become active automatically when policy permits.
-        #[arg(long)]
-        auto_enable_skills: Option<bool>,
         /// Export the durable-facts memory digest into host prompts.
         #[arg(long)]
         export_memory_digest: Option<bool>,
@@ -297,8 +291,8 @@ pub enum AutomationSkillsAction {
         #[arg(long)]
         json: bool,
     },
-    /// Create a pending managed skill draft.
-    Draft {
+    /// Create and activate a managed skill.
+    Create {
         #[arg(long)]
         id: String,
         #[arg(long)]
@@ -313,7 +307,7 @@ pub enum AutomationSkillsAction {
         #[arg(long, default_value_t = false)]
         pinned: bool,
     },
-    /// Update an existing skill and restage content changes for approval.
+    /// Update an existing managed skill immediately.
     Update {
         id: String,
         #[arg(long)]
@@ -327,13 +321,11 @@ pub enum AutomationSkillsAction {
         #[arg(long)]
         pinned: Option<bool>,
     },
-    /// Approve a pending skill.
-    Approve { id: String },
-    /// Disable an active or pending skill.
+    /// Disable an active skill.
     Disable { id: String },
     /// Archive a managed skill.
     Archive { id: String },
-    /// Restore an archived skill back to pending approval.
+    /// Restore an archived skill to active state.
     Restore { id: String },
     /// Export approved managed skills into a host plugin overlay or prompt index.
     Install {
@@ -358,7 +350,6 @@ pub enum AutomationSkillsInstallTarget {
     Codex,
     Claude,
     Agents,
-    #[value(alias = "opencode")]
     OpenCode,
     Kimi,
     Kiro,
@@ -392,6 +383,9 @@ pub enum AutomationFactsAction {
         /// Maximum proposals to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Output the canonical proposal payload as machine-readable JSON.
+        #[arg(long)]
+        json: bool,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,

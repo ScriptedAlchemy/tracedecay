@@ -281,8 +281,7 @@ pub struct ManagedSkillPendingUpdate {
     pub body_markdown: String,
     #[serde(default)]
     pub support_files: Vec<ManagedSupportFile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resulting_state: Option<ManagedSkillState>,
+    pub resulting_state: ManagedSkillState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_reason: Option<String>,
 }

@@ -38,32 +38,33 @@ use super::scheduler::AutomationTaskLock;
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
 };
+use crate::errors::{Result, TraceDecayError};
+use crate::ports::project_runtime::ProfileRuntime;
+use crate::ports::project_runtime::TraceDecay;
 #[cfg(test)]
-use crate::application::context::{
+use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
+use crate::ports::session_store::AutomationSessionStore;
+use crate::store::memory::DatabaseFactStore;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+#[cfg(test)]
+use tracedecay_temporal_query::TemporalKernelResult;
+#[cfg(test)]
+use tracedecay_temporal_query::context::VersionedTokenEstimator;
+#[cfg(test)]
+use tracedecay_usecases::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     session_application_grant_digest,
 };
-use crate::application::memory::MemoryApplication;
+use tracedecay_usecases::memory::MemoryApplication;
 #[cfg(test)]
-use crate::application::session::{
+use tracedecay_usecases::session::{
     SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalExecutionPort, SessionTemporalQuery,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::ProfileRuntime;
-#[cfg(test)]
-use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
-use crate::ports::session_store::AutomationSessionStore;
-use crate::store::memory::DatabaseFactStore;
-use crate::tracedecay::{TraceDecay, current_timestamp};
-use tracedecay_global_db::RegisteredGlobalDb;
-#[cfg(test)]
-use tracedecay_temporal_query::TemporalKernelResult;
-#[cfg(test)]
-use tracedecay_temporal_query::context::VersionedTokenEstimator;
 
 mod evidence;
 mod retrieval;
@@ -434,8 +435,8 @@ async fn run_skill_writer_for_store(
     })
 }
 
-/// Validates and stages the `skills` half of a skill-writer (or combined)
-/// run, returning the report plus the not-yet-appended success ledger record.
+/// Validates and stages the `skills` half of a skill-writer (or combined) run,
+/// returning the report plus the not-yet-appended success ledger record.
 async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
@@ -450,22 +451,16 @@ async fn finalize_skill_writer_success(
         proposed_ops,
         proposals,
     } = output;
-    let config = finalizer.config();
     let run_id = finalizer.run_id();
-    let proposal_outcome = validate_and_apply_skill_proposals(
-        profile_root,
-        run_id,
-        proposals,
-        config.auto_enable_skills,
-    )
-    .await?;
+    let proposal_outcome =
+        validate_and_apply_skill_proposals(profile_root, run_id, proposals).await?;
     let accepted_count = proposal_outcome.created.len()
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
     let rejected_count = proposal_outcome.rejected.len();
     let report = json!({
-        "status": if config.auto_enable_skills { "auto_enabled" } else { "needs_approval" },
-        "dry_run": !config.auto_enable_skills,
+        "status": if proposal_outcome.rejected.is_empty() { "needs_approval" } else { "quarantined_partial" },
+        "dry_run": false,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
@@ -502,7 +497,7 @@ async fn finalize_skill_writer_success(
     record.rejected_ops = report.get("rejected_skills").cloned();
     record.validation_report = Some(json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
-        "dry_run": !config.auto_enable_skills,
+        "dry_run": false,
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
@@ -915,6 +910,7 @@ async fn run_combined_review_for_retrieval(
     let (reflector_report, reflector_record) = match finalize_session_reflector_success(
         &memory,
         Some(cg.store_layout().project_root.as_path()),
+        config,
         &reflector_finalizer,
         ProposedAgentOutput {
             response: &response,
@@ -1097,9 +1093,9 @@ mod tests {
     impl SessionTemporalExecutionPort for NeverAutomationExecution {
         fn execute<'a, E>(
             &'a self,
-            _request: crate::application::session::AuthorizedTemporalExecutionRequest,
+            _request: tracedecay_usecases::session::AuthorizedTemporalExecutionRequest,
             _estimator: &'a E,
-        ) -> crate::application::session::TemporalExecutionFuture<'a>
+        ) -> tracedecay_usecases::session::TemporalExecutionFuture<'a>
         where
             E: VersionedTokenEstimator + Sync + 'a,
         {
@@ -1224,7 +1220,7 @@ mod tests {
         for (outcome, expected_reason) in [
             (
                 SessionRetrievalOutcome::<TemporalKernelResult>::Stale {
-                    freshness: crate::application::session::SessionDataFreshness::Stored {
+                    freshness: tracedecay_usecases::session::SessionDataFreshness::Stored {
                         generation_lag: 1,
                     },
                 },
@@ -1233,7 +1229,7 @@ mod tests {
             (
                 SessionRetrievalOutcome::Partial {
                     items: Vec::new(),
-                    freshness: crate::application::session::SessionDataFreshness::Fresh,
+                    freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
                     omitted: 1,
                 },
                 "session_evidence_partial",
@@ -1249,7 +1245,7 @@ mod tests {
             ),
             (
                 SessionRetrievalOutcome::CompleteZero {
-                    freshness: crate::application::session::SessionDataFreshness::Stored {
+                    freshness: tracedecay_usecases::session::SessionDataFreshness::Stored {
                         generation_lag: 2,
                     },
                 },
@@ -1264,7 +1260,7 @@ mod tests {
         assert!(matches!(
             accept_automation_temporal_outcome(
                 SessionRetrievalOutcome::<TemporalKernelResult>::CompleteZero {
-                    freshness: crate::application::session::SessionDataFreshness::Fresh,
+                    freshness: tracedecay_usecases::session::SessionDataFreshness::Fresh,
                 }
             ),
             AutomationTemporalRetrieval::CompleteZero
@@ -1275,7 +1271,7 @@ mod tests {
     fn complete_temporal_outcome_independently_requires_fresh_coverage() {
         let stale = SessionRetrievalOutcome::<TemporalKernelResult>::Complete {
             items: Vec::new(),
-            freshness: crate::application::session::SessionDataFreshness::Stored {
+            freshness: tracedecay_usecases::session::SessionDataFreshness::Stored {
                 generation_lag: 1,
             },
         };
@@ -1605,7 +1601,7 @@ mod tests {
         let owner = FactOwnerV1::Profile;
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let existing_fact_id = memory
-            .add_fact_v1(
+            .add_fact(
                 crate::memory::types::AddFactRequest {
                     content: "Committed memory baseline".to_string(),
                     category: crate::memory::types::MemoryCategory::Project,
@@ -1615,7 +1611,7 @@ mod tests {
                     trust: Some(0.8),
                     metadata: json!({}),
                 },
-                crate::application::memory::MemoryOperationContext::generated(
+                tracedecay_usecases::memory::MemoryOperationContext::generated(
                     &owner,
                     "seed automation validation",
                     None,
@@ -1629,13 +1625,6 @@ mod tests {
             .fact_id;
         let transaction = db
             .begin_write_transaction("hold automation validation writer")
-            .await
-            .unwrap();
-        transaction
-            .execute(
-                "UPDATE memory_facts SET updated_at = updated_at WHERE fact_id = ?1",
-                [existing_fact_id],
-            )
             .await
             .unwrap();
         let proposals = [json!({
@@ -1666,7 +1655,7 @@ mod tests {
         assert!(validated.1.is_empty());
         assert_eq!(
             memory
-                .get_fact_v1(existing_fact_id)
+                .get_fact(existing_fact_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1723,7 +1712,7 @@ mod tests {
         .unwrap();
 
         let (applied, newly_promoted) =
-            auto_apply_session_fact_proposals(&memory, Some(&project_root), records.clone())
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records.clone())
                 .await
                 .unwrap();
         assert!(newly_promoted);
@@ -1734,7 +1723,7 @@ mod tests {
         std::fs::remove_file(&snapshot).unwrap();
 
         let (replayed, newly_promoted) =
-            auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records)
                 .await
                 .unwrap();
         assert!(
@@ -1823,7 +1812,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+        let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records)
             .await
             .expect_err("the rejected second proposal must keep its original error path");
         assert!(error.to_string().contains("not pending approval"));

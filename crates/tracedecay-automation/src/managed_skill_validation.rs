@@ -290,11 +290,12 @@ pub fn validate_managed_pending_update(
             "managed skill staged_at must be a positive timestamp",
         ));
     }
-    if let Some(resulting_state) = pending.resulting_state
-        && resulting_state != ManagedSkillState::Archived
-    {
+    if !matches!(
+        pending.resulting_state,
+        ManagedSkillState::Active | ManagedSkillState::Archived
+    ) {
         return Err(config_error(
-            "managed skill pending update resulting_state must be archived",
+            "managed skill pending update resulting_state must be active or archived",
         ));
     }
     let skill = ManagedSkill {

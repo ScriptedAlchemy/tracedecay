@@ -20,9 +20,11 @@ use crate::research::{
 
 pub mod topology;
 mod work_executable_bindings;
+mod work_expertise_consent;
 
 pub use topology::*;
 pub use work_executable_bindings::*;
+pub use work_expertise_consent::*;
 
 const CONFIGURATION_SNAPSHOT_ID_DOMAIN: &str = "tracedecay.configuration.snapshot.v1";
 const PROTECTED_CHANGE_DIGEST_DOMAIN: &str = "tracedecay.configuration.protected-change.v1";
@@ -33,12 +35,15 @@ pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
 pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings.v1";
+pub const PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "work.expertise_consent.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
+pub const AUTOMATION_SETTINGS_SETTING_KEY: &str = "automation.settings.v1";
 
 /// Canonical user-profile settings.
 pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
 pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
 pub const USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY: &str = "user.extraction_timeout_secs.v1";
+pub const USER_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "user.work_expertise_consent.v1";
 
 /// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
@@ -62,7 +67,6 @@ pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interva
 pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_escalation_files.v1";
 pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
-pub const SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY: &str = "sync.orphan_db_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
 pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
 pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
@@ -76,11 +80,14 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    AUTOMATION_SETTINGS_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
@@ -101,7 +108,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
@@ -508,7 +514,9 @@ pub enum ConfigurationValueKindV1 {
     AnalyzerSettings,
     WorkTopologyPolicy,
     WorkExecutableBindings,
+    WorkExpertiseConsent,
     ContextScoutSettings,
+    AutomationSettings,
     CredentialReference,
 }
 
@@ -531,6 +539,165 @@ pub enum ContextScoutConfigurationModeV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutConfiguredModelPathV1 {
     CodexAppServer,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationBackendV1 {
+    #[default]
+    Disabled,
+    CodexAppServer,
+}
+
+impl AutomationBackendV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::CodexAppServer => "codex_app_server",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationHostModeV1 {
+    #[default]
+    Standalone,
+    DelegatedHost,
+}
+
+impl AutomationHostModeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::DelegatedHost => "delegated_host",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationMemoryApplyPolicyV1 {
+    #[default]
+    ValidateThenApply,
+    DraftForApproval,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationSkillActivationPolicyV1 {
+    #[default]
+    DraftForApproval,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationTaskSettingsV1 {
+    pub enabled: bool,
+    pub schedule: Option<String>,
+    pub interval_secs: Option<u64>,
+    pub cooldown_secs: Option<u64>,
+    pub min_idle_secs: Option<u64>,
+    pub stale_lock_secs: Option<u64>,
+}
+
+impl AutomationTaskSettingsV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        for value in [
+            self.interval_secs,
+            self.cooldown_secs,
+            self.min_idle_secs,
+            self.stale_lock_secs,
+        ] {
+            if matches!(value, Some(0)) {
+                return Err(DomainError::NonCanonical {
+                    field: "automation task duration",
+                });
+            }
+        }
+        if let Some(schedule) = self.schedule.as_deref() {
+            validate_canonical_label(schedule, "automation task schedule")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationTaskSetV1 {
+    pub memory_curator: AutomationTaskSettingsV1,
+    pub session_reflector: AutomationTaskSettingsV1,
+    pub skill_writer: AutomationTaskSettingsV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationSettingsV1 {
+    pub schema_version: u16,
+    pub enabled: bool,
+    pub backend: AutomationBackendV1,
+    pub host_mode: AutomationHostModeV1,
+    pub model_id: Option<String>,
+    pub timeout_secs: u64,
+    pub scheduler_tick_secs: u64,
+    pub memory_apply_policy: AutomationMemoryApplyPolicyV1,
+    pub skill_activation_policy: AutomationSkillActivationPolicyV1,
+    pub export_memory_digest: bool,
+    pub combine_due_tasks: bool,
+    pub allow_job_commands: bool,
+    pub tasks: AutomationTaskSetV1,
+}
+
+impl AutomationSettingsV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.timeout_secs == 0
+            || self.scheduler_tick_secs == 0
+            || matches!(self.backend, AutomationBackendV1::CodexAppServer)
+                && self
+                    .model_id
+                    .as_deref()
+                    .is_none_or(|model| model.trim().is_empty())
+            || !matches!(self.backend, AutomationBackendV1::CodexAppServer)
+                && self.model_id.is_some()
+        {
+            return Err(DomainError::NonCanonical {
+                field: "automation settings",
+            });
+        }
+        if let Some(model_id) = self.model_id.as_deref() {
+            validate_canonical_label(model_id, "automation model id")?;
+        }
+        self.tasks.memory_curator.validate()?;
+        self.tasks.session_reflector.validate()?;
+        self.tasks.skill_writer.validate()
+    }
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for AutomationSettingsV1 {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            enabled: false,
+            backend: AutomationBackendV1::Disabled,
+            host_mode: AutomationHostModeV1::Standalone,
+            model_id: None,
+            timeout_secs: 60,
+            scheduler_tick_secs: 60,
+            memory_apply_policy: AutomationMemoryApplyPolicyV1::ValidateThenApply,
+            skill_activation_policy: AutomationSkillActivationPolicyV1::DraftForApproval,
+            export_memory_digest: true,
+            combine_due_tasks: true,
+            allow_job_commands: false,
+            tasks: AutomationTaskSetV1::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -586,6 +753,8 @@ pub struct ContextScoutSettingsV1 {
     pub mode: ContextScoutConfigurationModeV1,
     pub limits: ContextScoutConfigurationLimitsV1,
     pub model_path: Option<ContextScoutConfiguredModelPathV1>,
+    pub model_id: Option<String>,
+    pub model_timeout_secs: Option<u64>,
 }
 
 impl ContextScoutSettingsV1 {
@@ -598,20 +767,36 @@ impl ContextScoutSettingsV1 {
             mode: ContextScoutConfigurationModeV1::Deterministic,
             limits: ContextScoutConfigurationLimitsV1::bounded_defaults(),
             model_path: None,
+            model_id: None,
+            model_timeout_secs: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        if self.schema_version != Self::SCHEMA_VERSION
-            || matches!(
-                (self.mode, self.model_path),
-                (ContextScoutConfigurationModeV1::Deterministic, Some(_))
-                    | (ContextScoutConfigurationModeV1::ConfiguredModel, None)
-            )
-        {
+        let model_configuration_is_valid = match self.mode {
+            ContextScoutConfigurationModeV1::Deterministic => {
+                self.model_path.is_none()
+                    && self.model_id.is_none()
+                    && self.model_timeout_secs.is_none()
+            }
+            ContextScoutConfigurationModeV1::ConfiguredModel => {
+                self.model_path.is_some()
+                    && self
+                        .model_id
+                        .as_deref()
+                        .is_some_and(|model| !model.trim().is_empty())
+                    && self
+                        .model_timeout_secs
+                        .is_some_and(|timeout| (5..=300).contains(&timeout))
+            }
+        };
+        if self.schema_version != Self::SCHEMA_VERSION || !model_configuration_is_valid {
             return Err(DomainError::NonCanonical {
                 field: "context scout settings",
             });
+        }
+        if let Some(model_id) = self.model_id.as_deref() {
+            validate_canonical_label(model_id, "context scout model id")?;
         }
         self.limits.validate()
     }
@@ -880,7 +1065,9 @@ pub enum ConfigurationValueV1 {
     AnalyzerSettings(AnalyzerSettingsV1),
     WorkTopologyPolicy(Box<WorkTopologyPolicyV1>),
     WorkExecutableBindings(Vec<WorkExecutableBindingV1>),
+    WorkExpertiseConsent(WorkExpertiseConsentV1),
     ContextScoutSettings(ContextScoutSettingsV1),
+    AutomationSettings(AutomationSettingsV1),
     CredentialReference(CredentialReferenceMetadataV1),
 }
 
@@ -896,7 +1083,9 @@ impl ConfigurationValueV1 {
             Self::AnalyzerSettings(_) => ConfigurationValueKindV1::AnalyzerSettings,
             Self::WorkTopologyPolicy(_) => ConfigurationValueKindV1::WorkTopologyPolicy,
             Self::WorkExecutableBindings(_) => ConfigurationValueKindV1::WorkExecutableBindings,
+            Self::WorkExpertiseConsent(_) => ConfigurationValueKindV1::WorkExpertiseConsent,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
+            Self::AutomationSettings(_) => ConfigurationValueKindV1::AutomationSettings,
             Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
         }
     }
@@ -931,7 +1120,9 @@ impl ConfigurationValueV1 {
             Self::AnalyzerSettings(settings) => settings.validate(),
             Self::WorkTopologyPolicy(policy) => policy.validate(),
             Self::WorkExecutableBindings(bindings) => validate_work_executable_bindings(bindings),
+            Self::WorkExpertiseConsent(consent) => consent.validate(),
             Self::ContextScoutSettings(settings) => settings.validate(),
+            Self::AutomationSettings(settings) => settings.validate(),
             Self::CredentialReference(metadata) => metadata.validate(),
         }
     }

@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::AutomationRunRecord;
 use crate::backend::AgentTaskKind;
-use crate::config::AutomationConfig;
+use crate::config::{AutomationConfig, AutomationMemoryApplyPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryApplySubject {
@@ -50,15 +50,15 @@ impl MemoryApplySubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryApplyPolicy {
     subject: MemoryApplySubject,
+    memory_apply_policy: AutomationMemoryApplyPolicy,
     accepted_count: usize,
-    auto_apply_memory_ops: bool,
     mutates_store: bool,
     fully_applied: bool,
 }
 
 impl MemoryApplyPolicy {
     pub fn curation_ops(config: &AutomationConfig, accepted_count: usize) -> Self {
-        let should_apply = should_auto_apply_memory_ops(config, accepted_count);
+        let should_apply = should_apply_memory_ops(config, accepted_count);
         Self::new(
             MemoryApplySubject::CurationOps,
             config,
@@ -73,23 +73,29 @@ impl MemoryApplyPolicy {
         accepted_count: usize,
         applied_count: usize,
     ) -> Self {
+        let should_apply = should_apply_memory_ops(config, accepted_count);
         Self::new(
             MemoryApplySubject::CurationOps,
             config,
             accepted_count,
-            applied_count > 0,
-            accepted_count > 0 && applied_count >= accepted_count,
+            should_apply && applied_count > 0,
+            should_apply && applied_count >= accepted_count,
         )
     }
 
-    pub fn session_facts(accepted_count: usize, applied_count: usize, auto_managed: bool) -> Self {
-        Self {
-            subject: MemoryApplySubject::SessionFacts,
+    pub fn session_facts(
+        config: &AutomationConfig,
+        accepted_count: usize,
+        applied_count: usize,
+    ) -> Self {
+        let should_apply = should_apply_memory_ops(config, accepted_count);
+        Self::new(
+            MemoryApplySubject::SessionFacts,
+            config,
             accepted_count,
-            auto_apply_memory_ops: accepted_count > 0,
-            mutates_store: auto_managed,
-            fully_applied: accepted_count > 0 && applied_count >= accepted_count,
-        }
+            should_apply && applied_count > 0,
+            should_apply && accepted_count > 0 && applied_count >= accepted_count,
+        )
     }
 
     fn new(
@@ -101,15 +107,15 @@ impl MemoryApplyPolicy {
     ) -> Self {
         Self {
             subject,
+            memory_apply_policy: config.memory_apply_policy,
             accepted_count,
-            auto_apply_memory_ops: config.auto_apply_memory_ops,
             mutates_store,
             fully_applied,
         }
     }
 
-    pub fn should_apply(accepted_count: usize) -> bool {
-        accepted_count > 0
+    pub fn should_apply(config: &AutomationConfig, accepted_count: usize) -> bool {
+        should_apply_memory_ops(config, accepted_count)
     }
 
     pub fn decision(self) -> MemoryApplyDecision {
@@ -128,9 +134,9 @@ impl MemoryApplyPolicy {
         let decision = self.decision();
         json!({
             "decision": decision.as_str(),
-            "auto_apply_memory_ops": self.auto_apply_memory_ops,
-            "require_dashboard_approval": false,
-            "approval_required": false,
+            "memory_apply_policy": self.memory_apply_policy,
+            "approval_required": self.accepted_count > 0
+                && self.memory_apply_policy == AutomationMemoryApplyPolicy::DraftForApproval,
             "autonomous_memory_apply": self.mutates_store,
             "mutates_store": self.mutates_store,
         })
@@ -243,6 +249,7 @@ pub fn value_as_usize(value: &Value) -> Option<usize> {
         .and_then(|number| usize::try_from(number).ok())
 }
 
-fn should_auto_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
-    accepted_count > 0 && config.auto_apply_memory_ops
+fn should_apply_memory_ops(config: &AutomationConfig, accepted_count: usize) -> bool {
+    accepted_count > 0
+        && config.memory_apply_policy == AutomationMemoryApplyPolicy::ValidateThenApply
 }

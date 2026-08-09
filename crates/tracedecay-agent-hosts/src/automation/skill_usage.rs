@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::config_error;
 use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
 use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 mod analytics;
 mod overlap;
@@ -148,8 +148,8 @@ impl SkillUsageRecord {
         self.pinned = skill.metadata.pinned;
         self.created_by = Some(skill.metadata.provenance.actor.clone());
         self.provenance_source = Some(skill.metadata.provenance.source);
-        if skill.metadata.approved_at.is_some() {
-            self.approved_at = skill.metadata.approved_at;
+        if skill.metadata.activated_at.is_some() {
+            self.approved_at = skill.metadata.activated_at;
         }
     }
 
@@ -240,7 +240,10 @@ pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill
 pub async fn record_skill_approval(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
     let mut ledger = load_skill_usage_ledger(profile_root).await?;
     let skill_id = skill.metadata.id.clone();
-    let approved_at = skill.metadata.approved_at.unwrap_or_else(current_timestamp);
+    let approved_at = skill
+        .metadata
+        .activated_at
+        .unwrap_or_else(current_timestamp);
     let record = ledger
         .records
         .entry(skill_id.clone())
