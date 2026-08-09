@@ -166,6 +166,14 @@ acceptance gates:
   require an explicit preview/confirmation, stale-state compare-and-swap, a
   durable result, and rollback or forward recovery appropriate to the real
   commit boundary.
+- Memory curation and managed-skill/skill-writer curation are fully agentic
+  product operations: the curator/orchestrator policy-validates and
+  automatically applies and materializes allowed results with durable evidence,
+  compare-and-swap/idempotence, and rollback controls. Production profiles run
+  the bounded curator/reflector/skill-writer scheduler by default; explicit
+  administration may pause, disable, back off, quarantine, or roll back the
+  loop or its outputs. Human CLI and UI review is observability and explicit
+  override only, never an approval gate or prerequisite for materialization.
 
 Actual released public-protocol compatibility, recovery, and truthful
 partial/unavailable behavior remain direct product requirements. Git never
@@ -379,7 +387,7 @@ delivery phases:
 |---|---|
 | Sanitized capture (complete) | One real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
 | Provider capture (complete) | Supported hosts/sources, daemon host-admission for non-replayable events, identities, dedupe, partial input, backpressure, and canonical event relations. |
-| Project memory and facts (active) | Project/profile ownership, evidence, corrections, trust, curation, deletion lineage, and generation-bound repository provenance anchors. |
+| Project memory and facts (active) | Project/profile ownership, evidence, corrections, trust, fully automatic policy-validated curation with durable apply/materialization evidence and rollback/disable controls, deletion lineage, and generation-bound repository provenance anchors. |
 | Session and LCM retrieval (active) | Occurrences, copies, authentic summaries, supersession, current/as-of/evolution retrieval, stable context assembly, and daemon-owned refresh. |
 | Code intelligence and lexical retrieval (active) | Deterministic extraction with typed edge authority and coverage, exact occurrence identity plus evidenced/abstaining lineage, generation-bound managed diagnostics/tests, a non-demotable exact/phrase/BM25 tier, typed quantifier inputs, legacy-behavior parity, and typed read-only Git status/diff/history/blame/hunk intelligence enriched by graph impact. Worktree-aware incremental indexing reuses content-addressed parse/chunk artifacts while retaining exact worktree and generation identity. |
 | Native semantic retrieval and ranking (active) | Local FastEmbed artifacts, immutable vector generations, exact flat-vector baseline/oracle, measured hybrid/reranking candidates, calibrated abstention, redundancy augmentation, and byte-stable lexical fallback. Semantic projection is asynchronous and batches only changed eligible chunks; ordinary search never waits for it. ANN, late interaction, and quantization remain optional measured candidates. |
@@ -494,6 +502,10 @@ send authorized configuration commands through their named daemon operation.
   the measurement authority; the Plan 11 UI renders supplied results and never
   computes a second grade, readiness score, action policy, or backend
   truth.
+- Automations observes default-scheduled curator/reflector/skill-writer runs,
+  automatic memory and managed-skill materialization receipts, failures,
+  backoff, quarantine, pause, disablement, rollback, and explicit overrides. It
+  is not an approval or apply queue for curation.
 - Optional GPU or commercial adapters may draw or accelerate only; they never
   own graph, query, storage, health, readiness, scheduling, ranking, or
   mutation semantics.

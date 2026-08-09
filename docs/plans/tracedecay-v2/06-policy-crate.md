@@ -41,6 +41,13 @@ uncertainty, and later explain why new runtime evidence justifies keeping or
 replanning the work. The evaluator never applies the proposal, admits a
 provider, or changes the graph.
 
+Memory and managed-skill/skill-writer curation use a distinct agentic consumer
+of this pure evaluator. The curator/orchestrator automatically applies and
+materializes every allowed result; no human review or approval is required.
+Production profiles schedule the bounded curator/reflector/skill-writer loop
+by default. CLI and UI review expose evidence and explicit admin pause,
+disable, backoff, quarantine, and rollback controls only.
+
 ## End-to-end production path
 
 1. The application assembles an authorized immutable snapshot containing the
@@ -60,6 +67,15 @@ provider, or changes the graph.
    evaluator can assess the new immutable evidence and emit a replan proposal.
    That proposal is read-only until an authorized user explicitly accepts or
    rejects it.
+
+The work-proposal flow above does not govern curation. For memory and
+managed-skill/skill-writer curation, the curator/orchestrator consumes the
+policy decision directly, atomically materializes an allowed result, and
+records the exact inputs, decision revision, output identity, and effect
+receipt. Denied, abstained, stale, cancelled, failed, rolled-back, and disabled
+states remain typed; retry is bounded and idempotent. Human review is never a
+precondition, while an authorized override can disable or roll back subsequent
+use without erasing evidence.
 
 This path uses the existing policy decision/revision/digest identity consumed
 by application results and runtime admission. This adds no parallel policy
@@ -130,6 +146,12 @@ conflict resolution are never implicit fallbacks.
    topology, routing, exploration, fallback, and replay decisions through their
    real application consumers; no capability is deferred to a policy-only
    phase.
+5. Mount memory and managed-skill/skill-writer decisions in the real
+   curator/orchestrator and schedule its bounded curator/reflector/skill-writer
+   loop by default in production profiles so allowed results automatically
+   apply and materialize with durable receipts, CAS/idempotence, and explicit
+   pause/disable/backoff/quarantine/rollback controls; do not add a draft,
+   approval, or validate-before-apply queue.
 
 No slice lands a standalone schema, trait, registry, fixture framework, or
 policy phase without its production caller.
@@ -162,6 +184,14 @@ code/session and live Git watermarks and proves both are returned unchanged
 when evidence agrees, disagreement is preserved and explained without
 frontier substitution, and stale or partial state on either source remains
 independently visible rather than becoming a merged current result.
+
+A direct curation journey must prove that eligible memory and managed-skill
+results are policy-validated, automatically materialized without human action,
+durably evidenced across restart, and idempotent on replay from a default
+production profile; denial, stale inputs, write failure, pause, disable,
+backoff, quarantine, and rollback must remain typed and must not leave a
+partially active artifact. CLI and UI inspection must not be required for
+progress.
 
 ## Excluded mechanisms
 
