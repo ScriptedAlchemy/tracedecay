@@ -11,8 +11,8 @@ use tracedecay_policy::work_loop::{
     WorkContentLocationLimitV1, WorkEffortClassV1, WorkEvidenceFrontierV1, WorkOrdinalBandV1,
     WorkPriorOutcomeV1, WorkPriorTerminalV1, WorkProposalCancellationV1, WorkProposalDecisionV1,
     WorkProposalDispositionV1, WorkProposalEvaluator, WorkProposalEvaluatorV1,
-    WorkProposalPolicyInputV1, WorkProposalReasonV1, WorkRouteCandidateV1, WorkRouteOverrideV1,
-    WorkRoutePlanV1, WorkTaskShapeKindV1,
+    WorkProposalPolicyInputV1, WorkProposalReasonV1, WorkProposalRuntimeCoverageV1,
+    WorkRouteCandidateV1, WorkRouteOverrideV1, WorkRoutePlanV1, WorkTaskShapeKindV1,
 };
 
 const LOCAL_WATERMARK: i64 = 10;
@@ -32,8 +32,10 @@ fn base_input() -> WorkProposalPolicyInputV1 {
         accepted_proposal_present: false,
         execution_admitted: false,
         task_accepted: false,
-        runtime_evidence_count: 0,
-        terminal_runtime_evidence_count: 0,
+        runtime: WorkProposalRuntimeCoverageV1::Complete {
+            attempt_count: 0,
+            terminal_attempt_count: 0,
+        },
         local_evidence: Some(WorkEvidenceFrontierV1 {
             watermark: UtcMicros(LOCAL_WATERMARK),
             digest: digest('a'),
@@ -42,6 +44,7 @@ fn base_input() -> WorkProposalPolicyInputV1 {
         policy_revision: 1,
         policy_digest: digest('b'),
         configuration_digest: digest('c'),
+        configuration_revision: None,
         deadline: UtcMicros(1_000),
         cancellation: WorkProposalCancellationV1::Active,
         evaluated_at: UtcMicros(EVALUATED_AT),
@@ -558,8 +561,10 @@ fn shape_is_derived_only_from_facts_already_in_the_snapshot() {
     let mut synthesis = base_input();
     synthesis.accepted_proposal_present = true;
     synthesis.execution_admitted = true;
-    synthesis.runtime_evidence_count = 8;
-    synthesis.terminal_runtime_evidence_count = 1;
+    synthesis.runtime = WorkProposalRuntimeCoverageV1::Complete {
+        attempt_count: 8,
+        terminal_attempt_count: 1,
+    };
     let shape = evaluate(&synthesis).shape.expect("shape is present");
     assert_eq!(shape.kind, WorkTaskShapeKindV1::Synthesis);
     assert_eq!(shape.band, WorkOrdinalBandV1::High);
@@ -607,8 +612,10 @@ fn the_short_circuit_paths_carry_no_planner_claim() {
     populated.unresolved_dependency_count = 3;
 
     let mut invalid = populated.clone();
-    invalid.runtime_evidence_count = 1;
-    invalid.terminal_runtime_evidence_count = 3;
+    invalid.runtime = WorkProposalRuntimeCoverageV1::Complete {
+        attempt_count: 1,
+        terminal_attempt_count: 3,
+    };
 
     let mut cancelled = populated.clone();
     cancelled.cancellation = WorkProposalCancellationV1::Cancelled {

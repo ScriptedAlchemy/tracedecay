@@ -8,7 +8,10 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ManifestDigest, TaskId, UtcMicros};
+use tracedecay_domain::{ConfigurationRevisionId, ManifestDigest, TaskId, UtcMicros};
+pub use tracedecay_domain::{
+    WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1, WorkRouteCandidateV1,
+};
 
 use crate::authorization::{PolicyIdentifierV1, policy_digest};
 
@@ -45,113 +48,6 @@ pub enum WorkFrontierComparisonV1 {
     Agree,
     Disagree,
     Incomparable,
-}
-
-/// Ordinal band. Never a probability, never a scalar score.
-///
-/// Bands are ordered `Lowest` .. `Highest`. Comparison is the only operation
-/// the evaluator performs over them, so no weighted sum can be reconstructed
-/// from a recorded decision.
-#[derive(
-    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkOrdinalBandV1 {
-    Lowest,
-    Low,
-    Moderate,
-    High,
-    Highest,
-}
-
-impl WorkOrdinalBandV1 {
-    /// Widen one band toward `Highest`, saturating. Widening is the only
-    /// permitted response to sparse, stale, or incomparable evidence; the
-    /// evaluator never narrows a band the evidence did not earn.
-    const fn widened(self) -> Self {
-        match self {
-            Self::Lowest => Self::Low,
-            Self::Low => Self::Moderate,
-            Self::Moderate => Self::High,
-            Self::High | Self::Highest => Self::Highest,
-        }
-    }
-
-    /// Mirror a coverage band onto the uncertainty scale. Full coverage is the
-    /// lowest uncertainty the evaluator will claim before any widening.
-    const fn inverted(self) -> Self {
-        match self {
-            Self::Lowest => Self::Highest,
-            Self::Low => Self::High,
-            Self::Moderate => Self::Moderate,
-            Self::High => Self::Low,
-            Self::Highest => Self::Lowest,
-        }
-    }
-}
-
-/// Where a route places task content. Declared by the authorized snapshot; the
-/// evaluator classifies nothing itself and never widens the declared class.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkContentLocationClassV1 {
-    Local,
-    Tenant,
-    External,
-}
-
-/// Declared effort class of a route. Ordered so the sizing band can take the
-/// stronger of the declared effort and the derived task shape.
-#[derive(
-    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkEffortClassV1 {
-    Minimal,
-    Standard,
-    Extended,
-}
-
-/// One eligible route, supplied BY THE APPLICATION from the authorized snapshot.
-///
-/// Policy never discovers a provider: a route absent from this list cannot be
-/// ranked, recommended, or named as the deterministic baseline.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkRouteCandidateV1 {
-    /// Stable identity of the route. Unique within `eligible_routes`; also the
-    /// total-order tiebreak that keeps ranking deterministic.
-    pub route_id: String,
-    /// The authorized provider capability this route exercises. Recorded, never
-    /// resolved or contacted by policy.
-    pub provider_capability_id: String,
-    /// The model the route names. Recorded verbatim; policy never substitutes.
-    pub model_id: String,
-    /// Effort the route declares for this task. Contributes the floor of the
-    /// calibrated sizing band.
-    pub effort: WorkEffortClassV1,
-    /// Budget the route would consume. Compared against the remaining envelope
-    /// to decide `RouteBudgetExceeded`.
-    pub declared_budget_ceiling: u64,
-    /// Where the route would place content. Compared against the declared limit
-    /// to decide `RouteContentLocationRefused`.
-    pub content_location: WorkContentLocationClassV1,
-    /// Correctness fitness band. Highest precedence ranking dimension.
-    pub correctness: WorkOrdinalBandV1,
-    /// Fitness for sensitive data. Second ranking dimension; never merged into
-    /// correctness.
-    pub sensitive_data_fitness: WorkOrdinalBandV1,
-    /// Latency fitness, supplied ALREADY ORIENTED as fitness: `Highest` means
-    /// best-fitting latency, not the slowest route.
-    pub latency: WorkOrdinalBandV1,
-    /// Cost fitness, supplied ALREADY ORIENTED as fitness: `Highest` means
-    /// best-fitting cost, not the most expensive route.
-    pub cost: WorkOrdinalBandV1,
-    /// How much unattended progress the route is trusted to make.
-    pub autonomy: WorkOrdinalBandV1,
-    /// Quality of the evidence backing the other bands. Ranked separately so a
-    /// well-evidenced weak route is never confused with an unevidenced strong one.
-    pub evidence_quality: WorkOrdinalBandV1,
 }
 
 /// Remaining budget for this task, supplied by the application authority.
@@ -221,6 +117,22 @@ pub struct WorkRouteOverrideV1 {
     pub recorded_at: UtcMicros,
 }
 
+/// Runtime-attempt coverage available to one proposal evaluation.
+///
+/// Counts exist only when the product runtime projection is complete. Partial
+/// and unavailable projections stay non-numeric so missing attempts can never
+/// be misrepresented as zero activity.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkProposalRuntimeCoverageV1 {
+    Complete {
+        attempt_count: u32,
+        terminal_attempt_count: u32,
+    },
+    Partial,
+    Unavailable,
+}
+
 /// Immutable Work snapshot facts assembled by the application authority.
 ///
 /// Every count and frontier is an explicit input; the evaluator performs no
@@ -235,13 +147,13 @@ pub struct WorkProposalPolicyInputV1 {
     pub accepted_proposal_present: bool,
     pub execution_admitted: bool,
     pub task_accepted: bool,
-    pub runtime_evidence_count: u32,
-    pub terminal_runtime_evidence_count: u32,
+    pub runtime: WorkProposalRuntimeCoverageV1,
     pub local_evidence: Option<WorkEvidenceFrontierV1>,
     pub live_git_evidence: Option<WorkEvidenceFrontierV1>,
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
+    pub configuration_revision: Option<ConfigurationRevisionId>,
     pub deadline: UtcMicros,
     pub cancellation: WorkProposalCancellationV1,
     pub evaluated_at: UtcMicros,
@@ -272,7 +184,16 @@ impl WorkProposalPolicyInputV1 {
             && self.policy_digest.validate().is_ok()
             && self.configuration_digest.validate().is_ok()
             && self.unresolved_dependency_count <= self.dependency_count
-            && self.terminal_runtime_evidence_count <= self.runtime_evidence_count
+            && (matches!(
+                self.runtime,
+                WorkProposalRuntimeCoverageV1::Complete {
+                    attempt_count,
+                    terminal_attempt_count,
+                } if terminal_attempt_count <= attempt_count
+            ) || matches!(
+                self.runtime,
+                WorkProposalRuntimeCoverageV1::Partial | WorkProposalRuntimeCoverageV1::Unavailable
+            ))
             && self
                 .local_evidence
                 .as_ref()
@@ -328,6 +249,8 @@ pub enum WorkProposalReasonV1 {
     FrontierDisagreement,
     FrontierIncomparable,
     TaskAccepted,
+    RuntimeCoveragePartial,
+    RuntimeCoverageUnavailable,
     TerminalEvidenceObserved,
     ExecutionInFlight,
     ProposalAccepted,
@@ -495,6 +418,7 @@ pub struct WorkProposalDecisionV1 {
     pub policy_revision: u64,
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
+    pub configuration_revision: Option<ConfigurationRevisionId>,
     pub disposition: WorkProposalDispositionV1,
     pub recommended_action: Option<WorkProposalActionV1>,
     /// True when the recommendation is the declared deterministic baseline
@@ -568,6 +492,7 @@ impl WorkProposalEvaluatorV1 {
             policy_revision: input.policy_revision,
             policy_digest: input.policy_digest.clone(),
             configuration_digest: input.configuration_digest.clone(),
+            configuration_revision: input.configuration_revision.clone(),
             disposition,
             recommended_action,
             deterministic_fallback,
@@ -639,23 +564,25 @@ fn count_u32(value: usize) -> u32 {
 ///
 /// The ladder reads the gate booleans in the same precedence the gates use, so
 /// the shape can never contradict the disposition that accompanies it.
-fn derive_shape(input: &WorkProposalPolicyInputV1) -> WorkTaskShapeV1 {
+fn derive_shape(
+    input: &WorkProposalPolicyInputV1,
+    attempt_count: u32,
+    terminal_attempt_count: u32,
+) -> WorkTaskShapeV1 {
     let kind = if input.task_accepted {
         WorkTaskShapeKindV1::Verification
-    } else if input.terminal_runtime_evidence_count > 0 {
+    } else if terminal_attempt_count > 0 {
         WorkTaskShapeKindV1::Synthesis
     } else if input.execution_admitted || input.accepted_proposal_present {
         WorkTaskShapeKindV1::Change
     } else if input.unresolved_dependency_count > 0 {
         WorkTaskShapeKindV1::Investigation
-    } else if input.dependency_count > 0 || input.runtime_evidence_count > 0 {
+    } else if input.dependency_count > 0 || attempt_count > 0 {
         WorkTaskShapeKindV1::Change
     } else {
         WorkTaskShapeKindV1::Unclassified
     };
-    let scale = input
-        .dependency_count
-        .saturating_add(input.runtime_evidence_count);
+    let scale = input.dependency_count.saturating_add(attempt_count);
     let band = match scale {
         0 => WorkOrdinalBandV1::Lowest,
         1..=2 => WorkOrdinalBandV1::Low,
@@ -822,8 +749,12 @@ const fn effort_band(effort: WorkEffortClassV1) -> WorkOrdinalBandV1 {
 /// Pure: it reads no clock, opens no store, and discovers no provider. Every
 /// route it can name arrived in `eligible_routes`, and every outcome it counts
 /// arrived in `prior_outcomes`.
-fn plan_work(input: &WorkProposalPolicyInputV1) -> WorkPlannerOutcome {
-    let shape = derive_shape(input);
+fn plan_work(
+    input: &WorkProposalPolicyInputV1,
+    attempt_count: u32,
+    terminal_attempt_count: u32,
+) -> WorkPlannerOutcome {
+    let shape = derive_shape(input, attempt_count, terminal_attempt_count);
     let decomposition = derive_decomposition(input);
     let (mut survivors, exclusions) = partition_routes(input);
     rank_survivors(&mut survivors);
@@ -1046,10 +977,36 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
                 comparison,
             );
         }
+        let (attempt_count, terminal_attempt_count) = match input.runtime {
+            WorkProposalRuntimeCoverageV1::Complete {
+                attempt_count,
+                terminal_attempt_count,
+            } => (attempt_count, terminal_attempt_count),
+            WorkProposalRuntimeCoverageV1::Partial => {
+                return self.decision(
+                    input,
+                    WorkProposalDispositionV1::Abstain,
+                    None,
+                    false,
+                    vec![WorkProposalReasonV1::RuntimeCoveragePartial],
+                    comparison,
+                );
+            }
+            WorkProposalRuntimeCoverageV1::Unavailable => {
+                return self.decision(
+                    input,
+                    WorkProposalDispositionV1::Indeterminate,
+                    None,
+                    false,
+                    vec![WorkProposalReasonV1::RuntimeCoverageUnavailable],
+                    comparison,
+                );
+            }
+        };
         // Past the short-circuits the input is valid, live, and inside its
         // deadline, so the planner claim is licensed. It is computed once and
         // merged into whichever gate terminates the evaluation.
-        let plan = plan_work(input);
+        let plan = plan_work(input, attempt_count, terminal_attempt_count);
         let mut reasons = vec![comparison_reason(comparison)];
         if comparison == WorkFrontierComparisonV1::Disagree {
             // Disagreeing frontiers cannot support a recommendation. Both
@@ -1080,7 +1037,7 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
             );
         }
         if input.execution_admitted {
-            if input.terminal_runtime_evidence_count > 0 {
+            if terminal_attempt_count > 0 {
                 reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
                 return self.planned_decision(
                     input,
@@ -1164,13 +1121,16 @@ mod tests {
             accepted_proposal_present: false,
             execution_admitted: false,
             task_accepted: false,
-            runtime_evidence_count: 0,
-            terminal_runtime_evidence_count: 0,
+            runtime: WorkProposalRuntimeCoverageV1::Complete {
+                attempt_count: 0,
+                terminal_attempt_count: 0,
+            },
             local_evidence: Some(frontier(10, 'a')),
             live_git_evidence: None,
             policy_revision: 1,
             policy_digest: digest('b'),
             configuration_digest: digest('c'),
+            configuration_revision: None,
             deadline: UtcMicros(1_000),
             cancellation: WorkProposalCancellationV1::Active,
             evaluated_at: UtcMicros(100),
@@ -1235,8 +1195,10 @@ mod tests {
         let mut request = input();
         request.accepted_proposal_present = true;
         request.execution_admitted = true;
-        request.runtime_evidence_count = 2;
-        request.terminal_runtime_evidence_count = 1;
+        request.runtime = WorkProposalRuntimeCoverageV1::Complete {
+            attempt_count: 2,
+            terminal_attempt_count: 1,
+        };
         let decision = WorkProposalEvaluatorV1::default().evaluate(&request);
         assert_eq!(decision.disposition, WorkProposalDispositionV1::Allow);
         assert_eq!(
@@ -1258,6 +1220,32 @@ mod tests {
         let decision = WorkProposalEvaluatorV1::default().evaluate(&request);
         assert_eq!(decision.disposition, WorkProposalDispositionV1::Abstain);
         assert_eq!(decision.recommended_action, None);
+    }
+
+    #[test]
+    fn incomplete_runtime_coverage_never_becomes_zero_attempts() {
+        let evaluator = WorkProposalEvaluatorV1::default();
+        let mut request = input();
+        request.runtime = WorkProposalRuntimeCoverageV1::Partial;
+        let partial = evaluator.evaluate(&request);
+        assert_eq!(partial.disposition, WorkProposalDispositionV1::Abstain);
+        assert_eq!(partial.shape, None);
+        assert_eq!(
+            partial.ordered_reason_codes,
+            vec![WorkProposalReasonV1::RuntimeCoveragePartial]
+        );
+
+        request.runtime = WorkProposalRuntimeCoverageV1::Unavailable;
+        let unavailable = evaluator.evaluate(&request);
+        assert_eq!(
+            unavailable.disposition,
+            WorkProposalDispositionV1::Indeterminate
+        );
+        assert_eq!(unavailable.shape, None);
+        assert_eq!(
+            unavailable.ordered_reason_codes,
+            vec![WorkProposalReasonV1::RuntimeCoverageUnavailable]
+        );
     }
 
     #[test]
@@ -1331,8 +1319,10 @@ mod tests {
     #[test]
     fn inconsistent_counts_are_an_invalid_request() {
         let mut request = input();
-        request.terminal_runtime_evidence_count = 3;
-        request.runtime_evidence_count = 1;
+        request.runtime = WorkProposalRuntimeCoverageV1::Complete {
+            attempt_count: 1,
+            terminal_attempt_count: 3,
+        };
         let decision = WorkProposalEvaluatorV1::default().evaluate(&request);
         assert_eq!(
             decision.disposition,
