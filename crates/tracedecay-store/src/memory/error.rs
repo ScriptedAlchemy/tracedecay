@@ -1,9 +1,6 @@
 use std::error::Error;
-use tracedecay_domain::{
-    DomainError, FactAssertionId, FactEventId, ProvenanceId, RetrievalAnchorId,
-};
 
-use super::FactProposalPromotionStateV1;
+use tracedecay_domain::{DomainError, FactAssertionId, FactEventId, RetrievalAnchorId};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -55,29 +52,9 @@ pub enum FactStoreError {
 pub type FactStoreResult<T> = Result<T, FactStoreError>;
 
 #[derive(Debug, thiserror::Error)]
-pub enum FactProposalStoreError {
-    #[error("fact authority operation failed")]
-    Store(#[from] FactStoreError),
-    #[error("fact proposal {proposal_id} state changed before promotion")]
-    ProposalStateConflict {
-        proposal_id: ProvenanceId,
-        expected: FactProposalPromotionStateV1,
-        actual: Option<FactProposalPromotionStateV1>,
-    },
-    #[error("fact proposal storage operation {operation} failed")]
-    Storage {
-        operation: &'static str,
-        #[source]
-        source: Box<dyn Error + Send + Sync>,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum ProjectMemoryStoreError {
     #[error(transparent)]
     Store(#[from] FactStoreError),
-    #[error(transparent)]
-    Proposal(#[from] FactProposalStoreError),
 }
 
 pub type ProjectMemoryResult<T> = Result<T, ProjectMemoryStoreError>;
