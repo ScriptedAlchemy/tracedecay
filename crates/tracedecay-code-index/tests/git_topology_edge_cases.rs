@@ -112,6 +112,8 @@ fn projection(
             coverage: GitCoverageV1::complete(),
         },
         ref_watermark,
+        branch_stacks: Vec::new(),
+        worktree_occupancies: Vec::new(),
     }
 }
 

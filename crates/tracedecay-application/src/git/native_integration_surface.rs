@@ -28,17 +28,20 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
     NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
     NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeInventoryEpoch,
+    WorktreeInventorySnapshotId,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
+    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority,
     IdempotencyContract, InverseContract, InverseUnavailableReason, LifecycleClass, PrivacyClass,
-    ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    TerminalState, TerminalStateContract, UseCaseId,
+    OperationId, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
+    RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId, CodecBindingKey,
 };
 
 use crate::current_bindings;
@@ -57,7 +60,7 @@ use crate::git::worktree::{
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
-use crate::{CancellationSignal, ResolvedScope};
+use crate::{AuthorizedScopeSet, CancellationSignal, ResolvedScope};
 
 /// Canonical wire operation names for the native-integration journey.
 pub const NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION: &str = "stack_snapshot";
@@ -89,6 +92,8 @@ pub use crate::git::worktree::{
 pub struct NativeIntegrationStackSnapshotSurfaceRequest {
     pub source: ResolvedScope,
     pub destination: ResolvedScope,
+    pub authorized_scope_set_id: ScopeSetId,
+    pub authorized_scope_set_revision: ScopeSetRevision,
     pub authorized_scope_set_digest: ManifestDigest,
     pub inventory_snapshot_id: WorktreeInventorySnapshotId,
     pub inventory_epoch: WorktreeInventoryEpoch,
@@ -103,19 +108,28 @@ impl NativeIntegrationStackSnapshotSurfaceRequest {
     /// never by the caller.
     pub fn into_resolution_request(
         self,
+        authorized_scope_set: AuthorizedScopeSet,
         observed_at: UtcMicros,
-    ) -> NativeIntegrationStackResolutionRequestV1 {
-        NativeIntegrationStackResolutionRequestV1 {
+    ) -> Result<NativeIntegrationStackResolutionRequestV1, ApplicationContractError> {
+        if authorized_scope_set.scope_set_id() != &self.authorized_scope_set_id
+            || authorized_scope_set.revision() != self.authorized_scope_set_revision
+            || authorized_scope_set.digest() != &self.authorized_scope_set_digest
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "native integration registered scope set",
+            });
+        }
+        Ok(NativeIntegrationStackResolutionRequestV1 {
             source: self.source,
             destination: self.destination,
-            authorized_scope_set_digest: self.authorized_scope_set_digest,
+            authorized_scope_set,
             inventory_snapshot_id: self.inventory_snapshot_id,
             inventory_epoch: self.inventory_epoch,
             selection: self.selection,
             grant_digest: self.grant_digest,
             policy_digest: self.policy_digest,
             observed_at,
-        }
+        })
     }
 }
 
@@ -778,6 +792,63 @@ pub fn native_integration_surface_catalog_contribution()
     Ok(contribution.with_executable_schemas(schemas)?)
 }
 
+/// Daemon-owned public HTTP bindings for native worktree administration.
+///
+/// The six stack transaction operations remain CLI/MCP-only; only specs that
+/// carry an actual current HTTP surface can enter this executable registry.
+pub fn native_worktree_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contribution = native_integration_surface_catalog_contribution()?;
+    let service_id = ServiceId::new("service.application.native-integration")?;
+    let mut bindings = Vec::new();
+    for spec in NATIVE_INTEGRATION_SPECS
+        .iter()
+        .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
+    {
+        let capability_id = CapabilityId::new(spec.capability)?;
+        let manifest = contribution
+            .capabilities()
+            .iter()
+            .find(|manifest| manifest.capability_id() == &capability_id)
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "native worktree executable capability",
+            })?;
+        let schema = contribution.executable_schema(&capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "native worktree executable schema",
+            },
+        )?;
+        let http_binding = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.capability_id() == &capability_id
+                    && binding.surface() == BindingSurface::Http
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "native worktree HTTP binding",
+            })?;
+        bindings.push(ExecutableBindingAvailabilityV1::available(
+            ExecutableBindingV1::daemon_owned(
+                manifest,
+                OperationId::new(format!("operation.application.{}", spec.operation))?,
+                service_id.clone(),
+                schema.request_schema().clone(),
+                schema.result_schema().clone(),
+                CodecBindingKey::new(format!(
+                    "codec.application.native-integration.{}.json.v1",
+                    spec.operation
+                ))?,
+                RouteExposureV1::Public {
+                    binding_id: http_binding.binding_id().clone(),
+                    route_path: format!("/application/native-integration/{}", spec.operation),
+                },
+            )?,
+        ));
+    }
+    ExecutableBindingRegistryV1::new(bindings).map_err(Into::into)
+}
+
 /// Resolve one native-integration wire operation to its canonical application
 /// operation. Callers use this to bind the exact capability and use case an
 /// authorization grant must name; there is no generic forwarding path.
@@ -1050,6 +1121,22 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {
+        let schema = serde_json::to_value(schemars::schema_for!(
+            NativeIntegrationStackSnapshotSurfaceRequest
+        ))
+        .expect("stack-snapshot schema");
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("stack-snapshot schema properties");
+
+        assert!(properties.contains_key("authorized_scope_set_id"));
+        assert!(properties.contains_key("authorized_scope_set_revision"));
+        assert!(properties.contains_key("authorized_scope_set_digest"));
+    }
 
     #[test]
     fn every_native_integration_journey_operation_is_bound_to_cli_and_mcp() {

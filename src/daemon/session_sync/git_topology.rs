@@ -1,0 +1,271 @@
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet};
+use tracedecay_code_index::git_projection::{
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
+    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
+    git_topology_namespace, git_topology_projection_identity,
+};
+use tracedecay_domain::{GitHeadStateV1, RefId, RepositoryId, WorktreeId};
+use tracedecay_global_db::ProjectGraphRuntimePortV1;
+use tracedecay_graph_db::{GraphCancellation, GraphDbError, GraphProjectorRevision};
+use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
+use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
+
+use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
+
+pub(super) const DECLARED_TOPOLOGY_STALE: &str = "git_topology_declared_state_stale";
+const DECLARED_TOPOLOGY_UNAVAILABLE: &str = "git_topology_declared_authority_unavailable";
+
+#[derive(Clone)]
+struct GitTopologySyncCancellation(Arc<AtomicBool>);
+
+impl GraphCancellation for GitTopologySyncCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+pub(super) fn publish_native_topology(
+    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    project_root: PathBuf,
+    repository: RepositoryId,
+    worktree: WorktreeId,
+    scope_sets: AuthorizedScopeSetSqliteStorage,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let identity = git_topology_projection_identity(
+        git_topology_namespace(&repository).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let current = runtime
+        .verified_snapshot(&identity, Arc::clone(&cancelled))
+        .map_err(|error| error.to_string())?;
+    let (branch_stacks, worktree_occupancies) = match current {
+        Some(snapshot) => {
+            let store = GitTopologyProjectionStore::from_verified_snapshot_verified(
+                snapshot,
+                Arc::new(GitTopologySyncCancellation(Arc::clone(&cancelled))),
+            )
+            .map_err(|error| error.to_string())?;
+            (
+                store.branch_stacks().to_vec(),
+                store.worktree_occupancies().to_vec(),
+            )
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    validate_retained_declared_topology(
+        &repository,
+        &project_root,
+        &branch_stacks,
+        &worktree_occupancies,
+        &scope_sets,
+    )?;
+    let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
+    let projection = adapter
+        .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
+        .map_err(|error| error.to_string())?
+        .with_declared_topology(branch_stacks, worktree_occupancies)
+        .map_err(|error| error.to_string())?;
+    let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .map_err(|error| error.to_string())?;
+    let check = || {
+        if cancelled.load(Ordering::Relaxed) {
+            Err(GraphDbError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    let manifest = build_git_topology_manifest_checked(identity, &projection, &revision, &check)
+        .map_err(|error| error.to_string())?;
+    let idempotency =
+        git_topology_idempotency_key(&projection, &revision).map_err(|error| error.to_string())?;
+    runtime
+        .publish_verified_manifest(&manifest, idempotency, cancelled)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(super) fn validate_retained_declared_topology(
+    repository: &RepositoryId,
+    repository_root: &Path,
+    branch_stacks: &[GitBranchStackBindingV1],
+    worktree_occupancies: &[GitWorktreeOccupancyV1],
+    storage: &AuthorizedScopeSetSqliteStorage,
+) -> Result<(), String> {
+    let enrolled = GitRepositoryAuthority::discover(repository_root)
+        .map_err(|_| "enrolled Git topology root is unavailable".to_owned())?;
+    for binding in branch_stacks {
+        let scope_set = exact_scope_set(
+            storage,
+            &binding.scope_set_id,
+            binding.scope_set_revision,
+            &binding.scope_set_digest,
+        )?;
+        let expected_worktrees = scope_set
+            .roots()
+            .iter()
+            .filter(|root| {
+                root.scope().project_id == binding.project_id
+                    && root.scope().repository_id == binding.repository_id
+            })
+            .map(|root| root.scope().worktree_id.clone())
+            .collect::<BTreeSet<_>>();
+        let projected_worktrees = worktree_occupancies
+            .iter()
+            .filter(|occupancy| {
+                occupancy.project_id == binding.project_id
+                    && occupancy.repository_id == binding.repository_id
+                    && occupancy.scope_set_id == binding.scope_set_id
+                    && occupancy.scope_set_revision == binding.scope_set_revision
+                    && occupancy.scope_set_digest == binding.scope_set_digest
+            })
+            .map(|occupancy| occupancy.worktree_id.clone())
+            .collect::<BTreeSet<_>>();
+        if expected_worktrees != projected_worktrees {
+            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        }
+        for node in &binding.revision.nodes {
+            let roots = scope_set
+                .roots()
+                .iter()
+                .filter(|root| {
+                    root.scope().project_id == node.project_id
+                        && root.scope().repository_id == node.repository_id
+                        && root.scope().reference.as_ref() == Some(&node.reference)
+                        && node
+                            .worktree_id
+                            .as_ref()
+                            .is_none_or(|worktree| &root.scope().worktree_id == worktree)
+                })
+                .collect::<Vec<_>>();
+            if roots.is_empty() {
+                return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+            }
+            for root in roots {
+                let authority = root_authority(root, repository, &enrolled)?;
+                let tip = authority
+                    .exact_reference_tip(node.reference.as_str())
+                    .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+                if tip.as_str() != node.tip.as_str() {
+                    return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+                }
+            }
+            let occupied = occupied_worktrees(
+                &scope_set,
+                &binding.project_id,
+                &binding.repository_id,
+                &node.reference,
+                &enrolled,
+            )?;
+            if occupied.len() > 1 || occupied.first() != node.worktree_id.as_ref() {
+                return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+            }
+        }
+    }
+    for occupancy in worktree_occupancies {
+        let scope_set = exact_scope_set(
+            storage,
+            &occupancy.scope_set_id,
+            occupancy.scope_set_revision,
+            &occupancy.scope_set_digest,
+        )?;
+        let roots = scope_set
+            .roots()
+            .iter()
+            .filter(|root| {
+                root.scope().project_id == occupancy.project_id
+                    && root.scope().repository_id == occupancy.repository_id
+                    && root.scope().worktree_id == occupancy.worktree_id
+            })
+            .collect::<Vec<_>>();
+        if roots.len() != 1 {
+            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        }
+        let authority = root_authority(roots[0], repository, &enrolled)?;
+        if !head_occupancy_matches(&authority, occupancy.reference.as_ref())? {
+            return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn exact_scope_set(
+    storage: &AuthorizedScopeSetSqliteStorage,
+    id: &tracedecay_domain::ScopeSetId,
+    revision: tracedecay_domain::ScopeSetRevision,
+    digest: &tracedecay_domain::ManifestDigest,
+) -> Result<AuthorizedScopeSet, String> {
+    let scope_set = storage
+        .read(id)
+        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?
+        .ok_or_else(|| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+    if scope_set.revision() != revision || scope_set.digest() != digest {
+        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+    }
+    Ok(scope_set)
+}
+
+fn occupied_worktrees(
+    scope_set: &AuthorizedScopeSet,
+    project: &tracedecay_domain::ProjectId,
+    repository: &RepositoryId,
+    reference: &RefId,
+    enrolled: &GitRepositoryAuthority,
+) -> Result<Vec<WorktreeId>, String> {
+    let mut occupied = Vec::new();
+    for root in scope_set.roots().iter().filter(|root| {
+        &root.scope().project_id == project && &root.scope().repository_id == repository
+    }) {
+        let authority = root_authority(root, repository, enrolled)?;
+        if head_occupancy_matches(&authority, Some(reference))? {
+            occupied.push(root.scope().worktree_id.clone());
+        }
+    }
+    occupied.sort();
+    occupied.dedup();
+    Ok(occupied)
+}
+
+fn root_authority(
+    root: &AuthorizedRoot,
+    repository: &RepositoryId,
+    enrolled: &GitRepositoryAuthority,
+) -> Result<GitRepositoryAuthority, String> {
+    if &root.scope().repository_id != repository {
+        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+    }
+    let locator = root
+        .locator()
+        .ok_or_else(|| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+    let authority = GitRepositoryAuthority::discover(&locator.canonical_root)
+        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+    if authority.common_dir() != enrolled.common_dir() {
+        return Err(DECLARED_TOPOLOGY_STALE.to_owned());
+    }
+    Ok(authority)
+}
+
+fn head_occupancy_matches(
+    authority: &GitRepositoryAuthority,
+    reference: Option<&RefId>,
+) -> Result<bool, String> {
+    let status = authority
+        .status()
+        .map_err(|_| DECLARED_TOPOLOGY_UNAVAILABLE.to_owned())?;
+    Ok(match (&status.head, reference) {
+        (GitHeadStateV1::Attached { branch, .. }, Some(reference)) => {
+            branch == reference.as_str()
+                || reference
+                    .as_str()
+                    .strip_prefix("refs/heads/")
+                    .is_some_and(|short| branch == short)
+        }
+        (GitHeadStateV1::Detached { .. } | GitHeadStateV1::Unborn { .. }, None) => true,
+        _ => false,
+    })
+}

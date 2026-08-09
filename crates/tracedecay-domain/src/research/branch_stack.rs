@@ -50,7 +50,9 @@ impl<'de> Deserialize<'de> for WorktreeInventoryEpoch {
 }
 
 /// Authoritative source that declared the exact stack topology.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchStackSourceV1 {
     ExplicitDeclaration,
@@ -58,7 +60,7 @@ pub enum BranchStackSourceV1 {
 }
 
 /// One visible branch/ref at one immutable tip.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BranchStackNodeV1 {
     pub node_id: StackNodeId,
@@ -84,7 +86,7 @@ impl BranchStackNodeV1 {
 
 /// A declared dependency edge; propagation direction remains an application
 /// decision and is never inferred from this edge.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct BranchStackEdgeV1 {
     pub dependency: StackNodeId,
@@ -105,7 +107,7 @@ impl BranchStackEdgeV1 {
 }
 
 /// Immutable branch-stack projection at one exact inventory revision.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BranchStackRevisionV1 {
     pub stack_id: BranchStackId,

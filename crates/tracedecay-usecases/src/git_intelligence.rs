@@ -322,6 +322,8 @@ impl NativeGitIntelligence {
                 coverage: GitCoverageV1::degraded(history.degradations.into_iter().collect()),
             },
             ref_watermark,
+            branch_stacks: Vec::new(),
+            worktree_occupancies: Vec::new(),
         };
         projection.validate().map_err(map_topology_error)?;
         Ok(projection)

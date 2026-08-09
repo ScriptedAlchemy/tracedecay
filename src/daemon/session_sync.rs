@@ -816,6 +816,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
     }
 }
 
+mod git_topology;
 mod work;
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();

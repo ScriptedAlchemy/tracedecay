@@ -8,15 +8,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    BranchStackId, BranchStackRevisionId, ManifestDigest, NativeIntegrationApprovalV1,
-    NativeIntegrationDirectionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
-    NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, StackNodeId, UtcMicros,
-    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    BranchStackId, BranchStackRevisionId, BranchStackRevisionV1, ManifestDigest,
+    NativeIntegrationApprovalV1, NativeIntegrationDirectionV1, NativeIntegrationPreviewId,
+    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, StackNodeId, UtcMicros, WorktreeInventoryEpoch,
+    WorktreeInventorySnapshotId,
 };
 
 use crate::{
-    ApplicationContractError, CancellationSignal, RequestAdmission, RequestContext, ResolvedScope,
+    ApplicationContractError, AuthorizedScopeSet, CancellationSignal, RequestAdmission,
+    RequestContext, ResolvedScope,
 };
 
 /// Caller-visible selection proof. The topology authority resolves it into an
@@ -28,6 +30,7 @@ pub enum NativeIntegrationSelectionBindingV1 {
         stack_id: BranchStackId,
         revision_id: BranchStackRevisionId,
         revision_digest: ManifestDigest,
+        declared_revision: BranchStackRevisionV1,
         source_node_id: StackNodeId,
         destination_node_id: StackNodeId,
         direction: NativeIntegrationDirectionV1,
@@ -44,6 +47,7 @@ impl NativeIntegrationSelectionBindingV1 {
                 stack_id,
                 revision_id,
                 revision_digest,
+                declared_revision,
                 source_node_id,
                 destination_node_id,
                 direction,
@@ -51,10 +55,14 @@ impl NativeIntegrationSelectionBindingV1 {
                 stack_id.validate()?;
                 revision_id.validate()?;
                 revision_digest.validate()?;
+                declared_revision.validate()?;
                 source_node_id.validate()?;
                 destination_node_id.validate()?;
                 if source_node_id == destination_node_id
                     || *direction == NativeIntegrationDirectionV1::IntegrateIndependentBranch
+                    || *stack_id != declared_revision.stack_id
+                    || *revision_id != declared_revision.revision_id
+                    || *revision_digest != declared_revision.digest
                 {
                     return Err(ApplicationContractError::Inconsistent {
                         field: "native integration stack edge",
@@ -73,7 +81,7 @@ impl NativeIntegrationSelectionBindingV1 {
 pub struct NativeIntegrationStackResolutionRequestV1 {
     pub source: ResolvedScope,
     pub destination: ResolvedScope,
-    pub authorized_scope_set_digest: ManifestDigest,
+    pub authorized_scope_set: AuthorizedScopeSet,
     pub inventory_snapshot_id: WorktreeInventorySnapshotId,
     pub inventory_epoch: WorktreeInventoryEpoch,
     pub selection: NativeIntegrationSelectionBindingV1,
@@ -86,7 +94,11 @@ impl NativeIntegrationStackResolutionRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         self.source.validate()?;
         self.destination.validate()?;
-        self.authorized_scope_set_digest.validate()?;
+        self.authorized_scope_set.validate().map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "native integration authorized scope set",
+            }
+        })?;
         self.inventory_snapshot_id.validate()?;
         self.inventory_epoch.validate()?;
         self.selection.validate()?;
@@ -103,8 +115,58 @@ impl NativeIntegrationStackResolutionRequestV1 {
                 field: "native integration exact root pair",
             });
         }
+        if !self
+            .authorized_scope_set
+            .roots()
+            .iter()
+            .any(|root| root.scope() == &self.source)
+            || !self
+                .authorized_scope_set
+                .roots()
+                .iter()
+                .any(|root| root.scope() == &self.destination)
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "native integration authorized scope set",
+            });
+        }
+        if let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+            declared_revision,
+            source_node_id,
+            destination_node_id,
+            ..
+        } = &self.selection
+        {
+            if declared_revision.inventory_snapshot_id != self.inventory_snapshot_id
+                || declared_revision.inventory_epoch != self.inventory_epoch
+                || !declared_node_matches_scope(declared_revision, source_node_id, &self.source)
+                || !declared_node_matches_scope(
+                    declared_revision,
+                    destination_node_id,
+                    &self.destination,
+                )
+            {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "native integration declared stack authority",
+                });
+            }
+        }
         Ok(())
     }
+}
+
+fn declared_node_matches_scope(
+    revision: &BranchStackRevisionV1,
+    node_id: &StackNodeId,
+    scope: &ResolvedScope,
+) -> bool {
+    revision.nodes.iter().any(|node| {
+        node.node_id == *node_id
+            && node.project_id == scope.project_id
+            && node.repository_id == scope.repository_id
+            && scope.reference.as_ref() == Some(&node.reference)
+            && node.worktree_id.as_ref() == Some(&scope.worktree_id)
+    })
 }
 
 /// Typed graph/topology resolution. Hidden or denied roots reveal no topology.

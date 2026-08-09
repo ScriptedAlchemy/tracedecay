@@ -11,8 +11,9 @@ use std::process::Command;
 
 use super::registry::DaemonNativeIntegrationServiceRegistry;
 use tracedecay_application::{
-    CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, NativeIntegrationApplyRequestV1, NativeIntegrationEvidenceRevisionsV1,
+    AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
+    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    NativeIntegrationApplyRequestV1, NativeIntegrationEvidenceRevisionsV1,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
     NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionOutcomeV1,
     NativeIntegrationStackResolutionRequestV1, RequestContext, RequestId, ResolvedScope,
@@ -22,8 +23,8 @@ use tracedecay_domain::{
     ActorId, CapabilityId, ManifestDigest, MechanicalIntegrationModeV1,
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPreviewId,
     NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
-    canonical_sha256,
+    RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
+    WorktreeInventorySnapshotId, canonical_sha256,
 };
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
@@ -148,18 +149,41 @@ fn context(destination: ResolvedScope, request_id: &str) -> RequestContext {
     .expect("request context")
 }
 
+fn authorized_scope_set(
+    source: ResolvedScope,
+    destination: ResolvedScope,
+    request_id: &str,
+) -> AuthorizedScopeSet {
+    let (capability, use_case) =
+        operation_authority(tracedecay_application::NATIVE_INTEGRATION_PREFLIGHT_OPERATION);
+    AuthorizedScopeSetAuthority::authorize(
+        ScopeSetId::new(format!("scope-set.native.journey.{request_id}")).expect("scope set id"),
+        ScopeSetRevision::new(1).expect("scope set revision"),
+        vec![
+            context(source, &format!("{request_id}.source")),
+            context(destination, &format!("{request_id}.destination")),
+        ],
+        &capability,
+        &use_case,
+        OBSERVED_AT,
+    )
+    .expect("authorized scope set")
+}
+
 fn preflight_request(
     mode: MechanicalIntegrationModeV1,
     request_id: &str,
 ) -> NativeIntegrationPreflightRequestV1 {
     let (source, destination) = exact_pair_scopes();
     let context = context(destination.clone(), request_id);
+    let authorized_scope_set =
+        authorized_scope_set(source.clone(), destination.clone(), request_id);
     NativeIntegrationPreflightRequestV1 {
         context,
         topology: NativeIntegrationStackResolutionRequestV1 {
             source,
             destination,
-            authorized_scope_set_digest: digest('b'),
+            authorized_scope_set,
             inventory_snapshot_id: WorktreeInventorySnapshotId::new("inventory.native.journey")
                 .expect("inventory snapshot"),
             inventory_epoch: WorktreeInventoryEpoch::new(1).expect("inventory epoch"),

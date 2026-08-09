@@ -14,13 +14,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
+    AuthorizedScopeSet, CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
     NativeIntegrationPortError, NativeIntegrationRecoveryRequestV1, NativeIntegrationService,
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
     NativeIntegrationStackResolutionRequestV1, NativeIntegrationStackSnapshotService,
     ResolvedScope,
 };
-use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, UtcMicros};
+use tracedecay_domain::{
+    ManifestDigest, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros,
+};
 use tracedecay_store::{NativeIntegrationStore, NativeIntegrationStoreResult};
 use tracedecay_usecases::native_integration::{
     DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
@@ -33,10 +35,14 @@ use tracedecay_usecases::stack_coordinator::{
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
 use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
+use super::{DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority};
+
+const MAX_PENDING_WORKTREE_CLEANUPS: u32 = 4_096;
 
 /// The one exact composition served to invocation routing.
 pub(crate) type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTransactionCoordinator<
@@ -156,6 +162,8 @@ pub(crate) struct DaemonNativeIntegrationOwner {
     service: Arc<DaemonProjectNativeIntegrationService>,
     snapshots: Arc<NativeIntegrationStackSnapshotService<SharedProjectNativeIntegrationTopology>>,
     store: SharedDaemonNativeIntegrationStore,
+    scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
+    worktree_authority: DaemonNativeWorktreeAuthority,
     stack_runtimes: Arc<Mutex<BTreeMap<ManifestDigest, Arc<DaemonGitHubStackRuntimeV1>>>>,
 }
 
@@ -178,6 +186,52 @@ impl DaemonNativeIntegrationOwner {
 
     pub(crate) fn store(&self) -> &SharedDaemonNativeIntegrationStore {
         &self.store
+    }
+
+    pub(crate) fn worktree_authority(&self) -> DaemonNativeWorktreeAuthority {
+        self.worktree_authority.clone()
+    }
+
+    pub(crate) fn worktree_scope_sets(
+        &self,
+    ) -> Result<DaemonAuthorizedScopeSetReader, NativeIntegrationPortError> {
+        self.scope_sets
+            .clone()
+            .map(DaemonAuthorizedScopeSetReader::new)
+            .ok_or(NativeIntegrationPortError::Unavailable)
+    }
+
+    pub(crate) fn cleanup_recovery_roots(&self) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
+        let mut roots = self
+            .store
+            .pending_worktree_cleanups(&self.repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?
+            .into_iter()
+            .map(|transaction| transaction.command.worktree_root)
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        Ok(roots)
+    }
+
+    pub(crate) fn authorized_scope_set(
+        &self,
+        scope_set_id: &ScopeSetId,
+        revision: ScopeSetRevision,
+        digest: &ManifestDigest,
+    ) -> Result<AuthorizedScopeSet, NativeIntegrationPortError> {
+        let storage = self
+            .scope_sets
+            .as_ref()
+            .ok_or(NativeIntegrationPortError::Unavailable)?;
+        let scope_set = storage
+            .read(scope_set_id)
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?
+            .ok_or(NativeIntegrationPortError::Unavailable)?;
+        if scope_set.revision() != revision || scope_set.digest() != digest {
+            return Err(NativeIntegrationPortError::Stale);
+        }
+        Ok(scope_set)
     }
 
     /// Mounts exactly one stack-delivery runtime for one exact project scope.
@@ -266,6 +320,13 @@ impl DaemonNativeIntegrationServiceRegistry {
         observed_at: UtcMicros,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
         let database_path = database.db_path().to_path_buf();
+        let scope_sets = database
+            .authorized_scope_set_storage()
+            .map_err(|_| NativeIntegrationPortError::Unavailable)?;
+        let graph_runtime = database
+            .project_graph_runtime()
+            .cloned()
+            .ok_or(NativeIntegrationPortError::Unavailable)?;
         self.ensure_with(
             database_path,
             repository_root,
@@ -273,6 +334,8 @@ impl DaemonNativeIntegrationServiceRegistry {
             repository_id,
             policy_digest,
             observed_at,
+            Some(scope_sets),
+            Some(graph_runtime),
             || self.stores.ensure(database),
         )
         .await
@@ -312,6 +375,8 @@ impl DaemonNativeIntegrationServiceRegistry {
             repository_id,
             policy_digest,
             observed_at,
+            None,
+            None,
             || self.stores.ensure_engine_test(store_path),
         )
         .await
@@ -326,6 +391,8 @@ impl DaemonNativeIntegrationServiceRegistry {
         repository_id: RepositoryId,
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
+        scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
+        graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
@@ -360,16 +427,27 @@ impl DaemonNativeIntegrationServiceRegistry {
         let store = open_store().map_err(|_| NativeIntegrationPortError::Unavailable)?;
         let recovery_store = store.clone();
         let native_root = repository_root.clone();
+        let topology_runtime = graph_runtime.clone();
         let owner_project_id = project_id.clone();
         let owner_repository_id = repository_id.clone();
         let (owner_project_id, owner_repository_id, service, snapshots) =
             tokio::task::spawn_blocking(move || {
                 let topology = SharedProjectNativeIntegrationTopology {
-                    inner: Arc::new(ExactPairNativeIntegrationTopology::open(
-                        owner_project_id.clone(),
-                        owner_repository_id.clone(),
-                        &native_root,
-                    )?),
+                    inner: Arc::new(match topology_runtime {
+                        Some(runtime) => {
+                            ExactPairNativeIntegrationTopology::open_with_graph_runtime(
+                                owner_project_id.clone(),
+                                owner_repository_id.clone(),
+                                &native_root,
+                                runtime,
+                            )?
+                        }
+                        None => ExactPairNativeIntegrationTopology::open(
+                            owner_project_id.clone(),
+                            owner_repository_id.clone(),
+                            &native_root,
+                        )?,
+                    }),
                 };
                 let native = GixNativeIntegrationAdapter::open(
                     owner_project_id.clone(),
@@ -406,12 +484,20 @@ impl DaemonNativeIntegrationServiceRegistry {
             .await
             .map_err(|_| NativeIntegrationPortError::Unavailable)??;
 
+        let worktree_authority = DaemonNativeWorktreeAuthority::new(
+            owner_project_id.clone(),
+            owner_repository_id.clone(),
+            repository_root.clone(),
+            store.clone(),
+        );
         let owner = DaemonNativeIntegrationOwner {
             project_id: owner_project_id.clone(),
             repository_id: owner_repository_id.clone(),
             service,
             snapshots,
             store,
+            scope_sets,
+            worktree_authority,
             stack_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let key = OwnerKey {

@@ -75,6 +75,20 @@ fn stack_revision_canonicalizes_nodes_and_edges_without_path_identity() {
 }
 
 #[test]
+fn stack_revision_schema_exports_declared_topology_nodes_and_edges() {
+    let schema = serde_json::to_value(schemars::schema_for!(BranchStackRevisionV1))
+        .expect("branch-stack schema");
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("branch-stack schema properties");
+
+    assert!(properties.contains_key("nodes"));
+    assert!(properties.contains_key("edges"));
+    assert!(properties.contains_key("source"));
+}
+
+#[test]
 fn stack_revision_rejects_cross_repository_nodes_and_duplicate_refs() {
     let mut foreign = node(
         "stack-node.foreign",

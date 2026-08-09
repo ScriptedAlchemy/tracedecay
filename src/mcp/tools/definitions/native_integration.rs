@@ -37,8 +37,16 @@ fn snapshot_binding_properties() -> serde_json::Value {
             "type": "object",
             "description": "Exact authorized destination scope in the same proven repository."
         },
+        "authorized_scope_set_id": string_property(
+            "Canonical registered multi-root scope-set identity."
+        ),
+        "authorized_scope_set_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Exact registered scope-set revision."
+        },
         "authorized_scope_set_digest": digest_property(
-            "Digest of the authorized multi-root scope set the selection was taken from."
+            "Digest of the exact registered multi-root scope set the selection was taken from."
         ),
         "inventory_snapshot_id": string_property(
             "Frozen worktree inventory snapshot identity."
@@ -60,6 +68,8 @@ fn snapshot_binding_properties() -> serde_json::Value {
 const SNAPSHOT_REQUIRED: &[&str] = &[
     "source",
     "destination",
+    "authorized_scope_set_id",
+    "authorized_scope_set_revision",
     "authorized_scope_set_digest",
     "inventory_snapshot_id",
     "inventory_epoch",

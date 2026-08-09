@@ -28,12 +28,12 @@ use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
 use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
 use tracedecay_application::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
-    NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
+    NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPortError,
     NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
-    NativeIntegrationReceiptProjectionV1,
-    NativeIntegrationStatusProjectionV1, NativeIntegrationStatusRequestV1,
-    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
-    native_integration_surface_operation,
+    NativeIntegrationReceiptProjectionV1, NativeIntegrationStatusProjectionV1,
+    NativeIntegrationStatusRequestV1, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1, NativeWorktreeService, NativeWorktreeSurfaceRequest,
+    NativeWorktreeSurfaceResultV1, WorktreeContractError, native_integration_surface_operation,
 };
 use tracedecay_domain::{
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
@@ -43,10 +43,10 @@ use tracedecay_store::NativeIntegrationStore;
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use crate::application_surface::NativeIntegrationSurfaceRequest;
+use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
 use crate::daemon::native_integration::stack_signals::{
     signal_from_preflight, signal_from_receipt,
 };
-use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
 
 /// How long a minted preview stays approvable. The preview must outlive its
 /// own request so the separate approval and apply operations can bind it, and
@@ -151,7 +151,14 @@ async fn execute_with_owner(
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
-            let resolution = snapshot.into_resolution_request(observed_at);
+            let resolution = match registered_topology_request(&owner, snapshot, observed_at) {
+                Ok(request) => request,
+                Err(error) => {
+                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                        NativeIntegrationSurfaceUnavailableV1::from(&error),
+                    ));
+                }
+            };
             let outcome =
                 tokio::task::spawn_blocking(move || owner.stack_snapshot(resolution, &signal))
                     .await
@@ -175,11 +182,20 @@ async fn execute_with_owner(
             let stack_runtime = owner
                 .github_stack_runtime(context.scope())
                 .map_err(|_| unavailable_native_integration())?;
+            let topology =
+                match registered_topology_request(&owner, preflight.snapshot, observed_at) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                            NativeIntegrationSurfaceUnavailableV1::from(&error),
+                        ));
+                    }
+                };
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
             let application_request = NativeIntegrationPreflightRequestV1 {
                 context,
-                topology: preflight.snapshot.into_resolution_request(observed_at),
+                topology,
                 evidence: preflight.evidence.into(),
                 preview_id,
                 preferred_mode: preflight.preferred_mode,
@@ -355,8 +371,8 @@ async fn execute_with_owner(
                                 .map_err(stack_coordinator_contract_error)?;
                         }
                         NativeIntegrationReceiptProjectionV1::project(&receipt)
-                        .map(NativeIntegrationSurfaceResultV1::Receipt)
-                        .map_err(|_| invalid_native_integration_request())
+                            .map(NativeIntegrationSurfaceResultV1::Receipt)
+                            .map_err(|_| invalid_native_integration_request())
                     }
                     Err(error) => surface_result_from_contract_error(error),
                 }
@@ -396,7 +412,86 @@ async fn execute_with_owner(
                 Err(error) => surface_result_from_contract_error(error),
             }
         }
+        NativeIntegrationSurfaceRequest::Worktree(request) => {
+            let scope_sets = match owner.worktree_scope_sets() {
+                Ok(scope_sets) => scope_sets,
+                Err(error) => {
+                    return Ok(NativeIntegrationSurfaceResultV1::unavailable(
+                        NativeIntegrationSurfaceUnavailableV1::from(&error),
+                    ));
+                }
+            };
+            let service = NativeWorktreeService::new(scope_sets, owner.worktree_authority());
+            let outcome = match request {
+                NativeWorktreeSurfaceRequest::Inventory(request) => service
+                    .inventory(&request, &signal)
+                    .map(NativeWorktreeSurfaceResultV1::Inventory),
+                NativeWorktreeSurfaceRequest::Inspect(request) => service
+                    .inspect(&request, &signal)
+                    .map(NativeWorktreeSurfaceResultV1::Inspection),
+                NativeWorktreeSurfaceRequest::Confirm(request) => service
+                    .confirm(&request, &signal)
+                    .map(NativeWorktreeSurfaceResultV1::Confirmation),
+                NativeWorktreeSurfaceRequest::Remove(request) => service
+                    .remove(&request, &signal)
+                    .map(NativeWorktreeSurfaceResultV1::Removal),
+                NativeWorktreeSurfaceRequest::Reconcile(request) => service
+                    .reconcile(&request, &signal)
+                    .map(NativeWorktreeSurfaceResultV1::Reconciliation),
+            };
+            match outcome {
+                Ok(outcome) => Ok(NativeIntegrationSurfaceResultV1::Worktree(outcome)),
+                Err(error) => worktree_surface_error(error),
+            }
+        }
     }
+}
+
+fn worktree_surface_error(
+    error: WorktreeContractError,
+) -> Result<NativeIntegrationSurfaceResultV1, ApplicationProblem> {
+    match error {
+        WorktreeContractError::Domain(_) | WorktreeContractError::Inconsistent { .. } => {
+            Err(invalid_native_integration_request())
+        }
+        WorktreeContractError::ScopeSetDenied | WorktreeContractError::Denied => Ok(
+            NativeIntegrationSurfaceResultV1::unavailable(
+                NativeIntegrationSurfaceUnavailableV1::Denied,
+            ),
+        ),
+        WorktreeContractError::Stale => Ok(NativeIntegrationSurfaceResultV1::unavailable(
+            NativeIntegrationSurfaceUnavailableV1::Stale,
+        )),
+        WorktreeContractError::DurabilityUncertain | WorktreeContractError::Native(_) => Ok(
+            NativeIntegrationSurfaceResultV1::unavailable(
+                NativeIntegrationSurfaceUnavailableV1::DurabilityUncertain,
+            ),
+        ),
+        WorktreeContractError::ScopeSetUnavailable
+        | WorktreeContractError::AuthorityUnavailable => Ok(
+            NativeIntegrationSurfaceResultV1::unavailable(
+                NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted,
+            ),
+        ),
+    }
+}
+
+fn registered_topology_request(
+    owner: &DaemonNativeIntegrationOwner,
+    snapshot: tracedecay_application::NativeIntegrationStackSnapshotSurfaceRequest,
+    observed_at: UtcMicros,
+) -> Result<
+    tracedecay_application::NativeIntegrationStackResolutionRequestV1,
+    NativeIntegrationPortError,
+> {
+    let scope_set = owner.authorized_scope_set(
+        &snapshot.authorized_scope_set_id,
+        snapshot.authorized_scope_set_revision,
+        &snapshot.authorized_scope_set_digest,
+    )?;
+    snapshot
+        .into_resolution_request(scope_set, observed_at)
+        .map_err(|_| NativeIntegrationPortError::Stale)
 }
 
 /// Contract violations are the caller's invalid request; port failures map to

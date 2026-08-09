@@ -1,34 +1,48 @@
-//! Exact-pair native-integration topology resolution.
+//! Exact native-integration topology resolution.
 //!
-//! Plan 36 lets a caller freeze either an explicit independent-branch proposal
-//! or an exact visible declared stack edge. This resolver owns the first case
-//! only: it proves the authorized source/destination pair against native Git
-//! and freezes it into the immutable domain selection.
-//!
-//! Declared stack edges resolve to `Unavailable` here. Plan 16's branch-stack
-//! projection is the authority for edge meaning, visibility, and readiness, and
-//! it is not bound to this resolver; answering `Unavailable` keeps that honest
-//! while disclosing no node identity, count, or topology — which is exactly
-//! what Plan 36 requires of a partially visible stack.
+//! Independent branches are proven from the enrolled repository. Declared
+//! stacks additionally require the exact registered linked-worktree roots and
+//! publish their frozen revision and observed occupancies through the verified
+//! Git topology projection.
 //!
 //! Branch names, paths, provider order, and graph proximity never select or
 //! infer the pair: the enrolled repository identity is supplied at trusted
 //! composition and the refs come from the already-authorized scope.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::{
-    CancellationSignal, NativeIntegrationPortError, NativeIntegrationSelectionBindingV1,
-    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
-    NativeIntegrationStackResolutionRequestV1,
+    AuthorizedRoot, CancellationSignal, NativeIntegrationPortError,
+    NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionOutcomeV1,
+    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
+};
+use tracedecay_code_index::git_projection::{
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
+    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
+    git_topology_namespace, git_topology_projection_identity,
 };
 use tracedecay_domain::{
-    FrozenIndependentBranchSelectionV1, GitHeadStateV1, GitOidV1, NativeIntegrationSelectionV1,
-    ProjectId, RefId, RepositoryId,
+    BranchStackRevisionV1, FrozenBranchStackSnapshotV1, FrozenIndependentBranchSelectionV1,
+    GitHeadStateV1, GitOidV1, NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId,
+    WorktreeId,
 };
+use tracedecay_global_db::ProjectGraphRuntimePortV1;
+use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
 use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 
 use super::{domain_error, native_error};
+use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
+
+struct NeverCancelled;
+
+impl GraphCancellation for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
 
 /// One enrolled repository's exact-pair resolver.
 ///
@@ -37,7 +51,9 @@ use super::{domain_error, native_error};
 pub struct ExactPairNativeIntegrationTopology {
     project_id: ProjectId,
     repository_id: RepositoryId,
+    repository_root: PathBuf,
     repository: GitRepositoryAuthority,
+    graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
 }
 
 impl ExactPairNativeIntegrationTopology {
@@ -46,6 +62,34 @@ impl ExactPairNativeIntegrationTopology {
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
     ) -> Result<Self, NativeIntegrationPortError> {
+        Self::open_with_optional_graph_runtime(
+            project_id,
+            repository_id,
+            enrolled_repository_root,
+            None,
+        )
+    }
+
+    pub fn open_with_graph_runtime(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        enrolled_repository_root: &Path,
+        graph_runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    ) -> Result<Self, NativeIntegrationPortError> {
+        Self::open_with_optional_graph_runtime(
+            project_id,
+            repository_id,
+            enrolled_repository_root,
+            Some(graph_runtime),
+        )
+    }
+
+    fn open_with_optional_graph_runtime(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        enrolled_repository_root: &Path,
+        graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
+    ) -> Result<Self, NativeIntegrationPortError> {
         project_id.validate().map_err(domain_error)?;
         repository_id.validate().map_err(domain_error)?;
         let repository =
@@ -53,7 +97,9 @@ impl ExactPairNativeIntegrationTopology {
         Ok(Self {
             project_id,
             repository_id,
+            repository_root: enrolled_repository_root.to_path_buf(),
             repository,
+            graph_runtime,
         })
     }
 
@@ -84,6 +130,245 @@ impl ExactPairNativeIntegrationTopology {
         // partial state and apply stays blocked.
         Ok(self.repository.exact_reference_tip(reference.as_str()).ok())
     }
+
+    fn resolve_declared_stack(
+        &self,
+        request: &NativeIntegrationStackResolutionRequestV1,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError> {
+        let Some(runtime) = &self.graph_runtime else {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        };
+        let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+            declared_revision,
+            source_node_id,
+            destination_node_id,
+            direction,
+            ..
+        } = &request.selection
+        else {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        };
+        if cancellation.is_cancelled() {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
+        if request.destination.project_id != self.project_id
+            || request.destination.repository_id != self.repository_id
+            || request.source.project_id != self.project_id
+            || request.source.repository_id != self.repository_id
+        {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Denied);
+        }
+        let (binding, occupancies) =
+            match self.verify_declared_authority(request, declared_revision, cancellation) {
+                Ok(value) => value,
+                Err(outcome) => return Ok(outcome),
+            };
+        let selection = FrozenBranchStackSnapshotV1::new(
+            declared_revision.clone(),
+            source_node_id.clone(),
+            destination_node_id.clone(),
+            *direction,
+            request.observed_at,
+        )
+        .map_err(domain_error)?;
+        let identity = match git_topology_namespace(&self.repository_id)
+            .and_then(git_topology_projection_identity)
+        {
+            Ok(identity) => identity,
+            Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let previous = match runtime.verified_snapshot(&identity, Arc::clone(&cancelled)) {
+            Ok(Some(snapshot)) => {
+                match GitTopologyProjectionStore::from_verified_snapshot_verified(
+                    snapshot,
+                    Arc::new(NeverCancelled),
+                ) {
+                    Ok(store) => (
+                        store.branch_stacks().to_vec(),
+                        store.worktree_occupancies().to_vec(),
+                    ),
+                    Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+                }
+            }
+            Ok(None) => (Vec::new(), Vec::new()),
+            Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+        };
+        let (mut branch_stacks, mut worktree_occupancies) = previous;
+        branch_stacks.retain(|candidate| {
+            candidate.project_id != binding.project_id
+                || candidate.repository_id != binding.repository_id
+                || candidate.scope_set_id != binding.scope_set_id
+                || candidate.revision.stack_id != binding.revision.stack_id
+        });
+        worktree_occupancies.retain(|candidate| {
+            candidate.project_id != binding.project_id
+                || candidate.repository_id != binding.repository_id
+                || candidate.scope_set_id != binding.scope_set_id
+        });
+        branch_stacks.push(binding);
+        worktree_occupancies.extend(occupancies);
+
+        let projection = match NativeGitIntelligence::new(
+            self.repository_root.clone(),
+            self.repository_id.clone(),
+            request.destination.worktree_id.clone(),
+        )
+        .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
+        .and_then(|projection| {
+            projection
+                .with_declared_topology(branch_stacks, worktree_occupancies)
+                .map_err(
+                    |error| crate::git_intelligence::GitIntelligenceError::MalformedOutput {
+                        operation: "declared topology projection",
+                        detail: error.to_string(),
+                    },
+                )
+        }) {
+            Ok(projection) => projection,
+            Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+        };
+        if cancellation.is_cancelled() {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
+        let revision =
+            match GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned()) {
+                Ok(revision) => revision,
+                Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+            };
+        let check = || {
+            if cancellation.is_cancelled() {
+                Err(tracedecay_graph_db::GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let manifest =
+            match build_git_topology_manifest_checked(identity, &projection, &revision, &check) {
+                Ok(manifest) => manifest,
+                Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+            };
+        let idempotency = match git_topology_idempotency_key(&projection, &revision) {
+            Ok(idempotency) => idempotency,
+            Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
+        };
+        if runtime
+            .publish_verified_manifest(&manifest, idempotency, cancelled)
+            .is_err()
+        {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
+        Ok(NativeIntegrationStackResolutionOutcomeV1::Complete(
+            Box::new(NativeIntegrationSelectionV1::DeclaredStackEdge(selection)),
+        ))
+    }
+
+    fn verify_declared_authority(
+        &self,
+        request: &NativeIntegrationStackResolutionRequestV1,
+        revision: &BranchStackRevisionV1,
+        cancellation: &CancellationSignal,
+    ) -> Result<
+        (GitBranchStackBindingV1, Vec<GitWorktreeOccupancyV1>),
+        NativeIntegrationStackResolutionOutcomeV1,
+    > {
+        let mut occupancies = Vec::new();
+        let mut occupied = BTreeMap::<RefId, BTreeSet<WorktreeId>>::new();
+        for root in request.authorized_scope_set.roots().iter().filter(|root| {
+            root.scope().project_id == self.project_id
+                && root.scope().repository_id == self.repository_id
+        }) {
+            if cancellation.is_cancelled() {
+                return Err(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+            }
+            let authority = self.root_authority(root)?;
+            let reference = attached_reference(&authority)?;
+            if let Some(reference) = &reference {
+                occupied
+                    .entry(reference.clone())
+                    .or_default()
+                    .insert(root.scope().worktree_id.clone());
+            }
+            occupancies.push(GitWorktreeOccupancyV1 {
+                project_id: root.scope().project_id.clone(),
+                repository_id: root.scope().repository_id.clone(),
+                scope_set_id: request.authorized_scope_set.scope_set_id().clone(),
+                scope_set_revision: request.authorized_scope_set.revision(),
+                scope_set_digest: request.authorized_scope_set.digest().clone(),
+                worktree_id: root.scope().worktree_id.clone(),
+                reference,
+            });
+        }
+        for node in &revision.nodes {
+            let root = request.authorized_scope_set.roots().iter().find(|root| {
+                root.scope().project_id == node.project_id
+                    && root.scope().repository_id == node.repository_id
+                    && root.scope().reference.as_ref() == Some(&node.reference)
+                    && node.worktree_id.as_ref() == Some(&root.scope().worktree_id)
+            });
+            let Some(root) = root else {
+                return Err(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+            };
+            let tip = self
+                .root_authority(root)?
+                .exact_reference_tip(node.reference.as_str())
+                .map_err(|_| NativeIntegrationStackResolutionOutcomeV1::Stale)?;
+            if tip.as_str() != node.tip.as_str() {
+                return Err(NativeIntegrationStackResolutionOutcomeV1::Stale);
+            }
+            let actual = occupied.get(&node.reference).cloned().unwrap_or_default();
+            let expected = node.worktree_id.iter().cloned().collect::<BTreeSet<_>>();
+            if actual != expected {
+                return Err(NativeIntegrationStackResolutionOutcomeV1::Stale);
+            }
+        }
+        Ok((
+            GitBranchStackBindingV1 {
+                project_id: request.source.project_id.clone(),
+                repository_id: request.source.repository_id.clone(),
+                scope_set_id: request.authorized_scope_set.scope_set_id().clone(),
+                scope_set_revision: request.authorized_scope_set.revision(),
+                scope_set_digest: request.authorized_scope_set.digest().clone(),
+                revision: revision.clone(),
+            },
+            occupancies,
+        ))
+    }
+
+    fn root_authority(
+        &self,
+        root: &AuthorizedRoot,
+    ) -> Result<GitRepositoryAuthority, NativeIntegrationStackResolutionOutcomeV1> {
+        let locator = root
+            .locator()
+            .ok_or(NativeIntegrationStackResolutionOutcomeV1::Unavailable)?;
+        let authority = GitRepositoryAuthority::discover(&locator.canonical_root)
+            .map_err(|_| NativeIntegrationStackResolutionOutcomeV1::Unavailable)?;
+        if authority.common_dir() != self.repository.common_dir() {
+            return Err(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
+        Ok(authority)
+    }
+}
+
+fn attached_reference(
+    authority: &GitRepositoryAuthority,
+) -> Result<Option<RefId>, NativeIntegrationStackResolutionOutcomeV1> {
+    let status = authority
+        .status()
+        .map_err(|_| NativeIntegrationStackResolutionOutcomeV1::Unavailable)?;
+    let GitHeadStateV1::Attached { branch, .. } = status.head else {
+        return Ok(None);
+    };
+    let reference = if branch.starts_with("refs/") {
+        branch
+    } else {
+        format!("refs/heads/{branch}")
+    };
+    RefId::new(reference)
+        .map(Some)
+        .map_err(|_| NativeIntegrationStackResolutionOutcomeV1::Unavailable)
 }
 
 impl NativeIntegrationStackResolutionPort for ExactPairNativeIntegrationTopology {
@@ -99,12 +384,16 @@ impl NativeIntegrationStackResolutionPort for ExactPairNativeIntegrationTopology
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
         }
 
+        if matches!(
+            request.selection,
+            NativeIntegrationSelectionBindingV1::DeclaredStackEdge { .. }
+        ) {
+            return self.resolve_declared_stack(request, cancellation);
+        }
+
         let NativeIntegrationSelectionBindingV1::IndependentBranch { proposal_digest } =
             &request.selection
         else {
-            // Plan 16 owns declared-edge authorization and visibility. Without
-            // that authority bound, no edge is resolvable and no topology is
-            // disclosed.
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
         };
 

@@ -79,6 +79,8 @@ fn projection(main_target: char) -> GitTopologyProjectionV1 {
             coverage: GitCoverageV1::complete(),
         },
         ref_watermark,
+        branch_stacks: Vec::new(),
+        worktree_occupancies: Vec::new(),
     }
 }
 

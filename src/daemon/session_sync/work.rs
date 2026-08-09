@@ -1,14 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_code_index::git_projection::{
-    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, build_git_topology_manifest_checked,
-    git_topology_idempotency_key, git_topology_namespace, git_topology_projection_identity,
-};
-use tracedecay_graph_db::{GraphDbError, GraphProjectorRevision};
-
-use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
-
 #[derive(Clone, Copy)]
 pub(super) enum SessionSyncInterruption {
     Cancelled,
@@ -735,39 +727,24 @@ impl SessionSyncProjectContext {
             .project_graph_runtime()
             .cloned()
             .ok_or_else(|| "project graph runtime is unavailable".to_owned())?;
+        let scope_sets = self
+            .project_sessions
+            .authorized_scope_set_storage()
+            .map_err(|error| error.to_string())?;
         let project_root = self.project_root.clone();
         let repository = scope.repository_id;
         let worktree = scope.worktree_id;
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
-            let projection = adapter
-                .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
-                .map_err(|error| error.to_string())?;
-            let revision =
-                GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-                    .map_err(|error| error.to_string())?;
-            let identity = git_topology_projection_identity(
-                git_topology_namespace(&repository).map_err(|error| error.to_string())?,
+            super::git_topology::publish_native_topology(
+                runtime,
+                project_root,
+                repository,
+                worktree,
+                scope_sets,
+                worker_cancelled,
             )
-            .map_err(|error| error.to_string())?;
-            let check = || {
-                if worker_cancelled.load(Ordering::Relaxed) {
-                    Err(GraphDbError::Cancelled)
-                } else {
-                    Ok(())
-                }
-            };
-            let manifest =
-                build_git_topology_manifest_checked(identity, &projection, &revision, &check)
-                    .map_err(|error| error.to_string())?;
-            let idempotency = git_topology_idempotency_key(&projection, &revision)
-                .map_err(|error| error.to_string())?;
-            runtime
-                .publish_verified_manifest(&manifest, idempotency, Arc::clone(&worker_cancelled))
-                .map_err(|error| error.to_string())?;
-            Ok(())
         });
         tokio::pin!(worker);
         loop {

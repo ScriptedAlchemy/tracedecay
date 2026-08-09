@@ -1,5 +1,7 @@
 //! Immutable Git topology projection over a verified graph snapshot.
 
+mod declared_topology;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
@@ -18,6 +20,9 @@ use tracedecay_graph_db::{
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
     GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
+
+use declared_topology::validate_declared_topology;
+pub use declared_topology::{GitBranchStackBindingV1, GitWorktreeOccupancyV1};
 
 const GIT_PROJECTION: &str = "git-topology";
 const COMMIT_LABEL: &str = "GitCommit";
@@ -56,6 +61,8 @@ pub struct GitTopologyProjectionV1 {
     pub refs: Vec<GitTopologyRefV1>,
     pub history: GitHistoryV1,
     pub ref_watermark: ManifestDigest,
+    pub branch_stacks: Vec<GitBranchStackBindingV1>,
+    pub worktree_occupancies: Vec<GitWorktreeOccupancyV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -64,6 +71,8 @@ struct GitTopologyMetadataV1 {
     repository: RepositoryId,
     ref_watermark: ManifestDigest,
     coverage: GitCoverageV1,
+    branch_stacks: Vec<GitBranchStackBindingV1>,
+    worktree_occupancies: Vec<GitWorktreeOccupancyV1>,
 }
 
 impl GitTopologyProjectionV1 {
@@ -81,11 +90,29 @@ impl GitTopologyProjectionV1 {
             return Err(GitTopologyProjectionError::RepositoryMismatch);
         }
         validate_refs(&self.refs)?;
+        validate_declared_topology(
+            &self.repository,
+            &self.branch_stacks,
+            &self.worktree_occupancies,
+        )?;
         let expected = git_topology_ref_watermark(&self.repository, &self.head, &self.refs)?;
         if self.ref_watermark != expected {
             return Err(GitTopologyProjectionError::RefWatermarkMismatch);
         }
         Ok(())
+    }
+
+    pub fn with_declared_topology(
+        mut self,
+        mut branch_stacks: Vec<GitBranchStackBindingV1>,
+        mut worktree_occupancies: Vec<GitWorktreeOccupancyV1>,
+    ) -> Result<Self, GitTopologyProjectionError> {
+        branch_stacks.sort_by(declared_topology::compare_branch_stack_bindings);
+        worktree_occupancies.sort_by(declared_topology::compare_worktree_occupancies);
+        self.branch_stacks = branch_stacks;
+        self.worktree_occupancies = worktree_occupancies;
+        self.validate()?;
+        Ok(self)
     }
 }
 
@@ -97,6 +124,10 @@ pub enum GitTopologyProjectionError {
     RepositoryMismatch,
     #[error("Git topology refs are duplicated or out of order")]
     NonCanonicalRefs,
+    #[error("Git topology declared branch stacks are duplicated or out of order")]
+    NonCanonicalBranchStacks,
+    #[error("Git topology worktree occupancies are duplicated or out of order")]
+    NonCanonicalWorktreeOccupancies,
     #[error("Git topology ref watermark does not match its canonical ref snapshot")]
     RefWatermarkMismatch,
     #[error("Git topology generation does not match")]
@@ -106,6 +137,8 @@ pub enum GitTopologyProjectionError {
         projected: ManifestDigest,
         current: ManifestDigest,
     },
+    #[error("Git topology declared binding is stale: {detail}")]
+    StaleBinding { detail: &'static str },
     #[error("Git topology operation was cancelled")]
     Cancelled,
     #[error("Git topology traversal budget was exhausted")]
@@ -268,6 +301,8 @@ pub fn build_git_topology_manifest_checked(
         &projection.repository,
         &projection.head,
         &projection.ref_watermark,
+        &projection.branch_stacks,
+        &projection.worktree_occupancies,
     ))
     .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
     GraphGenerationManifest::new_checked(
@@ -291,6 +326,8 @@ pub struct GitTopologyProjectionStore {
     repository: RepositoryId,
     ref_watermark: ManifestDigest,
     coverage: GitCoverageV1,
+    branch_stacks: Vec<GitBranchStackBindingV1>,
+    worktree_occupancies: Vec<GitWorktreeOccupancyV1>,
 }
 
 impl fmt::Debug for GitTopologyProjectionStore {
@@ -320,6 +357,8 @@ impl GitTopologyProjectionStore {
         if store.repository != projection.repository
             || store.ref_watermark != projection.ref_watermark
             || store.coverage != projection.history.coverage
+            || store.branch_stacks != projection.branch_stacks
+            || store.worktree_occupancies != projection.worktree_occupancies
         {
             return Err(GitTopologyProjectionError::GenerationMismatch);
         }
@@ -342,6 +381,8 @@ impl GitTopologyProjectionStore {
             repository: metadata.repository,
             ref_watermark: metadata.ref_watermark,
             coverage: metadata.coverage,
+            branch_stacks: metadata.branch_stacks,
+            worktree_occupancies: metadata.worktree_occupancies,
             snapshot: Arc::new(snapshot),
         })
     }
@@ -352,6 +393,10 @@ impl GitTopologyProjectionStore {
 
     pub fn ref_watermark(&self) -> &ManifestDigest {
         &self.ref_watermark
+    }
+
+    pub fn generation(&self) -> &GraphGenerationId {
+        &self.generation
     }
 
     pub fn coverage(&self) -> &GitCoverageV1 {
@@ -560,6 +605,8 @@ fn metadata_entity(
         repository: projection.repository.clone(),
         ref_watermark: projection.ref_watermark.clone(),
         coverage: projection.history.coverage.clone(),
+        branch_stacks: projection.branch_stacks.clone(),
+        worktree_occupancies: projection.worktree_occupancies.clone(),
     };
     GraphEntity::new(
         metadata_entity_id()?,
@@ -607,6 +654,12 @@ fn read_metadata(
         .coverage
         .validate()
         .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
+    validate_declared_topology(
+        &metadata.repository,
+        &metadata.branch_stacks,
+        &metadata.worktree_occupancies,
+    )
+    .map_err(|error| GitTopologyProjectionError::Corrupt(error.to_string()))?;
     Ok(metadata)
 }
 
