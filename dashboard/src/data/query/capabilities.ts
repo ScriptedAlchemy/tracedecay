@@ -45,7 +45,12 @@ export type CapabilitiesRead = z.infer<typeof CapabilitiesReadSchema>;
 export function useCapabilities() {
   return useQuery<LegacyResult<CapabilitiesRead>>({
     queryKey: ['capabilities'],
-    queryFn: () => fetchLegacy(CAPABILITIES_URL, CapabilitiesReadSchema),
+    queryFn: ({ signal }) => fetchLegacy(CAPABILITIES_URL, CapabilitiesReadSchema, { signal }),
+    // Capability discovery is daemon-wide and shared by every fleet surface.
+    // Keep the one answer warm while those surfaces mount so separate
+    // observers do not turn a single page read into duplicate requests.
+    refetchInterval: false,
+    staleTime: 60_000,
   });
 }
 
