@@ -487,6 +487,7 @@ mod tests {
                     succeeded_steps: 1,
                     failed_steps: 0,
                     cancelled_steps: 0,
+                    unknown_steps: 0,
                     eligible_attempts: 2,
                     observed_attempts: 2,
                     succeeded_attempts: 2,

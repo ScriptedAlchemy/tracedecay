@@ -84,7 +84,8 @@ pub fn record_automation_funnel_observation(
         observed_at.0,
         coverage_name(observation.ledger_coverage)
     );
-    emit(
+    let coverage = observation.ledger_coverage;
+    emit_with_coverage(
         producer,
         &owner_ref,
         "automation_run_lifecycle",
@@ -94,6 +95,7 @@ pub fn record_automation_funnel_observation(
             .is_terminal()
             .then_some(automation_terminal_result(observation.terminal)),
         ObservabilityPayloadV1::AutomationFunnel(observation),
+        coverage,
     )
 }
 

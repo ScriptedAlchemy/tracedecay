@@ -54,6 +54,7 @@ pub struct WorkflowOutcomeObservedV1 {
     pub succeeded_steps: u32,
     pub failed_steps: u32,
     pub cancelled_steps: u32,
+    pub unknown_steps: u32,
     pub eligible_attempts: u32,
     pub observed_attempts: u32,
     pub succeeded_attempts: u32,
@@ -85,12 +86,13 @@ impl WorkflowOutcomeObservedV1 {
         if self.workflow_sequence == 0
             || !self.status.is_terminal()
             || self.total_steps == 0
-            || classified_steps > self.total_steps
+            || classified_steps.checked_add(self.unknown_steps) != Some(self.total_steps)
             || self.observed_attempts > self.eligible_attempts
             || classified_attempts != self.observed_attempts
             || self.observed_attempts.checked_add(self.unknown_attempts)
                 != Some(self.eligible_attempts)
-            || (self.unknown_attempts == 0) != (self.coverage == CoverageStateV1::Known)
+            || ((self.unknown_steps == 0 && self.unknown_attempts == 0)
+                != (self.coverage == CoverageStateV1::Known))
             || !matches!(
                 self.coverage,
                 CoverageStateV1::Known | CoverageStateV1::Partial
@@ -182,6 +184,7 @@ mod tests {
             succeeded_steps: 1,
             failed_steps: 1,
             cancelled_steps: 0,
+            unknown_steps: 0,
             eligible_attempts: 3,
             observed_attempts: 2,
             succeeded_attempts: 1,
@@ -191,6 +194,31 @@ mod tests {
             unknown_attempts: 1,
             coverage: CoverageStateV1::Partial,
         };
+        assert_eq!(observation.validate(), Ok(()));
+    }
+
+    #[test]
+    fn known_outcome_requires_every_step_to_be_classified() {
+        let mut observation = WorkflowOutcomeObservedV1 {
+            run_id: RunId::new("run.workflow.unclassified-step").unwrap(),
+            workflow_sequence: 6,
+            status: WorkflowRunStatus::Failed,
+            total_steps: 3,
+            succeeded_steps: 0,
+            failed_steps: 1,
+            cancelled_steps: 0,
+            unknown_steps: 2,
+            eligible_attempts: 1,
+            observed_attempts: 1,
+            succeeded_attempts: 0,
+            failed_attempts: 1,
+            timed_out_attempts: 0,
+            cancelled_attempts: 0,
+            unknown_attempts: 0,
+            coverage: CoverageStateV1::Known,
+        };
+        assert_eq!(observation.validate(), Err("workflow_outcome"));
+        observation.coverage = CoverageStateV1::Partial;
         assert_eq!(observation.validate(), Ok(()));
     }
 

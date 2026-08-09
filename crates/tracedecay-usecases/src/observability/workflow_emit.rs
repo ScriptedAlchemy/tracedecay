@@ -142,6 +142,7 @@ pub fn record_workflow_settlement(
         let mut succeeded_steps = 0_u32;
         let mut failed_steps = 0_u32;
         let mut cancelled_steps = 0_u32;
+        let mut unknown_steps = 0_u32;
         for step in projection.definition().steps() {
             match projection.step(&step.step_id).map(|value| value.status()) {
                 Some(WorkflowStepStatus::Succeeded) => succeeded_steps += 1,
@@ -152,7 +153,7 @@ pub fn record_workflow_settlement(
                     | WorkflowStepStatus::Ready
                     | WorkflowStepStatus::Running,
                 )
-                | None => {}
+                | None => unknown_steps += 1,
             }
         }
         let Some(succeeded_attempts) = count_attempts(attempts, WorkAttemptStateV1::Succeeded)
@@ -180,11 +181,12 @@ pub fn record_workflow_settlement(
         let Some(unknown_attempts) = eligible_attempts.checked_sub(classified_attempts) else {
             return WorkOwnerObservationResultV1::Unavailable;
         };
-        let outcome_coverage = if attempt_reads_complete && unknown_attempts == 0 {
-            CoverageStateV1::Known
-        } else {
-            CoverageStateV1::Partial
-        };
+        let outcome_coverage =
+            if attempt_reads_complete && unknown_steps == 0 && unknown_attempts == 0 {
+                CoverageStateV1::Known
+            } else {
+                CoverageStateV1::Partial
+            };
         let outcome = WorkflowOutcomeObservedV1 {
             run_id: projection.run_id().clone(),
             workflow_sequence: projection.sequence(),
@@ -193,6 +195,7 @@ pub fn record_workflow_settlement(
             succeeded_steps,
             failed_steps,
             cancelled_steps,
+            unknown_steps,
             eligible_attempts,
             observed_attempts: classified_attempts,
             succeeded_attempts,
