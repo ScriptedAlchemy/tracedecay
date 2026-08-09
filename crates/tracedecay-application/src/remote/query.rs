@@ -798,7 +798,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
         &self,
         request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
         let request_id = request.request_id.clone();
         let observed_at = match self.service.now() {
             Ok(observed_at) => observed_at,
@@ -814,7 +814,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                         remote_exact_observation_query_result_contract_v1(),
                         request_id,
                         query_protocol_failure(error),
-                    )),
+                    )?),
                     remote_exact_observation_query_result_contract_v1(),
                     request.sent_at,
                 );
@@ -859,7 +859,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                         remote_exact_observation_query_result_contract_v1(),
                         request_id,
                         failure,
-                    )),
+                    )?),
                     remote_exact_observation_query_result_contract_v1(),
                     observed_at,
                 )

@@ -239,7 +239,7 @@ where
         &self,
         request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
         match self.service.capture(&request, &credential) {
@@ -250,13 +250,14 @@ where
                     reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
                     observed_at: outcome.captured_at,
                 };
-                let result = capture_effect_envelope(request, outcome).map_err(|failure| {
-                    remote_protocol_problem(
+                let result = match capture_effect_envelope(request, outcome) {
+                    Ok(envelope) => Ok(envelope),
+                    Err(failure) => Err(remote_protocol_problem(
                         remote_capture_result_contract_v1(),
                         request_id.clone(),
                         failure,
-                    )
-                });
+                    )?),
+                };
                 RemoteProtocolResponseV1::new_or_unavailable(
                     request_id,
                     authority,
@@ -278,7 +279,7 @@ where
                         remote_capture_result_contract_v1(),
                         request_id,
                         failure,
-                    )),
+                    )?),
                     remote_capture_result_contract_v1(),
                     observed_at,
                 )

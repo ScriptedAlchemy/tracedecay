@@ -109,7 +109,7 @@ async fn the_views_path_resolves_to_the_views_operation_and_refuses_a_malformed_
 fn work_router(seen: Arc<Mutex<Vec<WorkOperation>>>) -> Router {
     Router::new().nest(
         "/api/work",
-        tracedecay_api::work_core_router(move |request: WorkHttpRequest| {
+        tracedecay_api::work_dashboard_router(move |request: WorkHttpRequest| {
             let seen = Arc::clone(&seen);
             async move {
                 seen.lock()

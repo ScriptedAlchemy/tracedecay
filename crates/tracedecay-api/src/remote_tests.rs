@@ -35,6 +35,9 @@ use tracedecay_application::remote::recovery::{
     RecoveryAuthorityExpectationV1, StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
 use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::transfer::{
+    RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
+};
 use tracedecay_application::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
     PolicyDecisionRef, ResolvedScope,
@@ -104,7 +107,10 @@ impl RemoteEnrollmentProtocolPortV1 for UnreachedProtocolPort {
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
         _grant_credential: OpaqueRemoteCredential,
         _enrollment_credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+    ) -> Result<
+        RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+        tracedecay_application::ApplicationContractError,
+    > {
         self.calls.fetch_add(1, Ordering::SeqCst);
         unavailable_response(request)
     }
@@ -119,7 +125,10 @@ macro_rules! unreachable_protocol_port {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
-            ) -> RemoteProtocolResponseV1<Self::Output> {
+            ) -> Result<
+                RemoteProtocolResponseV1<Self::Output>,
+                tracedecay_application::ApplicationContractError,
+            > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 unavailable_response(request)
             }
@@ -129,7 +138,10 @@ macro_rules! unreachable_protocol_port {
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
                 control: RemoteProtocolExecutionControlV1,
-            ) -> RemoteProtocolResponseV1<Self::Output> {
+            ) -> Result<
+                RemoteProtocolResponseV1<Self::Output>,
+                tracedecay_application::ApplicationContractError,
+            > {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if let Some(deadline) = &self.controlled_deadline {
                     deadline.store(control.deadline.0, Ordering::SeqCst);
@@ -146,10 +158,11 @@ unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
 unreachable_protocol_port!(BackupRequestV1, BackupOperationStateV1);
 unreachable_protocol_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
+unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
 
 fn unavailable_response<Request, Output>(
     request: RemoteProtocolRequestV1<Request>,
-) -> RemoteProtocolResponseV1<Output> {
+) -> Result<RemoteProtocolResponseV1<Output>, tracedecay_application::ApplicationContractError> {
     let request_id = request.request_id;
     RemoteProtocolResponseV1::new(
         request_id.clone(),
@@ -161,9 +174,8 @@ fn unavailable_response<Request, Output>(
             remote_result_contract(),
             request_id,
             RemoteProtocolFailureV1::AuthorityUnavailable,
-        )),
+        )?),
     )
-    .unwrap()
 }
 
 const fn fixed_remote_clock() -> UtcMicros {

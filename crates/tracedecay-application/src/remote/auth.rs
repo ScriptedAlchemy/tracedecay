@@ -17,9 +17,9 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::{
-    ApplicationEnvelope, AuthorityReceipt, Deadline, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, ReconciliationState,
-    ResolvedScope, ResultContractRef,
+    ApplicationContractError, ApplicationEnvelope, AuthorityReceipt, Deadline, EffectId,
+    EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
+    OperationReceipt, ReconciliationState, ResolvedScope, ResultContractRef,
 };
 
 use super::protocol::{
@@ -597,7 +597,8 @@ where
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+    ) -> Result<RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>, ApplicationContractError>
+    {
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
         let result = match self
@@ -616,12 +617,12 @@ where
                 remote_enrollment_result_contract_v1(),
                 request_id.clone(),
                 RemoteProtocolFailureV1::AuthorityUnavailable,
-            )),
+            )?),
             Err(error) => Err(remote_protocol_problem(
                 remote_enrollment_result_contract_v1(),
                 request_id.clone(),
                 enrollment_protocol_failure(error),
-            )),
+            )?),
         };
         RemoteProtocolResponseV1::new_or_unavailable(
             request_id,
@@ -1321,11 +1322,13 @@ mod tests {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
         let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
-        let response = adapter.execute_enrollment(
-            protocol_enrollment_request("node.remote"),
-            grant_credential,
-            credential(b'e'),
-        );
+        let response = adapter
+            .execute_enrollment(
+                protocol_enrollment_request("node.remote"),
+                grant_credential,
+                credential(b'e'),
+            )
+            .unwrap();
 
         assert!(matches!(
             response.authority,
@@ -1359,16 +1362,20 @@ mod tests {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
         let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
-        adapter.execute_enrollment(
-            protocol_enrollment_request("node.remote"),
-            grant_credential,
-            credential(b'e'),
-        );
-        let replay = adapter.execute_enrollment(
-            protocol_enrollment_request("node.remote"),
-            credential(b'g'),
-            credential(b'e'),
-        );
+        adapter
+            .execute_enrollment(
+                protocol_enrollment_request("node.remote"),
+                grant_credential,
+                credential(b'e'),
+            )
+            .unwrap();
+        let replay = adapter
+            .execute_enrollment(
+                protocol_enrollment_request("node.remote"),
+                credential(b'g'),
+                credential(b'e'),
+            )
+            .unwrap();
         assert!(matches!(
             replay.result.unwrap_err().problem.source(),
             crate::ApplicationProblem::Stale { .. }

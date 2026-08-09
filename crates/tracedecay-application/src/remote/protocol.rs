@@ -70,14 +70,14 @@ pub trait RemoteProtocolPortV1<Request> {
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output>;
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError>;
 
     fn execute_controlled(
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
         _control: RemoteProtocolExecutionControlV1,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
         self.execute(request, credential)
     }
 }
@@ -97,7 +97,7 @@ pub trait RemoteEnrollmentProtocolPortV1: Send + Sync {
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>;
+    ) -> Result<RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>, ApplicationContractError>;
 }
 
 /// Validates canonical protocol metadata before delegating exactly once to the
@@ -124,7 +124,7 @@ impl<Port> RemoteProtocolServiceV1<Port> {
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
-        Ok(self.port.execute(request, credential))
+        self.port.execute(request, credential)
     }
 
     pub fn execute_controlled<Request>(
@@ -141,7 +141,7 @@ impl<Port> RemoteProtocolServiceV1<Port> {
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
-        Ok(self.port.execute_controlled(request, credential, control))
+        self.port.execute_controlled(request, credential, control)
     }
 
     pub fn execute_enrollment(
@@ -157,9 +157,8 @@ impl<Port> RemoteProtocolServiceV1<Port> {
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
-        Ok(self
-            .port
-            .execute_enrollment(request, grant_credential, enrollment_credential))
+        self.port
+            .execute_enrollment(request, grant_credential, enrollment_credential)
     }
 }
 
@@ -310,11 +309,11 @@ impl<T> RemoteProtocolResponseV1<T> {
         result: ApplicationResult<T>,
         contract: ResultContractRef,
         observed_at: UtcMicros,
-    ) -> Self {
+    ) -> Result<Self, ApplicationContractError> {
         let fallback_request_id = request_id.clone();
         match Self::new(request_id, authority, result) {
-            Ok(response) => response,
-            Err(_) => Self {
+            Ok(response) => Ok(response),
+            Err(_) => Ok(Self {
                 protocol_version: REMOTE_PROTOCOL_VERSION_V1,
                 request_id: fallback_request_id.clone(),
                 authority: CurrentRemoteAuthorityStateV1::Unavailable {
@@ -325,8 +324,8 @@ impl<T> RemoteProtocolResponseV1<T> {
                     contract,
                     fallback_request_id,
                     RemoteProtocolFailureV1::AuthorityUnavailable,
-                )),
-            },
+                )?),
+            }),
         }
     }
 }
@@ -522,7 +521,7 @@ pub fn remote_protocol_problem(
     contract: ResultContractRef,
     request_id: RequestId,
     failure: RemoteProtocolFailureV1,
-) -> ApplicationProblemEnvelope {
+) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
     let problem = match failure {
         RemoteProtocolFailureV1::CallerAuthenticationFailed
         | RemoteProtocolFailureV1::AuthorityAuthenticationFailed => {
@@ -538,7 +537,7 @@ pub fn remote_protocol_problem(
             diagnostic: safe_diagnostic(
                 "remote.protocol_incompatible",
                 "The remote protocol version is not supported",
-            ),
+            )?,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
@@ -551,7 +550,7 @@ pub fn remote_protocol_problem(
             diagnostic: safe_diagnostic(
                 "remote.authority_stale",
                 "Remote authority or credential identity is stale",
-            ),
+            )?,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
@@ -559,7 +558,7 @@ pub fn remote_protocol_problem(
             diagnostic: safe_diagnostic(
                 "remote.authority_reachable",
                 "Offline capture is rejected while the owning authority is reachable",
-            ),
+            )?,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
@@ -567,7 +566,7 @@ pub fn remote_protocol_problem(
             diagnostic: safe_diagnostic(
                 "remote.spool_saturated",
                 "The remote offline-capture spool has no remaining capacity",
-            ),
+            )?,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
@@ -575,7 +574,7 @@ pub fn remote_protocol_problem(
             diagnostic: safe_diagnostic(
                 "remote.authority_unavailable",
                 "The authenticated remote authority is unavailable",
-            ),
+            )?,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
@@ -583,8 +582,8 @@ pub fn remote_protocol_problem(
     ApplicationProblemEnvelope::new(contract, request_id, problem)
 }
 
-fn safe_diagnostic(code: &str, message: &str) -> SafeDiagnostic {
-    SafeDiagnostic::new(code, message).expect("static remote diagnostic is canonical")
+fn safe_diagnostic(code: &str, message: &str) -> Result<SafeDiagnostic, ApplicationContractError> {
+    SafeDiagnostic::new(code, message)
 }
 
 #[cfg(test)]
@@ -635,7 +634,7 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<Self::Output> {
+        ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let request_id = request.request_id;
             RemoteProtocolResponseV1::new(
@@ -649,9 +648,9 @@ mod tests {
                     ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap(),
                     request_id,
                     RemoteProtocolFailureV1::AuthorityUnavailable,
-                )),
+                )
+                .unwrap()),
             )
-            .unwrap()
         }
     }
 
@@ -702,10 +701,12 @@ mod tests {
                 contract.clone(),
                 RequestId::new("request.foreign").unwrap(),
                 RemoteProtocolFailureV1::AuthorityUnavailable,
-            )),
+            )
+            .unwrap()),
             contract,
             UtcMicros(20),
-        );
+        )
+        .unwrap();
 
         assert_eq!(response.request_id, request_id);
         assert!(matches!(
@@ -925,7 +926,8 @@ mod tests {
             ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap(),
             RequestId::new("request.remote").unwrap(),
             RemoteProtocolFailureV1::CallerAuthenticationFailed,
-        );
+        )
+        .unwrap();
         assert_eq!(
             problem.problem.source(),
             &ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

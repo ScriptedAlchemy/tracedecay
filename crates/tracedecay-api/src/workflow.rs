@@ -25,8 +25,8 @@ use tracedecay_application::{
 use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
-    application_problem_response, invalid_request_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
+    invalid_request_response,
 };
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
@@ -294,10 +294,10 @@ where
     O: WorkflowApplicationOwner,
 {
     let Some(operation) = WorkflowOperation::from_route_segment(&segment) else {
-        return application_problem_response(adapter_problem(
+        return adapter_problem_response(
             request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        );
     };
     let Ok(Json(body)) = body else {
         return invalid_request_response(

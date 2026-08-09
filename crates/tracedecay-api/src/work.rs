@@ -51,8 +51,8 @@ use tracedecay_domain::{
 };
 
 use crate::http::{
-    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
-    application_problem_response, invalid_request_response,
+    HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
+    invalid_request_response,
 };
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
@@ -449,10 +449,10 @@ where
     if WorkOperation::from_route_segment(&segment)
         .is_some_and(|operation| !operation.is_dashboard_operation())
     {
-        return application_problem_response(adapter_problem(
+        return adapter_problem_response(
             request_id.0.clone(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        );
     }
     dispatch(segment, state, request_id, controls, body).await
 }
@@ -483,10 +483,10 @@ where
     let Some(operation) = WorkOperation::parse(&segment) else {
         // An operation this build does not mount is concealed the same way an
         // unauthorised one is, so probing a path cannot reveal what exists.
-        return application_problem_response(adapter_problem(
+        return adapter_problem_response(
             request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        );
     };
     let Ok(Json(body)) = body else {
         return invalid_request_response(

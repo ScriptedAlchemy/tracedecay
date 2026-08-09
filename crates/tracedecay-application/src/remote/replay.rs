@@ -652,7 +652,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
         let fallback_authority = request.expected_authority.clone().map_or_else(
@@ -669,13 +669,14 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
         match self.service.replay(&request, &credential) {
             Ok(outcome) => {
                 let authority = outcome.authority.clone();
-                let result = replay_effect_envelope(request, outcome).map_err(|failure| {
-                    remote_protocol_problem(
+                let result = match replay_effect_envelope(request, outcome) {
+                    Ok(envelope) => Ok(envelope),
+                    Err(failure) => Err(remote_protocol_problem(
                         remote_replay_result_contract_v1(),
                         request_id.clone(),
                         failure,
-                    )
-                });
+                    )?),
+                };
                 RemoteProtocolResponseV1::new_or_unavailable(
                     request_id,
                     authority,
@@ -700,7 +701,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                         remote_replay_result_contract_v1(),
                         request_id,
                         failure,
-                    )),
+                    )?),
                     remote_replay_result_contract_v1(),
                     observed_at,
                 )

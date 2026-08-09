@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use tracedecay_domain::EnrollmentCredentialRecordV1;
 
+use crate::ApplicationContractError;
+
 use super::{
     auth::OpaqueRemoteCredential,
     capture::RemoteCaptureReceiptV1,
@@ -83,7 +85,8 @@ impl RemoteEnrollmentProtocolPortV1 for RemoteProtocolOwnerV1 {
         request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+    ) -> Result<RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>, ApplicationContractError>
+    {
         self.enrollment
             .execute_enrollment(request, grant_credential, enrollment_credential)
     }
@@ -98,7 +101,7 @@ macro_rules! delegate_remote_operation {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
-            ) -> RemoteProtocolResponseV1<Self::Output> {
+            ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
                 self.$field.execute(request, credential)
             }
 
@@ -107,7 +110,7 @@ macro_rules! delegate_remote_operation {
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
                 control: crate::remote::protocol::RemoteProtocolExecutionControlV1,
-            ) -> RemoteProtocolResponseV1<Self::Output> {
+            ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
                 self.$field.execute_controlled(request, credential, control)
             }
         }

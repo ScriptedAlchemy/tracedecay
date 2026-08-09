@@ -580,10 +580,12 @@ fn unavailable_service() -> RemoteExactObservationQueryServiceV1 {
 #[test]
 fn protocol_failure_uses_server_clock_and_never_returns_partial_success() {
     let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(unavailable_service());
-    let response = adapter.execute(
-        protocol_request(UtcMicros(10)),
-        OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
-    );
+    let response = adapter
+        .execute(
+            protocol_request(UtcMicros(10)),
+            OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+        )
+        .unwrap();
 
     assert!(response.result.is_err());
     assert!(matches!(

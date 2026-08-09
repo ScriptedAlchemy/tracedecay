@@ -61,6 +61,7 @@ impl HttpApplicationOperation {
             | Self::HealthDelta
             | Self::StorageStatus
             | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
+            Self::ObservatoryRead => HttpApplicationOwnerKind::Observatory,
             Self::ConfigurationList
             | Self::ConfigurationExplain
             | Self::ConfigurationGet

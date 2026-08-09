@@ -41,7 +41,8 @@ use tracedecay_application::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
 use tracedecay_application::{
-    ApplicationProblemKind, CancellationSignal, RequestId, ResultContractRef,
+    ApplicationContractError, ApplicationProblemKind, CancellationSignal, RequestId,
+    ResultContractRef,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::SchemaId;
@@ -96,6 +97,26 @@ pub enum RemoteHttpBoundaryError {
     MissingOrInvalidAuthorization,
 }
 
+enum RemoteHttpRejection {
+    Response(Response),
+    Contract(ApplicationContractError),
+}
+
+impl IntoResponse for RemoteHttpRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Response(response) => response,
+            Self::Contract(error) => {
+                // Contract construction failures are internal and may contain
+                // implementation details; consume them at the HTTP boundary
+                // without exposing unsafe diagnostics to an unauthenticated client.
+                drop(error);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+}
+
 /// Wire request body. Secret material is supplied only through HTTP headers.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -147,19 +168,19 @@ where
     Port: Send + Sync,
     Request: RemoteSessionBoundProtocolBodyV1,
 {
-    type Rejection = Response;
+    type Rejection = RemoteHttpRejection;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
         let authorization = authorization_header(&parts.headers)
-            .map_err(|_| concealed_authentication_response())?;
+            .map_err(|_| concealed_authentication_rejection())?;
         let credential = authorization.into_credential();
         let session = state
             .credential_admission
             .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
-            .map_err(|_| concealed_authentication_response())?;
+            .map_err(|_| concealed_authentication_rejection())?;
         Ok(Self {
             session,
             credential,
@@ -199,14 +220,14 @@ impl<Port> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
 where
     Port: Send + Sync,
 {
-    type Rejection = Response;
+    type Rejection = RemoteHttpRejection;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
         let authorization = authorization_header(&parts.headers)
-            .map_err(|_| concealed_authentication_response())?;
+            .map_err(|_| concealed_authentication_rejection())?;
         let grant_credential = authorization.into_credential();
         let session = state
             .credential_admission
@@ -215,9 +236,9 @@ where
                 <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
                 (state.clock)(),
             )
-            .map_err(|_| concealed_authentication_response())?;
+            .map_err(|_| concealed_authentication_rejection())?;
         let enrollment_credential = enrollment_credential(&parts.headers)
-            .map_err(|_| concealed_authentication_response())?;
+            .map_err(|_| concealed_authentication_rejection())?;
         Ok(Self {
             session,
             grant_credential,
@@ -288,7 +309,7 @@ async fn protocol_route<Port, Request>(
     State(state): State<RemoteProtocolRouterStateV1<Port>>,
     admission: RemotePreBodyAdmissionV1<Request>,
     payload: Result<Json<RemoteHttpRequestV1<Request>>, JsonRejection>,
-) -> Response
+) -> Result<Response, RemoteHttpRejection>
 where
     Port: RemoteProtocolPortV1<Request> + Send + Sync + 'static,
     Request: DeserializeOwned + RemoteSessionBoundProtocolBodyV1 + Send + 'static,
@@ -296,7 +317,7 @@ where
 {
     let Json(request) = match payload {
         Ok(payload) => payload,
-        Err(_) => return invalid_remote_request_response(),
+        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
     };
     let RemotePreBodyAdmissionV1 {
         mut session,
@@ -304,7 +325,7 @@ where
         ..
     } = admission;
     if Request::bind_authenticated_session(&session, &request.request).is_err() {
-        return concealed_authentication_response();
+        return Err(concealed_authentication_rejection());
     }
     if Request::REAUTHORIZE_BEFORE_EXECUTION {
         session = match state
@@ -312,14 +333,14 @@ where
             .reauthorize_publication(&session, (state.clock)())
         {
             Ok(session) => session,
-            Err(_) => return concealed_authentication_response(),
+            Err(_) => return Err(concealed_authentication_rejection()),
         };
         if Request::bind_authenticated_session(&session, &request.request).is_err() {
-            return concealed_authentication_response();
+            return Err(concealed_authentication_rejection());
         }
     }
     let Some(enrollment_deadline) = session.enrollment_expires_at() else {
-        return concealed_authentication_response();
+        return Err(concealed_authentication_rejection());
     };
     let deadline = request
         .request
@@ -333,7 +354,7 @@ where
         request.request.request_id.as_str()
     )) {
         Ok(cancellation) => cancellation,
-        Err(_) => return invalid_remote_request_response(),
+        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
     };
     let mut cancel_on_drop = CancelRemoteRequestOnDropV1 {
         cancellation: cancellation.clone(),
@@ -351,8 +372,9 @@ where
     .await;
     cancel_on_drop.disarm();
     match execution {
-        Ok(Ok(response)) => remote_protocol_response(response.into()),
-        Ok(Err(_)) | Err(_) => invalid_remote_request_response(),
+        Ok(Ok(response)) => Ok(remote_protocol_response(response.into())),
+        Ok(Err(error)) => Err(RemoteHttpRejection::Contract(error)),
+        Err(_) => invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
     }
 }
 
@@ -360,13 +382,13 @@ async fn enrollment_route<Port>(
     State(state): State<RemoteProtocolRouterStateV1<Port>>,
     admission: RemoteEnrollmentPreBodyAdmissionV1,
     payload: Result<Json<RemoteHttpRequestV1<EnrollmentRequestV1>>, JsonRejection>,
-) -> Response
+) -> Result<Response, RemoteHttpRejection>
 where
     Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
 {
     let Json(request) = match payload {
         Ok(payload) => payload,
-        Err(_) => return invalid_remote_request_response(),
+        Err(_) => return invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
     };
     if <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
         &admission.session,
@@ -374,15 +396,15 @@ where
     )
     .is_err()
     {
-        return concealed_authentication_response();
+        return Err(concealed_authentication_rejection());
     }
     match state.service.execute_enrollment(
         request.request,
         admission.grant_credential,
         admission.enrollment_credential,
     ) {
-        Ok(response) => remote_protocol_response(response.into()),
-        Err(_) => invalid_remote_request_response(),
+        Ok(response) => Ok(remote_protocol_response(response.into())),
+        Err(error) => Err(RemoteHttpRejection::Contract(error)),
     }
 }
 
@@ -411,11 +433,13 @@ fn remote_protocol_response<T: Serialize>(response: RemoteHttpResponseV1<T>) -> 
         Err(problem) => match problem.problem.kind() {
             ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
             ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-            ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-                StatusCode::CONFLICT
-            }
+            ApplicationProblemKind::Conflict
+            | ApplicationProblemKind::PartialEffect
+            | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
             ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-            ApplicationProblemKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
             ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
             ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
@@ -424,12 +448,20 @@ fn remote_protocol_response<T: Serialize>(response: RemoteHttpResponseV1<T>) -> 
     (status, Json(response)).into_response()
 }
 
-fn concealed_authentication_response() -> Response {
-    crate::application_problem_response(remote_protocol_problem(
+fn concealed_authentication_response() -> Result<Response, ApplicationContractError> {
+    let problem = remote_protocol_problem(
         remote_result_contract(),
         concealed_request_id(),
         RemoteProtocolFailureV1::CallerAuthenticationFailed,
-    ))
+    )?;
+    Ok(crate::application_problem_response(problem))
+}
+
+fn concealed_authentication_rejection() -> RemoteHttpRejection {
+    match concealed_authentication_response() {
+        Ok(response) => RemoteHttpRejection::Response(response),
+        Err(error) => RemoteHttpRejection::Contract(error),
+    }
 }
 
 fn concealed_request_id() -> RequestId {
@@ -437,12 +469,14 @@ fn concealed_request_id() -> RequestId {
         .expect("static concealed remote request id is canonical")
 }
 
-fn invalid_remote_request_response() -> Response {
-    crate::application_problem_response(crate::http::invalid_request_problem(
-        RequestId::new("request.remote.invalid").expect("static remote request id is canonical"),
+fn invalid_remote_request_response() -> Result<Response, ApplicationContractError> {
+    let request_id = RequestId::new("request.remote.invalid")?;
+    let problem = crate::http::invalid_request_problem(
+        request_id,
         "remote.invalid_request",
         "The remote protocol request is malformed",
-    ))
+    )?;
+    Ok(crate::application_problem_response(problem))
 }
 
 fn remote_result_contract() -> ResultContractRef {

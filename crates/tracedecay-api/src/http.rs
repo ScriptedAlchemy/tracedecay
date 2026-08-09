@@ -11,9 +11,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, CancellationSignal,
-    Deadline, OpaqueCursor, PageRequest, ProblemOwningLayer, RequestId, ResultContractRef,
-    RetryDirective, SafeDiagnostic,
+    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
+    ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, SchemaId, ScopeDimension,
@@ -151,6 +151,7 @@ pub enum HttpApplicationOperation {
     HealthDelta,
     StorageStatus,
     DiagnosticsRead,
+    ObservatoryRead,
     ConfigurationList,
     ConfigurationExplain,
     ConfigurationGet,
@@ -185,12 +186,13 @@ pub enum HttpApplicationOwnerKind {
     Feedback,
     CallableCode,
     Primitive,
+    Observatory,
     Configuration,
     ContextScout,
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 78] = [
+    pub const ALL: [Self; 79] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -245,6 +247,7 @@ impl HttpApplicationOperation {
         Self::HealthDelta,
         Self::StorageStatus,
         Self::DiagnosticsRead,
+        Self::ObservatoryRead,
         Self::ConfigurationList,
         Self::ConfigurationExplain,
         Self::ConfigurationGet,
@@ -341,6 +344,7 @@ impl HttpApplicationOperation {
             Self::HealthDelta => "health_delta",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
+            Self::ObservatoryRead => "observatory_read",
             Self::ConfigurationList => "configuration_list",
             Self::ConfigurationExplain => "configuration_explain",
             Self::ConfigurationGet => "configuration_get",
@@ -409,6 +413,7 @@ impl HttpApplicationOperation {
                 | Self::NativeIntegrationApply
                 | Self::NativeIntegrationStatus
                 | Self::NativeIntegrationCancel
+                | Self::ObservatoryRead
         )
     }
 
@@ -447,6 +452,7 @@ impl HttpApplicationOperation {
             operation if operation.owner_kind() == HttpApplicationOwnerKind::Configuration => {
                 format!("/configuration/{}", operation.as_str())
             }
+            Self::ObservatoryRead => "/observatory/read".to_owned(),
             operation => format!("/context-scout/{}", operation.as_str()),
         }
     }
@@ -555,6 +561,11 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
 
     fn invoke_primitive(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
+    fn invoke_observatory(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture;
+
     fn invoke_configuration(
         &self,
         request: HttpApplicationRequest,
@@ -595,6 +606,13 @@ where
         Box::pin((self)(request))
     }
 
+    fn invoke_observatory(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
     fn invoke_configuration(
         &self,
         request: HttpApplicationRequest,
@@ -621,9 +639,13 @@ fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
     match kind {
         ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
+        ApplicationProblemKind::Conflict
+        | ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
         ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
         ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
         ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
@@ -665,21 +687,30 @@ pub fn application_problem_response(application: ApplicationProblemEnvelope) -> 
         .into_response()
 }
 
+/// Report an internal contract violation before a canonical problem envelope
+/// exists. There is no truthful application-problem body to return in this
+/// case, because constructing that body is what failed.
+pub(crate) fn application_contract_error_response(_error: ApplicationContractError) -> Response {
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
 /// Build the stable HTTP envelope for a problem owned by transport admission.
 ///
 /// The executable uses this for failures that occur before an application
 /// router can mint its own request context, such as project-route resolution.
 pub fn adapter_problem_response(request_id: RequestId, problem: ApplicationProblem) -> Response {
-    application_problem_response(adapter_problem(request_id, problem))
+    match adapter_problem(request_id, problem) {
+        Ok(problem) => application_problem_response(problem),
+        Err(error) => application_contract_error_response(error),
+    }
 }
 
 pub(crate) fn invalid_request_problem(
     request_id: RequestId,
     code: &'static str,
     message: &'static str,
-) -> ApplicationProblemEnvelope {
-    let diagnostic =
-        SafeDiagnostic::new(code, message).expect("HTTP adapter diagnostics are static");
+) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
+    let diagnostic = SafeDiagnostic::new(code, message)?;
     adapter_problem(
         request_id,
         ApplicationProblem::InvalidRequest {
@@ -693,15 +724,13 @@ pub(crate) fn invalid_request_problem(
 pub(crate) fn adapter_problem(
     request_id: RequestId,
     problem: ApplicationProblem,
-) -> ApplicationProblemEnvelope {
+) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
     let contract = ResultContractRef::new(
-        SchemaId::new("schema.tracedecay.http.adapter-problem.v1")
-            .expect("the HTTP adapter problem schema id is static"),
+        SchemaId::new("schema.tracedecay.http.adapter-problem.v1")?,
         1,
-    )
-    .expect("the HTTP adapter problem contract is static");
+    )?;
     ApplicationProblemEnvelope::new(contract, request_id, problem)
-        .with_owning_layer(ProblemOwningLayer::Adapter)
+        .map(|envelope| envelope.with_owning_layer(ProblemOwningLayer::Adapter))
 }
 
 pub(crate) fn invalid_request_response(
@@ -709,7 +738,10 @@ pub(crate) fn invalid_request_response(
     code: &'static str,
     message: &'static str,
 ) -> Response {
-    application_problem_response(invalid_request_problem(request_id, code, message))
+    match invalid_request_problem(request_id, code, message) {
+        Ok(problem) => application_problem_response(problem),
+        Err(error) => application_contract_error_response(error),
+    }
 }
 
 /// Build the catalog-advertised application routes at relative paths.
@@ -725,6 +757,10 @@ where
 {
     Router::new()
         .route("/git/{operation}", post(git_read::<O>))
+        .route(
+            "/github-stack/signal-expand",
+            post(github_stack_signal_expand::<O>),
+        )
         .route("/feedback/{operation}", post(public_feedback_read::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
@@ -813,6 +849,7 @@ constant_operation_handlers! {
     },
     affected_tests => HttpApplicationOperation::AffectedTests;
     test_results => HttpApplicationOperation::TestResults;
+    github_stack_signal_expand => HttpApplicationOperation::GitHubStackSignalExpand;
 }
 
 fn parse_primitive_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
@@ -859,10 +896,10 @@ macro_rules! parsed_operation_handlers {
                 O: HttpApplicationOwners,
             {
                 let Some(operation) = $parse(&operation) else {
-                    return application_problem_response(adapter_problem(
+                    return adapter_problem_response(
                         request_id.0,
                         ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                    ));
+                    );
                 };
                 invoke_route(operation, state, request_id, cancellation, page, body).await
             }
@@ -943,6 +980,7 @@ where
         HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
         HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
+        HttpApplicationOwnerKind::Observatory => owners.invoke_observatory(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),

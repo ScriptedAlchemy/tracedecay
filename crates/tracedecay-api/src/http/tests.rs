@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
+
 use super::{
     DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
     parse_callable_code_operation, parse_configuration_operation, parse_context_scout_operation,
-    parse_feedback_read_operation, parse_git_read_operation,
+    parse_feedback_read_operation, parse_git_read_operation, parse_native_integration_operation,
 };
 use tracedecay_application::{
     configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
@@ -271,8 +273,12 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
 
 #[test]
 fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
-    assert_eq!(HttpApplicationOperation::ALL.len(), 77);
+    let mut names = BTreeSet::new();
     for operation in HttpApplicationOperation::ALL {
+        assert!(
+            names.insert(operation.as_str()),
+            "canonical operation names must be unique"
+        );
         assert_eq!(
             HttpApplicationOperation::from_tool_name(&format!("tracedecay_{}", operation.as_str())),
             Some(operation),
@@ -286,6 +292,11 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
     );
     assert!(!HttpApplicationOperation::GitPreview.is_http_exposed());
     assert!(!HttpApplicationOperation::GitApply.is_http_exposed());
+    assert!(!HttpApplicationOperation::ObservatoryRead.is_http_exposed());
+    assert_eq!(
+        HttpApplicationOperation::ObservatoryRead.owner_kind(),
+        HttpApplicationOwnerKind::Observatory
+    );
     assert_eq!(
         HttpApplicationOperation::GitPreview.owner_kind(),
         HttpApplicationOwnerKind::Git
@@ -294,4 +305,39 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         HttpApplicationOperation::GitApply.owner_kind(),
         HttpApplicationOwnerKind::Git
     );
+    assert!(HttpApplicationOperation::GitHubStackSignalExpand.is_http_exposed());
+    assert_eq!(
+        HttpApplicationOperation::GitHubStackSignalExpand.application_route_path(),
+        "/application/github-stack/signal-expand"
+    );
+}
+
+#[test]
+fn native_worktree_http_parser_admits_only_the_five_public_operations() {
+    for operation in [
+        HttpApplicationOperation::NativeIntegrationWorktreeInventory,
+        HttpApplicationOperation::NativeIntegrationWorktreeInspect,
+        HttpApplicationOperation::NativeIntegrationWorktreeConfirm,
+        HttpApplicationOperation::NativeIntegrationWorktreeRemove,
+        HttpApplicationOperation::NativeIntegrationWorktreeReconcile,
+    ] {
+        assert_eq!(
+            parse_native_integration_operation(operation.as_str()),
+            Some(operation)
+        );
+        assert_eq!(
+            operation.application_route_path(),
+            format!("/application/native-integration/{}", operation.as_str())
+        );
+    }
+    for operation in [
+        HttpApplicationOperation::NativeIntegrationStackSnapshot,
+        HttpApplicationOperation::NativeIntegrationPreflight,
+        HttpApplicationOperation::NativeIntegrationApprove,
+        HttpApplicationOperation::NativeIntegrationApply,
+        HttpApplicationOperation::NativeIntegrationStatus,
+        HttpApplicationOperation::NativeIntegrationCancel,
+    ] {
+        assert_eq!(parse_native_integration_operation(operation.as_str()), None);
+    }
 }

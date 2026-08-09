@@ -23,8 +23,8 @@ use crate::remote::credential_admission::{
     RemoteCredentialAdmissionPortV1, RemoteCredentialUseV1, RemoteSessionBoundProtocolBodyV1,
 };
 use crate::remote::protocol::{
-    REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
+    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, remote_protocol_problem,
 };
 use crate::{
     ApplicationContractError, ApplicationEnvelope, CancellationObservation, CancellationStage,
@@ -250,14 +250,10 @@ impl RemoteRecoveryProtocolOwnerV1 {
         expected: &RecoveryAuthorityExpectationV1,
         failure: RemoteProtocolFailureV1,
         contract: ResultContractRef,
-    ) -> RemoteProtocolResponseV1<T> {
+    ) -> Result<RemoteProtocolResponseV1<T>, ApplicationContractError> {
         let authority = self.operations.current_authority(expected, (self.clock)());
-        RemoteProtocolResponseV1 {
-            protocol_version: REMOTE_PROTOCOL_VERSION_V1,
-            request_id: request_id.clone(),
-            authority,
-            result: Err(remote_protocol_problem(contract, request_id, failure)),
-        }
+        let problem = remote_protocol_problem(contract, request_id.clone(), failure)?;
+        RemoteProtocolResponseV1::new(request_id, authority, Err(problem))
     }
 
     fn effect_envelope<T>(
@@ -494,22 +490,10 @@ macro_rules! impl_recovery_protocol {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
-            ) -> RemoteProtocolResponseV1<Self::Output> {
+            ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
                 let request_id = request.request_id.clone();
                 let expected = ($expected)(&request);
-                let contract = match result_contract($schema) {
-                    Ok(contract) => contract,
-                    Err(_) => {
-                        let contract =
-                            crate::remote::protocol::remote_enrollment_result_contract_v1();
-                        return self.failure_response(
-                            request_id,
-                            &expected,
-                            RemoteProtocolFailureV1::AuthorityUnavailable,
-                            contract,
-                        );
-                    }
-                };
+                let contract = result_contract($schema)?;
                 let (session, caller) =
                     match self.admit(&request, &credential, $use_case, $reauthorize) {
                         Ok(admitted) => admitted,
@@ -523,27 +507,21 @@ macro_rules! impl_recovery_protocol {
                 {
                     Ok(committed) => {
                         let authority = committed.authority.clone();
-                        let result = self
-                            .effect_envelope(
-                                request_id.clone(),
-                                $operation,
-                                &session,
-                                committed,
+                        let result = match self.effect_envelope(
+                            request_id.clone(),
+                            $operation,
+                            &session,
+                            committed,
+                            contract.clone(),
+                        ) {
+                            Ok(envelope) => Ok(envelope),
+                            Err(failure) => Err(remote_protocol_problem(
                                 contract.clone(),
-                            )
-                            .map_err(|failure| {
-                                remote_protocol_problem(
-                                    contract.clone(),
-                                    request_id.clone(),
-                                    failure,
-                                )
-                            });
-                        RemoteProtocolResponseV1 {
-                            protocol_version: REMOTE_PROTOCOL_VERSION_V1,
-                            request_id,
-                            authority,
-                            result,
-                        }
+                                request_id.clone(),
+                                failure,
+                            )?),
+                        };
+                        RemoteProtocolResponseV1::new(request_id, authority, result)
                     }
                     Err(error) => self.failure_response(
                         request_id,

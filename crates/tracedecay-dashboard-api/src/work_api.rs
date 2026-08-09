@@ -1,6 +1,6 @@
 //! The dashboard's public Work contract.
 //!
-//! The routes themselves are built by [`tracedecay_api::work_core_router`] from
+//! The routes themselves are built by [`tracedecay_api::work_dashboard_router`] from
 //! the canonical [`WorkOperation`] descriptor — this module only restates that
 //! descriptor as the route document the dashboard contract schema publishes.
 //! There is no second route table and no forwarding hop: a dashboard Work
@@ -26,7 +26,8 @@ pub(super) struct RegisteredWorkRouteContractV1 {
 }
 
 /// Names the dashboard-exposed operations; every column of the document is read
-/// off the descriptor. A test holds this list to `WorkOperation::ALL`.
+/// off the descriptor. This is the dashboard view of `WorkOperation::ALL` with
+/// scheduler-owned `StartAttempt` intentionally withheld from the dashboard.
 macro_rules! dashboard_work_routes {
     ($($variant:ident),+ $(,)?) => {
         static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[
@@ -56,17 +57,26 @@ dashboard_work_routes!(
     ReviewProposal,
     AcceptProposal,
     AdmitExecution,
-    AttachRuntimeEvidence,
     AcceptTask,
-    StartAttempt,
     Synthesize,
     AttemptStatus,
     CancelAttempt,
     ResumeAttempts,
+    RetryAttempt,
     ListAttempts,
+    ExecutionHistory,
     HydrateArtifacts,
+    RetrieveEvidence,
     Views,
+    Experience,
+    CompareProposal,
+    PrepareGraphMutation,
+    MutateGraph,
     Topology,
+    TopologyMetrics,
+    PrepareDuplicateAdjudication,
+    AdjudicateDuplicate,
+    AdjudicateLeak,
     PauseRun,
     ResumeRun,
     RunControl,
@@ -94,7 +104,7 @@ mod tests {
     fn dashboard_router() -> Router {
         Router::new().nest(
             "/api/work",
-            tracedecay_api::work_core_router(|_request: WorkHttpRequest| async {
+            tracedecay_api::work_dashboard_router(|_request: WorkHttpRequest| async {
                 StatusCode::SERVICE_UNAVAILABLE.into_response()
             }),
         )
@@ -143,7 +153,11 @@ mod tests {
 
     #[test]
     fn the_route_document_is_exactly_the_descriptor() {
-        assert_eq!(super::DOCUMENTED_OPERATIONS, WorkOperation::ALL.as_slice());
+        let expected = WorkOperation::ALL
+            .into_iter()
+            .filter(|operation| operation.is_dashboard_operation())
+            .collect::<Vec<_>>();
+        assert_eq!(super::DOCUMENTED_OPERATIONS, expected.as_slice());
     }
 
     #[test]
@@ -157,9 +171,10 @@ mod tests {
             .iter()
             .map(|route| route.operation_id)
             .collect::<BTreeSet<_>>();
-        let expected_ids = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
-            .iter()
-            .map(|(operation, _, _)| format!("operation.work.{operation}"))
+        let expected_ids = WorkOperation::ALL
+            .into_iter()
+            .filter(|operation| operation.is_dashboard_operation())
+            .map(|operation| operation.operation_id_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(
             routes.len(),

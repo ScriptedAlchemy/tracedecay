@@ -20,6 +20,7 @@ mod http;
 pub mod multi_root;
 pub mod read_model;
 pub mod remote;
+mod retained;
 mod sse;
 pub mod work;
 pub mod workflow;
@@ -50,10 +51,15 @@ pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
     MultiRootInvocationFuture, multi_root_application_router,
 };
+pub use retained::{
+    RetainedApplicationOwner, RetainedHttpRequest, RetainedInvocationFuture,
+    retained_application_route_path, retained_application_router,
+    retained_invalid_request_response, retained_operation_id, retained_route_path,
+};
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
-    work_application_router, work_core_router, work_invalid_request_response,
+    work_application_router, work_dashboard_router, work_invalid_request_response,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
@@ -322,16 +328,18 @@ mod tests {
     #[tokio::test]
     async fn application_router_does_not_mount_multi_root_routes() {
         let app = application_router(|request: super::HttpApplicationRequest| async move {
+            let problem = ApplicationProblemEnvelope::new(
+                ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                    .expect("contract"),
+                request.request_id,
+                ApplicationProblem::unavailable(
+                    SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                ),
+            )
+            .expect("test application problem envelope");
             CanonicalInvocationResult::<serde_json::Value>::new(
                 BindingId::new("binding.http.test.v1").expect("binding"),
-                Err(ApplicationProblemEnvelope::new(
-                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
-                        .expect("contract"),
-                    request.request_id,
-                    ApplicationProblem::unavailable(
-                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
-                    ),
-                )),
+                Err(problem),
             )
         });
 
@@ -364,21 +372,19 @@ mod tests {
                     .lock()
                     .expect("feedback operation observations")
                     .push(request.operation);
+                let problem = ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                        .expect("contract"),
+                    request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                    ),
+                )
+                .expect("test application problem envelope");
                 CanonicalInvocationResult::<serde_json::Value>::new(
                     BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
                         .expect("binding"),
-                    Err(ApplicationProblemEnvelope::new(
-                        ResultContractRef::new(
-                            SchemaId::new("schema.test.result").expect("schema"),
-                            1,
-                        )
-                        .expect("contract"),
-                        request.request_id,
-                        ApplicationProblem::unavailable(
-                            SafeDiagnostic::new("test.unavailable", "Unavailable")
-                                .expect("diagnostic"),
-                        ),
-                    )),
+                    Err(problem),
                 )
             }
         });
@@ -436,21 +442,19 @@ mod tests {
                         request.deadline.clone(),
                         request.cancellation.context(),
                     ));
+                let problem = ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                        .expect("contract"),
+                    request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                    ),
+                )
+                .expect("test application problem envelope");
                 CanonicalInvocationResult::<serde_json::Value>::new(
                     BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
                         .expect("binding"),
-                    Err(ApplicationProblemEnvelope::new(
-                        ResultContractRef::new(
-                            SchemaId::new("schema.test.result").expect("schema"),
-                            1,
-                        )
-                        .expect("contract"),
-                        request.request_id,
-                        ApplicationProblem::unavailable(
-                            SafeDiagnostic::new("test.unavailable", "Unavailable")
-                                .expect("diagnostic"),
-                        ),
-                    )),
+                    Err(problem),
                 )
             }
         });
@@ -511,7 +515,8 @@ mod tests {
             RequestId::new("request.http.invalid").unwrap(),
             "http.invalid_query",
             "The HTTP query is invalid",
-        );
+        )
+        .expect("static HTTP adapter problem is canonical");
         let value = serde_json::to_value(envelope).expect("serialize canonical problem");
 
         assert_eq!(value["request_id"], "request.http.invalid");
@@ -523,11 +528,13 @@ mod tests {
 
     #[test]
     fn concealed_http_problem_omits_binding_identity() {
-        let result = Err(ApplicationProblemEnvelope::new(
+        let problem = ApplicationProblemEnvelope::new(
             ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
             RequestId::new("request.test").unwrap(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )
+        .expect("test application problem envelope");
+        let result = Err(problem);
         let value = serde_json::to_value(
             CanonicalInvocationResult::<()>::new(
                 BindingId::new("binding.http.test.v1").unwrap(),
@@ -543,13 +550,15 @@ mod tests {
 
     #[test]
     fn non_concealed_http_problem_preserves_binding_identity() {
-        let result = Err(ApplicationProblemEnvelope::new(
+        let problem = ApplicationProblemEnvelope::new(
             ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
             RequestId::new("request.test").unwrap(),
             ApplicationProblem::unavailable(
                 SafeDiagnostic::new("test.unavailable", "Temporarily unavailable").unwrap(),
             ),
-        ));
+        )
+        .expect("test application problem envelope");
+        let result = Err(problem);
         let value = serde_json::to_value(
             CanonicalInvocationResult::<()>::new(
                 BindingId::new("binding.http.test.v1").unwrap(),

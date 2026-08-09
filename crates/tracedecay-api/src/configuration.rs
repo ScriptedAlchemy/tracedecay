@@ -170,9 +170,13 @@ pub fn configuration_application_problem_error(
     let status = match problem.problem.kind {
         ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
+        ApplicationProblemKind::Conflict
+        | ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
         ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
         ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
         ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
