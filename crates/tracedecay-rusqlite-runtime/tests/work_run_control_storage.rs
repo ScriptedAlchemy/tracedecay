@@ -21,17 +21,17 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
-    UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkBlockedIntervalCauseV1,
-    WorkBlockedIntervalClosureV1, WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1,
-    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRunControlAuthorityV1,
-    WorkRunControlReasonV1, WorkRunControlStateV1, WorkRunControlV1, WorkSandboxPolicy,
-    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorkflowStepId, WorktreeId,
+    ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
+    WorkAttemptV1, WorkAuthority, WorkBlockedIntervalCauseV1, WorkBlockedIntervalClosureV1,
+    WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1, WorkCancellationStateV1,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionEnvelopeV1,
+    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
+    WorkFenceEpochV1, WorkFilesystemPolicy, WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId,
+    WorkProductEventSequenceV1, WorkProductSourceWatermarkV1, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkRunControlAuthorityV1, WorkRunControlReasonV1, WorkRunControlStateV1, WorkRunControlV1,
+    WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowStepId, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -77,6 +77,17 @@ fn route() -> WorkProviderRouteV1 {
     .unwrap()
 }
 
+fn projection_binding() -> WorkAttemptProjectionBindingV1 {
+    WorkAttemptProjectionBindingV1::new(
+        WorkGraphVersionV1::new(3).unwrap(),
+        WorkProductEventSequenceV1::new(7).unwrap(),
+        WorkProductSourceWatermarkV1::new(Default::default()).unwrap(),
+        digest('f'),
+        id::<ProposalId>("proposal.run-control.storage"),
+    )
+    .unwrap()
+}
+
 fn execution_snapshot() -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.rc.1"),
@@ -109,13 +120,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
 fn attempt_for(task_id: TaskId, run_id: RunId, attempt_id: &str) -> WorkAttemptV1 {
     let identity =
         WorkAttemptIdentityV1::new(task_id, run_id, id::<AttemptId>(attempt_id)).unwrap();
-    let binding = WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.run-control.storage"),
-        tracedecay_domain::WorkProjectionSequenceV1::new(7),
-        WorkVersion::new(3).unwrap(),
-        id::<ProposalId>("proposal.run-control.storage"),
-    )
-    .unwrap();
+    let binding = projection_binding();
     let envelope = WorkExecutionEnvelopeV1::new(
         identity.clone(),
         binding.clone(),
@@ -163,13 +168,7 @@ fn attempt_with_admission(
     topology: tracedecay_domain::WorkTopologyPolicyV1,
 ) -> WorkAttemptV1 {
     let identity = WorkAttemptIdentityV1::new(task(), run(), id::<AttemptId>(attempt_id)).unwrap();
-    let binding = WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.run-control.storage"),
-        tracedecay_domain::WorkProjectionSequenceV1::new(7),
-        WorkVersion::new(3).unwrap(),
-        id::<ProposalId>("proposal.run-control.storage"),
-    )
-    .unwrap();
+    let binding = projection_binding();
     let execution = WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.rc.1"),
         configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.rc.1"),
