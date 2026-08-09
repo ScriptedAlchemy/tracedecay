@@ -1,60 +1,19 @@
-//! Verified Work product graph publication.
+//! Verified Work product graph persistence inside the event transaction.
 //!
-//! Publication is what turns an appended event into something a read may serve.
-//! It folds the journal through that event, digests the recovered graph, and
-//! records the version. A read that finds no published row for a version
-//! reports the absence — it never falls back to folding unpublished events,
-//! because an unverified fold is exactly the falsified reading the Work views
-//! must never draw.
+//! The event port folds the journal through the new event, digests the recovered
+//! graph, and records the version before committing either row. There is no
+//! independently callable publication or restart-reconciliation authority.
 
 use tracedecay_application::{
-    VerifiedWorkGraphVersionV1, WorkGraphPublishPortErrorV1, WorkGraphPublishPortV1,
-    WorkProductPortContextV1,
+    VerifiedWorkGraphVersionV1, WorkProductEventPortErrorV1, WorkProductPortContextV1,
 };
 use tracedecay_domain::WorkProductEventV1;
 
 use super::{fold_graph, load_journal, owner_params, recovered_graph_digest, selection_covers};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{WorkSqliteStorage, exact_sql_statement, exact_sql_text, registered_work_query};
+use crate::work::{exact_sql_statement, exact_sql_text, registered_work_query};
 
-type PortError = WorkGraphPublishPortErrorV1;
-
-impl WorkGraphPublishPortV1 for WorkSqliteStorage {
-    fn publish_event(
-        &self,
-        context: &WorkProductPortContextV1,
-        event: &WorkProductEventV1,
-    ) -> Result<VerifiedWorkGraphVersionV1, PortError> {
-        let scope = context.authorized_scope();
-        if !selection_covers(scope.selection(), event) {
-            return Err(PortError::Unavailable);
-        }
-        // An observation earlier than the change it publishes is not a state
-        // this authority can record: `valid_at <= observed_at` is a schema
-        // invariant, and silently widening it would make the forensic and
-        // as-of readings disagree.
-        if context.observed_at() < event.occurred_at() {
-            return Err(PortError::Unavailable);
-        }
-
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(|_| PortError::Unavailable)?;
-
-        let outcome = publish_in_transaction(&transaction, context, event);
-        match outcome {
-            Ok(verified) => {
-                transaction.commit().map_err(|_| PortError::Unavailable)?;
-                Ok(verified)
-            }
-            Err(error) => {
-                let _ = transaction.rollback();
-                Err(error)
-            }
-        }
-    }
-}
+type PortError = WorkProductEventPortErrorV1;
 
 pub(super) fn publish_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
@@ -62,6 +21,14 @@ pub(super) fn publish_in_transaction(
     event: &WorkProductEventV1,
 ) -> Result<VerifiedWorkGraphVersionV1, PortError> {
     let scope = context.authorized_scope();
+    if !selection_covers(scope.selection(), event) {
+        return Err(PortError::NotFoundOrNotAuthorized);
+    }
+    // An observation earlier than the change it verifies would make forensic
+    // and as-of reads disagree, so the entire event transaction is refused.
+    if context.observed_at() < event.occurred_at() {
+        return Err(PortError::Unavailable);
+    }
     let journal = load_journal(transaction, scope).ok_or(PortError::Unavailable)?;
     let entry = journal
         .iter()
@@ -138,28 +105,6 @@ pub(super) fn publish_in_transaction(
             .map_err(|_| PortError::Unavailable)?,
         )
         .map_err(|_| PortError::VersionConflict)?;
-
-    transaction
-        .execute(
-            exact_sql_statement(
-                "UPDATE work_product_event_outbox_v1
-                 SET published_at = ?4
-                 WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND sequence = ?3
-                   AND published_at IS NULL",
-                owner_params(scope)
-                    .into_iter()
-                    .chain([
-                        ExactSqlValue::Integer(
-                            i64::try_from(entry.sequence.get())
-                                .map_err(|_| PortError::Unavailable)?,
-                        ),
-                        ExactSqlValue::Integer(context.observed_at().0),
-                    ])
-                    .collect(),
-            )
-            .map_err(|_| PortError::Unavailable)?,
-        )
-        .map_err(|_| PortError::DurabilityUncertain)?;
 
     VerifiedWorkGraphVersionV1::new(
         event.result_graph_version(),

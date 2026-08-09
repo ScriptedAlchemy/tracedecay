@@ -2,11 +2,11 @@
 //! channel.
 //!
 //! The application crate owns the Work product family as pure ports:
-//! `WorkProductEventPortV1` appends to an immutable journal,
-//! `WorkGraphPublishPortV1` turns one appended event into a verified graph
-//! version, and `WorkGraphReadPortV1` serves those verified versions with every
-//! projection derived from the same version. Until this module existed the only
-//! implementation of any of them was a test double, so the whole family —
+//! `WorkProductEventPortV1` atomically appends to an immutable journal and
+//! records its verified graph version, while `WorkGraphReadPortV1` serves those
+//! verified versions with every projection derived from the same version.
+//! Until this module existed the only implementation of either authority was a
+//! test double, so the whole family —
 //! including the DAG, timeline, causal, workload, and critical-path projections
 //! the Work views draw — had no producer at all.
 //!
@@ -24,10 +24,9 @@
 //!    so a runtime reading for accepted attempts this authority cannot observe
 //!    is reported as an explicit unavailable coverage rather than as a
 //!    fabricated zero.
-//! 3. **Only verified versions are readable.** An appended event is not yet a
-//!    readable graph version. A read serves a version only after
-//!    `publish_event` recorded it, so a caller can never observe a graph the
-//!    authority has not verified and digested.
+//! 3. **Only verified versions are readable.** The event and its recovered
+//!    graph version commit in one transaction, so a caller can never observe an
+//!    event without the graph authority that verified and digested it.
 
 use tracedecay_application::{
     AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductSelectionScopeV1,

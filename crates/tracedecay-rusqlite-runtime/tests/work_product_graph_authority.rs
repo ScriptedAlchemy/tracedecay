@@ -241,7 +241,7 @@ fn read_current(
 }
 
 #[test]
-fn a_created_work_product_is_journaled_published_and_read_back_with_declared_effort() {
+fn a_created_work_product_commits_one_verified_journal_version_with_declared_effort() {
     let store = RegisteredWorkStore::start("work-product-create");
     let receipt = create(
         &store,
@@ -263,20 +263,42 @@ fn a_created_work_product_is_journaled_published_and_read_back_with_declared_eff
         receipt.verified_graph_version().graph_version(),
         WorkGraphVersionV1::initial()
     );
-    // The event, its outbox entry, and the verified version are all durable
-    // and settled in the same commit: an event can never exist unpublished
-    // once its publication succeeded.
+    // The event and verified version are the two rows of one atomic commit.
+    // Their exact sequence/version identity must agree with the returned
+    // receipt; separate row counts alone would not prove that relationship.
     assert_eq!(store.count("work_product_events_v1"), 1);
     assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+    let (event_id, event_sequence, verified_sequence, verified_version): (String, i64, i64, i64) =
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT event.event_id, event.sequence,
+                            verified.event_sequence, verified.graph_version
+                     FROM work_product_events_v1 AS event
+                     JOIN work_product_graph_versions_v1 AS verified
+                       ON verified.owner_brain_id = event.owner_brain_id
+                      AND verified.owner_profile_id = event.owner_profile_id
+                      AND verified.event_sequence = event.sequence
+                      AND verified.graph_version = event.result_graph_version",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("inspect the atomic event and verified graph pair")
+        });
     assert_eq!(
-        store.inspect(|connection| connection
-            .query_row(
-                "SELECT COUNT(*) FROM work_product_event_outbox_v1 WHERE published_at IS NOT NULL",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap()),
-        1
+        event_id,
+        receipt.event().event_id().as_str(),
+        "the committed journal row must be the returned event"
+    );
+    assert_eq!(event_sequence, verified_sequence);
+    assert_eq!(
+        event_sequence,
+        i64::try_from(receipt.event().sequence().get()).expect("event sequence fits SQLite")
+    );
+    assert_eq!(
+        verified_version,
+        i64::try_from(receipt.verified_graph_version().graph_version().get())
+            .expect("graph version fits SQLite")
     );
 
     let WorkGraphReadV1::Current { snapshot, .. } = read_current(&store).expect("read current")
@@ -350,8 +372,39 @@ fn replaying_one_command_returns_the_same_event_without_a_second_journal_row() {
     assert!(!first.replayed());
     assert!(second.replayed());
     assert_eq!(first.event(), second.event());
+    assert_eq!(
+        first.verified_graph_version(),
+        second.verified_graph_version()
+    );
     assert_eq!(store.count("work_product_events_v1"), 1);
     assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+}
+
+#[test]
+fn a_verified_graph_insert_failure_rolls_back_the_journal_event() {
+    let store =
+        RegisteredWorkStore::start_with_setup("work-product-atomic-rollback", |connection| {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_work_product_verified_graph
+                     BEFORE INSERT ON work_product_graph_versions_v1
+                     BEGIN
+                       SELECT RAISE(ABORT, 'injected verified graph failure');
+                     END;",
+                )
+                .expect("install verified graph failure trigger");
+        });
+
+    create(
+        &store,
+        "command.work-product.atomic-rollback",
+        UtcMicros(100),
+        vec![item("task.only", &[], 2)],
+    )
+    .expect_err("the verified graph failure must reject the whole atomic append");
+
+    assert_eq!(store.count("work_product_events_v1"), 0);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 0);
 }
 
 #[test]
@@ -376,6 +429,7 @@ fn the_same_command_with_different_input_is_an_idempotency_conflict() {
     .expect_err("a reused command id with different input must not be accepted");
     assert_eq!(conflict, WorkProductApplicationErrorV1::IdempotencyConflict);
     assert_eq!(store.count("work_product_events_v1"), 1);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
 }
 
 #[test]
@@ -398,6 +452,7 @@ fn a_second_creation_cannot_claim_there_is_no_prior_graph() {
     .expect_err("a second create must lose the compare-and-swap");
     assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
     assert_eq!(store.count("work_product_events_v1"), 1);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 1);
 }
 
 #[test]
@@ -568,24 +623,23 @@ fn a_forensic_read_is_placed_by_observation_time_not_by_the_change_instant() {
     assert_eq!(snapshot.valid_at(), UtcMicros(100));
 }
 
-/// A read must never be answered from an event that was appended but whose
-/// publication never landed: the unverified fold is exactly the falsified
-/// reading this authority exists to prevent.
+/// A read must never answer from a journal whose verified row was corrupted
+/// out of band. Production cannot commit this shape because both rows share one
+/// transaction, but the read authority still fails closed against tampering.
 #[test]
-fn an_appended_event_without_a_published_version_is_not_readable() {
-    let store = RegisteredWorkStore::start("work-product-unpublished");
+fn a_tampered_journal_without_its_verified_version_is_not_readable() {
+    let store = RegisteredWorkStore::start("work-product-tampered-verification");
     create(
         &store,
-        "command.work-product.unpublished",
+        "command.work-product.tampered-verification",
         UtcMicros(100),
         vec![item("task.only", &[], 2)],
     )
     .expect("create the work product");
     assert!(read_current(&store).is_ok());
 
-    // Remove only the verified publication, leaving the journal intact — the
-    // exact durable shape a crash between append and publish would leave if
-    // they were not one transaction.
+    // Remove only the verified row through the out-of-band inspection
+    // connection. No production writer exposes this partial mutation.
     store.inspect(|connection| {
         connection
             .execute("DELETE FROM work_product_graph_versions_v1", [])
@@ -593,7 +647,7 @@ fn an_appended_event_without_a_published_version_is_not_readable() {
     });
 
     assert_eq!(
-        read_current(&store).expect_err("an unpublished event is not a readable graph"),
+        read_current(&store).expect_err("an unverified event is not a readable graph"),
         WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
     );
     assert_eq!(store.count("work_product_events_v1"), 1);

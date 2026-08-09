@@ -1,5 +1,4 @@
-//! The immutable Work product event journal, its idempotency replay, and the
-//! publication outbox one append enqueues.
+//! The immutable Work product event journal and its atomic verified projection.
 
 use tracedecay_application::{
     WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1, WorkProductEventDraftV1,
@@ -83,7 +82,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
                 Ok(WorkProductEventCommitOutcomeV1::Replayed(commit))
             }
             Err(error) => {
-                let _ = transaction.rollback();
+                transaction.rollback().map_err(|_| PortError::Unavailable)?;
                 Err(error)
             }
         }
@@ -127,16 +126,7 @@ pub(super) fn append_in_transaction(
         .ok_or(PortError::Unavailable)?;
     let event = mint_event(draft, sequence).ok_or(PortError::VersionConflict)?;
     insert_event(transaction, context, &event, sequence)?;
-    enqueue_outbox(transaction, context, sequence)?;
-    let verified = super::publication::publish_in_transaction(transaction, context, &event)
-        .map_err(|error| match error {
-            tracedecay_application::WorkGraphPublishPortErrorV1::VersionConflict => {
-                PortError::VersionConflict
-            }
-            tracedecay_application::WorkGraphPublishPortErrorV1::Unavailable => {
-                PortError::Unavailable
-            }
-        })?;
+    let verified = super::publication::publish_in_transaction(transaction, context, &event)?;
     WorkProductEventCommitV1::new(event, verified)
         .map(WorkProductEventCommitOutcomeV1::Appended)
         .map_err(|_| PortError::Unavailable)
@@ -218,11 +208,12 @@ fn insert_event(
     sequence: WorkProductEventSequenceV1,
 ) -> Result<(), PortError> {
     let payload = serde_json::to_string(event).map_err(|_| PortError::Unavailable)?;
-    let expected = event
-        .expected_graph_version()
-        .map_or(ExactSqlValue::Null, |version| {
-            ExactSqlValue::Integer(i64::try_from(version.get()).unwrap_or(i64::MAX))
-        });
+    let expected = match event.expected_graph_version() {
+        Some(version) => ExactSqlValue::Integer(
+            i64::try_from(version.get()).map_err(|_| PortError::Unavailable)?,
+        ),
+        None => ExactSqlValue::Null,
+    };
     transaction
         .execute(
             exact_sql_statement(
@@ -253,37 +244,5 @@ fn insert_event(
             .map_err(|_| PortError::Unavailable)?,
         )
         .map_err(|_| PortError::VersionConflict)?;
-    Ok(())
-}
-
-/// Enqueue the appended event for publication.
-///
-/// The outbox row is written in the same transaction as the event, so an event
-/// can never exist without a pending publication, and `publish_event` is the
-/// only writer that can settle it.
-fn enqueue_outbox(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
-    context: &WorkProductPortContextV1,
-    sequence: WorkProductEventSequenceV1,
-) -> Result<(), PortError> {
-    transaction
-        .execute(
-            exact_sql_statement(
-                "INSERT INTO work_product_event_outbox_v1 (
-                    owner_brain_id, owner_profile_id, sequence, enqueued_at, published_at
-                 ) VALUES (?1, ?2, ?3, ?4, NULL)",
-                owner_params(context.authorized_scope())
-                    .into_iter()
-                    .chain([
-                        ExactSqlValue::Integer(
-                            i64::try_from(sequence.get()).map_err(|_| PortError::Unavailable)?,
-                        ),
-                        ExactSqlValue::Integer(context.observed_at().0),
-                    ])
-                    .collect(),
-            )
-            .map_err(|_| PortError::Unavailable)?,
-        )
-        .map_err(|_| PortError::Unavailable)?;
     Ok(())
 }

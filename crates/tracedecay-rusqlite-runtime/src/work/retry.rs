@@ -46,53 +46,78 @@ impl WorkRetryStoragePortV1 for WorkSqliteStorage {
         write: &WorkRetryWriteV1,
         concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkRetryAttemptOutcomeV1, WorkAttemptStorageError> {
-        validate_write(write)?;
         let transaction = self
             .handle
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        if let Some(replayed) = replay(
-            &transaction,
-            authority,
-            write.receipt.command.command_id.as_str(),
-        )? {
-            let _ = transaction.rollback();
-            return if replayed.receipt().canonical_input_digest
-                == write.receipt.canonical_input_digest
-            {
+        let outcome =
+            insert_retry_bounded_in_transaction(&transaction, authority, write, concurrency);
+        match outcome {
+            Ok(created @ WorkRetryAttemptOutcomeV1::Created { .. }) => {
+                transaction
+                    .commit()
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+                Ok(created)
+            }
+            Ok(replayed @ WorkRetryAttemptOutcomeV1::Replayed { .. }) => {
+                transaction
+                    .rollback()
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
                 Ok(replayed)
-            } else {
-                Err(WorkAttemptStorageError::AttemptConflict)
-            };
+            }
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+                Err(error)
+            }
         }
-        require_attempt(
-            &transaction,
-            authority,
-            &write.receipt.command.original_attempt,
-            true,
-        )?;
-        if load_attempt(&transaction, authority, write.attempt.identity())?.is_some() {
-            let _ = transaction.rollback();
-            return Err(WorkAttemptStorageError::AttemptConflict);
-        }
-        require_run_reservation(&transaction, authority, write.attempt.identity())?;
-        require_first_run_admission(&transaction, authority, &write.attempt)?;
-        crate::work::capacity::require_capacity(
-            &transaction,
-            authority,
-            write.attempt.identity().task_id(),
-            concurrency,
-        )?;
-        insert_attempt(&transaction, authority, &write.attempt)?;
-        insert_receipt(&transaction, authority, write)?;
-        transaction
-            .commit()
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        Ok(WorkRetryAttemptOutcomeV1::Created {
-            receipt: write.receipt.clone(),
-            attempt: write.attempt.clone(),
-        })
     }
+}
+
+/// Persist one retry and receipt without settling the caller-owned transaction.
+pub(crate) fn insert_retry_bounded_in_transaction(
+    transaction: &ExactSqlTransaction,
+    authority: &WorkAuthority,
+    write: &WorkRetryWriteV1,
+    concurrency: &TopologyConcurrencyPolicyV1,
+) -> Result<WorkRetryAttemptOutcomeV1, WorkAttemptStorageError> {
+    validate_write(write)?;
+    if let Some(replayed) = replay(
+        transaction,
+        authority,
+        write.receipt.command.command_id.as_str(),
+    )? {
+        return if replayed.receipt().canonical_input_digest == write.receipt.canonical_input_digest
+        {
+            Ok(replayed)
+        } else {
+            Err(WorkAttemptStorageError::AttemptConflict)
+        };
+    }
+    require_attempt(
+        transaction,
+        authority,
+        &write.receipt.command.original_attempt,
+        true,
+    )?;
+    if load_attempt(transaction, authority, write.attempt.identity())?.is_some() {
+        return Err(WorkAttemptStorageError::AttemptConflict);
+    }
+    require_run_reservation(transaction, authority, write.attempt.identity())?;
+    require_first_run_admission(transaction, authority, &write.attempt)?;
+    crate::work::capacity::require_capacity(
+        transaction,
+        authority,
+        write.attempt.identity().task_id(),
+        concurrency,
+    )?;
+    insert_attempt(transaction, authority, &write.attempt)?;
+    insert_receipt(transaction, authority, write)?;
+    Ok(WorkRetryAttemptOutcomeV1::Created {
+        receipt: write.receipt.clone(),
+        attempt: write.attempt.clone(),
+    })
 }
 
 fn validate_write(write: &WorkRetryWriteV1) -> Result<(), WorkAttemptStorageError> {

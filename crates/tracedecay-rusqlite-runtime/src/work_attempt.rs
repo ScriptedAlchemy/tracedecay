@@ -35,18 +35,46 @@ fn insert_attempt(
     attempt: &WorkAttemptV1,
     concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
+    let transaction = storage
+        .handle
+        .begin_immediate()
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    let outcome = insert_attempt_in_transaction(&transaction, authority, attempt, concurrency);
+    match outcome {
+        Ok(WorkAttemptInsertOutcome::Inserted) => {
+            transaction
+                .commit()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Ok(WorkAttemptInsertOutcome::Inserted)
+        }
+        Ok(WorkAttemptInsertOutcome::Replayed(attempt)) => {
+            transaction
+                .rollback()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Ok(WorkAttemptInsertOutcome::Replayed(attempt))
+        }
+        Err(error) => {
+            transaction
+                .rollback()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Err(error)
+        }
+    }
+}
+
+/// Persist one ordinary attempt without settling the caller-owned transaction.
+pub(crate) fn insert_attempt_in_transaction(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptV1,
+    concurrency: Option<&TopologyConcurrencyPolicyV1>,
+) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
     let payload = serde_json::to_string(&StoredWorkAttemptV1 {
         attempt: attempt.clone(),
         synthesis: None,
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    let transaction = storage
-        .handle
-        .begin_immediate()
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    let existing = load_payload(&transaction, authority, attempt.identity())?;
-    if let Some(existing) = existing {
-        let _ = transaction.rollback();
+    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
         return if existing == payload {
             let record: StoredWorkAttemptV1 = serde_json::from_str(&existing)
                 .map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -55,11 +83,11 @@ fn insert_attempt(
             Err(WorkAttemptStorageError::AttemptConflict)
         };
     }
-    require_run_reservation_admitted(&transaction, authority, attempt.identity())?;
-    require_first_run_admission(&transaction, authority, attempt)?;
+    require_run_reservation_admitted(transaction, authority, attempt.identity())?;
+    require_first_run_admission(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
         crate::work::capacity::require_capacity(
-            &transaction,
+            transaction,
             authority,
             attempt.identity().task_id(),
             concurrency,
@@ -90,9 +118,6 @@ fn insert_attempt(
             )
             .map_err(|_| WorkAttemptStorageError::Unavailable)?,
         )
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    transaction
-        .commit()
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     Ok(WorkAttemptInsertOutcome::Inserted)
 }
@@ -406,18 +431,47 @@ fn insert_synthesis_record(
     record: &WorkSynthesisAdmissionRecordV1,
     concurrency: Option<&TopologyConcurrencyPolicyV1>,
 ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
+    let transaction = storage
+        .handle
+        .begin_immediate()
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    let outcome = insert_synthesis_in_transaction(&transaction, authority, record, concurrency);
+    match outcome {
+        Ok(WorkSynthesisInsertOutcome::Inserted) => {
+            transaction
+                .commit()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Ok(WorkSynthesisInsertOutcome::Inserted)
+        }
+        Ok(WorkSynthesisInsertOutcome::Replayed(result)) => {
+            transaction
+                .rollback()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Ok(WorkSynthesisInsertOutcome::Replayed(result))
+        }
+        Err(error) => {
+            transaction
+                .rollback()
+                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            Err(error)
+        }
+    }
+}
+
+/// Persist one synthesis attempt without settling the caller-owned transaction.
+pub(crate) fn insert_synthesis_in_transaction(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    record: &WorkSynthesisAdmissionRecordV1,
+    concurrency: Option<&TopologyConcurrencyPolicyV1>,
+) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
     let attempt = &record.result.attempt;
     let payload = serde_json::to_string(&StoredWorkAttemptV1 {
         attempt: attempt.clone(),
         synthesis: Some(record.clone()),
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    let transaction = storage
-        .handle
-        .begin_immediate()
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    if let Some(existing) = load_payload(&transaction, authority, attempt.identity())? {
-        let _ = transaction.rollback();
+    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
         let existing: StoredWorkAttemptV1 =
             serde_json::from_str(&existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
         return match existing.synthesis {
@@ -427,11 +481,11 @@ fn insert_synthesis_record(
             _ => Err(WorkAttemptStorageError::AttemptConflict),
         };
     }
-    require_run_reservation_admitted(&transaction, authority, attempt.identity())?;
-    require_first_run_admission(&transaction, authority, attempt)?;
+    require_run_reservation_admitted(transaction, authority, attempt.identity())?;
+    require_first_run_admission(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
         crate::work::capacity::require_capacity(
-            &transaction,
+            transaction,
             authority,
             attempt.identity().task_id(),
             concurrency,
@@ -462,9 +516,6 @@ fn insert_synthesis_record(
             )
             .map_err(|_| WorkAttemptStorageError::Unavailable)?,
         )
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    transaction
-        .commit()
         .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     Ok(WorkSynthesisInsertOutcome::Inserted)
 }
