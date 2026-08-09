@@ -195,7 +195,7 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     ));
     assert_eq!(admitted.feedback_notice, Some(notice.clone()));
 
-    let rendered = render_host_delivery(None, Some(&notice)).unwrap();
+    let rendered = render_host_delivery(None, Some(&notice), false).unwrap();
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
@@ -203,6 +203,35 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
             .unwrap(),
         notice
     );
+}
+
+#[test]
+fn github_stack_wakeup_is_content_free() {
+    let response = serde_json::json!({
+        "action": "hook_v2_admit",
+        "status": "accepted",
+        "disposition": HookTransportDispositionV1::Accepted,
+        "orchestration": null,
+        "ready_guidance": null,
+        "feedback_notice": null,
+        "github_stack_signal_available": true,
+        "reason": null,
+    });
+    let admitted = daemon_admission_response(&response);
+    assert!(admitted.github_stack_signal_available);
+
+    let rendered = render_host_delivery(None, None, true).expect("stack wakeup renders");
+
+    assert_eq!(
+        rendered,
+        "TraceDecay GitHub stack update available for authenticated expansion."
+    );
+    for protected_detail in ["signal_id", "watermark", "actor", "recipient", "state"] {
+        assert!(
+            !rendered.contains(protected_detail),
+            "hook wakeup must not disclose {protected_detail}",
+        );
+    }
 }
 
 struct RecordingFeedbackDeliveryPort {

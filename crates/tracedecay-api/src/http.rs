@@ -20,6 +20,7 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
+mod application_operation_owner;
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
@@ -364,91 +365,6 @@ impl HttpApplicationOperation {
             Self::ContextScoutClaim => "context_scout_claim",
             Self::ContextScoutDelivery => "context_scout_delivery",
             Self::ContextScoutFeedback => "context_scout_feedback",
-        }
-    }
-
-    pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
-        match self {
-            Self::GitStatus
-            | Self::GitDiff
-            | Self::GitHistory
-            | Self::GitBlame
-            | Self::GitHunks
-            | Self::GitPreview
-            | Self::GitApply
-            | Self::GitHubStackSignalExpand => HttpApplicationOwnerKind::Git,
-            Self::NativeIntegrationStackSnapshot
-            | Self::NativeIntegrationPreflight
-            | Self::NativeIntegrationApprove
-            | Self::NativeIntegrationApply
-            | Self::NativeIntegrationStatus
-            | Self::NativeIntegrationCancel
-            | Self::NativeIntegrationWorktreeInventory
-            | Self::NativeIntegrationWorktreeInspect
-            | Self::NativeIntegrationWorktreeConfirm
-            | Self::NativeIntegrationWorktreeRemove
-            | Self::NativeIntegrationWorktreeReconcile => {
-                HttpApplicationOwnerKind::NativeIntegration
-            }
-            Self::FeedbackDiagnostics
-            | Self::FeedbackGet
-            | Self::FeedbackExpand
-            | Self::FeedbackList
-            | Self::FeedbackImpact
-            | Self::FeedbackAdvisoryCycle
-            | Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
-            Self::CodeExactOccurrence
-            | Self::CodePhraseSearch
-            | Self::CodeCallees
-            | Self::CodeFacets
-            | Self::CodeTimeline
-            | Self::CodeDeclaration
-            | Self::CodeDefinition
-            | Self::CodeTypeDefinition
-            | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
-            Self::TestResults
-            | Self::CodeSymbolSearch
-            | Self::CodeSignatureSearch
-            | Self::CodeImplementations
-            | Self::CodeTypeHierarchy
-            | Self::CodeCallers
-            | Self::SessionLookup
-            | Self::QualifiedName
-            | Self::CallChain
-            | Self::FileDependents
-            | Self::SourceLines
-            | Self::SourceBody
-            | Self::SourceOutline
-            | Self::ModuleApi
-            | Self::FileMetadata
-            | Self::HealthRead
-            | Self::HealthDelta
-            | Self::StorageStatus
-            | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
-            Self::ConfigurationList
-            | Self::ConfigurationExplain
-            | Self::ConfigurationGet
-            | Self::ConfigurationSet
-            | Self::ConfigurationUnset
-            | Self::ConfigurationBatch
-            | Self::ConfigurationWriteCredential
-            | Self::ConfigurationObservedState
-            | Self::ConfigurationProtectedPreview
-            | Self::ConfigurationProtectedApply
-            | Self::ConfigurationRollbackPreview
-            | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
-            Self::ContextScoutStatus
-            | Self::ContextScoutRecent
-            | Self::ContextScoutExplain
-            | Self::ContextScoutCapability
-            | Self::ContextScoutBudget
-            | Self::ContextScoutPause
-            | Self::ContextScoutResume
-            | Self::ContextScoutCancel
-            | Self::ContextScoutClaim
-            | Self::ContextScoutDelivery
-            | Self::ContextScoutFeedback => HttpApplicationOwnerKind::ContextScout,
         }
     }
 

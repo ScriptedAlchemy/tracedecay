@@ -58,7 +58,8 @@ pub use stack_signal_expand::{
     GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandUnavailableV1,
 };
 pub use surface_catalog::{
-    git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,
+    git_surface_catalog_contribution, git_surface_executable_binding_registry,
+    git_surface_handler_descriptors, git_surface_operation,
 };
 pub use transactions::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,

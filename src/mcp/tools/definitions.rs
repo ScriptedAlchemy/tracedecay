@@ -19,10 +19,12 @@ use super::binding::registered_project_reader_tool_names;
 mod admin;
 mod analysis;
 mod application;
-mod ast_grep;
+mod application_schema;
+pub(super) mod ast_grep;
 mod edit;
 mod git;
 mod git_scope;
+mod github_stack;
 mod graph;
 mod lcm;
 mod memory;
@@ -38,8 +40,10 @@ mod workflow;
 use admin::*;
 use analysis::*;
 use application::*;
+use ast_grep::{ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available};
 use edit::*;
 use git::*;
+use github_stack::*;
 use graph::*;
 use lcm::*;
 use memory::*;
@@ -47,15 +51,6 @@ use multi_root::*;
 use native_integration::*;
 use skills::*;
 use testing::*;
-
-// Re-exported for API parity with the pre-split module: the type is only
-// consumed through `ast_grep_diagnostics()` return values, so nothing names
-// it in-crate and the unused-imports lint would otherwise fire.
-#[allow(unused_imports)]
-pub use ast_grep::{
-    AstGrepDiagnostics, ast_grep_available, ast_grep_diagnostics, ast_grep_diagnostics_json,
-    ast_grep_outline_available,
-};
 
 /// Read-only annotations shared by every tool.
 fn read_only(title: &str) -> Value {

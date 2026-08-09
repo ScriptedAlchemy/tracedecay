@@ -238,6 +238,7 @@ pub(crate) enum HookV2AdmissionOutcomeV1 {
         orchestration: crate::daemon::HookOrchestrationAdmissionV1,
         ready_guidance: Value,
         feedback_notice: Value,
+        github_stack_signal_available: bool,
     },
     /// This exact envelope was already admitted; no work is repeated.
     ExactDuplicate,
@@ -248,6 +249,13 @@ pub(crate) enum HookV2AdmissionOutcomeV1 {
     /// Idempotency could not be recorded, so nothing was admitted.
     Backpressured,
     Unavailable,
+}
+
+fn cursor_stack_wakeup_allowed(
+    first_admission: bool,
+    producer: tracedecay_hooks::HookHostV1,
+) -> bool {
+    first_admission && producer == tracedecay_hooks::HookHostV1::CursorDesktop
 }
 
 pub(crate) async fn admit_hook_v2_envelope(
@@ -424,10 +432,34 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     } else {
         Value::Null
     };
+    // Hook V2 carries no actor identity, so it can only surface an opaque
+    // availability wakeup for its exact authenticated project/worktree. The
+    // actor-bound MCP expansion path authorizes and settles the signal later.
+    let github_stack_signal_available =
+        if cursor_stack_wakeup_allowed(first_admission, envelope.producer) {
+            let project_id = envelope.project_id;
+            let worktree_id = envelope.worktree_id;
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                tokio::task::spawn_blocking(move || {
+                    crate::daemon::native_integration::github_stack_hook_available(
+                        project_id,
+                        worktree_id,
+                    )
+                }),
+            )
+            .await
+            .ok()
+            .and_then(std::result::Result::ok)
+            .unwrap_or(false)
+        } else {
+            false
+        };
     HookV2AdmissionOutcomeV1::Admitted {
         orchestration,
         ready_guidance,
         feedback_notice,
+        github_stack_signal_available,
     }
 }
 
@@ -456,6 +488,7 @@ pub(super) async fn hook_v2_admit(
                 orchestration,
                 ready_guidance,
                 feedback_notice,
+                github_stack_signal_available,
             } => json!({
                 "action": action,
                 "status": "accepted",
@@ -463,6 +496,7 @@ pub(super) async fn hook_v2_admit(
                 "orchestration": orchestration,
                 "ready_guidance": ready_guidance,
                 "feedback_notice": feedback_notice,
+                "github_stack_signal_available": github_stack_signal_available,
             }),
             HookV2AdmissionOutcomeV1::ExactDuplicate => json!({
                 "action": action,

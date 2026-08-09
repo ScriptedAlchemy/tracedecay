@@ -21,10 +21,13 @@ pub(crate) use binding::{
     mcp_dispatch_contract, tool_dispatches_registered_project_reader,
     tool_dispatches_source_edit_effect, tool_supports_live_cancellation,
 };
+pub use definitions::ast_grep::{
+    ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
+};
 pub use definitions::{
-    ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
-    context_description, default_catalog_discovery_authority, explore_call_budget,
-    format_capable_tool_names, get_catalog_filtered_tool_definitions_with_budget,
+    ToolRegistryMode, context_description, default_catalog_discovery_authority,
+    explore_call_budget, format_capable_tool_names,
+    get_catalog_filtered_tool_definitions_with_budget,
     get_catalog_filtered_tool_definitions_with_warming_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,

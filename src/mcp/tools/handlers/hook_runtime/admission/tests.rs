@@ -245,6 +245,25 @@ fn hook_v2_missing_configuration_remains_transiently_unavailable() {
 }
 
 #[test]
+fn github_stack_wakeup_is_cursor_desktop_only_and_first_admission_only() {
+    assert!(cursor_stack_wakeup_allowed(
+        true,
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+    ));
+    assert!(!cursor_stack_wakeup_allowed(
+        false,
+        tracedecay_hooks::HookHostV1::CursorDesktop,
+    ));
+    for host in [
+        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        tracedecay_hooks::HookHostV1::CursorCloud,
+    ] {
+        assert!(!cursor_stack_wakeup_allowed(true, host), "{host:?}");
+    }
+}
+
+#[test]
 fn hook_v2_catchup_response_propagates_transport_disposition() {
     let response = hook_v2_catchup_response("hook_v2_admit");
     assert_eq!(response["status"], "rejected");

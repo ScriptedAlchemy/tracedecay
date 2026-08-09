@@ -683,6 +683,7 @@ async fn dispatch_decoded(
         elapsed_us(started),
     );
     let feedback_notice = admission.take_feedback_notice();
+    let github_stack_signal_available = admission.take_github_stack_signal_available();
     match completed {
         Ok(result) => {
             let rollback = HookFeedbackRollbackSwitchV1 {
@@ -731,6 +732,7 @@ async fn dispatch_decoded(
                 guidance: render_host_delivery(
                     result.rendered_guidance,
                     delivered.feedback.as_ref(),
+                    github_stack_signal_available,
                 ),
                 disposition: result.receipt.disposition,
             }
@@ -781,16 +783,21 @@ pub(crate) async fn commit_context_scout_feedback(
 fn render_host_delivery(
     guidance: Option<String>,
     feedback_notice: Option<&crate::application::advisory::AdvisoryHookLookupNoticeV1>,
+    github_stack_signal_available: bool,
 ) -> Option<String> {
     let notice = feedback_notice
         .and_then(|notice| serde_json::to_string(notice).ok())
         .map(|notice| format!("TraceDecay feedback ready for authorized lookup: {notice}"));
-    match (guidance, notice) {
-        (Some(guidance), Some(notice)) => Some(format!("{guidance}\n\n{notice}")),
-        (Some(guidance), None) => Some(guidance),
-        (None, Some(notice)) => Some(notice),
-        (None, None) => None,
-    }
+    let stack_wakeup = github_stack_signal_available
+        .then_some("TraceDecay GitHub stack update available for authenticated expansion.");
+    [guidance, notice, stack_wakeup.map(str::to_owned)]
+        .into_iter()
+        .flatten()
+        .reduce(|mut rendered, next| {
+            rendered.push_str("\n\n");
+            rendered.push_str(&next);
+            rendered
+        })
 }
 
 fn append_for_replay(

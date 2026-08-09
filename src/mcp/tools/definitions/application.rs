@@ -1,13 +1,9 @@
 use serde_json::json;
 
-use super::{def, def_always_load, def_rw, required_object_schema, string_property};
-use crate::mcp::tools::ToolDefinition;
+use super::application_schema::closed_object_schema;
 
-fn closed_object_schema(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
-    let mut schema = required_object_schema(properties, required);
-    schema["additionalProperties"] = json!(false);
-    schema
-}
+use super::{def, def_always_load, def_rw, string_property};
+use crate::mcp::tools::ToolDefinition;
 
 fn page_request_schema() -> serde_json::Value {
     closed_object_schema(
@@ -290,24 +286,6 @@ pub(super) fn def_git_apply() -> ToolDefinition {
                 "idempotency_key": string_property("Stable key for safe apply retry and terminal receipt replay.")
             }),
             &["preview_id", "preview_digest", "idempotency_key"],
-        ),
-    )
-}
-
-pub(super) fn def_github_stack_signal_expand() -> ToolDefinition {
-    def(
-        "tracedecay_github_stack_signal_expand",
-        "Expand GitHub stack signal",
-        "Authorize and expand one durable GitHub stack signal by opaque identity. The daemon mints actor authority; callers cannot name recipients, queue state, or stack content.",
-        closed_object_schema(
-            json!({
-                "signal_id": string_property("Opaque durable GitHub stack signal identity."),
-                "expected_watermark_id": {
-                    "type": ["string", "null"],
-                    "description": "Optional exact host-delivery watermark guard."
-                }
-            }),
-            &["signal_id"],
         ),
     )
 }

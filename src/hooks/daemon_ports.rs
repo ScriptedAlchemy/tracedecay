@@ -26,6 +26,7 @@ pub(crate) struct DaemonAdmissionPort<'a> {
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
     feedback_notice: Mutex<Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>>,
+    github_stack_signal_available: Mutex<bool>,
     /// The caller's hook span, so the admission round trip is attributed like
     /// every other hook/daemon call. Passing `None` here reported hosts that
     /// route through the native dispatcher as having done no daemon IPC at all.
@@ -44,6 +45,7 @@ impl<'a> DaemonAdmissionPort<'a> {
             session_id,
             lifecycle,
             feedback_notice: Mutex::new(None),
+            github_stack_signal_available: Mutex::new(false),
             telemetry,
         }
     }
@@ -56,11 +58,21 @@ impl<'a> DaemonAdmissionPort<'a> {
             .ok()
             .and_then(|mut notice| notice.take())
     }
+
+    /// An actor-less Hook V2 admission can carry only this opaque availability
+    /// wakeup. It never constitutes recipient acknowledgement.
+    pub(crate) fn take_github_stack_signal_available(&self) -> bool {
+        self.github_stack_signal_available
+            .lock()
+            .map(|mut available| std::mem::take(&mut *available))
+            .unwrap_or(false)
+    }
 }
 
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
     pub(crate) feedback_notice: Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
+    pub(crate) github_stack_signal_available: bool,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -83,6 +95,7 @@ struct DaemonAdmissionResponseWireV1 {
     orchestration: Option<serde_json::Value>,
     ready_guidance: Option<HookReadyGuidanceV1>,
     feedback_notice: Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
+    github_stack_signal_available: Option<bool>,
     reason: Option<String>,
 }
 
@@ -99,6 +112,7 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
     let unavailable = || DaemonAdmissionResponseV1 {
         immediate: HookImmediateAdmissionV1::Unavailable,
         feedback_notice: None,
+        github_stack_signal_available: false,
     };
     let Ok(wire) = serde_json::from_value::<DaemonAdmissionResponseWireV1>(response.clone()) else {
         return unavailable();
@@ -112,6 +126,7 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
             DaemonAdmissionResponseV1 {
                 immediate: HookImmediateAdmissionV1::CatchupRequired,
                 feedback_notice: None,
+                github_stack_signal_available: false,
             }
         }
         (
@@ -133,11 +148,13 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
                     ready_guidance: wire.ready_guidance,
                 },
                 feedback_notice: wire.feedback_notice,
+                github_stack_signal_available: wire.github_stack_signal_available.unwrap_or(false),
             }
         }
         (DaemonAdmissionStatusV1::Backpressured, None) => DaemonAdmissionResponseV1 {
             immediate: HookImmediateAdmissionV1::Backpressured,
             feedback_notice: None,
+            github_stack_signal_available: false,
         },
         (DaemonAdmissionStatusV1::Unavailable, None) => unavailable(),
         _ => unavailable(),
@@ -176,6 +193,11 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                 && let Ok(mut retained) = self.feedback_notice.lock()
             {
                 *retained = Some(notice);
+            }
+            if response.github_stack_signal_available
+                && let Ok(mut retained) = self.github_stack_signal_available.lock()
+            {
+                *retained = true;
             }
             response.immediate
         })
