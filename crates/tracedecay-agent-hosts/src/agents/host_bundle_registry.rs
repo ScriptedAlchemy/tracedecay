@@ -539,7 +539,7 @@ fn component_assets(
         // land between preview confirmation and `registration.apply`, so the
         // adapter's revision recheck read TraceDecay's own bytes as third-party
         // drift and every apply rolled back with `StalePreview`. Own a
-        // descriptor under `.kiro/tracedecay` instead, exactly like Kiro Core.
+        // descriptor under `.kiro/tracedecay` instead.
         (HostKindV1::Kiro, HostBundleComponentV1::ContextMcp) => (
             ".kiro/tracedecay",
             vec![(
@@ -581,13 +581,6 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
-            )],
-        ),
-        (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
-            ".kiro/tracedecay",
-            vec![(
-                "component.json",
-                r#"{"host":"kiro","registration":"settings/mcp.json+agents/tracedecay.json","route":"hook+mcp","native_events":"userPromptSubmit,preToolUse,postToolUse","version_disposition":"session_workspace_prompt_boundaries_only"}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostBundleComponentV1::Agent) => (
