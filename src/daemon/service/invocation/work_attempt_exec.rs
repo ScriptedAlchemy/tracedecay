@@ -430,6 +430,7 @@ fn settle_unstarted<S>(
         outcome,
         stdout: None,
         stderr: None,
+        provider_session: None,
         provider_fallback,
         observed_at: current_micros(),
     };
@@ -573,6 +574,7 @@ async fn execute_provider_with_environment<S>(
         outcome,
         stdout,
         stderr,
+        provider_session: None,
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
@@ -649,6 +651,12 @@ async fn execute_app_server<S>(
     let cwd = PathBuf::from(envelope.worktree_root());
     let session_cancellation = cancellation.clone();
     let admitted_environment = admitted_environment.clone();
+    let provider_id = running
+        .actual_route()
+        .map_or(attempt.requested_route().provider_id(), |route| {
+            route.provider_id()
+        })
+        .clone();
     let mut session = tokio::task::spawn_blocking(move || {
         run_work_with_codex_app_server(
             &prompt,
@@ -659,7 +667,19 @@ async fn execute_app_server<S>(
             wall,
             &admitted_environment,
         )
-        .map(|summary| summary.text)
+        .and_then(|summary| {
+            let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
+                provider_id,
+                tracedecay_domain::SessionId::new(summary.thread_id)
+                    .map_err(|error| crate::errors::TraceDecayError::Config {
+                        message: format!("Codex app-server returned an invalid thread id: {error}"),
+                    })?,
+            )
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: format!("Codex app-server session identity is invalid: {error}"),
+            })?;
+            Ok((summary.text, source))
+        })
         .map_err(|error| error.to_string())
     });
 
@@ -691,6 +711,7 @@ async fn execute_app_server<S>(
     };
 
     let mut text = None;
+    let mut provider_session = None;
     let outcome = match ending {
         AppServerEnding::TimedOut => {
             let _ = session.await;
@@ -700,8 +721,9 @@ async fn execute_app_server<S>(
             let _ = session.await;
             WorkAttemptProviderOutcomeV1::Cancelled
         }
-        AppServerEnding::Session(Ok(Ok(answer))) => {
+        AppServerEnding::Session(Ok(Ok((answer, source)))) => {
             text = Some(answer);
+            provider_session = Some(source);
             WorkAttemptProviderOutcomeV1::Exited { code: 0 }
         }
         AppServerEnding::Session(Ok(Err(error))) => {
@@ -732,6 +754,7 @@ async fn execute_app_server<S>(
         // The session client discards the app-server's stderr; there is no
         // second channel to summarize truthfully.
         stderr: None,
+        provider_session,
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };

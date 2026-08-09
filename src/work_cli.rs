@@ -582,10 +582,14 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        DaemonInvocationProblem::ResetRequired => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work_authority_reset_required".to_owned(),
-            message: "The owning Work authority requires an explicit reset".to_owned(),
-        }),
+        DaemonInvocationProblem::ResetRequired => ApplicationProblem::ResetRequired {
+            diagnostic: SafeDiagnostic {
+                code: "work_authority_reset_required".to_owned(),
+                message: "The owning Work authority requires an explicit reset".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reset],
+        },
         DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "work_authority_unavailable".to_owned(),
             message: "The owning Work authority is unavailable".to_owned(),
@@ -688,9 +692,16 @@ mod tests {
         use tracedecay_application::ApplicationProblem;
 
         let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
-        let ApplicationProblem::Unavailable { diagnostic, .. } = problem else {
-            panic!("work reset must remain a typed unavailable problem");
+        let ApplicationProblem::ResetRequired {
+            diagnostic,
+            retry,
+            legal_actions,
+        } = problem
+        else {
+            panic!("work reset must remain a typed reset-required problem");
         };
         assert_eq!(diagnostic.code, "work_authority_reset_required");
+        assert_eq!(retry, tracedecay_application::RetryDirective::Never);
+        assert_eq!(legal_actions, vec![tracedecay_application::LegalAction::Reset]);
     }
 }

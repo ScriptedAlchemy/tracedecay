@@ -52,14 +52,16 @@ pub mod work_attempt;
 pub mod work_attempt_effect;
 pub mod work_catalog;
 pub mod work_duplicate_adjudication;
+pub mod work_evidence;
+pub mod work_execution_history;
 pub mod work_handoff_frontier;
+pub mod work_intelligence;
 pub mod work_leak_adjudication;
 pub mod work_owner_observation;
 pub mod work_placement;
 pub mod work_product;
 pub mod work_read;
 pub mod work_retry;
-pub mod work_retry_evidence_binding;
 pub mod work_run_control;
 pub mod work_synthesis;
 pub mod work_topology_view;
@@ -312,14 +314,37 @@ pub use work_attempt::*;
 pub use work_attempt_effect::*;
 pub use work_catalog::*;
 pub use work_duplicate_adjudication::*;
+pub use work_evidence::{
+    MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1, VerifiedWorkEvidenceRootV1, WorkAnchorHydrationFuture,
+    WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkAnchorHydrationV1,
+    WorkAttemptReceiptReadErrorV1, WorkAttemptReceiptReadPortV1, WorkAttemptReceiptV1,
+    WorkEvidenceContinuationV1, WorkEvidenceCoverageStateV1, WorkEvidenceCoverageV1,
+    WorkEvidenceExpansionSelectorV1, WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1,
+    WorkEvidenceOmissionReasonV1, WorkEvidenceOmissionV1, WorkEvidenceRetrievalServiceV1,
+    WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceRootReadErrorV1,
+    WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1, WorkSessionNarrativeFuture,
+    WorkSessionNarrativePortV1, WorkSessionNarrativeRequestV1, WorkSessionNarrativeV1,
+};
+pub use work_execution_history::{
+    WorkExecutionHistoryV1, WorkExecutionSpanV1, WorkExecutionTimingCoverageV1,
+    WorkObservedExecutionOrderBasisV1, WorkObservedExecutionV1, project_work_execution_history,
+};
 pub use work_handoff_frontier::*;
+pub use work_intelligence::{
+    GenerateProposalRequest, GeneratedWorkProposal, MAX_WORK_EXPERIENCE_CANDIDATES_V1,
+    WorkCalibrationEvidenceV1, WorkCalibrationProvenanceV1, WorkCalibrationUncertaintyV1,
+    WorkExperienceApplicabilityV1, WorkExperienceCandidateV1, WorkExperienceCoverageV1,
+    WorkExperienceRequestV1, WorkExperienceV1, WorkExpertiseAuthorizationV1,
+    WorkExpertiseConsentPinV1, WorkExpertiseConsentSnapshotV1, WorkExpertiseContextDurabilityV1,
+    WorkExpertiseLegalActionV1, WorkExpertiseUnavailableReasonV1, WorkIntelligenceServiceV1,
+    WorkProposalComparisonEffectV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
+};
 pub use work_leak_adjudication::*;
 pub use work_owner_observation::*;
 pub use work_placement::*;
 pub use work_product::*;
 pub use work_read::*;
 pub use work_retry::*;
-pub use work_retry_evidence_binding::*;
 pub use work_run_control::*;
 pub use work_synthesis::*;
 pub use work_topology_view::*;

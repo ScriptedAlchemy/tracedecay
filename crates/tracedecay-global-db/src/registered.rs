@@ -799,6 +799,25 @@ impl RegisteredGlobalDb {
         })
     }
 
+    /// Attaches product intelligence to the canonical verified Work graph and
+    /// rooted-evidence authorities owned by this registered exact-SQL store.
+    pub fn work_intelligence_service(
+        &self,
+        binding: tracedecay_application::WorkProductBindingV1,
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_application::WorkIntelligenceServiceV1<
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        >,
+    > {
+        let storage = self.work_storage()?;
+        Ok(tracedecay_application::WorkIntelligenceServiceV1::new(
+            storage.clone(),
+            storage,
+            binding,
+        ))
+    }
+
     /// Attaches the workflow source and journal authority over the registered
     /// exact-SQL handle.
     pub fn workflow_storage(

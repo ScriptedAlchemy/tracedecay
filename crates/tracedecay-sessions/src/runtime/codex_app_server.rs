@@ -133,6 +133,8 @@ pub struct CodexAppServerSummaryConfig {
 pub struct CodexAppServerSummary {
     pub text: String,
     pub model: Option<String>,
+    /// Provider-native thread identity returned by the admitted thread/start.
+    pub thread_id: String,
 }
 
 impl Default for CodexAppServerSummaryConfig {
@@ -363,7 +365,7 @@ fn run_codex_protocol(
     )?;
     drop(stdin);
 
-    let mut summary = wait_for_turn_summary(line_rx, deadline)?;
+    let mut summary = wait_for_turn_summary(line_rx, deadline, thread_id)?;
     if summary.model.is_none() {
         summary.model = thread_model;
     }
@@ -527,6 +529,7 @@ fn wait_for_response(
 fn wait_for_turn_summary(
     line_rx: &mpsc::Receiver<std::io::Result<String>>,
     deadline: Instant,
+    thread_id: String,
 ) -> Result<CodexAppServerSummary> {
     let mut text = String::new();
     let mut model = None;
@@ -553,7 +556,11 @@ fn wait_for_turn_summary(
                 }
             }
             Some("turn/completed") => {
-                return Ok(CodexAppServerSummary { text, model });
+                return Ok(CodexAppServerSummary {
+                    text,
+                    model,
+                    thread_id,
+                });
             }
             _ => {}
         }

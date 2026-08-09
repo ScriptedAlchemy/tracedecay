@@ -204,6 +204,7 @@ mod types;
 mod work;
 mod work_attempt_exec;
 mod work_blocked_interval_recovery;
+mod work_routing;
 
 use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
@@ -229,6 +230,7 @@ use registrars::*;
 use retained::*;
 use types::*;
 use work::*;
+use work_routing::*;
 
 pub(crate) use configuration::{
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,

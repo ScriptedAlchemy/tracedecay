@@ -108,7 +108,9 @@ pub enum ObservationContractError {
 ///
 /// The session identity is provider-native evidence. The physical file identity
 /// is represented separately by [`ObservationSourceGenerationV1`].
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationSourceIdentityV1 {
     #[serde(

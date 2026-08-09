@@ -4550,8 +4550,8 @@ typed_operation!(
 );
 
 pub mod work_accept_proposal {
-    pub type Request = tracedecay_application::AcceptProposalCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
+    pub type Request = tracedecay_application::DecideWorkProposalRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationReceiptV1;
 }
 typed_operation!(
     WorkAcceptProposal,
@@ -4698,8 +4698,8 @@ typed_operation!(
 );
 
 pub mod work_admit_execution {
-    pub type Request = tracedecay_application::AdmitExecutionCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
+    pub type Request = tracedecay_application::AdmitWorkExecutionRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationReceiptV1;
 }
 typed_operation!(
     WorkAdmitExecution,
@@ -4768,43 +4768,6 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.admit_placement.result",
-    1
-);
-
-pub mod work_attach_runtime_evidence {
-    pub type Request = tracedecay_application::AttachRuntimeEvidenceCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
-}
-typed_operation!(
-    WorkAttachRuntimeEvidence,
-    work_attach_runtime_evidence,
-    "operation.work.attach_runtime_evidence",
-    OperationTransport::Http {
-        route: "/application/work/attach-runtime-evidence"
-    },
-    "binding.http.work.attach_runtime_evidence",
-    EffectClass::Administrative,
-    IdempotencyContract::Required,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeEffect,
-        CancellationPoint::EffectInFlight,
-        CancellationPoint::AfterCommit
-    ],
-    30000,
-    DeadlineBehavior::ReturnEffectReceipt,
-    ReconciliationContract::Required,
-    ReceiptContract::DurableEffect,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::EffectUnknown,
-        TerminalState::Partial
-    ],
-    "schema.work.attach_runtime_evidence.result",
     1
 );
 
@@ -4881,8 +4844,8 @@ typed_operation!(
 );
 
 pub mod work_create {
-    pub type Request = tracedecay_application::CreateWorkCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
+    pub type Request = tracedecay_application::CreateWorkTaskRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationReceiptV1;
 }
 typed_operation!(
     WorkCreate,
@@ -5057,40 +5020,213 @@ typed_operation!(
     1
 );
 
-pub mod work_mint_retry_test_binding {
-    pub type Request = tracedecay_application::WorkRetryTestBindingTokenRequestV1;
-    pub type Result = tracedecay_application::WorkRetryTestBindingTokenOutcomeV1;
+pub mod work_execution_history {
+    pub type Request = tracedecay_application::WorkAttemptListRequestV1;
+    pub type Result = tracedecay_application::WorkExecutionHistoryV1;
 }
 typed_operation!(
-    WorkMintRetryTestBinding,
-    work_mint_retry_test_binding,
-    "operation.work.mint_retry_test_binding",
+    WorkExecutionHistory,
+    work_execution_history,
+    "operation.work.execution_history",
     OperationTransport::Http {
-        route: "/application/work/mint-retry-test-binding"
+        route: "/application/work/execution-history"
     },
-    "binding.http.work.mint_retry_test_binding",
-    EffectClass::Administrative,
-    IdempotencyContract::Required,
+    "binding.http.work.execution_history",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
     true,
     &[
         CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeEffect,
-        CancellationPoint::EffectInFlight,
-        CancellationPoint::AfterCommit
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
     ],
     30000,
-    DeadlineBehavior::ReturnEffectReceipt,
-    ReconciliationContract::Required,
-    ReceiptContract::DurableEffect,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
     &[
         TerminalState::Completed,
         TerminalState::Cancelled,
         TerminalState::TimedOut,
         TerminalState::Failed,
-        TerminalState::EffectUnknown,
         TerminalState::Partial
     ],
-    "schema.work.mint_retry_test_binding.result",
+    "schema.work.execution_history.result",
+    1
+);
+
+pub mod work_retrieve_evidence {
+    pub type Request = tracedecay_application::WorkEvidenceRetrieveRequestV1;
+    pub type Result = tracedecay_application::WorkEvidenceRetrievalV1;
+}
+typed_operation!(
+    WorkRetrieveEvidence,
+    work_retrieve_evidence,
+    "operation.work.retrieve_evidence",
+    OperationTransport::Http {
+        route: "/application/work/retrieve-evidence"
+    },
+    "binding.http.work.retrieve_evidence",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.retrieve_evidence.result",
+    1
+);
+
+pub mod work_experience {
+    pub type Request = tracedecay_application::WorkExperienceRequestV1;
+    pub type Result = tracedecay_application::WorkExperienceV1;
+}
+typed_operation!(
+    WorkExperience,
+    work_experience,
+    "operation.work.experience",
+    OperationTransport::Http {
+        route: "/application/work/experience"
+    },
+    "binding.http.work.experience",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.experience.result",
+    1
+);
+
+pub mod work_compare_proposal {
+    pub type Request = tracedecay_application::WorkProposalComparisonRequestV1;
+    pub type Result = tracedecay_application::WorkProposalComparisonV1;
+}
+typed_operation!(
+    WorkCompareProposal,
+    work_compare_proposal,
+    "operation.work.compare_proposal",
+    OperationTransport::Http {
+        route: "/application/work/compare-proposal"
+    },
+    "binding.http.work.compare_proposal",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.compare_proposal.result",
+    1
+);
+
+pub mod work_prepare_duplicate_adjudication {
+    pub type Request = tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1;
+    pub type Result = tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
+}
+typed_operation!(
+    WorkPrepareDuplicateAdjudication,
+    work_prepare_duplicate_adjudication,
+    "operation.work.prepare_duplicate_adjudication",
+    OperationTransport::Http {
+        route: "/application/work/prepare-duplicate-adjudication"
+    },
+    "binding.http.work.prepare_duplicate_adjudication",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.prepare_duplicate_adjudication.result",
+    1
+);
+
+pub mod work_prepare_graph_mutation {
+    pub type Request = tracedecay_application::PrepareWorkProductMutationRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationRequestV1;
+}
+typed_operation!(
+    WorkPrepareGraphMutation,
+    work_prepare_graph_mutation,
+    "operation.work.prepare_graph_mutation",
+    OperationTransport::Http {
+        route: "/application/work/prepare-graph-mutation"
+    },
+    "binding.http.work.prepare_graph_mutation",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.prepare_graph_mutation.result",
     1
 );
 
@@ -5424,8 +5560,8 @@ typed_operation!(
 );
 
 pub mod work_review_proposal {
-    pub type Request = tracedecay_application::ReviewProposalRequestV1;
-    pub type Result = tracedecay_domain::WorkProjection;
+    pub type Request = tracedecay_application::DecideWorkProposalRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationReceiptV1;
 }
 typed_operation!(
     WorkReviewProposal,

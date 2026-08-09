@@ -719,12 +719,16 @@ impl DaemonWorkRuntimeRegistrar {
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
         work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
+        proposal_routing: DaemonWorkProposalRoutingAuthorityV1,
+        evidence_retrieval: crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
             || authority.worktree_id() != &grant.scope.worktree_id
             || authority.actor_id() != &actor
             || authority.policy_digest() != &grant.digest
+            || !proposal_routing.matches_scope(&grant.scope)
+            || proposal_routing.configuration_digest() != &configuration_digest
         {
             return Err(TraceDecayError::Config {
                 message: "Workflow authority does not match its registered grant".to_owned(),
@@ -753,6 +757,10 @@ impl DaemonWorkRuntimeRegistrar {
                         && registered.authority_digest == authority_digest
                         && registered.policy_digest == policy_digest
                         && registered.configuration_digest == configuration_digest
+                        && registered
+                            .proposal_routing
+                            .same_configuration_as(&proposal_routing)
+                        && registered.evidence_retrieval.same_authority(&evidence_retrieval)
                     {
                         // The same authority re-registering only renews its grant.
                         if registered.grant != grant {
@@ -782,6 +790,8 @@ impl DaemonWorkRuntimeRegistrar {
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),
                         work_topology_policy: work_topology_policy.clone(),
+                        proposal_routing: proposal_routing.clone(),
+                        evidence_retrieval: evidence_retrieval.clone(),
                         blocked_interval_observation_recovery:
                             super::work_blocked_interval_recovery::WorkBlockedIntervalObservationRecoveryOwnerV1::mount(
                                 Arc::clone(&database),

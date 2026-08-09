@@ -11,6 +11,61 @@ use tracedecay_lsp::{
     LspRequestId, UnavailableSemanticProvider,
 };
 
+struct DeniedWorkEvidenceRetrieval;
+
+impl crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1
+    for DeniedWorkEvidenceRetrieval
+{
+    fn retrieve_admitted<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async {
+            crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied
+        })
+    }
+}
+
+pub(in crate::daemon) fn denied_work_evidence_retrieval()
+-> crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1 {
+    crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
+        DeniedWorkEvidenceRetrieval,
+    ))
+}
+
+pub(in crate::daemon) fn empty_work_proposal_routing(
+    scope: ResolvedScope,
+) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
+    let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
+        "configuration.revision.work-empty-routing",
+    )
+    .expect("configuration revision");
+    let key = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    )
+    .expect("work executable bindings key");
+    let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
+        std::collections::BTreeMap::from([(
+            key,
+            tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                Vec::new(),
+            ),
+        )]),
+        std::collections::BTreeMap::new(),
+    )
+    .expect("empty Work routing snapshot");
+    let digest = snapshot.effective_behavior_digest.clone();
+    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(
+        scope,
+        revision,
+        &snapshot,
+        &digest,
+    )
+    .expect("empty Work proposal routing");
+    (routing, digest)
+}
+
 #[derive(Default)]
 struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<FeedbackSourceEventV1>>);
 

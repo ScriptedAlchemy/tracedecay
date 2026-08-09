@@ -1172,6 +1172,16 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open work topology policy is unavailable: {error}"),
             })?
             .clone();
+    let work_proposal_routing =
+        crate::daemon::service::invocation::DaemonWorkProposalRoutingAuthorityV1::mount(
+            scope.clone(),
+            configuration.revision_id.clone(),
+            &configuration.snapshot,
+            &access.configuration_digest,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Work proposal routing is unavailable: {error}"),
+        })?;
     // Project-open has no authenticated GitHub response or persisted source
     // record. It mounts policy and delivery only; the review refresh owner is
     // the sole producer of canonical provider observations and anchors.
@@ -1221,6 +1231,8 @@ pub(super) async fn register_project_open_production_owners(
             configuration_policy_digest.clone(),
             access.configuration_digest.clone(),
             work_topology_policy,
+            work_proposal_routing,
+            server.work_evidence_retrieval()?,
         )
         .await
         .map_err(|error| TraceDecayError::Config {

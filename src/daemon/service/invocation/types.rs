@@ -813,6 +813,12 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     /// The complete resolved work topology policy pinned at registration;
     /// workflow run admission and placement evaluate against this policy.
     pub(super) work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
+    /// Project-open-pinned proposal routing authority over the exact admitted
+    /// configuration snapshot and executable bindings.
+    pub(super) proposal_routing: super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
+    /// Canonical Plan 23 retrieval authority retained at project open.
+    pub(super) evidence_retrieval:
+        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
     /// Project-owned bounded replay for receipts that closed outside a request
     /// response, such as terminal attempt compare-and-swaps.
     pub(super) blocked_interval_observation_recovery:

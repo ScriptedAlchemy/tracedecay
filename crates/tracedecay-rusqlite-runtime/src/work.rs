@@ -23,7 +23,6 @@ mod leak_adjudication;
 mod owner_observation;
 mod projection;
 mod retry;
-mod retry_evidence_binding;
 mod schema;
 mod sql;
 
