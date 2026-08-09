@@ -182,10 +182,11 @@ curator's conservative invariants.
   similarity-dedup + hygiene planner (`dashboard/memory_curate.rs`), sends the
   bounded `llm_review` clusters to the backend, then **re-validates the
   returned ops against freshly recomputed evidence** before any apply. Apply
-  policy: auto-apply when `auto_apply_memory_ops=true` — automation applies
-  without any human approval gate (`require_dashboard_approval` is deprecated
-  and ignored); otherwise ops surface for dashboard review. Destructive-op
-  counts (permanent deletes, merge losers) are reported explicitly.
+  policy: apply only after validation when
+  `memory_apply_policy=validate_then_apply`; with
+  `memory_apply_policy=draft_for_approval`, operations remain
+  `pending_approval` for CLI/dashboard review. Destructive-op counts
+  (permanent deletes, merge losers) are reported explicitly.
 - **session_reflector** (`runner.rs:170-420`, `session_reflector.rs`):
   evidence = `lcm_grep` over the LCM session store with a **fixed keyword
   query** (`"remember prefer decision requirement workflow"`, limit 20 hits,
@@ -201,8 +202,8 @@ curator's conservative invariants.
   previews) + skill-usage summaries + stale recommendations + underused-tool
   signals + derived improvement recommendations. Proposals (create/update
   with `base_checksum` optimistic concurrency) are validated and land as
-  `pending_approval` drafts; `auto_enable_skills` (default false) can promote
-  them to `active`.
+  `pending_approval` drafts; `skill_activation_policy=draft_for_approval`
+  keeps them `PendingApproval` until explicit lifecycle approval and export.
 
 ### 2.3 Backend (`backend.rs`)
 
