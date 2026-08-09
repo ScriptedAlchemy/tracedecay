@@ -9,7 +9,8 @@ use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::retained_surfaces::{
-    SessionRefreshActionV1, SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshResultV1,
+    RetainedSurfaceExecutionErrorV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
+    SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshResultV1,
     SessionRefreshTemporalModeV1,
 };
 use tracedecay_application::{
@@ -214,7 +215,7 @@ fn request_matches_mounted_project_scope(
 }
 
 fn admitted_identity(
-    request: &tracedecay_application::SessionRefreshActionRequestV1,
+    request: &SessionRefreshActionRequestV1,
 ) -> Result<ResolvedSessionIdentity, RetainedSurfaceExecutionErrorV1> {
     let profile_id = ProfileId::new(request.project.profile_id.clone())
         .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
@@ -240,7 +241,7 @@ fn admitted_identity(
 }
 
 fn admitted_target(
-    request: &tracedecay_application::SessionRefreshActionRequestV1,
+    request: &SessionRefreshActionRequestV1,
 ) -> Result<SessionRefreshTarget, RetainedSurfaceExecutionErrorV1> {
     let temporal_mode = match request.target.temporal_mode {
         SessionRefreshTemporalModeV1::Current => TemporalModeV1::Current,

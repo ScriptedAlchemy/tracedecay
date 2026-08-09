@@ -10,11 +10,14 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::git::{GITHUB_STACK_SIGNAL_EXPAND_OPERATION, git_surface_operation};
+use tracedecay_application::git::{
+    GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
+    GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
+    GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceResultV1,
+    git_surface_operation,
+};
 use tracedecay_application::{
-    CancellationSignal, GitHubStackSignalEvidenceRefV1, GitHubStackSignalExpandPort,
-    GitHubStackSignalExpandPortError, GitHubStackSignalExpandRequestV1,
-    GitHubStackSignalExpandSurfaceResultV1, NativeIntegrationContractError, NativeIntegrationPort,
+    CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
     NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
     NativeIntegrationPreflightRequestV1, RequestAdmission, RequestContext, ResolvedScope,
 };

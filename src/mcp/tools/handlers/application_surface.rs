@@ -223,7 +223,7 @@ pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
     operation: ApplicationSurfaceOperation,
     binding_id: BindingId,
-    result: ApplicationResult<tracedecay_application::RetainedSurfaceResultV1>,
+    result: ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
 ) -> Result<crate::mcp::tools::ToolResult> {
     let result = crate::application_surface::retained::result_value(result).map_err(|error| {

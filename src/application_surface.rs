@@ -755,7 +755,7 @@ pub enum ApplicationSurfaceRequest {
     ObservatoryRead(ObservatoryReadRequestV1),
     Configuration(ConfigurationSurfaceRequest),
     ContextScout(ContextScoutSurfaceRequest),
-    Retained(tracedecay_application::RetainedSurfaceRequestV1),
+    Retained(tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1),
 }
 
 pub struct ApplicationSurfaceInvocationResult {

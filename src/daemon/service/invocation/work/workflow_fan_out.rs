@@ -729,7 +729,7 @@ pub(in crate::daemon::service::invocation) fn workflow_product_revision_pins(
 }
 
 fn current_workflow_product_graph(
-    product: &crate::global_db::RegisteredWorkProductServicesV1,
+    product: &tracedecay_global_db::RegisteredWorkProductServicesV1,
     context: &RequestContext,
     selection: tracedecay_application::WorkProductSelectionScopeV1,
     observed_at: UtcMicros,
@@ -768,7 +768,7 @@ fn workflow_child_task_matches(
 #[allow(clippy::too_many_arguments)]
 fn apply_workflow_child_product_mutation(
     registered: &RegisteredWorkRuntime,
-    product: &crate::global_db::RegisteredWorkProductServicesV1,
+    product: &tracedecay_global_db::RegisteredWorkProductServicesV1,
     context: &RequestContext,
     binding: &tracedecay_application::WorkProductBindingV1,
     selection: tracedecay_application::WorkProductSelectionScopeV1,

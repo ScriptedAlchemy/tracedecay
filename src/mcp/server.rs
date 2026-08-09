@@ -183,7 +183,7 @@ pub(crate) type SourceEditFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = crate::errors::Result<
-                    tracedecay_usecases::edit::SourceEditSurfaceResultV1,
+                    tracedecay_application::source_edit::SourceEditSurfaceResultV1,
                 >,
             > + Send
             + 'static,

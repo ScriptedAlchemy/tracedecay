@@ -65,7 +65,10 @@ use tracedecay_lsp::{
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
-use crate::application_surface::{ConfigurationSurfaceRequest, ContextScoutSurfaceRequest};
+use crate::application_surface::{
+    ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
+    GitHubStackSignalExpandSurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+};
 use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use tracedecay_usecases::primitives::PrimitiveRequest;
 
@@ -839,7 +842,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     RetainedApplication {
-        request: tracedecay_application::RetainedSurfaceRequestV1,
+        request: tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1334,7 +1337,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn retained_application(
         request_id: impl Into<String>,
-        request: tracedecay_application::RetainedSurfaceRequestV1,
+        request: tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -2819,7 +2822,8 @@ pub(crate) enum DaemonInvocationOutcome {
     },
     RetainedApplication {
         scope: ResolvedScope,
-        outcome: ApplicationOutcome<tracedecay_application::RetainedSurfaceResultV1>,
+        outcome:
+            ApplicationOutcome<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     },
     MultiRootScopeSetRead {
         scope: ResolvedScope,

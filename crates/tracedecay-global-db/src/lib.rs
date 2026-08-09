@@ -105,7 +105,8 @@ pub use registered::{
     MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
     PendingDeliverySourceReceiptV1, ProjectGraphRuntimePortV1, RegisteredGlobalDb,
     RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
-    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
+    RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
+    WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use remote_deletion::{
