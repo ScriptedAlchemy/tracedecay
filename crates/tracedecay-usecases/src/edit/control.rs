@@ -2,6 +2,19 @@ use tracedecay_application::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, EffectTermination,
     now_micros,
 };
+use tracedecay_graph_db::GraphCancellation;
+
+#[derive(Clone)]
+struct SourceEditGraphCancellationV1 {
+    deadline: Deadline,
+    cancellation: CancellationSignal,
+}
+
+impl GraphCancellation for SourceEditGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled() || self.deadline.is_elapsed_at(now_micros())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SourceEditEffectControlV1 {
@@ -15,6 +28,13 @@ impl SourceEditEffectControlV1 {
             deadline,
             cancellation,
         }
+    }
+
+    pub(super) fn graph_cancellation(&self) -> std::sync::Arc<dyn GraphCancellation> {
+        std::sync::Arc::new(SourceEditGraphCancellationV1 {
+            deadline: self.deadline.clone(),
+            cancellation: self.cancellation.clone(),
+        })
     }
 
     pub(super) fn checkpoint(&self, stage: CancellationStage) -> Option<SourceEditControlStopV1> {

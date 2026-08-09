@@ -4,6 +4,7 @@ use tracedecay_application::{
     SourceEditVerificationV1, now_micros, source_edit_operation,
 };
 use tracedecay_domain::ManifestDigest;
+use tracedecay_graph_db::GraphCancellation;
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::Result;
@@ -14,7 +15,7 @@ use super::digest::{
     effect_id, normalize_candidate_files, planned_source_edit_state_digest,
     source_edit_recovery_digest, source_edit_state_digest,
 };
-use super::dispatch::run_source_edit;
+use super::dispatch::{SourceEditGraphReadAuthorityV1, run_source_edit};
 use super::journal::{
     ResolvedSourceEditPreview, SourceEditDurability, SourceEditDurableRequestV1,
     SourceEditJournalStateV1, SourceEditJournalV1, same_source_edit_authority,
@@ -196,6 +197,7 @@ fn authority_still_matches(
 
 pub(super) async fn execute_source_edit_inner<A>(
     graph: &TraceDecay,
+    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -303,7 +305,17 @@ where
         return Ok(result);
     }
 
-    let preview = match resolve_source_edit_preview(graph, request.edit.clone()).await {
+    let graph_cancellation = source_edit_graph_cancellation(control, &request.context);
+    let preview = match resolve_source_edit_preview(
+        graph,
+        code_graph,
+        &request.context,
+        request.observed_at,
+        Arc::clone(&graph_cancellation),
+        request.edit.clone(),
+    )
+    .await
+    {
         Ok(preview) => preview,
         Err(_) => {
             return fail_pre_effect(
@@ -509,7 +521,17 @@ where
 
     let (effect_result, plan_complete) = crate::tracedecay::apply_source_edit_plan(
         planned_files,
-        run_source_edit(graph, request.edit.clone().with_dry_run(false), control),
+        run_source_edit(
+            graph,
+            SourceEditGraphReadAuthorityV1 {
+                port: code_graph,
+                context: &request.context,
+                observed_at: request.observed_at,
+                cancellation: graph_cancellation,
+            },
+            request.edit.clone().with_dry_run(false),
+            control,
+        ),
     )
     .await;
     let outcome = match effect_result {
@@ -601,10 +623,20 @@ where
 
 pub(super) async fn resolve_source_edit_preview(
     graph: &TraceDecay,
+    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    context: &tracedecay_application::RequestContext,
+    observed_at: tracedecay_domain::UtcMicros,
+    cancellation: Arc<dyn GraphCancellation>,
     edit: SourceEditRequest,
 ) -> Result<ResolvedSourceEditPreview> {
     let (outcome, planned_files) = crate::tracedecay::capture_source_edit_plan(run_source_edit(
         graph,
+        SourceEditGraphReadAuthorityV1 {
+            port: code_graph,
+            context,
+            observed_at,
+            cancellation,
+        },
         edit.with_dry_run(true),
         None,
     ))
@@ -649,3 +681,14 @@ pub(super) async fn resolve_source_edit_preview(
         planned_files,
     })
 }
+
+fn source_edit_graph_cancellation(
+    control: Option<&SourceEditEffectControlV1>,
+    context: &tracedecay_application::RequestContext,
+) -> Arc<dyn GraphCancellation> {
+    control.map_or_else(
+        || crate::graph::request_graph_cancellation(context),
+        SourceEditEffectControlV1::graph_cancellation,
+    )
+}
+use std::sync::Arc;

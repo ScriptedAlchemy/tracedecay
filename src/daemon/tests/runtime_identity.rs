@@ -78,7 +78,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     .expect("linked-only source");
 
     let client_identity = test_client_identity_for(profile_root.clone());
-    initialize_test_project(&primary, &client_identity).await;
+    let layout = initialize_test_project(&primary, &client_identity).await;
+    save_scheduled_automation(&layout.dashboard_root, true).await;
     let stale_project_id = "proj_stale_linked_worktree";
     crate::storage::write_enrollment_marker(
         &linked,
@@ -101,8 +102,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         client_identity,
         ..test_handshake_defaults()
     };
-
-    save_scheduled_automation(&engine, &primary_handshake, true).await;
 
     let (primary_server, linked_server) = tokio::join!(
         engine.project_server(&primary_handshake),

@@ -151,6 +151,9 @@ pub(crate) type DashboardGraphInteractiveResolver =
 pub(crate) type CodeIndexPublicationIdentityResolver =
     Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static>;
 
+pub(crate) type CodeGraphProjectionReadPort =
+    Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
+
 /// Code-index search boundary contracts, owned by the query kernel.
 ///
 /// The whole `CodeIndexSearch*V1` family is pure request/outcome data with no
@@ -370,6 +373,7 @@ pub struct McpServer {
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
     /// Daemon-owned exact sealed-generation branch comparison bridge.
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
+    code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -755,6 +759,7 @@ impl McpServer {
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
+            code_graph_projection_read_port,
             code_index_search_authority,
             retained_project_graph_resolver,
             dashboard_graph_interactive_resolver,
@@ -987,6 +992,7 @@ impl McpServer {
             code_index_publication_identity,
             code_index_search_executor,
             code_index_branch_diff_executor,
+            code_graph_projection_read_port,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
@@ -1158,6 +1164,10 @@ impl McpServer {
                 tokio::sync::SetError::AlreadyInitializedError(executor)
                 | tokio::sync::SetError::InitializingError(executor) => executor,
             })
+    }
+
+    pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
+        self.code_graph_projection_read_port.clone()
     }
 
     pub(crate) fn install_source_edit_reconciliation_executor(

@@ -1,247 +1,138 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { KnowledgeCuration } from './KnowledgeCuration.tsx';
 
-import { useScope } from "../../data/scope/store.ts";
-import { CurationConsole } from "./CurationConsole.tsx";
+/**
+ * The curation surface reads the curator's status and its current plan. Under
+ * test: supersession candidates render as reviewable pairs (older fact, the
+ * newer fact that may supersede it, the measured similarity), a failed plan
+ * computation renders as its error and never as a clean empty plan, and a
+ * store with nothing to propose says so against the counted total.
+ */
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  useScope.getState().selectAllProjects();
 });
 
-describe("automatic curation console", () => {
-  it("reports status, activity, receipts, and outcomes without manual plan/apply controls", async () => {
-    const fetchMock = stubRoutes();
-    renderConsole();
-
-    expect(
-      await screen.findByText(/validate → apply automatically/),
-    ).toBeTruthy();
-    expect(await screen.findByText(/deployment complete/)).toBeTruthy();
-    expect(await screen.findByText(/recalled and helpful/)).toBeTruthy();
-    expect(
-      screen.queryByRole("button", {
-        name: /plan|apply|approve|delete|merge/i,
-      }),
-    ).toBeNull();
-    expect(
-      fetchMock.mock.calls.some(([url]) =>
-        String(url).includes("/curation/plan"),
-      ),
-    ).toBe(false);
-    expect(
-      fetchMock.mock.calls.some(([url]) =>
-        String(url).includes("/curate/apply"),
-      ),
-    ).toBe(false);
-  });
-
-  it("sends only enabled, revision CAS, and caller-stable idempotency on config change", async () => {
-    useScope.setState({
-      scope: {
-        kind: "project",
-        projectId: "proj_active",
-        label: "Active",
-        activation: "active",
+describe('Knowledge curation panel', () => {
+  it('renders supersession candidates as reviewable pairs with tier counts', async () => {
+    stubRoutes({
+      status: status(3, 'similarity dedup: 2 deletes applied'),
+      plan: {
+        actions: [candidate(11, 'Near-duplicate of #12')],
+        hygiene: {
+          secret_like: [],
+          transient: [candidate(31, 'Transient run output')],
+          supersession: [
+            {
+              ...candidate(7, 'Possible supersession'),
+              superseded_by: 21,
+              similarity: 0.8123,
+              content: 'we use React for the dashboard',
+            },
+          ],
+        },
+        counts: { delete: 1 },
+        total_facts: 412,
+        error: '',
       },
     });
-    const fetchMock = stubRoutes();
-    renderConsole();
+    renderPanel();
 
-    const checkbox = await screen.findByRole("checkbox", {
-      name: /Automation enabled/i,
+    expect(await screen.findByText(/3 apply runs recorded/)).toBeTruthy();
+    expect(screen.getByText(/last: similarity dedup: 2 deletes applied/)).toBeTruthy();
+    expect(screen.getByText(/possibly superseded by #21/)).toBeTruthy();
+    expect(screen.getByText(/similarity 0\.8123/)).toBeTruthy();
+    expect(screen.getByText('we use React for the dashboard')).toBeTruthy();
+    expect(screen.getByText(/candidates for review, not decisions/i)).toBeTruthy();
+  });
+
+  it('renders a failed plan computation as its error, never a clean plan', async () => {
+    stubRoutes({
+      status: status(0, null),
+      plan: {
+        actions: [],
+        hygiene: null,
+        counts: {},
+        total_facts: 0,
+        error: 'memory store unavailable: db is locked',
+      },
     });
-    await userEvent.click(checkbox);
-    await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
-      ).toBe(true);
+    renderPanel();
+
+    expect(
+      await screen.findByText(/curation plan could not be computed: memory store unavailable/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/nothing proposed/i)).toBeNull();
+  });
+
+  it('states a truthful empty plan against the counted total', async () => {
+    stubRoutes({
+      status: status(0, null),
+      plan: {
+        actions: [],
+        hygiene: { secret_like: [], transient: [], supersession: [] },
+        counts: {},
+        total_facts: 96,
+        error: '',
+      },
     });
-    const patch = fetchMock.mock.calls.find(
-      ([, init]) => init?.method === "PATCH",
-    );
-    expect(JSON.parse(String(patch?.[1]?.body))).toEqual({
-      enabled: false,
-      expected_revision_id: "configuration.revision.curation.test",
-      idempotency_key: expect.stringMatching(
-        /^idempotency\.dashboard-settings\./,
-      ),
-    });
+    renderPanel();
+
+    expect(await screen.findByText(/nothing proposed across 96 facts/)).toBeTruthy();
+    expect(
+      screen.getByText(/the similarity curator has never applied a run/i),
+    ).toBeTruthy();
   });
 });
 
-function renderConsole() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 } },
-  });
-  render(
-    <QueryClientProvider client={client}>
-      <CurationConsole />
-    </QueryClientProvider>,
+function candidate(factId: number, reason: string) {
+  return {
+    recommended_op: 'delete',
+    fact_id: factId,
+    reason,
+    content: null,
+    confidence: 0.7,
+    review_required: true,
+    status: 'candidate',
+  };
+}
+
+function status(runCount: number, summary: string | null) {
+  return {
+    provider: 'tracedecay',
+    state: {
+      paused: false,
+      last_run_at: null,
+      run_count: runCount,
+      last_run_summary: summary,
+      last_run_id: null,
+    },
+    config: { enabled: true, mode: 'similarity_dedup' },
+    snapshots: [],
+  };
+}
+
+function stubRoutes(bodies: { status: unknown; plan: unknown }) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.endsWith('/curation/plan') ? bodies.plan : bodies.status;
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }),
   );
 }
 
-function stubRoutes() {
-  const status = {
-    provider: "tracedecay",
-    state: {
-      paused: false,
-      last_run_at: "2026-08-08T12:00:00Z",
-      run_count: 2,
-      last_run_summary: "automatic curation completed",
-      last_run_id: "run-1",
-    },
-    config: {
-      enabled: true,
-      interval_hours: 6,
-      min_idle_hours: 2,
-      mode: "automatic",
-      dry_run_first: false,
-    },
-    snapshots: [],
-  };
-  const activity = { events: [], count: 0, limit: 100, error: "" };
-  const runs = {
-    records: [
-      {
-        run_id: "run-1",
-        trigger: "scheduler",
-        task: "memory_curator",
-        backend: "codex_app_server",
-        status: "completed",
-        reviewed_count: 0,
-        accepted_count: 1,
-        rejected_count: 1,
-        skipped_count: 0,
-        started_at: "2026-08-08T12:00:00Z",
-        completed_at: "2026-08-08T12:00:02Z",
-        validation_repairs: [{ field: "content" }],
-        deployment: {
-          status: "complete",
-          exports: [],
-          materialization_scopes: [],
-          errors: [],
-          retry_required: false,
-        },
-      },
-    ],
-    count: 1,
-    limit: 50,
-    error: "",
-  };
-  const outcomes = {
-    generated_at: 1_700_000_000,
-    skills: [],
-    facts: [
-      {
-        proposal_id: "apply-1",
-        run_id: "run-1",
-        fact_id: "fact-1",
-        applied_at: 1_699_000_000,
-        days_since_applied: 1,
-        retrieval_count: 2,
-        access_count: 1,
-        helpful_count: 1,
-        unhelpful_count: 0,
-        last_recalled_at: 1_700_000_000,
-        still_exists: true,
-        verdict: "recalled_and_helpful",
-      },
-    ],
-    snapshot: {
-      available: true,
-      skills_refreshed_at: 1_700_000_000,
-      facts_refreshed_at: 1_700_000_000,
-    },
-    error: "",
-  };
-  const config = {
-    configuration_revision_id: "configuration.revision.curation.test",
-    source: "daemon_pinned_snapshot",
-    effective: {
-      schema_version: 1,
-      enabled: true,
-      backend: "codex_app_server",
-      host_mode: "standalone",
-      model_id: "gpt-5.6-mini",
-      timeout_secs: 60,
-      scheduler_tick_secs: 60,
-      combine_due_tasks: true,
-      allow_job_commands: false,
-      tasks: {
-        memory_curator: {
-          enabled: true,
-          schedule: "interval",
-          interval_secs: 3600,
-          cooldown_secs: 300,
-          min_idle_secs: 30,
-          stale_lock_secs: 3600,
-        },
-        session_reflector: {
-          enabled: true,
-          schedule: "interval",
-          interval_secs: 900,
-          cooldown_secs: 300,
-          min_idle_secs: 30,
-          stale_lock_secs: 3600,
-        },
-        skill_writer: {
-          enabled: true,
-          schedule: "interval",
-          interval_secs: 900,
-          cooldown_secs: 300,
-          min_idle_secs: 30,
-          stale_lock_secs: 3600,
-        },
-      },
-    },
-    backend_availability: {
-      backend: "codex_app_server",
-      available: true,
-      executable: "codex",
-      reason: null,
-    },
-  };
-  const automaticReceipt = {
-    schema_version: 1,
-    apply_id: "apply-1",
-    run_id: "run-1",
-    state: "applied",
-    add_fact_request: { content: "A recorded project fact." },
-    applied_canonical_fact_id: "fact-1",
-    applied_fact_id: 1,
-    recorded_at: 1_700_000_000,
-  };
-  const fetchMock = vi.fn(
-    async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      const body = url.includes("/curation/status")
-        ? status
-        : url.includes("/curation/activity")
-          ? activity
-          : url.includes("/curation/runs")
-            ? runs
-            : url.includes("/automation/outcomes")
-              ? outcomes
-              : url.includes("/automatic-fact-receipts")
-                ? {
-                    receipts: [automaticReceipt],
-                    count: 1,
-                    limit: 50,
-                    error: "",
-                  }
-                : url.includes("/curation/config")
-                  ? config
-                  : {};
-      void init;
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
+function renderPanel() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <KnowledgeCuration />
+    </QueryClientProvider>,
   );
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
 }

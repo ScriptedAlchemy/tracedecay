@@ -1,13 +1,53 @@
-use tracedecay_application::SourceEditRequest;
+use std::sync::Arc;
 
-use crate::tracedecay::TraceDecay;
+use tracedecay_application::{RequestContext, SourceEditRequest};
+use tracedecay_domain::UtcMicros;
+use tracedecay_graph_db::GraphCancellation;
+
+use crate::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadRequest, map_code_graph_read_runtime_error,
+};
+use crate::tracedecay::{SourceEditGraphReadV1, TraceDecay};
 use tracedecay_runtime_core::errors::Result;
 
 use super::control::SourceEditEffectControlV1;
 use super::outcome::SourceEditOutcome;
 
+pub(super) struct SourceEditGraphReadAuthorityV1<'a> {
+    pub(super) port: &'a dyn CodeGraphProjectionReadPort,
+    pub(super) context: &'a RequestContext,
+    pub(super) observed_at: UtcMicros,
+    pub(super) cancellation: Arc<dyn GraphCancellation>,
+}
+
+async fn admitted_graph(
+    authority: &SourceEditGraphReadAuthorityV1<'_>,
+) -> Result<SourceEditGraphReadV1> {
+    let verified = authority
+        .port
+        .open(CodeGraphReadRequest::new(
+            authority.context,
+            authority.observed_at,
+            Arc::clone(&authority.cancellation),
+        ))
+        .await
+        .map_err(map_code_graph_read_runtime_error)?;
+    let reader = verified
+        .reader_with_cancellation(
+            authority.context,
+            authority.observed_at,
+            Arc::clone(&authority.cancellation),
+        )
+        .map_err(map_code_graph_read_runtime_error)?;
+    Ok(SourceEditGraphReadV1::new(
+        reader,
+        Arc::clone(&authority.cancellation),
+    ))
+}
+
 pub(super) async fn run_source_edit(
     graph: &TraceDecay,
+    graph_read: SourceEditGraphReadAuthorityV1<'_>,
     request: SourceEditRequest,
     _control: Option<&SourceEditEffectControlV1>,
 ) -> Result<SourceEditOutcome> {
@@ -94,6 +134,15 @@ pub(super) async fn run_source_edit(
             new_name,
             dry_run,
             ..
-        } => SourceEditOutcome::Rename(graph.rename_symbol(&binding, &new_name, dry_run).await?),
+        } => SourceEditOutcome::Rename(
+            graph
+                .rename_symbol(
+                    admitted_graph(&graph_read).await?,
+                    &binding,
+                    &new_name,
+                    dry_run,
+                )
+                .await?,
+        ),
     })
 }

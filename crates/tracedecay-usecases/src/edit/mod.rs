@@ -39,9 +39,20 @@ use verify::config_error;
 /// preview and recaptures state under its edit lock.
 pub async fn preview_source_edit_expected_state(
     graph: &TraceDecay,
+    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
+    context: &tracedecay_application::RequestContext,
+    observed_at: tracedecay_domain::UtcMicros,
     edit: SourceEditRequest,
 ) -> Result<ManifestDigest> {
-    let preview = resolve_source_edit_preview(graph, edit).await?;
+    let preview = resolve_source_edit_preview(
+        graph,
+        code_graph,
+        context,
+        observed_at,
+        crate::graph::request_graph_cancellation(context),
+        edit,
+    )
+    .await?;
     if !preview.outcome.success() {
         return Err(config_error(preview.outcome.message().to_owned()));
     }
@@ -52,6 +63,7 @@ pub async fn preview_source_edit_expected_state(
 
 pub async fn execute_source_edit<A>(
     graph: &TraceDecay,
+    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -59,11 +71,12 @@ pub async fn execute_source_edit<A>(
 where
     A: SourceEditAuthorizationPort,
 {
-    execute_source_edit_inner(graph, operation, request, authorization, None).await
+    execute_source_edit_inner(graph, code_graph, operation, request, authorization, None).await
 }
 
 pub async fn execute_source_edit_with_control<A>(
     graph: &TraceDecay,
+    code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
     authorization: &A,
@@ -72,7 +85,15 @@ pub async fn execute_source_edit_with_control<A>(
 where
     A: SourceEditAuthorizationPort,
 {
-    execute_source_edit_inner(graph, operation, request, authorization, Some(control)).await
+    execute_source_edit_inner(
+        graph,
+        code_graph,
+        operation,
+        request,
+        authorization,
+        Some(control),
+    )
+    .await
 }
 
 pub async fn execute_source_edit_rollback<A>(

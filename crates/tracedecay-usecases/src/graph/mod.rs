@@ -1,8 +1,12 @@
-//! Graph query and health helpers moved down from the root binary's
-//! `src/graph/`. Both files' whole closure is the runtime kernel
-//! (`tracedecay_runtime_core::{db, errors, types}`); nothing kept them at the
-//! composition root. See SEAMS.md.
+//! Code-graph use cases over daemon-resolved verified projections.
 
 pub mod health;
+mod projection;
 pub mod queries;
 pub mod scc;
+
+pub use projection::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead, map_code_graph_read_runtime_error, map_projection_error,
+    request_graph_cancellation,
+};

@@ -18,15 +18,15 @@
  * the surface shows the daemon's own re-read rather than the value that was
  * asked for.
  */
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { fixtureEnvelope } from "../../test/fixtureEnvelope.ts";
-import { useScope } from "../../data/scope/store.ts";
-import { KnowledgePage } from "./KnowledgePage.tsx";
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
+import { useScope } from '../../data/scope/store.ts';
+import { KnowledgePage } from './KnowledgePage.tsx';
 
 /* ---- route bodies -------------------------------------------------------- */
 
@@ -38,26 +38,22 @@ function overviewEnvelope(facts: readonly unknown[] = []) {
   // from the fixture authority rather than being invented here, so these cases
   // cannot accidentally assert against a truth claim no route makes.
   return fixtureEnvelope({
-    query: "",
+    query: '',
     limit: 100,
     providers: {},
     holographic: {
-      path: "/tmp/memory.db",
+      path: '/tmp/memory.db',
       exists: true,
-      error: "",
+      error: '',
       overview: null,
       facts,
       entities: [],
       graph: { nodes: [], edges: [] },
-      facts_coverage: {
-        completeness: "bounded",
-        limit: 100,
-        query_applied_after_limit: false,
-      },
+      facts_coverage: { completeness: 'bounded', limit: 100, query_applied_after_limit: false },
       reads: {
-        facts: { state: "ready" },
-        entities: { state: "ready" },
-        graph: { state: "ready" },
+        facts: { state: 'ready' },
+        entities: { state: 'ready' },
+        graph: { state: 'ready' },
       },
     },
   });
@@ -69,12 +65,12 @@ const PROJECTION = {
   exists: true,
   dim: 64,
   limit: 400,
-  method: "pca",
-  error: "",
+  method: 'pca',
+  error: '',
   points: [
-    projectionPoint(1, -1, 0.5, "decision"),
-    projectionPoint(2, 1.5, -0.25, "decision"),
-    projectionPoint(3, 0.25, 2, "code_area"),
+    projectionPoint(1, -1, 0.5, 'decision'),
+    projectionPoint(2, 1.5, -0.25, 'decision'),
+    projectionPoint(3, 0.25, 2, 'code_area'),
   ],
 };
 
@@ -85,7 +81,7 @@ const SIMILARITY = {
   limit: 25,
   min_similarity: 0.85,
   total_pairs: 120,
-  error: "",
+  error: '',
   score_distribution: {
     min_score: 0.02,
     max_score: 0.99,
@@ -98,45 +94,45 @@ const SIMILARITY = {
     {
       a_id: 11,
       b_id: 12,
-      a_content: "the dashboard uses rsbuild",
-      b_content: "the dashboard is built with rsbuild",
-      a_category: "decision",
-      b_category: "decision",
+      a_content: 'the dashboard uses rsbuild',
+      b_content: 'the dashboard is built with rsbuild',
+      a_category: 'decision',
+      b_category: 'decision',
       similarity: 0.9731,
-      classification: "likely_duplicate",
+      classification: 'likely_duplicate',
     },
   ],
 };
 
 const TRUST_HISTORY = {
   fact_id: 7,
-  error: "",
-  repair: { state: "incomplete", processed: 4, remaining: 96 },
+  error: '',
+  repair: { state: 'incomplete', processed: 4, remaining: 96 },
   trust_history: [
     {
-      timestamp: "2026-08-01T00:00:00Z",
-      action: "helpful",
+      timestamp: '2026-08-01T00:00:00Z',
+      action: 'helpful',
       old_trust: 0.5,
       new_trust: 0.62,
       delta: 0.12,
-      details_availability: "available",
-      note: "confirmed against the running daemon",
+      details_availability: 'available',
+      note: 'confirmed against the running daemon',
     },
     {
-      timestamp: "2026-08-02T00:00:00Z",
-      action: "unhelpful",
+      timestamp: '2026-08-02T00:00:00Z',
+      action: 'unhelpful',
       old_trust: 0.62,
       new_trust: 0.51,
       delta: -0.11,
-      details_availability: "legacy_redacted",
+      details_availability: 'legacy_redacted',
     },
     {
-      timestamp: "2026-08-03T00:00:00Z",
-      action: "helpful",
+      timestamp: '2026-08-03T00:00:00Z',
+      action: 'helpful',
       old_trust: 0.51,
       new_trust: 0.58,
       delta: 0.07,
-      details_availability: "unknown",
+      details_availability: 'unknown',
     },
   ],
 };
@@ -144,64 +140,46 @@ const TRUST_HISTORY = {
 const OPLOG = {
   count: 3,
   limit: 100,
-  error: "",
+  error: '',
   events: [
-    {
-      id: 3,
-      ts: "2026-08-03T00:00:00Z",
-      op: "add_fact",
-      fact_id: 9,
-      detail: { summary: "stored a decision" },
-    },
-    {
-      id: 2,
-      ts: "2026-08-02T00:00:00Z",
-      op: "add_fact",
-      fact_id: 8,
-      detail: { redacted: true },
-    },
-    {
-      id: 1,
-      ts: "2026-08-01T00:00:00Z",
-      op: "remove_fact",
-      fact_id: null,
-      detail: { availability: "unknown" },
-    },
+    { id: 3, ts: '2026-08-03T00:00:00Z', op: 'add_fact', fact_id: 9, detail: { summary: 'stored a decision' } },
+    { id: 2, ts: '2026-08-02T00:00:00Z', op: 'add_fact', fact_id: 8, detail: { redacted: true } },
+    { id: 1, ts: '2026-08-01T00:00:00Z', op: 'remove_fact', fact_id: null, detail: { availability: 'unknown' } },
   ],
 };
 
 const RUNS = {
   count: 2,
   limit: 50,
-  error: "",
+  error: '',
   records: [
     {
-      run_id: "run-a",
-      trigger: "scheduler",
-      task: "memory_curator",
-      backend: "codex_app_server",
-      status: "completed",
+      run_id: 'run-a',
+      trigger: 'scheduler',
+      task: 'memory_curator',
+      backend: 'codex_app_server',
+      status: 'completed',
       reviewed_count: 5,
       accepted_count: 3,
       rejected_count: 2,
       skipped_count: 0,
-      started_at: "2026-08-01T00:00:00Z",
-      completed_at: "2026-08-01T00:01:00Z",
-      model: "gpt-5-codex",
+      started_at: '2026-08-01T00:00:00Z',
+      completed_at: '2026-08-01T00:01:00Z',
+      model: 'gpt-5-codex',
     },
     {
-      run_id: "run-b",
-      trigger: "manual",
-      task: "skill_writer",
-      backend: "codex_app_server",
-      status: "failed",
+      run_id: 'run-b',
+      trigger: 'manual',
+      task: 'skill_writer',
+      backend: 'codex_app_server',
+      status: 'failed',
       reviewed_count: 0,
       accepted_count: 0,
       rejected_count: 0,
       skipped_count: 0,
-      started_at: "2026-08-02T00:00:00Z",
-      completed_at: "2026-08-02T00:00:30Z",
-      error: "backend timed out after 60s",
+      started_at: '2026-08-02T00:00:00Z',
+      completed_at: '2026-08-02T00:00:30Z',
+      error: 'backend timed out after 60s',
     },
   ],
 };
@@ -209,13 +187,13 @@ const RUNS = {
 const ACTIVITY = {
   count: 1,
   limit: 100,
-  error: "",
+  error: '',
   events: [
     {
-      ts: "2026-08-03T00:00:00Z",
-      phase: "finish",
-      message: "similarity dedup: 2 deletes applied",
-      level: "info",
+      ts: '2026-08-03T00:00:00Z',
+      phase: 'finish',
+      message: 'similarity dedup: 2 deletes applied',
+      level: 'info',
       dry_run: false,
     },
   ],
@@ -223,61 +201,37 @@ const ACTIVITY = {
 
 function config(overrides: Record<string, unknown> = {}) {
   const automation = {
-    schema_version: 1,
     enabled: true,
-    backend: "codex_app_server",
-    host_mode: "standalone",
-    model_id: "gpt-5.6-mini",
+    backend: 'codex_app_server',
+    host_mode: 'standalone',
     timeout_secs: 60,
     scheduler_tick_secs: 300,
+    auto_apply_memory_ops: true,
+    auto_enable_skills: false,
+    export_memory_digest: true,
     combine_due_tasks: true,
     allow_job_commands: false,
     tasks: {
-      memory_curator: {
-        enabled: true,
-        schedule: "daily",
-        interval_secs: 86400,
-        cooldown_secs: 300,
-        min_idle_secs: 30,
-        stale_lock_secs: 3600,
-      },
-      session_reflector: {
-        enabled: false,
-        schedule: null,
-        interval_secs: null,
-        cooldown_secs: null,
-        min_idle_secs: null,
-        stale_lock_secs: null,
-      },
-      skill_writer: {
-        enabled: false,
-        schedule: null,
-        interval_secs: null,
-        cooldown_secs: null,
-        min_idle_secs: null,
-        stale_lock_secs: null,
-      },
+      memory_curator: { enabled: true, schedule: 'daily', interval_secs: 86400 },
+      session_reflector: { enabled: false, schedule: null },
+      skill_writer: { enabled: false, schedule: null },
     },
     ...overrides,
   };
   return {
+    global: automation,
+    project: null,
     effective: automation,
-    configuration_revision_id: "configuration.revision.knowledge.test",
-    source: "daemon_pinned_snapshot",
     backend_availability: {
-      backend: "codex_app_server",
+      backend: 'codex_app_server',
       available: true,
-      executable: "/usr/local/bin/codex",
+      executable: '/usr/local/bin/codex',
     },
+    project_config_path: '/repo/.tracedecay/automation.json',
   };
 }
 
-function projectionPoint(
-  factId: number,
-  x: number,
-  y: number,
-  category: string,
-) {
+function projectionPoint(factId: number, x: number, y: number, category: string) {
   return {
     fact_id: factId,
     x,
@@ -300,51 +254,15 @@ function projectionPoint(
  * `/curation/runs` and `/curation/config` both end in a segment that a naive
  * `includes('/curation')` would confuse. */
 const ROUTES: readonly (readonly [string, unknown])[] = [
-  [
-    "/automatic-fact-receipts",
-    { receipts: [], count: 0, limit: 50, error: "" },
-  ],
-  ["/trust-history", TRUST_HISTORY],
-  ["/projection", PROJECTION],
-  ["/similarity", SIMILARITY],
-  ["/curation/activity", ACTIVITY],
-  ["/curation/runs", RUNS],
-  [
-    "/automation/outcomes",
-    {
-      generated_at: 1_700_000_000,
-      skills: [],
-      facts: [],
-      snapshot: {
-        available: true,
-        skills_refreshed_at: null,
-        facts_refreshed_at: null,
-      },
-      error: "",
-    },
-  ],
-  [
-    "/curation/status",
-    {
-      provider: "tracedecay",
-      state: {
-        paused: false,
-        run_count: 1,
-        last_run_at: null,
-        last_run_summary: "automatic curation completed",
-        last_run_id: "run-1",
-      },
-      config: {
-        enabled: true,
-        interval_hours: 6,
-        min_idle_hours: 2,
-        mode: "automatic",
-        dry_run_first: false,
-      },
-      snapshots: [],
-    },
-  ],
-  ["/oplog", OPLOG],
+  ['/fact-proposals', { proposals: [], count: 0, limit: 50, error: '' }],
+  ['/trust-history', TRUST_HISTORY],
+  ['/projection', PROJECTION],
+  ['/similarity', SIMILARITY],
+  ['/curation/activity', ACTIVITY],
+  ['/curation/runs', RUNS],
+  ['/curation/status', { provider: 'tracedecay', state: { paused: false, run_count: 1, last_run_at: null, last_run_summary: 'similarity dedup: 2 deletes applied', last_run_id: 'curate-apply-1' }, config: {}, snapshots: [] }],
+  ['/curation/plan', { actions: [], hygiene: { secret_like: [], transient: [], supersession: [] }, counts: {}, total_facts: 96, error: '' }],
+  ['/oplog', OPLOG],
 ];
 
 let requested: string[] = [];
@@ -352,23 +270,23 @@ let configBody: unknown = config();
 
 function stubRoutes(options: { patchStatus?: number } = {}) {
   vi.stubGlobal(
-    "fetch",
+    'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       requested.push(url);
-      const path = url.split("?")[0] ?? url;
-      if (path.endsWith("/curation/config")) {
-        if (init?.method === "PATCH") {
+      const path = url.split('?')[0] ?? url;
+      if (path.endsWith('/curation/config')) {
+        if (init?.method === 'PATCH') {
           const status = options.patchStatus ?? 200;
           if (status !== 200) {
-            return new Response(JSON.stringify({ detail: "refused" }), {
+            return new Response(JSON.stringify({ detail: 'refused' }), {
               status,
-              headers: { "content-type": "application/json" },
+              headers: { 'content-type': 'application/json' },
             });
           }
           // The handler re-reads and returns the resolved layering; the
           // dashboard shows THAT, never the value it asked for.
-          configBody = config({ enabled: false });
+          configBody = config({ auto_enable_skills: true });
         }
         return json(configBody);
       }
@@ -383,14 +301,12 @@ function stubRoutes(options: { patchStatus?: number } = {}) {
 function json(body: unknown) {
   return new Response(JSON.stringify(body), {
     status: 200,
-    headers: { "content-type": "application/json" },
+    headers: { 'content-type': 'application/json' },
   });
 }
 
-function renderPage(entry = "/knowledge") {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
+function renderPage(entry = '/knowledge') {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[entry]}>
@@ -403,7 +319,7 @@ function renderPage(entry = "/knowledge") {
 beforeEach(() => {
   requested = [];
   configBody = config();
-  useScope.setState({ scope: { kind: "all" } });
+  useScope.setState({ scope: { kind: 'all' } });
 });
 
 afterEach(() => {
@@ -412,159 +328,125 @@ afterEach(() => {
 
 /* ---- the camera ---------------------------------------------------------- */
 
-describe("Knowledge view switcher", () => {
-  it("opens the facts explorer for an absent or unreadable view parameter", async () => {
+describe('Knowledge view switcher', () => {
+  it('opens the facts explorer for an absent or unreadable view parameter', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=not-a-view");
+    renderPage('/knowledge?view=not-a-view');
     await waitFor(() =>
-      expect(
-        screen
-          .getByRole("tab", { name: "Facts" })
-          .getAttribute("aria-selected"),
-      ).toBe("true"),
+      expect(screen.getByRole('tab', { name: 'Facts' }).getAttribute('aria-selected')).toBe('true'),
     );
   });
 
-  it("opens the view named in the address", async () => {
+  it('opens the view named in the address', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=oplog");
+    renderPage('/knowledge?view=oplog');
     await waitFor(() =>
-      expect(
-        screen
-          .getByRole("tab", { name: "Oplog" })
-          .getAttribute("aria-selected"),
-      ).toBe("true"),
+      expect(screen.getByRole('tab', { name: 'Oplog' }).getAttribute('aria-selected')).toBe('true'),
     );
-    expect(await screen.findByText("stored a decision")).toBeTruthy();
+    expect(await screen.findByText('stored a decision')).toBeTruthy();
   });
 
-  it("does not read a view until the camera is on it", async () => {
+  it('does not read a view until the camera is on it', async () => {
     stubRoutes();
     renderPage();
-    await screen.findByRole("tab", { name: "Facts" });
+    await screen.findByRole('tab', { name: 'Facts' });
     // The oplog is not on screen, so nothing may have asked for it. A page
     // that fetched every view up front would make switching feel instant and
     // make a heavy store pay for four reads to look at one.
-    expect(requested.some((url) => url.includes("/oplog"))).toBe(false);
-    await userEvent.click(screen.getByRole("tab", { name: "Oplog" }));
-    await waitFor(() =>
-      expect(requested.some((url) => url.includes("/oplog"))).toBe(true),
-    );
+    expect(requested.some((url) => url.includes('/oplog'))).toBe(false);
+    await userEvent.click(screen.getByRole('tab', { name: 'Oplog' }));
+    await waitFor(() => expect(requested.some((url) => url.includes('/oplog'))).toBe(true));
   });
 
-  it("names the panel its tabs control", async () => {
+  it('names the panel its tabs control', async () => {
     stubRoutes();
     renderPage();
-    const tab = await screen.findByRole("tab", { name: "Facts" });
-    const panelId = tab.getAttribute("aria-controls");
+    const tab = await screen.findByRole('tab', { name: 'Facts' });
+    const panelId = tab.getAttribute('aria-controls');
     expect(panelId).toBeTruthy();
     // `aria-controls` naming an element that was never drawn is an invalid
     // reference, not a weaker one — the accessibility gate reads it as a
     // failure.
-    expect(document.getElementById(panelId ?? "")).toBeTruthy();
+    expect(document.getElementById(panelId ?? '')).toBeTruthy();
   });
 });
 
 /* ---- geometry ------------------------------------------------------------ */
 
-describe("Memory geometry", () => {
-  it("states what the projection axes are and censuses the categories", async () => {
+describe('Memory geometry', () => {
+  it('states what the projection axes are and censuses the categories', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=geometry");
+    renderPage('/knowledge?view=geometry');
     expect(
-      await screen.findByText(
-        /principal components of 3 phase vectors of width 64/,
-      ),
+      await screen.findByText(/principal components of 3 phase vectors of width 64/),
     ).toBeTruthy();
-    const census = screen.getByLabelText("Projected facts by category");
-    expect(within(census).getByText("decision · 2")).toBeTruthy();
-    expect(within(census).getByText("code_area · 1")).toBeTruthy();
+    const census = screen.getByLabelText('Projected facts by category');
+    expect(within(census).getByText('decision · 2')).toBeTruthy();
+    expect(within(census).getByText('code_area · 1')).toBeTruthy();
   });
 
-  it("refuses to draw a projection the daemon did not compute", async () => {
+  it('refuses to draw a projection the daemon did not compute', async () => {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/projection")) {
-          return json({
-            ...PROJECTION,
-            method: "none",
-            points: [PROJECTION.points[0]],
-          });
+        if (url.includes('/projection')) {
+          return json({ ...PROJECTION, method: 'none', points: [PROJECTION.points[0]] });
         }
-        if (url.includes("/similarity")) return json(SIMILARITY);
+        if (url.includes('/similarity')) return json(SIMILARITY);
         return json(OVERVIEW_ENVELOPE);
       }),
     );
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(/placeholders, not a projection/),
-    ).toBeTruthy();
+    renderPage('/knowledge?view=geometry');
+    expect(await screen.findByText(/placeholders, not a projection/)).toBeTruthy();
   });
 
-  it("keeps the three similarity denominators apart", async () => {
+  it('keeps the three similarity denominators apart', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=geometry");
+    renderPage('/knowledge?view=geometry');
     expect(
       await screen.findByText(
-        "1 shown of 120 scored pairs over 40 vectored facts, at or above 0.85",
+        '1 shown of 120 scored pairs over 40 vectored facts, at or above 0.85',
       ),
     ).toBeTruthy();
   });
 
-  it("names the pair list so it is reachable by keyboard", async () => {
+  it('names the pair list so it is reachable by keyboard', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=geometry");
-    const list = await screen.findByRole("region", {
-      name: "Similar fact pairs",
-    });
+    renderPage('/knowledge?view=geometry');
+    const list = await screen.findByRole('region', { name: 'Similar fact pairs' });
     // The list scrolls and holds nothing focusable, so it takes the tab stop
     // itself (WCAG 2.1.1) and the name sits on the node that scrolls.
-    expect(list.getAttribute("tabindex")).toBe("0");
+    expect(list.getAttribute('tabindex')).toBe('0');
   });
 });
 
 /* ---- oplog --------------------------------------------------------------- */
 
-describe("Memory oplog", () => {
-  it("renders a withheld detail and an unrecorded one as different states", async () => {
+describe('Memory oplog', () => {
+  it('renders a withheld detail and an unrecorded one as different states', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=oplog");
-    const withheld = await screen.findByText(
-      /detail withheld by the privacy gate/,
-    );
-    expect(withheld.closest("[data-state]")?.getAttribute("data-state")).toBe(
-      "redacted",
-    );
+    renderPage('/knowledge?view=oplog');
+    const withheld = await screen.findByText(/detail withheld by the privacy gate/);
+    expect(withheld.closest('[data-state]')?.getAttribute('data-state')).toBe('redacted');
     const unrecorded = screen.getByText(/its detail state is unknown/);
-    expect(unrecorded.closest("[data-state]")?.getAttribute("data-state")).toBe(
-      "unknown",
-    );
+    expect(unrecorded.closest('[data-state]')?.getAttribute('data-state')).toBe('unknown');
   });
 
-  it("reports an unreadable store rather than an empty history", async () => {
+  it('reports an unreadable store rather than an empty history', async () => {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/oplog")) {
-          return json({
-            events: [],
-            count: 0,
-            limit: 100,
-            error: "database is locked",
-          });
+        if (url.includes('/oplog')) {
+          return json({ events: [], count: 0, limit: 100, error: 'database is locked' });
         }
         return json(OVERVIEW_ENVELOPE);
       }),
     );
-    renderPage("/knowledge?view=oplog");
-    expect(
-      await screen.findByText(
-        /the memory oplog could not be read: database is locked/,
-      ),
-    ).toBeTruthy();
+    renderPage('/knowledge?view=oplog');
+    expect(await screen.findByText(/the memory oplog could not be read: database is locked/))
+      .toBeTruthy();
     expect(screen.queryByText(/nothing has ever written/)).toBeNull();
   });
 });
@@ -576,8 +458,8 @@ describe("Memory oplog", () => {
  * counters are real columns rather than absences. */
 const FACT_ROW = {
   fact_id: 7,
-  content: "a memory fact",
-  category: "code_area",
+  content: 'a memory fact',
+  category: 'code_area',
   trust_score: 0.58,
   retrieval_count: 4,
   access_count: 9,
@@ -592,17 +474,17 @@ const FACT_ROW = {
   metadata: null,
 };
 
-describe("Fact trust history", () => {
+describe('Fact trust history', () => {
   function stubWithFact() {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         requested.push(url);
-        const path = url.split("?")[0] ?? url;
-        if (path.endsWith("/trust-history")) return json(TRUST_HISTORY);
-        if (path.includes("/fact/")) {
-          return json(fixtureEnvelope({ error: "", fact: FACT_ROW }));
+        const path = url.split('?')[0] ?? url;
+        if (path.endsWith('/trust-history')) return json(TRUST_HISTORY);
+        if (path.includes('/fact/')) {
+          return json(fixtureEnvelope({ error: '', fact: FACT_ROW }));
         }
         for (const [suffix, body] of ROUTES) {
           if (path.endsWith(suffix)) return json(body);
@@ -612,68 +494,56 @@ describe("Fact trust history", () => {
     );
   }
 
-  it("does not ask for a trust audit until a fact is open", async () => {
+  it('does not ask for a trust audit until a fact is open', async () => {
     stubWithFact();
     renderPage();
-    await screen.findByRole("tab", { name: "Facts" });
+    await screen.findByRole('tab', { name: 'Facts' });
     // The route takes an `i64` path segment; asking it about no fact would
     // manufacture a 404 this surface then has to explain away.
-    expect(requested.some((url) => url.includes("/trust-history"))).toBe(false);
+    expect(requested.some((url) => url.includes('/trust-history'))).toBe(false);
   });
 
-  it("renders withheld and unrecorded event details as their own states", async () => {
+  it('renders withheld and unrecorded event details as their own states', async () => {
     stubWithFact();
     renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
+    await userEvent.click(await screen.findByText('a memory fact'));
 
-    const events = await screen.findByRole("region", {
-      name: "Trust history events",
-    });
-    expect(
-      within(events).getByText("confirmed against the running daemon"),
-    ).toBeTruthy();
-    const withheld = within(events).getByText(
-      /detail withheld by an earlier writer/,
-    );
-    expect(withheld.closest("[data-state]")?.getAttribute("data-state")).toBe(
-      "redacted",
-    );
+    const events = await screen.findByRole('region', { name: 'Trust history events' });
+    expect(within(events).getByText('confirmed against the running daemon')).toBeTruthy();
+    const withheld = within(events).getByText(/detail withheld by an earlier writer/);
+    expect(withheld.closest('[data-state]')?.getAttribute('data-state')).toBe('redacted');
     const unrecorded = within(events).getByText(/detail state never recorded/);
-    expect(unrecorded.closest("[data-state]")?.getAttribute("data-state")).toBe(
-      "unknown",
-    );
+    expect(unrecorded.closest('[data-state]')?.getAttribute('data-state')).toBe('unknown');
     // The list scrolls with nothing focusable in it, so it takes the tab stop.
-    expect(events.getAttribute("tabindex")).toBe("0");
+    expect(events.getAttribute('tabindex')).toBe('0');
   });
 
-  it("states that an unfinished repair may have left the audit incomplete", async () => {
+  it('states that an unfinished repair may have left the audit incomplete', async () => {
     stubWithFact();
     renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
+    await userEvent.click(await screen.findByText('a memory fact'));
     expect(await screen.findByText(/still has 96 rows to go/)).toBeTruthy();
   });
 
-  it("nets the trust the recorded events actually moved", async () => {
+  it('nets the trust the recorded events actually moved', async () => {
     stubWithFact();
     renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
+    await userEvent.click(await screen.findByText('a memory fact'));
     // 0.500 in, 0.580 out, across three events — the gauge above shows only
     // the closing figure, which is what this drilldown exists to explain.
-    expect(await screen.findByText("0.500")).toBeTruthy();
-    expect(screen.getByText("+0.080")).toBeTruthy();
+    expect(await screen.findByText('0.500')).toBeTruthy();
+    expect(screen.getByText('+0.080')).toBeTruthy();
   });
 });
 
 /* ---- curation ------------------------------------------------------------ */
 
-describe("Curation console", () => {
-  it("reports run history with the ledger status of each run", async () => {
+describe('Curation console', () => {
+  it('reports run history with the ledger status of each run', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=curation");
-    const list = await screen.findByRole("region", {
-      name: "Automation run records",
-    });
-    expect(within(list).getByText("backend timed out after 60s")).toBeTruthy();
+    renderPage('/knowledge?view=curation');
+    const list = await screen.findByRole('region', { name: 'Automation run records' });
+    expect(within(list).getByText('backend timed out after 60s')).toBeTruthy();
     // The failed run keeps its own chip rather than being folded into a count,
     // and the chip carries the state in `data-state` so the meaning does not
     // depend on the label text or on colour.
@@ -681,91 +551,83 @@ describe("Curation console", () => {
     expect(list.querySelector('[data-state="ready"]')).toBeTruthy();
   });
 
-  it("says an empty activity stream is the daemon’s memory, not an idle curator", async () => {
+  it('says an empty activity stream is the daemon’s memory, not an idle curator', async () => {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        const path = url.split("?")[0] ?? url;
-        if (path.endsWith("/curation/activity")) {
-          return json({ events: [], count: 0, limit: 100, error: "" });
+        const path = url.split('?')[0] ?? url;
+        if (path.endsWith('/curation/activity')) {
+          return json({ events: [], count: 0, limit: 100, error: '' });
         }
         for (const [suffix, body] of ROUTES) {
           if (path.endsWith(suffix)) return json(body);
         }
-        if (path.endsWith("/curation/config")) return json(config());
+        if (path.endsWith('/curation/config')) return json(config());
         return json(OVERVIEW_ENVELOPE);
       }),
     );
-    renderPage("/knowledge?view=curation");
-    expect(
-      await screen.findByText(/ephemeral after a daemon restart/),
-    ).toBeTruthy();
+    renderPage('/knowledge?view=curation');
+    expect(await screen.findByText(/a restart empties it/)).toBeTruthy();
   });
 
-  it("states which project a configuration write would reach", async () => {
+  it('states which project a configuration write would reach', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=curation");
-    expect(
-      await screen.findByText("Applies to the active project."),
-    ).toBeTruthy();
+    renderPage('/knowledge?view=curation');
+    expect(await screen.findByText('Applies to the active project.')).toBeTruthy();
   });
 
-  it("shows the daemon’s re-read after a patch, not the value that was asked for", async () => {
+  it('shows the daemon’s re-read after a patch, not the value that was asked for', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=curation");
-    const toggle = await screen.findByRole("checkbox", {
-      name: /Automation enabled/,
+    renderPage('/knowledge?view=curation');
+    const toggle = await screen.findByRole('checkbox', {
+      name: /Enable generated skills automatically/,
     });
-    expect((toggle as HTMLInputElement).checked).toBe(true);
+    expect((toggle as HTMLInputElement).checked).toBe(false);
     await userEvent.click(toggle);
     await waitFor(() =>
       expect(
         (
-          screen.getByRole("checkbox", {
-            name: /Automation enabled/,
+          screen.getByRole('checkbox', {
+            name: /Enable generated skills automatically/,
           }) as HTMLInputElement
         ).checked,
-      ).toBe(false),
+      ).toBe(true),
     );
-    const patch = requested.filter((url) => url.includes("/curation/config"));
+    const patch = requested.filter((url) => url.includes('/curation/config'));
     expect(patch.length).toBeGreaterThan(1);
   });
 
-  it("refuses the write before dispatch under a read-only scope", async () => {
+  it('refuses the write before dispatch under a read-only scope', async () => {
     useScope.setState({
       scope: {
-        kind: "project",
-        projectId: "proj_other",
-        label: "Other",
-        activation: "selected",
+        kind: 'project',
+        projectId: 'proj_other',
+        label: 'Other',
+        activation: 'selected',
       },
     });
     stubRoutes();
-    renderPage("/knowledge?view=curation");
-    const toggle = await screen.findByRole("checkbox", {
-      name: /Automation enabled/,
+    renderPage('/knowledge?view=curation');
+    const toggle = await screen.findByRole('checkbox', {
+      name: /Enable generated skills automatically/,
     });
     expect((toggle as HTMLInputElement).disabled).toBe(true);
     // No PATCH may have gone out: the reason is stated instead, and it names
     // the remedy rather than reporting a 405 the transport cannot interpret.
     expect(screen.getByText(/is not the active project/)).toBeTruthy();
     expect(
-      requested.some(
-        (url) => url.includes("/curation/config") && url.includes("PATCH"),
-      ),
+      requested.some((url) => url.includes('/curation/config') && url.includes('PATCH')),
     ).toBe(false);
   });
 
-  it("does not offer browser-owned policy settings", async () => {
+  it('does not offer the two settings the daemon refuses over HTTP', async () => {
     stubRoutes();
-    renderPage("/knowledge?view=curation");
-    await screen.findByRole("checkbox", { name: /Automation enabled/ });
-    // Validation/application policy stays daemon-owned; only the enable switch
-    // is a control in this console.
-    expect(
-      screen.queryByRole("checkbox", { name: /job commands/i }),
-    ).toBeNull();
-    expect(screen.queryByRole("checkbox", { name: /apply|skill/i })).toBeNull();
+    renderPage('/knowledge?view=curation');
+    await screen.findByRole('checkbox', { name: /Automation enabled/ });
+    // `allow_job_commands` and the external-command backend are rejected by the
+    // handler itself; a control whose only outcome is a 400 is not a control.
+    expect(screen.queryByRole('checkbox', { name: /job commands/i })).toBeNull();
+    expect(screen.getByText(/refused by the daemon over HTTP/)).toBeTruthy();
   });
 });

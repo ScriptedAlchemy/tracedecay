@@ -7,10 +7,9 @@
  * in `contract_schema.rs`, so their schemas are generated and the workspace
  * reads them through {@link useEnvelope}. Every route below answers a bare
  * `Json<Value>`: they are NOT in the contract catalog, there is nothing for
- * codegen to emit, and the house ladder for that tier is `usePayload` plus a
+ * codegen to emit, and the house ladder for that tier is `useLegacy` plus a
  * local zod schema written against the handler — the same construction
- * `CurationConsole.tsx` uses for the read-only `/curation/{status,activity,runs}`
- * and daemon-settings routes.
+ * `KnowledgeCuration.tsx` already uses for `/curation/{status,plan}`.
  *
  * So these schemas are hand-written on purpose, and each one names the `json!`
  * literal it mirrors. Two rules follow from that provenance and are load-bearing
@@ -28,21 +27,21 @@
  * `.passthrough()` throughout: these handlers carry more than any one surface
  * reads, and a field added server-side must not fail an unrelated panel.
  */
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { z } from "zod";
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { z } from 'zod';
 
-import { fetchPayloadWrite, type PayloadWriteResult } from "./payload.ts";
-import { payloadQueryKey, usePayload } from "./usePayload.ts";
+import { fetchLegacyWrite, type LegacyWriteResult } from './legacy.ts';
+import { legacyQueryKey, useLegacy } from './useLegacy.ts';
 import {
   scopeKey,
   scopeWritable,
   scopedUrl,
   useScope,
   type ScopeWritability,
-} from "../scope/store.ts";
+} from '../scope/store.ts';
 
 /** The plugin mount every route below hangs off (`lib.rs` `project_api_router`). */
-export const MEMORY_BASE = "/api/plugins/holographic";
+export const MEMORY_BASE = '/api/plugins/holographic';
 
 /* ---- trust history ------------------------------------------------------- */
 
@@ -57,13 +56,11 @@ export const MEMORY_BASE = "/api/plugins/holographic";
  * render as blank.
  */
 export const TrustDetailAvailabilitySchema = z.enum([
-  "available",
-  "legacy_redacted",
-  "unknown",
+  'available',
+  'legacy_redacted',
+  'unknown',
 ]);
-export type TrustDetailAvailability = z.infer<
-  typeof TrustDetailAvailabilitySchema
->;
+export type TrustDetailAvailability = z.infer<typeof TrustDetailAvailabilitySchema>;
 
 /**
  * One append-only feedback event.
@@ -77,7 +74,7 @@ export type TrustDetailAvailability = z.infer<
 export const TrustHistoryEventSchema = z
   .object({
     timestamp: z.string(),
-    action: z.enum(["helpful", "unhelpful"]),
+    action: z.enum(['helpful', 'unhelpful']),
     old_trust: z.number(),
     new_trust: z.number(),
     delta: z.number(),
@@ -98,7 +95,7 @@ export type TrustHistoryEvent = z.infer<typeof TrustHistoryEventSchema>;
  */
 export const TrustRepairSchema = z
   .object({
-    state: z.enum(["unknown", "not_required", "complete", "incomplete"]),
+    state: z.enum(['unknown', 'not_required', 'complete', 'incomplete']),
     processed: z.number().nullable(),
     remaining: z.number().nullable(),
   })
@@ -125,8 +122,8 @@ export type TrustHistoryPayload = z.infer<typeof TrustHistoryPayloadSchema>;
  * has no subject for.
  */
 export function useFactTrustHistory(factId: number | null) {
-  return usePayload(
-    ["memory", "trust-history", String(factId ?? "")],
+  return useLegacy(
+    ['memory', 'trust-history', String(factId ?? '')],
     `${MEMORY_BASE}/fact/${encodeURIComponent(String(factId ?? 0))}/trust-history`,
     TrustHistoryPayloadSchema,
     { enabled: factId != null },
@@ -191,10 +188,9 @@ export type ProjectionPayload = z.infer<typeof ProjectionPayloadSchema>;
  * cost per remount; it is a projection of the whole store, not a live reading.
  */
 export function useMemoryProjection(query: string, limit = 400) {
-  const search =
-    query.trim() === "" ? "" : `&q=${encodeURIComponent(query.trim())}`;
-  return usePayload(
-    ["memory", "projection", query.trim(), limit],
+  const search = query.trim() === '' ? '' : `&q=${encodeURIComponent(query.trim())}`;
+  return useLegacy(
+    ['memory', 'projection', query.trim(), limit],
     `${MEMORY_BASE}/projection?limit=${limit}${search}`,
     ProjectionPayloadSchema,
     { staleTime: 5 * 60_000 },
@@ -235,15 +231,11 @@ export const SimilarityDistributionSchema = z
     bin_count: z.number(),
     total_pairs: z.number(),
     bins: z.array(
-      z
-        .object({ start: z.number(), end: z.number(), count: z.number() })
-        .passthrough(),
+      z.object({ start: z.number(), end: z.number(), count: z.number() }).passthrough(),
     ),
   })
   .passthrough();
-export type SimilarityDistribution = z.infer<
-  typeof SimilarityDistributionSchema
->;
+export type SimilarityDistribution = z.infer<typeof SimilarityDistributionSchema>;
 
 /**
  * `GET /similarity` (`memory_api::similarity`).
@@ -269,8 +261,8 @@ export const SimilarityPayloadSchema = z
 export type SimilarityPayload = z.infer<typeof SimilarityPayloadSchema>;
 
 export function useMemorySimilarity(minSimilarity: number, limit = 25) {
-  return usePayload(
-    ["memory", "similarity", minSimilarity, limit],
+  return useLegacy(
+    ['memory', 'similarity', minSimilarity, limit],
     `${MEMORY_BASE}/similarity?min_similarity=${minSimilarity}&limit=${limit}`,
     SimilarityPayloadSchema,
     { staleTime: 5 * 60_000 },
@@ -278,55 +270,6 @@ export function useMemorySimilarity(minSimilarity: number, limit = 25) {
 }
 
 /* ---- curation activity --------------------------------------------------- */
-
-/** The daemon's automatic curation status. This is observability only: the
- * policy decision and application are owned by the scheduler, while the
- * dashboard exposes the current receipt and the enable/disable control. */
-export const CurationStatusPayloadSchema = z
-  .object({
-    provider: z.string(),
-    state: z
-      .object({
-        paused: z.boolean(),
-        last_run_at: z.string().nullable(),
-        run_count: z.number(),
-        last_run_summary: z.string().nullable(),
-        last_run_id: z.string().nullable(),
-      })
-      .passthrough(),
-    config: z
-      .object({
-        enabled: z.boolean(),
-        interval_hours: z.number().nullable(),
-        min_idle_hours: z.number().nullable(),
-        mode: z.string(),
-        dry_run_first: z.boolean(),
-      })
-      .passthrough(),
-    snapshots: z.array(
-      z
-        .object({
-          id: z.string(),
-          name: z.string(),
-          path: z.string(),
-          ts: z.string().nullable(),
-          summary: z.string().nullable(),
-          provider: z.string(),
-          mode: z.string(),
-        })
-        .passthrough(),
-    ),
-  })
-  .passthrough();
-export type CurationStatusPayload = z.infer<typeof CurationStatusPayloadSchema>;
-
-export function useCurationStatus() {
-  return usePayload(
-    ["memory", "curation", "status"],
-    `${MEMORY_BASE}/curation/status`,
-    CurationStatusPayloadSchema,
-  );
-}
 
 /** One curator event (`memory_service::push_curation_activity_with_level`). All
  * five keys are written unconditionally on every push. */
@@ -350,13 +293,11 @@ export const CurationActivityPayloadSchema = z
     error: z.string(),
   })
   .passthrough();
-export type CurationActivityPayload = z.infer<
-  typeof CurationActivityPayloadSchema
->;
+export type CurationActivityPayload = z.infer<typeof CurationActivityPayloadSchema>;
 
 export function useCurationActivity(limit = 100) {
-  return usePayload(
-    ["memory", "curation", "activity", limit],
+  return useLegacy(
+    ['memory', 'curation', 'activity', limit],
     `${MEMORY_BASE}/curation/activity?limit=${limit}`,
     CurationActivityPayloadSchema,
   );
@@ -367,7 +308,7 @@ export function useCurationActivity(limit = 100) {
 /**
  * One ledger record (`AutomationRunLedgerRecord`), as the sidecar serializes it.
  *
- * `run_id`, `trigger`, `task`, `backend`, `status`, the application counts and the two
+ * `run_id`, `trigger`, `task`, `backend`, `status`, the four counts and the two
  * timestamps have no `skip_serializing_if`, so they are required. `model`,
  * `error`, `host_mode` and `fallback_status` all carry
  * `skip_serializing_if = "Option::is_none"` and are therefore ABSENT rather than
@@ -391,26 +332,6 @@ export const CurationRunRecordSchema = z
     host_mode: z.string().optional(),
     error: z.string().optional(),
     fallback_status: z.string().optional(),
-    activation_policy: z.string().optional(),
-    created_skills: z.array(z.unknown()).optional(),
-    updated_skills: z.array(z.unknown()).optional(),
-    applied_consolidations: z.array(z.unknown()).optional(),
-    rejected_skills: z.array(z.unknown()).optional(),
-    validation_repairs: z.array(z.unknown()).optional(),
-    receipts: z.array(z.unknown()).optional(),
-    llm_apply: z.unknown().optional(),
-    curation_policy: z.unknown().optional(),
-    deployment: z
-      .object({
-        status: z.enum(["complete", "partial_failure", "unavailable"]),
-        exports: z.array(z.unknown()),
-        materialization_scopes: z.array(z.unknown()),
-        errors: z.array(z.string()),
-        reason: z.string().optional(),
-        retry_required: z.boolean(),
-      })
-      .passthrough()
-      .optional(),
   })
   .passthrough();
 export type CurationRunRecord = z.infer<typeof CurationRunRecordSchema>;
@@ -434,8 +355,8 @@ export const CurationRunsPayloadSchema = z
 export type CurationRunsPayload = z.infer<typeof CurationRunsPayloadSchema>;
 
 export function useCurationRuns(limit = 50) {
-  return usePayload(
-    ["memory", "curation", "runs", limit],
+  return useLegacy(
+    ['memory', 'curation', 'runs', limit],
     `${MEMORY_BASE}/curation/runs?limit=${limit}`,
     CurationRunsPayloadSchema,
   );
@@ -457,7 +378,7 @@ export function useCurationRuns(limit = 50) {
 export const OplogDetailSchema = z.union([
   z.object({ summary: z.string() }).passthrough(),
   z.object({ redacted: z.literal(true) }).passthrough(),
-  z.object({ availability: z.literal("unknown") }).passthrough(),
+  z.object({ availability: z.literal('unknown') }).passthrough(),
 ]);
 export type OplogDetail = z.infer<typeof OplogDetailSchema>;
 
@@ -487,8 +408,8 @@ export const OplogPayloadSchema = z
 export type OplogPayload = z.infer<typeof OplogPayloadSchema>;
 
 export function useMemoryOplog(limit = 100) {
-  return usePayload(
-    ["memory", "oplog", limit],
+  return useLegacy(
+    ['memory', 'oplog', limit],
     `${MEMORY_BASE}/oplog?limit=${limit}`,
     OplogPayloadSchema,
   );
@@ -496,33 +417,33 @@ export function useMemoryOplog(limit = 100) {
 
 /* ---- curation config ----------------------------------------------------- */
 
-/** One scheduled task's configuration (`AutomationTaskSettingsV1`). Every
- * optional duration is serialized as `null`, not omitted, by the domain
- * contract. */
+/** One scheduled task's configuration (`AutomationTaskConfig`). `schedule` has a
+ * plain `#[serde(default)]` and serializes as null; the four `_secs` members
+ * skip when absent. */
 export const AutomationTaskConfigSchema = z
   .object({
     enabled: z.boolean(),
     schedule: z.string().nullable(),
-    interval_secs: z.number().nullable(),
-    cooldown_secs: z.number().nullable(),
-    min_idle_secs: z.number().nullable(),
-    stale_lock_secs: z.number().nullable(),
+    interval_secs: z.number().optional(),
+    cooldown_secs: z.number().optional(),
+    min_idle_secs: z.number().optional(),
+    stale_lock_secs: z.number().optional(),
   })
   .passthrough();
-export type AutomationTaskConfigReading = z.infer<
-  typeof AutomationTaskConfigSchema
->;
+export type AutomationTaskConfigReading = z.infer<typeof AutomationTaskConfigSchema>;
 
-/** A resolved daemon-pinned `AutomationSettingsV1`. */
+/** A resolved `AutomationConfig` — every member has a serde default, so a served
+ * layer carries all of them. */
 export const AutomationConfigSchema = z
   .object({
-    schema_version: z.number(),
     enabled: z.boolean(),
     backend: z.string(),
     host_mode: z.string(),
-    model_id: z.string().nullable(),
     timeout_secs: z.number(),
     scheduler_tick_secs: z.number(),
+    auto_apply_memory_ops: z.boolean(),
+    auto_enable_skills: z.boolean(),
+    export_memory_digest: z.boolean(),
     combine_due_tasks: z.boolean(),
     allow_job_commands: z.boolean(),
     tasks: z
@@ -546,57 +467,56 @@ export type AutomationConfigReading = z.infer<typeof AutomationConfigSchema>;
  */
 export const AutomationConfigOverlaySchema = z.record(z.string(), z.unknown());
 
-/** `GET|PATCH /curation/config` (`automation_config_api`). The daemon returns
- * the pinned revision together with the effective settings; no browser-side
- * global/project layering is authoritative. */
+/**
+ * `GET|PATCH /curation/config` (`automation_config_api`).
+ *
+ * The layering is the payload: `global` is the user profile's config, `project`
+ * the project overlay, `effective` what `effective_config` resolved from the
+ * two. `backend_availability` is the daemon's own probe of the selected backend
+ * — the dashboard never infers availability from the backend name.
+ */
 export const CurationConfigPayloadSchema = z
   .object({
-    configuration_revision_id: z.string(),
-    source: z.literal("daemon_pinned_snapshot"),
+    global: AutomationConfigSchema,
+    project: AutomationConfigOverlaySchema.nullable(),
     effective: AutomationConfigSchema,
     backend_availability: z
       .object({
         backend: z.string(),
         available: z.boolean(),
-        executable: z.string().nullable().optional(),
-        reason: z.string().nullable().optional(),
+        executable: z.string().optional(),
+        reason: z.string().optional(),
       })
       .passthrough(),
-    application_outcome: z.unknown().optional(),
+    project_config_path: z.string(),
   })
   .passthrough();
 export type CurationConfigPayload = z.infer<typeof CurationConfigPayloadSchema>;
 
-export const curationConfigKey = ["memory", "curation", "config"] as const;
+export const curationConfigKey = ['memory', 'curation', 'config'] as const;
 export const curationConfigUrl = `${MEMORY_BASE}/curation/config`;
 
 export function useCurationConfig() {
-  return usePayload(
-    curationConfigKey,
-    curationConfigUrl,
-    CurationConfigPayloadSchema,
-  );
+  return useLegacy(curationConfigKey, curationConfigUrl, CurationConfigPayloadSchema);
 }
 
 /**
-/** The one setting this surface exposes. Validation and application policy are
- * daemon-owned and are never browser toggles. */
+ * The subset of the config this dashboard is allowed to send.
+ *
+ * Deliberately five booleans and nothing else. `allow_job_commands` is refused
+ * by `automation_config_api::reject_job_command_enablement` — the handler will
+ * not accept it over HTTP at all — and `backend: external_command` by
+ * `reject_unselectable_backend`. Offering either would build a control whose
+ * only possible outcome is a 400, so neither is in the type: the guard is the
+ * shape of what can be sent, not a check run after a user has already asked.
+ */
 export interface CurationConfigPatch {
-  readonly enabled: boolean;
+  readonly enabled?: boolean;
+  readonly auto_apply_memory_ops?: boolean;
+  readonly auto_enable_skills?: boolean;
+  readonly export_memory_digest?: boolean;
+  readonly combine_due_tasks?: boolean;
 }
-
-export interface CurationConfigMutation extends CurationConfigPatch {
-  readonly expected_revision_id: string;
-  readonly idempotency_key: string;
-}
-
-export const CurationConfigMutationSchema = z
-  .object({
-    enabled: z.boolean(),
-    expected_revision_id: z.string(),
-    idempotency_key: z.string(),
-  })
-  .strict();
 
 /**
  * What a config write produced, including the case where there was none.
@@ -606,8 +526,8 @@ export const CurationConfigMutationSchema = z
  * daemon was asked and refused.
  */
 export type CurationConfigWriteResult =
-  | PayloadWriteResult<CurationConfigPayload>
-  | { outcome: "not_dispatched"; writability: ScopeWritability };
+  | LegacyWriteResult<CurationConfigPayload>
+  | { outcome: 'not_dispatched'; writability: ScopeWritability };
 
 /** The scope a write was issued under, captured at dispatch — see
  * `useSchedulerControl`, where settling against the render's current scope
@@ -628,52 +548,32 @@ interface ConfigDispatch {
 export function useCurationConfigPatch() {
   const scope = useScope((s) => s.scope);
   const client = useQueryClient();
-  const configKey = payloadQueryKey(
-    scope,
-    curationConfigKey,
-    curationConfigUrl,
-  );
+  const configKey = legacyQueryKey(scope, curationConfigKey, curationConfigUrl);
   const writability = scopeWritable(scope);
-  const mutation = useMutation<
-    CurationConfigWriteResult,
-    Error,
-    CurationConfigMutation,
-    ConfigDispatch
-  >({
+  const mutation = useMutation<CurationConfigWriteResult, Error, CurationConfigPatch, ConfigDispatch>({
     mutationKey: [...curationConfigKey, scopeKey(scope)],
     onMutate: () => ({ configKey }),
-    mutationFn: async (patch: CurationConfigMutation) => {
+    mutationFn: async (patch: CurationConfigPatch) => {
       // Nothing leaves the browser unless the scope is known to accept it. The
       // control is disabled on this same reading, so arriving here means the
       // disable was bypassed, and dispatching anyway would trade a stated
       // reason for a 405 this layer cannot tell from a route that has gone away.
-      if (writability.state !== "writable") {
-        return { outcome: "not_dispatched", writability };
+      if (writability.state !== 'writable') {
+        return { outcome: 'not_dispatched', writability };
       }
-      const parsed = CurationConfigMutationSchema.safeParse(patch);
-      if (!parsed.success) {
-        return {
-          outcome: "error",
-          detail: "invalid automation configuration mutation",
-        };
-      }
-      return fetchPayloadWrite(
-        scopedUrl(scope, curationConfigUrl),
-        CurationConfigPayloadSchema,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(patch),
-        },
-      );
+      return fetchLegacyWrite(scopedUrl(scope, curationConfigUrl), CurationConfigPayloadSchema, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
     },
     onSuccess: (result, _patch, dispatch) => {
       const target = dispatch.configKey;
-      if (result.outcome === "ok") {
+      if (result.outcome === 'ok') {
         client.setQueryData(target, result);
         return;
       }
-      if (result.outcome === "not_dispatched") return;
+      if (result.outcome === 'not_dispatched') return;
       void client.invalidateQueries({ queryKey: target });
     },
   });

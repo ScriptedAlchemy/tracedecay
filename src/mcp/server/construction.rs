@@ -67,6 +67,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
+    pub(crate) code_graph_projection_read_port: Option<super::CodeGraphProjectionReadPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
     pub(crate) dashboard_graph_interactive_resolver:
@@ -167,6 +168,7 @@ impl McpServerConstructionContext {
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
+            code_graph_projection_read_port: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             dashboard_graph_interactive_resolver: None,
@@ -245,6 +247,7 @@ impl McpServerConstructionContext {
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
+            code_graph_projection_read_port: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             dashboard_graph_interactive_resolver: None,
@@ -301,6 +304,7 @@ impl McpServerConstructionContext {
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
+            code_graph_projection_read_port: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             dashboard_graph_interactive_resolver: None,
@@ -342,6 +346,14 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexBranchDiffExecutor,
     ) -> Self {
         self.code_index_branch_diff_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_code_graph_projection_read_port(
+        mut self,
+        port: super::CodeGraphProjectionReadPort,
+    ) -> Self {
+        self.code_graph_projection_read_port = Some(port);
         self
     }
 

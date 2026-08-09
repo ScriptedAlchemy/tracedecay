@@ -208,20 +208,22 @@ async fn test_scout_owner(
 
 #[tokio::test]
 async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
-
     let temporary = tempfile::tempdir().expect("temporary directory");
-    let model_config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        ..AutomationConfig::default()
-    };
+    let profile_root = temporary.path().join("profile");
+    let dashboard_root = temporary.path().join("dashboard");
+    std::fs::create_dir_all(&profile_root).expect("create profile");
+    std::fs::create_dir_all(&dashboard_root).expect("create dashboard root");
     let pin = configured_model_pin();
     let control = pin.control();
     let owner = test_scout_owner(&temporary).await;
-    install_project_open_context_scout_configuration(owner.as_ref(), pin, &model_config)
-        .await
-        .expect("install project-open Scout configuration");
+    install_project_open_context_scout_configuration(
+        owner.as_ref(),
+        pin,
+        &profile_root,
+        &dashboard_root,
+    )
+    .await
+    .expect("install project-open Scout configuration");
     let now = UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()

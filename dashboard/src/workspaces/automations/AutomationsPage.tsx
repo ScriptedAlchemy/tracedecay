@@ -1,41 +1,203 @@
-import { CircleCheck, CirclePause, CirclePlay } from "lucide-react";
-
+import { CircleCheck, CirclePause, CirclePlay } from 'lucide-react';
+import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
+import { StatTile } from '../../ui/LegacyStates.tsx';
+import {
+  LegacyBoundary,
+  legacyReadState,
+  type LegacyBlockedState,
+} from '../../ui/ReadSection.tsx';
+import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
+import { type LegacyResult } from '../../data/query/legacy.ts';
+import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   automationSchedulerKey,
   schedulerStatusUrl,
   tallied,
-  talliedFactReceipts,
+  talliedProposals,
   useAutomationJobs,
-  useAutomationFactReceipts,
+  useAutomationProposals,
   useAutomationSkills,
   useSchedulerControl,
   type JobRow,
   type ListReading,
-  type AutomaticFactReceipt,
+  type ProposalRow,
   type SchedulerControlResult,
   type SkillRow,
-} from "../../data/query/automation.ts";
-import { usePayload } from "../../data/query/usePayload.ts";
-import {
-  scopeWriteSentence,
-  type ScopeWritability,
-} from "../../data/scope/store.ts";
+} from '../../data/query/automation.ts';
+import { RunHistory } from './RunHistory.tsx';
+import { scopeWriteSentence, type ScopeWritability } from '../../data/scope/store.ts';
 import {
   AutomationSchedulerStatusV1Schema,
   type AutomationSchedulerStatusV1,
-} from "../../contracts/generated.ts";
-import { OverviewCard, OverviewGrid } from "../../ui/archetypes/OverviewGrid";
-import { cn } from "../../ui/cn";
-import { PayloadBoundary } from "../../ui/ReadSection.tsx";
-import { StatTile } from "../../ui/LegacyStates.tsx";
-import { RunHistory } from "./RunHistory.tsx";
+} from '../../contracts/generated.ts';
+import { cn } from '../../ui/cn';
 
+/**
+ * The scheduler shape is the generated one.
+ *
+ * It used to be declared here by hand, because `automation_scheduler_api.rs`
+ * built its response with `json!` and so had no Rust type for the contract
+ * generator to export — the whole automation surface sat outside the generated
+ * boundary. That handler is typed now, so this reads the real contract, and the
+ * pending-review union comes across as a discriminated union rather than the
+ * looser `state` enum with two independently-optional fields that a hand
+ * transcription could only approximate.
+ */
 type SchedulerStatus = AutomationSchedulerStatusV1;
 
-/** Automation is daemon-owned. This page reports scheduler receipts and
- * application outcomes; it never asks a browser operator to approve a draft. */
+/** What this dashboard can actually say about one review queue. */
+type ReviewQueueReading =
+  | { quality: 'measured'; count: number }
+  | { quality: 'unknown'; reason: string };
+
+/**
+ * Resolves one review queue from the scheduler payload.
+ *
+ * These two counts are the whole human-approval step of the automation
+ * pipeline: they are what tells a person that agent-proposed facts and skill
+ * drafts are waiting. So there is no zero fallback anywhere on this path — a
+ * queue the daemon could not read reads as unknown.
+ *
+ * `pending_review` is the authority, not the flat `pending_*` mirrors. The
+ * bundle is embedded in the binary that answers this route, so the two always
+ * ship together and a payload without the discriminated union fails contract
+ * parsing into `unsupported_schema` rather than reaching a fallback here.
+ */
+function reviewQueue(
+  data: SchedulerStatus,
+  queue: 'fact_proposals' | 'skills',
+): ReviewQueueReading {
+  const reported = data.pending_review[queue];
+  switch (reported.state) {
+    case 'unreadable':
+      return { quality: 'unknown', reason: reported.reason };
+    case 'measured':
+      return { quality: 'measured', count: reported.count };
+    default: {
+      // Compile-time exhaustiveness, so a third reading state cannot be added
+      // to the contract without this switch failing to build. It is not a
+      // runtime path: the discriminated union rejects an unknown `state`
+      // upstream, in `fetchLegacy`. The arm still returns `unknown` instead of
+      // throwing, because the one thing it must never do is pick a number.
+      const unhandled: never = reported;
+      return {
+        quality: 'unknown',
+        reason: `the daemon reported an unrecognized reading state: ${JSON.stringify(unhandled)}`,
+      };
+    }
+  }
+}
+
+/**
+ * A review queue as this page can read it right now, including the case where
+ * the scheduler read that carries the queue never produced a payload.
+ *
+ * The list cards below consult a queue to decide whether they may call
+ * themselves empty, and they are rendered independently of the scheduler panel
+ * — so "the scheduler read failed" has to arrive here as a reading, not as an
+ * absent argument that a caller would have to remember to handle.
+ */
+function queueReading(
+  result: LegacyResult<SchedulerStatus> | undefined,
+  pending: boolean,
+  queue: 'fact_proposals' | 'skills',
+): ReviewQueueReading {
+  const read = legacyReadState(pending, result);
+  return read.kind === 'ready'
+    ? reviewQueue(read.value, queue)
+    : { quality: 'unknown', reason: schedulerUnread(read.state, read.detail) };
+}
+
+/** Why the scheduler read produced no reading, in this surface's own terms.
+ *
+ * Exhaustive over `LegacyBlockedState`, so a state added to the legacy ladder
+ * cannot reach a reader wearing a sentence written for a different condition —
+ * the guarantee this used to hold by switching over `LegacyResult` itself. */
+function schedulerUnread(state: LegacyBlockedState, detail: string | undefined): string {
+  switch (state) {
+    case 'loading':
+      return 'the scheduler read has not returned yet';
+    case 'unknown':
+      return 'no scheduler read has been recorded';
+    case 'offline':
+      return 'the daemon did not answer the scheduler read';
+    case 'unauthorized':
+      return 'the daemon accepted no identity for the scheduler read';
+    case 'denied':
+      return 'this identity is not permitted to read the scheduler';
+    case 'error':
+      return `the scheduler read failed (${detail})`;
+    case 'unsupported_schema':
+      return 'the scheduler answered in a shape this dashboard cannot read';
+    // The daemon named the condition itself, and `detail` is the payload's own
+    // `error` sentence or, failing that, its `status` discriminant.
+    case 'unavailable':
+      return `the scheduler reported it cannot serve this (${detail})`;
+    default: {
+      const unhandled: never = state;
+      return `the scheduler read reported an unrecognized outcome: ${String(unhandled)}`;
+    }
+  }
+}
+
+/** A review queue as a tile. An unread queue prints an em dash under the
+ * `unknown` evidence pattern — never a zero, which would read as a queue that
+ * was checked and found empty. */
+function ReviewQueueTile({ label, reading }: { label: string; reading: ReviewQueueReading }) {
+  return (
+    <StatTile
+      label={label}
+      value={reading.quality === 'measured' ? reading.count : '—'}
+      hint={<EvidencePattern quality={reading.quality} />}
+    />
+  );
+}
+
+/**
+ * Whether an empty list may be reported as an empty review queue.
+ *
+ * The two reads count different populations and are deliberately not compared
+ * as numbers: the list routes return every state under a cap, while
+ * `pending_review` counts only what awaits human approval. What is comparable
+ * is the containment — a pending item is one of the items the list enumerates —
+ * so an empty list and a measured, non-empty queue cannot both be true, and an
+ * empty list says nothing at all about a queue nobody could read.
+ *
+ * This is the agreement the page previously lacked. Its scheduler tile printed
+ * an em dash for an unreadable proposal queue and explained that the count was
+ * unknown rather than zero, while the card thirty lines below asserted "no
+ * pending fact proposals" from the same screen.
+ */
+type EmptyClaim =
+  | { verdict: 'empty' }
+  | { verdict: 'unknown'; reason: string }
+  | { verdict: 'contradicted'; pending: number };
+
+function emptyClaim(queue: ReviewQueueReading): EmptyClaim {
+  switch (queue.quality) {
+    case 'unknown':
+      return { verdict: 'unknown', reason: queue.reason };
+    case 'measured':
+      return queue.count === 0
+        ? { verdict: 'empty' }
+        : { verdict: 'contradicted', pending: queue.count };
+    default: {
+      const unhandled: never = queue;
+      return {
+        verdict: 'unknown',
+        reason: `the queue reported an unrecognized reading: ${JSON.stringify(unhandled)}`,
+      };
+    }
+  }
+}
+
+/** Automations: scheduler health, jobs, managed skills, fact proposals — all
+ * real /api/automation surfaces. The actions phase begins here with the
+ * scheduler's pause and resume, the two controls whose route is typed; the
+ * remaining bounded controls follow as their handlers enter the generated
+ * contract boundary, and until then those surfaces stay read-only. */
 export function AutomationsPage() {
-  const scheduler = usePayload(
+  const scheduler = useLegacy(
     automationSchedulerKey,
     schedulerStatusUrl,
     AutomationSchedulerStatusV1Schema,
@@ -43,18 +205,34 @@ export function AutomationsPage() {
   const control = useSchedulerControl();
   const jobs = useAutomationJobs();
   const skills = useAutomationSkills();
-  const receipts = useAutomationFactReceipts();
+  const proposals = useAutomationProposals();
+
+  // Resolved once here rather than inside each card, so the scheduler is the
+  // single authority both cards and the tiles above them read the queues from.
+  const proposalQueue = queueReading(scheduler.data, scheduler.isPending, 'fact_proposals');
+  const skillQueue = queueReading(scheduler.data, scheduler.isPending, 'skills');
 
   return (
+    // Scrollable regions need keyboard operation (WCAG 2.1.1). At narrow widths
+    // this column scrolls while everything inside it is read-out — counts,
+    // reasons, job rows — with nothing to tab to, and it grows taller exactly
+    // when a queue is unreadable and the reason paragraph appears. The column
+    // takes the tab stop itself, the same remedy Explorer's filter rail uses.
     <div
       tabIndex={0}
       role="region"
       aria-label="Automations content"
       className="flex h-full flex-col overflow-auto"
     >
+      {/* `flex-wrap`, because the scheduler control carries a sentence rather
+        * than a chip: under a read-only scope it explains which project a
+        * write would reach and how to reach it, and that runs to two lines of
+        * prose. Held on one row it laid the remedy out past the right edge at
+        * 320 CSS px and at 400% zoom — the reader saw a disabled button and
+        * the first few words of the way to enable it. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Automations</h1>
-        {scheduler.data?.outcome === "ok" ? (
+        {scheduler.data?.outcome === 'ok' ? (
           <>
             <SchedulerBadge
               status={scheduler.data.data.status}
@@ -70,48 +248,126 @@ export function AutomationsPage() {
           </>
         ) : null}
       </div>
-
-      <PayloadBoundary
-        title="Scheduler"
-        pending={scheduler.isPending}
-        result={scheduler.data}
-      >
-        {(data) => <SchedulerBody data={data} />}
-      </PayloadBoundary>
-
+      <LegacyBoundary title="Scheduler" pending={scheduler.isPending} result={scheduler.data}>
+        {(data) => {
+          const proposalTile = reviewQueue(data, 'fact_proposals');
+          const draftTile = reviewQueue(data, 'skills');
+          const unread = (
+            [
+              ['fact proposals', proposalTile],
+              ['skill drafts', draftTile],
+            ] as const
+          ).flatMap(([label, reading]) =>
+            reading.quality === 'unknown' ? [{ label, reason: reading.reason }] : [],
+          );
+          return (
+            <div className="flex flex-col gap-3 p-4">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <StatTile label="state" value={data.status} />
+                {/* No null branch: `scheduler_tick_secs` is a plain `u64` on
+                  * the wire and non-nullable in the contract, so an em dash
+                  * here could only ever be a fallback for a payload the schema
+                  * has already rejected — the same unreachable fallback the
+                  * review queues used to carry. */}
+                <StatTile label="tick interval" value={`${data.scheduler_tick_secs}s`} />
+                <ReviewQueueTile label="pending proposals" reading={proposalTile} />
+                <ReviewQueueTile label="pending skills" reading={draftTile} />
+              </div>
+              {/* The tile can only carry the evidence class; the reason belongs
+                * in full, unclipped, because this is the queue that gates human
+                * approval and "why can nobody read it" is the actionable part. */}
+              {unread.length > 0 ? (
+                <p className="border border-edge-subtle bg-surface-1 px-3 py-2 text-2xs leading-relaxed text-text-secondary">
+                  Awaiting-review counts are unknown, not zero.{' '}
+                  {unread.map((queue) => `The ${queue.label} queue: ${queue.reason}.`).join(' ')}{' '}
+                  Nothing here says whether anything is waiting for your approval.
+                </p>
+              ) : null}
+            </div>
+          );
+        }}
+      </LegacyBoundary>
       <OverviewGrid>
         <OverviewCard title="Jobs">
-          <PayloadBoundary
-            title="Jobs"
-            pending={jobs.isPending}
-            result={jobs.data}
-          >
-            {(data) => <JobsBody data={data.jobs} count={data.count} />}
-          </PayloadBoundary>
+          <LegacyBoundary title="Jobs" pending={jobs.isPending} result={jobs.data}>
+            {(data) => {
+              const reading = tallied(data.jobs, data.count, 'jobs');
+              if (reading.rows.length === 0) {
+                // Jobs are a plain configured list with no review queue behind
+                // them, so an empty body really is an empty list — provided the
+                // handler's own tally agrees, which `tallied` has just checked.
+                return reading.complete ? (
+                  <p className="text-2xs text-text-muted">no automation jobs defined</p>
+                ) : (
+                  <PartialNotice reason={reading.reason} />
+                );
+              }
+              return (
+                <>
+                  {reading.complete ? null : <PartialNotice reason={reading.reason} />}
+                  <div className="flex flex-col">
+                    {reading.rows.map((job) => (
+                      <JobRowLine key={job.id} job={job} />
+                    ))}
+                  </div>
+                </>
+              );
+            }}
+          </LegacyBoundary>
         </OverviewCard>
         <OverviewCard title="Managed skills">
-          <PayloadBoundary
-            title="Managed skills"
-            pending={skills.isPending}
-            result={skills.data}
-          >
-            {(data) => <SkillsBody data={data.skills} count={data.count} />}
-          </PayloadBoundary>
+          <LegacyBoundary title="Skills" pending={skills.isPending} result={skills.data}>
+            {(data) => {
+              const reading = tallied(data.skills, data.count, 'managed skills');
+              if (reading.rows.length === 0) {
+                return (
+                  <EmptyList
+                    reading={reading}
+                    claim={emptyClaim(skillQueue)}
+                    empty="no managed skills"
+                    queue="skill drafts"
+                  />
+                );
+              }
+              return (
+                <>
+                  {reading.complete ? null : <PartialNotice reason={reading.reason} />}
+                  <div className="flex flex-col">
+                    {reading.rows.map((skill) => (
+                      <SkillRowLine key={skill.metadata.id} skill={skill} />
+                    ))}
+                  </div>
+                </>
+              );
+            }}
+          </LegacyBoundary>
         </OverviewCard>
-        <OverviewCard title="Fact application outcomes">
-          <PayloadBoundary
-            title="Fact application outcomes"
-            pending={receipts.isPending}
-            result={receipts.data}
-          >
-            {(data) => (
-              <FactReceiptsBody
-                data={data.receipts}
-                count={data.count}
-                limit={data.limit}
-              />
-            )}
-          </PayloadBoundary>
+        <OverviewCard title="Fact proposals">
+          <LegacyBoundary title="Proposals" pending={proposals.isPending} result={proposals.data}>
+            {(data) => {
+              const reading = talliedProposals(data.proposals, data.count, data.limit);
+              if (reading.rows.length === 0) {
+                return (
+                  <EmptyList
+                    reading={reading}
+                    claim={emptyClaim(proposalQueue)}
+                    empty="no pending fact proposals"
+                    queue="fact proposals"
+                  />
+                );
+              }
+              return (
+                <>
+                  {reading.complete ? null : <PartialNotice reason={reading.reason} />}
+                  <div className="flex flex-col">
+                    {reading.rows.map((proposal) => (
+                      <ProposalRowLine key={proposal.proposal_id} proposal={proposal} />
+                    ))}
+                  </div>
+                </>
+              );
+            }}
+          </LegacyBoundary>
         </OverviewCard>
         <OverviewCard title="Run history">
           <RunHistory />
@@ -121,138 +377,50 @@ export function AutomationsPage() {
   );
 }
 
-function SchedulerBody({ data }: { data: SchedulerStatus }) {
-  return (
-    <div className="flex flex-col gap-3 p-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatTile label="state" value={data.status} />
-        <StatTile
-          label="automation"
-          value={data.enabled ? "enabled" : "disabled"}
-        />
-        <StatTile
-          label="tick interval"
-          value={`${data.scheduler_tick_secs}s`}
-        />
-        <StatTile
-          label="configuration revision"
-          value={data.configuration_revision_id}
-        />
-      </div>
-      <div className="flex flex-col gap-1 border-t border-edge-subtle pt-2">
-        <p className="text-3xs leading-relaxed text-text-muted">
-          Validation, curation, and skill activation run automatically. The rows
-          below are the scheduler&apos;s latest due/skip readings, not an
-          operator queue.
+/** A list that came back with no rows, said as much as the reads support.
+ *
+ * The empty sentence is only printed when two independent reads agree that
+ * nothing is there: this list, and the scheduler's count of the queue the
+ * sentence is about. Anything else states what is unknown instead. */
+function EmptyList({
+  reading,
+  claim,
+  empty,
+  queue,
+}: {
+  reading: ListReading<unknown>;
+  claim: EmptyClaim;
+  empty: string;
+  queue: string;
+}) {
+  // An incoherent body is the stronger finding: nothing about the queue can be
+  // concluded from a list that does not match its own tally.
+  if (!reading.complete) return <PartialNotice reason={reading.reason} />;
+  switch (claim.verdict) {
+    case 'empty':
+      return <p className="text-2xs text-text-muted">{empty}</p>;
+    case 'unknown':
+      return (
+        <p role="status" className="text-2xs leading-relaxed text-text-secondary">
+          This read returned no rows, but whether the {queue} queue is empty is unknown:{' '}
+          {claim.reason}.
         </p>
-        {data.tasks.length === 0 ? (
-          <p className="text-2xs text-text-muted">
-            no scheduler task readings are available
-          </p>
-        ) : (
-          <ul className="flex flex-col gap-1">
-            {data.tasks.map((task) => (
-              <li
-                key={task.task}
-                className="flex flex-wrap items-baseline justify-between gap-x-2 border-b border-edge-subtle py-1 last:border-b-0"
-              >
-                <span className="text-2xs text-text-primary">{task.task}</span>
-                <span className="text-3xs text-text-secondary">
-                  {task.due ? "due" : (task.skip_reason ?? "not due")}
-                  {task.last_scheduler_run
-                    ? " · last run recorded"
-                    : " · no run recorded"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function JobsBody({ data, count }: { data: readonly JobRow[]; count: number }) {
-  const reading = tallied(data, count, "jobs");
-  if (reading.rows.length === 0) {
-    return reading.complete ? (
-      <p className="text-2xs text-text-muted">no automation jobs defined</p>
-    ) : (
-      <PartialNotice reason={reading.reason} />
-    );
+      );
+    case 'contradicted':
+      return (
+        <p role="status" className="text-2xs leading-relaxed text-state-error">
+          This read returned no rows while the scheduler counted {claim.pending} awaiting review,
+          so the two disagree and neither is presented as the answer.
+        </p>
+      );
+    default: {
+      const unhandled: never = claim;
+      return <PartialNotice reason={`unrecognized queue verdict: ${JSON.stringify(unhandled)}`} />;
+    }
   }
-  return (
-    <>
-      {reading.complete ? null : <PartialNotice reason={reading.reason} />}
-      <div className="flex flex-col">
-        {reading.rows.map((job) => (
-          <JobRowLine key={job.id} job={job} />
-        ))}
-      </div>
-    </>
-  );
 }
 
-function SkillsBody({
-  data,
-  count,
-}: {
-  data: readonly SkillRow[];
-  count: number;
-}) {
-  const reading = tallied(data, count, "managed skills");
-  if (reading.rows.length === 0) {
-    return reading.complete ? (
-      <p className="text-2xs text-text-muted">
-        no managed skills have been activated
-      </p>
-    ) : (
-      <PartialNotice reason={reading.reason} />
-    );
-  }
-  return (
-    <>
-      {reading.complete ? null : <PartialNotice reason={reading.reason} />}
-      <div className="flex flex-col">
-        {reading.rows.map((skill) => (
-          <SkillRowLine key={skill.metadata.id} skill={skill} />
-        ))}
-      </div>
-    </>
-  );
-}
-
-function FactReceiptsBody({
-  data,
-  count,
-  limit,
-}: {
-  data: readonly AutomaticFactReceipt[];
-  count: number;
-  limit: number;
-}) {
-  const reading = talliedFactReceipts(data, count, limit);
-  if (reading.rows.length === 0) {
-    return reading.complete ? (
-      <p className="text-2xs text-text-muted">
-        no fact application outcomes are recorded
-      </p>
-    ) : (
-      <PartialNotice reason={reading.reason} />
-    );
-  }
-  return (
-    <>
-      {reading.complete ? null : <PartialNotice reason={reading.reason} />}
-      <div className="flex flex-col">
-        {reading.rows.map((receipt) => (
-          <FactReceiptRowLine key={receipt.apply_id} receipt={receipt} />
-        ))}
-      </div>
-    </>
-  );
-}
-
+/** A list that is real but is not the whole set it names. */
 function PartialNotice({ reason }: { reason: string }) {
   return (
     <p role="status" className="text-2xs leading-relaxed text-text-secondary">
@@ -267,18 +435,11 @@ function JobRowLine({ job }: { job: JobRow }) {
       {job.enabled ? (
         <CirclePlay aria-hidden size={13} className="shrink-0 text-accent" />
       ) : (
-        <CirclePause
-          aria-hidden
-          size={13}
-          className="shrink-0 text-text-muted"
-        />
+        <CirclePause aria-hidden size={13} className="shrink-0 text-text-muted" />
       )}
       <span className="min-w-0 flex-1 truncate text-xs">{job.name}</span>
       <span className="tabular shrink-0 text-2xs text-text-muted">
-        {job.schedule ??
-          (job.interval_secs != null
-            ? `every ${job.interval_secs}s`
-            : "manual")}
+        {job.schedule ?? (job.interval_secs != null ? `every ${job.interval_secs}s` : 'manual')}
       </span>
     </div>
   );
@@ -288,16 +449,21 @@ function SkillRowLine({ skill }: { skill: SkillRow }) {
   return (
     <div className="flex items-center gap-2 border-b border-edge-subtle py-1.5 last:border-b-0">
       <CircleCheck aria-hidden size={13} className="shrink-0 text-text-muted" />
-      <span className="min-w-0 flex-1 truncate text-xs">
-        {skill.metadata.title}
-      </span>
+      <span className="min-w-0 flex-1 truncate text-xs">{skill.metadata.title}</span>
       <StateLabel state={skill.metadata.state} />
     </div>
   );
 }
 
-function FactReceiptRowLine({ receipt }: { receipt: AutomaticFactReceipt }) {
-  const content = receipt.add_fact_request.content;
+/** One proposal row.
+ *
+ * The list route filters on no state by default, so these are proposals in
+ * every state and the row says which — the pending subset is the scheduler's
+ * count, not this list's length. A record that carries no `add_fact_request`
+ * has no fact text at all; it says so rather than printing its identifier in
+ * the slot where the fact belongs, which is what the old `?? id` chain did. */
+function ProposalRowLine({ proposal }: { proposal: ProposalRow }) {
+  const content = proposal.add_fact_request?.content;
   return (
     <div className="flex items-center gap-2 border-b border-edge-subtle py-1.5 last:border-b-0">
       {content !== undefined ? (
@@ -306,15 +472,19 @@ function FactReceiptRowLine({ receipt }: { receipt: AutomaticFactReceipt }) {
         </span>
       ) : (
         <span className="min-w-0 flex-1 truncate text-xs text-text-muted">
-          receipt carries no fact text
+          this proposal carries no fact request
         </span>
       )}
-      <StateLabel state={receipt.state} />
+      <StateLabel state={proposal.state} />
     </div>
   );
 }
 
+/** The record's own state word, passed through rather than interpreted: the
+ * page displays it and never branches on it, so a state added in Rust reads
+ * correctly here without this file knowing about it. */
 function StateLabel({ state }: { state: string }) {
+  if (state.length === 0) return null;
   return (
     <span className="shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs text-text-muted">
       {state}
@@ -322,26 +492,40 @@ function StateLabel({ state }: { state: string }) {
   );
 }
 
-function controlFailure(
-  result: SchedulerControlResult | undefined,
-): string | null {
-  if (result === undefined || result.outcome === "ok") return null;
+/** Why the last control attempt did not produce a reading, or null if it did.
+ *
+ * A control that failed must not read as a control that did nothing, so every
+ * non-`ok` outcome gets words. `unsupported_schema` is called out separately
+ * because it means the request very likely *did* take effect and only the reply
+ * was unreadable — the opposite advice from `offline`. */
+function controlFailure(result: SchedulerControlResult | undefined): string | null {
+  if (result === undefined) return null;
   switch (result.outcome) {
-    case "offline":
-      return "The daemon did not answer, so the scheduler was not changed.";
-    case "unauthorized":
-      return "The daemon accepted no identity for the change, so the scheduler was not changed.";
-    case "denied":
-      return "This identity is not permitted to control the scheduler, so it was not changed.";
-    case "error":
+    case 'ok':
+      return null;
+    case 'offline':
+      return 'The daemon did not answer, so the scheduler was not changed.';
+    case 'unauthorized':
+      return 'The daemon accepted no identity for the change, so the scheduler was not changed.';
+    case 'denied':
+      return 'This identity is not permitted to control the scheduler, so it was not changed.';
+    case 'error':
       return `The daemon refused the change (${result.detail}).`;
-    case "unsupported_schema":
-      return "The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.";
-    case "unavailable":
+    case 'unsupported_schema':
+      return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.';
+    // The daemon answered, in its own contract, that it cannot serve this at
+    // all — so unlike `error` the change definitely did not take effect, and
+    // the reason it gave is the one worth repeating.
+    case 'unavailable':
       return `The scheduler was not changed: ${result.reason ?? result.status}.`;
-    case "read_only_scope":
+    // The gateway refused the write because this project is not the active one.
+    // Its own sentence is repeated rather than reworded, and it is stated as a
+    // scope fact so the remedy is switching scope rather than retrying.
+    case 'read_only_scope':
       return `The scheduler was not changed: ${result.refusal.detail}.`;
-    case "not_dispatched":
+    // No request was made, so the phrasing has to be about this dashboard
+    // declining rather than the daemon refusing.
+    case 'not_dispatched':
       return scopeWriteSentence(result.writability, {
         writable: (target) =>
           `Nothing was sent, though writes to ${target} are accepted — reload to re-read the scheduler.`,
@@ -354,6 +538,21 @@ function controlFailure(
   }
 }
 
+/**
+ * Pause and resume, the first two bounded controls on this page.
+ *
+ * No confirmation step, and that is a deliberate reading of the product's
+ * existing rule rather than an omission: the Doctor inspector gates on a
+ * remediation descriptor's declared `action_confirmation`, which exists because
+ * owner remediations mutate stores and can be lossy. Pausing the scheduler is
+ * reversible by the adjacent button, destroys nothing, and is idempotent on the
+ * server, so adding a checkbox here would be new confirmation machinery for a
+ * toggle rather than the established treatment of a destructive act.
+ *
+ * The label always names the action against the *server's* reported state, and
+ * the button is disabled while a control is in flight, so it can never be read
+ * as "already paused" before the daemon has said so.
+ */
 function SchedulerControl({
   paused,
   pending,
@@ -367,32 +566,42 @@ function SchedulerControl({
   writability: ScopeWritability;
   onToggle: (paused: boolean) => void;
 }) {
-  const blocked = writability.state !== "writable";
+  // Disabled before dispatch, on the same reading the mutation refuses on. The
+  // reason is on the control itself rather than only in a status line, because
+  // a disabled button with the explanation elsewhere reads as a broken button.
+  const blocked = writability.state !== 'writable';
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <button
         type="button"
         disabled={pending || blocked}
+        // Described in every state: the target of an accepted write is as much
+        // a thing to know before pressing as the reason for a refused one.
         aria-describedby="scheduler-control-scope"
         onClick={() => onToggle(!paused)}
+        // A 17.5px chip beside the scheduler badge it matches. The chip keeps
+        // that size — it is paired with `SchedulerBadge` and the two have to
+        // read as one register — while the button's own box becomes the 44px
+        // target. See `.td-hit`.
         className="td-hit group disabled:opacity-50"
       >
         <span
           className={cn(
-            "inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs",
-            "group-hover:bg-surface-2",
+            'inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs',
+            'group-hover:bg-surface-2',
           )}
         >
-          {pending
-            ? "working…"
-            : paused
-              ? "Resume scheduler"
-              : "Pause scheduler"}
+          {pending ? 'working…' : paused ? 'Resume scheduler' : 'Pause scheduler'}
         </span>
       </button>
+      {/* Present in every state, including the writable one: a write under the
+        * all-projects aggregate lands on a single project, and the reader is
+        * told which rather than left to assume the change fans out. */}
       <span
         id="scheduler-control-scope"
         data-scope-writability={writability.state}
+        // `min-w-0`: the sentence is the widest thing on this row and has to
+        // be allowed to wrap inside it rather than push itself off the edge.
         className="min-w-0 text-2xs text-text-secondary"
       >
         {scopeWriteSentence(writability, {
@@ -408,20 +617,14 @@ function SchedulerControl({
   );
 }
 
-function SchedulerBadge({
-  status,
-  paused,
-}: {
-  status: string;
-  paused: boolean;
-}) {
+function SchedulerBadge({ status, paused }: { status: string; paused: boolean }) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border px-1.5 text-2xs",
+        'inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border px-1.5 text-2xs',
         paused
-          ? "border-edge-subtle text-text-muted"
-          : "border-accent/40 bg-accent/10 text-text-primary",
+          ? 'border-edge-subtle text-text-muted'
+          : 'border-accent/40 bg-accent/10 text-text-primary',
       )}
     >
       {paused ? (

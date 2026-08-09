@@ -329,6 +329,12 @@ pub(super) async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project search scope is invalid: {error:?}"),
             })?;
+    let code_graph_projection_read_port =
+        project_open_owners::project_code_graph_projection_read_port(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            code_search_scope.clone(),
+        );
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,
@@ -587,6 +593,7 @@ pub(super) async fn production_project_server(
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
+    .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
@@ -659,6 +666,7 @@ pub(super) async fn production_project_server(
                 project_open_owners::install_project_open_source_edit_preview_owner(
                     resolved.as_ref(),
                     Arc::clone(&cg),
+                    Arc::clone(&code_graph_projection_read_port),
                     canonical_project_path,
                     &project_id,
                 )
@@ -960,6 +968,7 @@ pub(super) async fn production_project_server(
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
+            .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)
@@ -1037,6 +1046,7 @@ pub(super) async fn production_project_server(
                         project_open_owners::install_project_open_source_edit_preview_owner(
                             full_candidate.as_ref(),
                             Arc::clone(&cg),
+                            Arc::clone(&code_graph_projection_read_port),
                             canonical_project_path,
                             &project_id,
                         )

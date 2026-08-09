@@ -1,6 +1,8 @@
 use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
 };
+use crate::automation::config_error;
+use crate::automation::run_ledger::AutomationRunStatus;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
@@ -8,8 +10,6 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use tracedecay_agent_hosts::automation::config_error;
-use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
 
 use super::errors::map_host_admission_outcome;
 use super::required_str;
@@ -19,7 +19,7 @@ pub(super) async fn user_review(
     profile_root: &Path,
     session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
 ) -> Result<Value> {
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+    use crate::automation::run_ledger::AutomationTrigger;
 
     let provider = required_str(args, "provider")?;
     let session_id = args
@@ -31,6 +31,14 @@ pub(super) async fn user_review(
         .get("run_id")
         .and_then(Value::as_str)
         .map(str::to_string);
+    if crate::automation::scheduler::load_scheduler_control(
+        &crate::automation::runner::user_automation_root(profile_root),
+    )
+    .await?
+    .paused
+    {
+        return Ok(json!({ "action": "user_review", "status": "paused" }));
+    }
     let run = run_user_review(
         profile_root,
         Arc::clone(session_runtime_registry),
@@ -50,33 +58,63 @@ pub(super) async fn user_review(
 }
 
 async fn run_user_review(
-    _profile_root: &std::path::Path,
-    _session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    _provider: &str,
-    _session_id: Option<String>,
-    _run_id: Option<String>,
-    _trigger: tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger,
-) -> Result<tracedecay_agent_hosts::automation::runner::UserSessionAutomationRun> {
-    Err(config_error(
-        "projectless Hermes review is unavailable: automation requires a pinned project configuration",
-    ))
+    profile_root: &std::path::Path,
+    session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    provider: &str,
+    session_id: Option<String>,
+    run_id: Option<String>,
+    trigger: crate::automation::run_ledger::AutomationTrigger,
+) -> Result<crate::automation::runner::UserSessionAutomationRun> {
+    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::runner::{
+        MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, UserSessionAutomationOptions,
+        run_user_session_automation_with_backend,
+    };
+
+    let global = crate::user_config::UserConfig::load().automation;
+    let config = crate::automation::config::effective_user_automation_config(
+        profile_root,
+        &global,
+        crate::user_config::automation_is_configured(),
+    )
+    .await?;
+    let backend = CodexAppServerBackend::from_automation_config(&config);
+    run_user_session_automation_with_backend(
+        profile_root,
+        session_runtime_registry,
+        &config,
+        &backend,
+        UserSessionAutomationOptions {
+            session_reflector: SessionReflectorAutomationOptions {
+                trigger,
+                run_id,
+                provider: provider.to_string(),
+                session_id,
+                ..SessionReflectorAutomationOptions::default()
+            },
+            memory_curator: MemoryCuratorAutomationOptions {
+                trigger,
+                ..MemoryCuratorAutomationOptions::default()
+            },
+            skill_writer: SkillWriterAutomationOptions {
+                trigger,
+                provider: provider.to_string(),
+                ..SkillWriterAutomationOptions::default()
+            },
+        },
+    )
+    .await
 }
 
 async fn apply_projectless_hermes_receipt_plan(
     profile_root: &Path,
     plan: crate::mcp::hook_events::HookEventPlan,
 ) -> HostAdmissionOutcome {
-    let dashboard_root =
-        tracedecay_agent_hosts::automation::runner::user_automation_root(profile_root);
+    let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
     match plan {
         crate::mcp::hook_events::HookEventPlan::RecordTerminalReceipt { route, receipt } => {
-            match tracedecay_agent_hosts::automation::host_receipts::record(
-                &dashboard_root,
-                route,
-                receipt,
-            )
-            .await
-            {
+            match crate::automation::host_receipts::record(&dashboard_root, route, receipt).await {
                 Ok(true) => HostAdmissionOutcome::replay_completed(true, false),
                 Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
                 Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
@@ -85,7 +123,7 @@ async fn apply_projectless_hermes_receipt_plan(
         crate::mcp::hook_events::HookEventPlan::MarkTurnIngested {
             route,
             transcript_watermark,
-        } => match tracedecay_agent_hosts::automation::host_receipts::mark_turn_ingested(
+        } => match crate::automation::host_receipts::mark_turn_ingested(
             &dashboard_root,
             route,
             &transcript_watermark,
@@ -221,11 +259,8 @@ async fn continue_projectless_hermes_review(
     session_runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
     session_db: &RegisteredGlobalDb,
 ) -> Result<Value> {
-    let dashboard_root =
-        tracedecay_agent_hosts::automation::runner::user_automation_root(profile_root);
-    let Some(ready) =
-        tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
-    else {
+    let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
+    let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
         return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
     };
     if session_db
@@ -239,6 +274,12 @@ async fn continue_projectless_hermes_review(
     {
         return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));
     }
+    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
+        .await?
+        .paused
+    {
+        return Ok(json!({ "action": "hermes_receipt", "status": "paused" }));
+    }
     let session_id = ready
         .pending
         .route
@@ -250,14 +291,14 @@ async fn continue_projectless_hermes_review(
         "hermes",
         session_id,
         Some(format!("user_host_receipt_{}", ready.pending.generation)),
-        tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::HostReceipt,
+        crate::automation::run_ledger::AutomationTrigger::HostReceipt,
     )
     .await?;
     if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
         && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
         && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
     {
-        tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+        crate::automation::host_receipts::mark_consumed(
             &dashboard_root,
             &ready.pending.session_key,
             ready.pending.generation,

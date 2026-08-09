@@ -21,7 +21,9 @@ use tracedecay_application::source_edit::{
     RenameSymbolBindingV1,
 };
 use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::{Database, DependencyImportUse};
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::path_safety::{
@@ -34,6 +36,34 @@ pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a
 pub type GraphValueFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type GraphCallChain = Vec<(Node, Option<Edge>)>;
 pub type ComplexityRankedNode = (Node, u32, u64, u64, u64);
+
+/// One application-admitted immutable graph generation used for a source-edit
+/// plan and its exact preview/apply identity.
+#[derive(Clone)]
+pub struct SourceEditGraphReadV1 {
+    reader: CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+}
+
+impl SourceEditGraphReadV1 {
+    pub fn new(
+        reader: CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Self {
+        Self {
+            reader,
+            cancellation,
+        }
+    }
+
+    pub fn reader(&self) -> &CodeGraphInteractiveReader {
+        &self.reader
+    }
+
+    pub fn cancellation(&self) -> Arc<dyn GraphCancellation> {
+        Arc::clone(&self.cancellation)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GraphRequestControl<'a> {
@@ -236,6 +266,7 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, MoveResult>;
     fn rename_symbol<'a>(
         &'a self,
+        graph: SourceEditGraphReadV1,
         binding: &'a RenameSymbolBindingV1,
         new_name: &'a str,
         dry_run: bool,

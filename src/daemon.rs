@@ -39,8 +39,9 @@ use memory_repair_scheduler::{
 #[cfg(all(unix, test))]
 use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
-    automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
-    run_automation_scheduler_tick, scheduler_task_log_fields,
+    automation_scheduler_tick_secs_for_project, automation_staged_log_fields,
+    daemon_scheduler_record_log_line, run_automation_scheduler_tick, scheduler_task_log_fields,
+    user_config_for_client,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};

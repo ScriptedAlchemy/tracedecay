@@ -25,7 +25,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::DependencyImportUse;
 use tracedecay_usecases::tracedecay::{
     BranchDiagnostics, EditDiagnosticRecord, GraphFuture, GraphRequestControl, GraphRuntimePort,
-    GraphValueFuture, PlannedSourceEditFile,
+    GraphValueFuture, PlannedSourceEditFile, SourceEditGraphReadV1,
 };
 
 use crate::db::Database;
@@ -399,11 +399,14 @@ impl GraphRuntimePort for TraceDecay {
 
     fn rename_symbol<'a>(
         &'a self,
+        graph: SourceEditGraphReadV1,
         binding: &'a RenameSymbolBindingV1,
         new_name: &'a str,
         dry_run: bool,
     ) -> GraphFuture<'a, RenameResult> {
-        Box::pin(TraceDecay::rename_symbol(self, binding, new_name, dry_run))
+        Box::pin(TraceDecay::rename_symbol(
+            self, graph, binding, new_name, dry_run,
+        ))
     }
 
     fn recover_source_edit_preimages<'a>(
