@@ -258,8 +258,8 @@ fn print_automation_config(
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": effective.host_mode
                 == tracedecay::automation::config::AutomationHostMode::DelegatedHost,
-            "memory_apply_policy": "validate_then_apply",
-            "skill_activation_policy": "validate_then_activate",
+            "automatic_memory_apply": true,
+            "automatic_skill_activation": true,
             "export_memory_digest": effective.export_memory_digest,
         },
     });
@@ -286,8 +286,8 @@ fn print_automation_config(
         if explain {
             println!("source: daemon_pinned_snapshot");
             println!("trace_decay_backend_calls: {trace_decay_backend_calls}");
-            println!("memory_apply_policy: validate_then_apply");
-            println!("skill_activation_policy: validate_then_activate");
+            println!("automatic_memory_apply: true");
+            println!("automatic_skill_activation: true");
             println!("export_memory_digest: {}", effective.export_memory_digest);
         }
     }
