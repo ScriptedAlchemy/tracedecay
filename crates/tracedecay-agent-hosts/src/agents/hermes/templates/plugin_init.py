@@ -733,6 +733,21 @@ def _decode_content_json(content):
 def _looks_like_lcm_contract(value):
     return isinstance(value, dict) and bool(_LCM_CONTRACT_KEYS.intersection(value))
 
+def _application_outcome_payload(value):
+    """Extract the typed payload from a successful mounted application outcome."""
+    if not isinstance(value, dict):
+        return None
+    outcome = value.get("outcome")
+    if not isinstance(outcome, dict):
+        return None
+    if outcome.get("outcome") not in ("evidence", "preview", "effect"):
+        return None
+    packet = outcome.get("value")
+    if not isinstance(packet, dict):
+        return None
+    payload = packet.get("payload")
+    return payload if isinstance(payload, dict) else None
+
 def _retrieval_handle(value):
     if not isinstance(value, dict):
         return None
@@ -776,6 +791,10 @@ def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int 
     if not isinstance(value, dict):
         return value
 
+    application_payload = _application_outcome_payload(value)
+    if application_payload is not None:
+        return _decode_tool_payload(application_payload, name, args, kwargs, depth + 1, seen_handles)
+
     handle = _retrieval_handle(value)
     if handle and name != "tracedecay_retrieve":
         if handle in seen_handles:
@@ -816,7 +835,11 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
         }
-    if not _looks_like_lcm_contract(outer) and "content" not in outer:
+    if (
+        not _looks_like_lcm_contract(outer)
+        and _application_outcome_payload(outer) is None
+        and "content" not in outer
+    ):
         return {
             "error": "tracedecay tool response missing text content",
             "raw_preview": _bridge_preview(raw),
@@ -2134,6 +2157,7 @@ class TraceDecayContextEngine(ContextEngine):
 
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
+        args["provider"] = STANDARD_HERMES_LCM_PROVIDER
         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_status",
@@ -2640,6 +2664,19 @@ class TracedecayMemoryProvider(MemoryProvider):
         if fixed_args:
             tool_args = dict(tool_args)
             tool_args.update(fixed_args)
+            # Hermes' legacy fixed-action provider wire calls the taxonomy
+            # field ``fact_type``.  Translate that compatibility field only
+            # for the fixed aliases; the canonical generic ``fact_store``
+            # surface remains category-shaped and is passed through as-is.
+            if "fact_type" in tool_args:
+                fact_type = tool_args.pop("fact_type")
+                category = tool_args.get("category")
+                if category is not None and str(category) != str(fact_type):
+                    return tools.error_payload(
+                        "fact_type and category must agree when both are provided"
+                    )
+                if category is None:
+                    tool_args["category"] = fact_type
         if "memory_scope" not in tool_args:
             action = str(tool_args.get("action") or "")
             category = str(tool_args.get("category") or "")

@@ -48,6 +48,33 @@ def assert_tool_dispatch_success(raw):
     return outer
 
 
+def assert_lcm_status_argv(argv, project_root):
+    """Validate the canonical CLI route used by the stock context engine."""
+    assert len(argv) >= 6, argv
+    assert argv[1] == "tool", argv
+    name_index = 2
+    if argv[name_index] == "--project":
+        assert len(argv) >= 8, argv
+        assert os.path.realpath(argv[name_index + 1]) == os.path.realpath(project_root), argv
+        name_index += 2
+    else:
+        raise AssertionError(f"lcm status must carry the project route: {argv!r}")
+    assert argv[name_index] == "tracedecay_lcm_status", argv
+    assert argv[name_index + 1 : name_index + 3] == ["--json", "--args"], argv
+    assert len(argv) == name_index + 4, argv
+    return argv[-1]
+
+
+def assert_decoded_result(payload, *required_fields):
+    """Require a host-facing result, rather than an application transport envelope."""
+    assert isinstance(payload, dict), payload
+    assert "error" not in payload, payload
+    assert "contract" not in payload and "outcome" not in payload, payload
+    for field in required_fields:
+        assert field in payload, (field, payload)
+    return payload
+
+
 def main():
     hermes_home = os.path.join(os.environ["HOME"], ".hermes")
     project_root = os.getcwd()
@@ -217,8 +244,25 @@ def main():
     assert engine.should_compress_preflight([], current_tokens=1000) is False
     ok("should_compress_preflight honors the bool ABC contract")
 
-    status = engine.status()
-    assert isinstance(status, dict) and "error" not in status, status
+    lcm_status_argv = []
+    real_subprocess_run = plugin.tools.subprocess.run
+    try:
+        def capture_lcm_status_argv(argv, *args, **kwargs):
+            lcm_status_argv.append(argv)
+            return real_subprocess_run(argv, *args, **kwargs)
+
+        plugin.tools.subprocess.run = capture_lcm_status_argv
+        status = engine.status()
+    finally:
+        plugin.tools.subprocess.run = real_subprocess_run
+    assert lcm_status_argv, "context engine did not invoke tracedecay_lcm_status"
+    status_payload = json.loads(assert_lcm_status_argv(lcm_status_argv[-1], project_root))
+    assert status_payload == {
+        "provider": "hermes",
+        "session_id": "stock-check-session",
+        "format": "json",
+    }, status_payload
+    assert_decoded_result(status, "status")
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
         ok("lcm_status dispatch round-trips", "not_ingested before compress")
@@ -271,8 +315,8 @@ def main():
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
 
-    # Legacy fixed-action names still dispatch even though they no longer
-    # cost schema footprint.
+    # The shipped fixed-action compatibility wire still dispatches through the
+    # canonical fact-store contract without expanding the public schema.
     assert_tool_dispatch_success(
         provider.handle_tool_call(
             "fact_add",
@@ -293,6 +337,7 @@ def main():
         },
         project_root=project_root,
     )
+    assert_decoded_result(found, "count", "facts", "results")
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
 
@@ -338,6 +383,8 @@ def main():
         {"action": "list", "limit": 200, "format": "json"},
         project_root=other_project,
     )
+    assert_decoded_result(first_project_result, "count", "facts", "results")
+    assert_decoded_result(second_project_result, "count", "facts", "results")
     first_contents = {
         item.get("fact", item).get("content") for item in first_project_result.get("facts", [])
     }
@@ -373,7 +420,10 @@ def main():
         },
         project_root=project_root,
     )
-    assert isinstance(grep, dict) and "error" not in grep, grep
+    assert_decoded_result(grep, "status", "hits", "provider", "query")
+    assert grep["provider"] == "hermes", grep
+    assert grep["query"] == "hello", grep
+    assert isinstance(grep["hits"], list), grep
     ok("sync_turn ingests the turn into the LCM raw store")
     provider.on_memory_write(
         "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
@@ -388,18 +438,26 @@ def main():
         },
         project_root=project_root,
     )
+    assert_decoded_result(mirrored, "count", "facts", "results")
     assert mirrored.get("count", 0) >= 1, mirrored
     ok("on_memory_write mirrors built-in memory writes")
 
     # 4. Graph tool dispatch through generated tools.py against the real cwd,
     #    never the Hermes plugin/config directory.
     graph_status = plugin.call_tracedecay_json("tracedecay_status", {})
+    assert_decoded_result(graph_status, "file_count", "node_count")
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status
     ok(
         "graph tool dispatch round-trips against the working project",
         f"files={graph_status.get('file_count')} nodes={graph_status.get('node_count')}",
     )
+    command_status = plugin._tracedecay_status(hermes_home=hermes_home)
+    assert isinstance(command_status, str) and command_status.startswith(
+        "tracedecay status:\n"
+    ), command_status
+    assert "files:" in command_status and "nodes:" in command_status, command_status
+    ok("registered /tracedecay_status command renders the mounted graph result")
     assert project_root != hermes_home
     ok("Hermes home does not select the TraceDecay project", project_root)
 

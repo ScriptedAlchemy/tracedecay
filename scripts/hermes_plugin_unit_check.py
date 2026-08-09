@@ -565,6 +565,25 @@ def _check_response_handle_deref(plugin):
     try:
         def _handled_response(name, args, **kwargs):
             bridge_calls.append((name, args, kwargs))
+            if name == "tracedecay_lcm_status":
+                return json.dumps(
+                    {
+                        "contract": {
+                            "schema_id": "schema.application.retained.lcm-status.result",
+                            "schema_revision": 1,
+                        },
+                        "outcome": {
+                            "outcome": "evidence",
+                            "value": {
+                                "payload": {
+                                    "status": "not_ingested",
+                                    "provider": "hermes",
+                                    "session_id": "check-session",
+                                }
+                            },
+                        },
+                    }
+                )
             if name == "tracedecay_retrieve":
                 payload = {
                     "count": 1,
@@ -597,6 +616,14 @@ def _check_response_handle_deref(plugin):
             "path": "/tmp/selected-project"
         }, bridge_calls
         ok("generic response handles dereference for memory-provider results")
+
+        status = plugin.call_tracedecay_json("tracedecay_lcm_status", {})
+        assert status == {
+            "status": "not_ingested",
+            "provider": "hermes",
+            "session_id": "check-session",
+        }, status
+        ok("mounted application outcomes unwrap to their typed payload")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
 
@@ -642,6 +669,27 @@ def _check_engine_state_and_compress(
     finally:
         plugin._resolved_project_scope = real_resolver
     ok("context engine isolates project routing per Hermes session")
+
+    status_calls = []
+    real_json = plugin.call_tracedecay_json
+    try:
+        plugin.call_tracedecay_json = lambda name, args, **kwargs: (
+            status_calls.append((name, args, kwargs))
+            or {"status": "not_ingested"}
+        )
+        engine.active_session_id = "status-session"
+        engine.project_root = str(runtime_project)
+        assert engine.status() == {"status": "not_ingested"}
+    finally:
+        plugin.call_tracedecay_json = real_json
+    assert status_calls == [
+        (
+            "tracedecay_lcm_status",
+            {"provider": "hermes", "session_id": "status-session"},
+            {"project_root": str(runtime_project)},
+        )
+    ], status_calls
+    ok("context-engine status binds its Hermes provider and session target")
 
     messages = [
         {"role": "user", "content": "hello"},
@@ -791,6 +839,33 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         assert args["memory_scope"] == "project", args
         assert kwargs["project_root"] == expected_project_root, kwargs
         ok("memory tool calls stay bound to the provider's session project")
+
+        provider.handle_tool_call(
+            "fact_add",
+            {"content": "legacy alias", "fact_type": "decision"},
+        )
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_fact_store", calls
+        assert args["action"] == "add" and args["category"] == "decision", args
+        assert "fact_type" not in args, args
+        assert kwargs["project_root"] == expected_project_root, kwargs
+        conflict = provider.handle_tool_call(
+            "fact_add",
+            {
+                "content": "conflicting alias",
+                "fact_type": "decision",
+                "category": "observation",
+            },
+        )
+        assert "fact_type and category must agree" in conflict, conflict
+        provider.handle_tool_call(
+            "fact_store",
+            {"action": "add", "content": "canonical field", "fact_type": "decision"},
+        )
+        name, args, _kwargs = calls[-1]
+        assert name == "tracedecay_fact_store", calls
+        assert args["fact_type"] == "decision" and "category" not in args, args
+        ok("legacy fact aliases translate fact_type without narrowing generic fact_store")
 
         before = len(transcript_calls)
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)

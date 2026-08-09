@@ -49,7 +49,6 @@ mod tests {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: crate::agents::expected_tool_perms(),
-            project_root: None,
             dashboard,
         }
     }

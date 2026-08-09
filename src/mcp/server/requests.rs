@@ -76,6 +76,16 @@ struct ApplicationSurfaceDispatch<'a> {
     invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
 }
 
+/// Whether a tool reaches the typed daemon invocation boundary.
+///
+/// Canonical application and retained operations require the daemon invocation
+/// executor before the request is admitted to its typed owner.
+fn requires_application_invocation_executor(tool_name: &str) -> bool {
+    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+        || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
+        || tracedecay_application::RetainedSurfaceOperation::from_name(tool_name).is_some()
+}
+
 /// Retained name for this module's call sites; the saturating clamp is the one
 /// shared definition so MCP cannot stamp "now" differently from the daemon.
 pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
@@ -927,6 +937,8 @@ impl McpServer {
                     .cloned(),
                 source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
+                code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
+                code_graph_request_context_factory: self.code_graph_request_context_factory.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 dashboard_graph_interactive_resolver: self
                     .dashboard_graph_interactive_resolver
@@ -938,6 +950,7 @@ impl McpServer {
                     self.user_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.as_ref())
+                .with_profile_retained_admission(self.profile_retained_admission.as_ref())
                 .with_registered_databases(
                     self.registered_session_db.as_ref(),
                     self.registered_user_session_db.as_ref(),
@@ -1140,10 +1153,7 @@ impl McpServer {
         cg: &TraceDecay,
         tool_name: &str,
     ) -> ApplicationSurfaceDispatch<'a> {
-        let application_surface =
-            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let work_operation = crate::mcp::tools::binding::work_operation_for_tool(tool_name);
-        let invocation_executor = if application_surface.is_some() || work_operation.is_some() {
+        let invocation_executor = if requires_application_invocation_executor(tool_name) {
             match self.application_invocation_executor.as_deref() {
                 Some(executor) => Some(executor),
                 None => self
@@ -1474,8 +1484,10 @@ impl McpServer {
         //   - the user disabled both auto_watch and read_refresh.
         let last_time = cg.last_sync_timestamp().await;
         let now = crate::tracedecay::current_timestamp();
-        let age_secs = now - last_time;
-        if last_time > 0 && age_secs > 3600 {
+        if let Some(last_time) = last_time
+            && now.saturating_sub(last_time) > 3600
+        {
+            let age_secs = now.saturating_sub(last_time);
             let refreshed_recently = {
                 let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
                 done > 0 && now.saturating_sub(done) < self.sync_config.read_cooldown_secs as i64
@@ -1846,6 +1858,17 @@ mod git_read_control_tests {
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }
         assert!(!registry.lock().expect("registry").contains_key(&request_id));
+    }
+
+    #[test]
+    fn all_retained_tools_request_the_daemon_invocation_executor() {
+        for operation in tracedecay_application::RetainedSurfaceOperation::CALLABLE {
+            let tool_name = format!("tracedecay_{}", operation.as_str());
+            assert!(
+                requires_application_invocation_executor(&tool_name),
+                "{tool_name} must use the mounted retained owner",
+            );
+        }
     }
 
     /// These tools walk git trees but are not application-surface operations
