@@ -14,10 +14,10 @@ use tracedecay_application::{
 use tracedecay_domain::{
     CoverageStateV1, GitHubStackCapabilityObservedV1, GitHubStackCapabilityStateV1,
     GitHubStackCapabilityV1, GitTopologyAnchorTargetV1, IntervalStateV1, ManifestDigest,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1, UtcMicros,
-    canonical_sha256,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
+    ObservationScopeV1, UtcMicros, canonical_sha256,
     configuration::{ReviewTopologyKindV1, WorkTopologyPolicyV1},
-    derive_git_topology_anchor_id_v3,
+    derive_git_topology_anchor_id,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 
@@ -238,8 +238,11 @@ impl GitHubStackProbeOwnerV1 {
         if coordinator.capability.provider.as_str() != "provider.github" {
             return Err(GitHubStackCapabilityObservationUnavailableV1::CoordinatorEvidenceInvalid);
         }
-        let expected_capability_anchor = derive_git_topology_anchor_id_v3(
-            &source_binding.owner,
+        let anchor_owner = ObservationScopeV1::Project {
+            project_id: self.scope.project_id.clone(),
+        };
+        let expected_capability_anchor = derive_git_topology_anchor_id(
+            &anchor_owner,
             &GitTopologyAnchorTargetV1::GitHubStackCapability(coordinator.capability.clone()),
         )
         .map_err(|_| GitHubStackCapabilityObservationUnavailableV1::CoordinatorEvidenceInvalid)?;
@@ -268,8 +271,8 @@ impl GitHubStackProbeOwnerV1 {
                     GitHubStackCapabilityObservationUnavailableV1::CoordinatorEvidenceInvalid,
                 );
             }
-            let expected_snapshot_anchor = derive_git_topology_anchor_id_v3(
-                &source_binding.owner,
+            let expected_snapshot_anchor = derive_git_topology_anchor_id(
+                &anchor_owner,
                 &GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone()),
             )
             .map_err(|_| {

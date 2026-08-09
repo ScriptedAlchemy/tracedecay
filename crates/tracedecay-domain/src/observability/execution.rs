@@ -274,7 +274,11 @@ impl WorkIntegrationTransitionObservedV1 {
     }
 }
 
-closed_enum!(StackDriftKindV1 {
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StackDriftKindV1 {
     HeadAdvanced,
     BaseAdvanced,
     MergeBaseChanged,
@@ -284,7 +288,7 @@ closed_enum!(StackDriftKindV1 {
     Retargeted,
     Superseded,
     Unknown,
-});
+}
 closed_enum!(IntervalStateV1 { Open, Closed });
 closed_enum!(DurationBucketV1 {
     Under1m,

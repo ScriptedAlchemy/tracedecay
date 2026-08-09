@@ -6,9 +6,11 @@ mod activity_tests;
 mod delivery;
 mod execution;
 mod mcp_dispatch;
+mod product_views;
 mod retrieval;
 mod review_labels;
 mod runtime;
+mod workflow;
 
 pub use activity::ActivityObservedV1;
 pub use delivery::*;
@@ -16,9 +18,11 @@ pub use execution::*;
 pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
 };
+pub use product_views::*;
 pub use retrieval::*;
 pub use review_labels::*;
 pub use runtime::*;
+pub use workflow::*;
 
 use std::collections::BTreeMap;
 
@@ -124,6 +128,15 @@ pub enum ObservabilityPayloadV1 {
     HealthSnapshot(HealthSnapshotObservedV1),
     Activity(ActivityObservedV1),
     McpDispatch(McpDispatchObservedV1),
+    AppropriateReliance(AppropriateRelianceObservedV1),
+    AutomationFunnel(AutomationFunnelObservedV1),
+    TaskIntelligenceDecision(TaskIntelligenceDecisionObservedV1),
+    TaskIntelligenceOutcome(TaskIntelligenceOutcomeObservedV1),
+    ProviderReliability(ProviderReliabilityObservedV1),
+    RemoteCoverage(RemoteCoverageObservedV1),
+    WorkflowLifecycle(WorkflowLifecycleObservedV1),
+    WorkflowOutcome(WorkflowOutcomeObservedV1),
+    WorkflowResource(WorkflowResourceObservedV1),
 }
 
 impl ObservabilityPayloadV1 {
@@ -160,6 +173,15 @@ impl ObservabilityPayloadV1 {
             Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
             Self::Activity(_) => "activity.observed.v1",
             Self::McpDispatch(_) => "mcp.dispatch.observed.v1",
+            Self::AppropriateReliance(_) => "reliance.decision.observed.v1",
+            Self::AutomationFunnel(_) => "automation.funnel.observed.v1",
+            Self::TaskIntelligenceDecision(_) => "work.task_intelligence.decision.observed.v1",
+            Self::TaskIntelligenceOutcome(_) => "work.task_intelligence.outcome.observed.v1",
+            Self::ProviderReliability(_) => "work.provider_reliability.observed.v1",
+            Self::RemoteCoverage(_) => "remote.coverage.observed.v1",
+            Self::WorkflowLifecycle(_) => "workflow.lifecycle.observed.v1",
+            Self::WorkflowOutcome(_) => "workflow.outcome.observed.v1",
+            Self::WorkflowResource(_) => "workflow.resource.observed.v1",
         }
     }
 
@@ -196,6 +218,15 @@ impl ObservabilityPayloadV1 {
             Self::WorkDeliveryFanout(value) => value.validate(),
             Self::TelemetryDrop(value) => value.validate(),
             Self::HealthSnapshot(_) | Self::Activity(_) | Self::McpDispatch(_) => Ok(()),
+            Self::AppropriateReliance(value) => value.validate(),
+            Self::AutomationFunnel(value) => value.validate(),
+            Self::TaskIntelligenceDecision(value) => value.validate(),
+            Self::TaskIntelligenceOutcome(value) => value.validate(),
+            Self::ProviderReliability(value) => value.validate(),
+            Self::RemoteCoverage(value) => value.validate(),
+            Self::WorkflowLifecycle(value) => value.validate(),
+            Self::WorkflowOutcome(value) => value.validate(),
+            Self::WorkflowResource(value) => value.validate(),
         }
     }
 }
