@@ -10,8 +10,9 @@ use super::super::{
     ExecutionTopologyMeasurementV1,
 };
 use super::{
-    ConflictOutcomeRowV1, ConflictPredictionRowV1, DuplicateRowV1, ExecutionTopologyEvidenceV1,
-    ExecutionTopologyRollupStateErrorV1, ProjectionContext, TopologySampleV1,
+    ConflictOutcomeRowV1, ConflictPredictionRowV1, DuplicateReceiptKeyV1, DuplicateRowV1,
+    ExecutionTopologyEvidenceV1, ExecutionTopologyRollupStateErrorV1, ProjectionContext,
+    TopologySampleV1,
 };
 use crate::observability::{MetricCoverageV1, MetricEvidenceClassV1};
 use serde::{Deserialize, Serialize};
@@ -244,10 +245,19 @@ impl ExecutionTopologyCapacityRollupV1 {
 
     pub(super) fn absorb_duplicate_rows(
         &mut self,
-        rows: &BTreeMap<String, (Option<DuplicateRowV1>, i64)>,
+        rows: &BTreeMap<DuplicateReceiptKeyV1, (Option<DuplicateRowV1>, i64)>,
     ) {
-        for (row, _) in rows.values() {
-            self.absorb_duplicate_row(*row);
+        let mut latest = BTreeMap::<&str, (u64, Option<DuplicateRowV1>)>::new();
+        for ((reference, revision), (row, _)) in rows {
+            match latest.get(reference.as_str()) {
+                Some((current_revision, _)) if *current_revision > *revision => {}
+                _ => {
+                    latest.insert(reference, (*revision, *row));
+                }
+            }
+        }
+        for (_, (_, row)) in latest {
+            self.absorb_duplicate_row(row);
         }
     }
 

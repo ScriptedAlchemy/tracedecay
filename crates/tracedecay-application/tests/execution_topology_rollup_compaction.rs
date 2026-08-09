@@ -1,4 +1,5 @@
 use tracedecay_application::{
+    ExecutionDuplicateKindV1, ExecutionQuantityUnitV1, ExecutionTopologyDimensionV1,
     ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupRetentionV1, ObservabilityHorizonV1,
     ObservabilityPageV1, build_execution_topology_rollup_fragment,
     check_execution_topology_rollup_retention_json, project_execution_topology_fragments,
@@ -83,15 +84,33 @@ fn duplicate_event(
     event_time_micros: i64,
     adjudication_revision: u64,
 ) -> ObservabilityEnvelopeV1 {
+    duplicate_event_for(
+        sequence,
+        event_time_micros,
+        "duplicate.rollup-compaction",
+        adjudication_revision,
+        "receipt.rollup-compaction",
+        1,
+    )
+}
+
+fn duplicate_event_for(
+    sequence: u64,
+    event_time_micros: i64,
+    adjudication_ref: &str,
+    adjudication_revision: u64,
+    local_anchor_ref: &str,
+    wall_micros: u64,
+) -> ObservabilityEnvelopeV1 {
     envelope(
         sequence,
         event_time_micros,
         "trace.rollup-compaction-duplicate",
         ObservabilityPayloadV1::WorkDuplicateEffort(WorkDuplicateEffortObservedV1 {
-            adjudication_ref: "duplicate.rollup-compaction".to_owned(),
+            adjudication_ref: adjudication_ref.to_owned(),
             adjudication_revision,
             kind: DuplicateEffortKindV1::ExactDuplicate,
-            wall_micros: Some(1),
+            wall_micros: Some(wall_micros),
             token_count: None,
             cost_micros: None,
             test_count: None,
@@ -99,7 +118,7 @@ fn duplicate_event(
             evidence: QuantityEvidenceClassV1::LocallyMeasured,
             effect_outcome: DuplicateEffectOutcomeV1::Committed,
             coverage: CoverageStateV1::Known,
-            local_anchor_refs: Vec::new(),
+            local_anchor_refs: vec![local_anchor_ref.to_owned()],
         }),
         None,
         None,
@@ -251,4 +270,84 @@ fn post_retention_corrections_join_retained_bounded_evidence_exactly() {
         assert_eq!(model.coverage.state, CoverageStateV1::Known);
         assert_ne!(model.watermark, "execution-topology:rollup-unavailable");
     }
+}
+
+#[test]
+fn duplicate_receipt_corrections_choose_the_latest_revision_across_anchors_and_fragment_order() {
+    let day0 = horizon(0, DAY_MICROS);
+    let day1 = horizon(DAY_MICROS, DAY_MICROS.saturating_mul(2));
+    let receipt_ref = "duplicate.rollup-compaction-revision";
+    let compacted = decode(&compact_json(
+        &build_execution_topology_rollup_fragment(
+            SCOPE,
+            &day0,
+            40,
+            page(
+                vec![duplicate_event_for(
+                    40,
+                    1_000_000,
+                    receipt_ref,
+                    1,
+                    "receipt.duplicate.origin",
+                    10,
+                )],
+                "duplicate-origin",
+            ),
+        )
+        .unwrap(),
+        31 * DAY_MICROS,
+    ));
+    let late = build_execution_topology_rollup_fragment(
+        SCOPE,
+        &day1,
+        41,
+        page(
+            vec![
+                duplicate_event_for(
+                    41,
+                    DAY_MICROS + 1_000_000,
+                    receipt_ref,
+                    2,
+                    "receipt.duplicate.corrected",
+                    20,
+                ),
+                duplicate_event_for(
+                    42,
+                    DAY_MICROS + 2_000_000,
+                    receipt_ref,
+                    1,
+                    "receipt.duplicate.stale",
+                    10,
+                ),
+            ],
+            "duplicate-correction-and-stale",
+        ),
+    )
+    .unwrap();
+    let requested = horizon(0, DAY_MICROS.saturating_mul(2));
+    let forward = project_execution_topology_fragments(
+        SCOPE,
+        &requested,
+        42,
+        &[compacted.clone(), late.clone()],
+    );
+    let reverse = project_execution_topology_fragments(SCOPE, &requested, 42, &[late, compacted]);
+    assert_eq!(forward, reverse);
+    let duplicate = forward
+        .measurements
+        .iter()
+        .find(|measurement| {
+            measurement.value.metric == "work_duplicate_effort_total"
+                && measurement.dimensions
+                    == [
+                        ExecutionTopologyDimensionV1::DuplicateKind(
+                            ExecutionDuplicateKindV1::ExactDuplicate,
+                        ),
+                        ExecutionTopologyDimensionV1::Unit(ExecutionQuantityUnitV1::WallMicros),
+                    ]
+        })
+        .unwrap();
+    assert_eq!(duplicate.value.coverage.eligible, Some(1));
+    assert_eq!(duplicate.value.coverage.observed, 1);
+    assert_eq!(duplicate.value.coverage.unknown, 0);
 }

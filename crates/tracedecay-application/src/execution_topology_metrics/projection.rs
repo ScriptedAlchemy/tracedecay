@@ -111,6 +111,10 @@ pub(super) struct DuplicateRowV1 {
     pub(super) event_time_micros: i64,
 }
 
+/// A duplicate relation receipt revision. Evidence anchors support drill-down,
+/// but only this stable receipt pair determines correction replacement.
+pub(super) type DuplicateReceiptKeyV1 = (String, u64);
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct BlockedRowV1 {
     /// Stable owner receipt identity. Open and closed corrections share this
@@ -176,7 +180,7 @@ pub(super) struct ExecutionTopologyEvidenceV1 {
     pub(super) outcomes: BTreeMap<String, ConflictOutcomeRowV1>,
     pub(super) integrations: Vec<IntegrationRowV1>,
     pub(super) stack_drifts: BTreeMap<String, StackDriftRowV1>,
-    pub(super) duplicates: BTreeMap<String, (Option<DuplicateRowV1>, i64)>,
+    pub(super) duplicates: BTreeMap<DuplicateReceiptKeyV1, (Option<DuplicateRowV1>, i64)>,
     pub(super) blocked: Vec<BlockedRowV1>,
     pub(super) reruns: Vec<RerunRowV1>,
     pub(super) leaks: BTreeMap<String, (u64, Option<LeakRowV1>, i64)>,
@@ -410,20 +414,21 @@ impl ExecutionTopologyEvidenceV1 {
             coverage: duplicate.coverage,
             event_time_micros,
         };
-        let Some(anchor_ref) = duplicate.local_anchor_refs.iter().min() else {
-            return;
-        };
-        match self.duplicates.get(anchor_ref) {
+        let receipt = (
+            duplicate.adjudication_ref.clone(),
+            duplicate.adjudication_revision,
+        );
+        match self.duplicates.get(&receipt) {
             Some((existing, existing_time)) if existing.as_ref() != Some(&row) => {
                 self.duplicates.insert(
-                    anchor_ref.clone(),
+                    receipt,
                     (None, (*existing_time).max(event_time_micros)),
                 );
             }
             Some(_) => {}
             None => {
                 self.duplicates
-                    .insert(anchor_ref.clone(), (Some(row), event_time_micros));
+                    .insert(receipt, (Some(row), event_time_micros));
             }
         }
     }
@@ -501,10 +506,14 @@ mod aggregation_tests {
         WorkExecutionLeakRecoveryV1,
     };
 
-    fn duplicate(anchor_refs: &[&str], wall_micros: u64) -> WorkDuplicateEffortObservedV1 {
+    fn duplicate(
+        adjudication_revision: u64,
+        anchor_refs: &[&str],
+        wall_micros: u64,
+    ) -> WorkDuplicateEffortObservedV1 {
         WorkDuplicateEffortObservedV1 {
             adjudication_ref: "duplicate.relation.fixture".to_owned(),
-            adjudication_revision: 1,
+            adjudication_revision,
             kind: DuplicateEffortKindV1::ExactDuplicate,
             wall_micros: Some(wall_micros),
             token_count: None,
@@ -522,41 +531,44 @@ mod aggregation_tests {
     }
 
     #[test]
-    fn duplicate_effort_aggregation_is_anchor_keyed_and_order_independent() {
+    fn duplicate_receipt_revisions_are_monotone_despite_out_of_order_delivery() {
         for rows in [
             vec![
-                duplicate(&["receipt.duplicate.alpha"], 10),
-                duplicate(&["receipt.duplicate.beta"], 20),
+                duplicate(1, &["receipt.duplicate.shared"], 10),
+                duplicate(2, &["receipt.duplicate.shared"], 20),
             ],
             vec![
-                duplicate(&["receipt.duplicate.beta"], 20),
-                duplicate(&["receipt.duplicate.alpha"], 10),
-            ],
-            vec![
-                duplicate(&["receipt.duplicate.alpha"], 10),
-                duplicate(&["receipt.duplicate.alpha"], 10),
-                duplicate(&["receipt.duplicate.beta"], 20),
+                duplicate(2, &["receipt.duplicate.shared"], 20),
+                duplicate(1, &["receipt.duplicate.shared"], 10),
             ],
         ] {
             let mut evidence = ExecutionTopologyEvidenceV1::default();
             for row in &rows {
                 evidence.absorb_duplicate(row, 0);
             }
-            let (row, _) = evidence.duplicates.get("receipt.duplicate.alpha").unwrap();
-            assert_eq!(row.unwrap().quantities[0], Some(10));
-            let (row, _) = evidence.duplicates.get("receipt.duplicate.beta").unwrap();
-            assert_eq!(row.unwrap().quantities[0], Some(20));
+            assert_eq!(evidence.duplicates.len(), 2);
+            assert_eq!(
+                evidence
+                    .duplicates
+                    .values()
+                    .filter_map(|(row, _)| row.map(|row| row.quantities[0]))
+                    .collect::<Vec<_>>(),
+                vec![Some(10), Some(20)]
+            );
         }
     }
 
     #[test]
     fn conflicting_duplicate_quantities_remain_unknown() {
         let mut evidence = ExecutionTopologyEvidenceV1::default();
-        evidence.absorb_duplicate(&duplicate(&["receipt.duplicate.alpha"], 20), 0);
-        evidence.absorb_duplicate(&duplicate(&["receipt.duplicate.alpha"], 21), 0);
+        evidence.absorb_duplicate(&duplicate(1, &["receipt.duplicate.alpha"], 20), 0);
+        evidence.absorb_duplicate(&duplicate(1, &["receipt.duplicate.alpha"], 21), 0);
         assert!(
-            evidence.duplicates["receipt.duplicate.alpha"].0.is_none(),
-            "conflicting anchor quantities must not pick an arrival-order winner"
+            evidence
+                .duplicates
+                .values()
+                .all(|(row, _)| row.is_none()),
+            "conflicting same-revision quantities must not pick an arrival-order winner"
         );
     }
 
