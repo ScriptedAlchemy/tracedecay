@@ -16,6 +16,12 @@ export default defineConfig({
   },
   output: {
     distPath: { root: 'app-dist' },
+    cleanDistPath: true,
+    manifest: {
+      filename: 'asset-manifest.json',
+      prefix: false,
+      filter: () => true,
+    },
     // The daemon serves everything; assets must be relative and offline.
     assetPrefix: '/',
   },
@@ -29,6 +35,9 @@ export default defineConfig({
     },
   },
   performance: {
+    buildCache: {
+      buildDependencies: ['postcss.config.mjs'],
+    },
     chunkSplit: { strategy: 'split-by-experience' },
   },
 });
