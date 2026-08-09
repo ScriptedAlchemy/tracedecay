@@ -256,6 +256,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
     pub dashboard_application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    pub(crate) daemon_invocation_service: Option<&'a crate::daemon::DaemonInvocationService>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -312,6 +313,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             diagnostics_lsp: None,
             application_invocation_executor: None,
             dashboard_application_invocation_executor: None,
+            daemon_invocation_service: None,
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,

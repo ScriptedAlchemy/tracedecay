@@ -605,6 +605,7 @@ pub(super) async fn production_project_server(
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
+    .with_daemon_invocation_service(invocation.service.clone())
     .with_retained_project_graph_resolver(Arc::clone(&retained_graph_resolver));
     if let Some(reconciler) = automation_scheduler_reconciler.as_ref() {
         core_context = core_context.with_automation_scheduler_reconciler(Arc::clone(reconciler));
@@ -981,6 +982,7 @@ pub(super) async fn production_project_server(
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)
+            .with_daemon_invocation_service(invocation.service.clone())
             .with_startup_catch_up_enabled(runtime.startup_catch_up())
             .with_retained_project_graph_resolver(retained_graph_resolver);
             if let Some(reconciler) = automation_scheduler_reconciler {

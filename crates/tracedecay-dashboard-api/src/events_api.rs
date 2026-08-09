@@ -977,6 +977,7 @@ pub(crate) async fn dashboard_state_fixture(
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
+        automation_observation: None,
         automation_scheduler_reconciler: None,
         automation_writer: crate::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,

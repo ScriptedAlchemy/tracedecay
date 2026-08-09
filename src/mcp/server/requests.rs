@@ -923,6 +923,7 @@ impl McpServer {
                 dashboard_application_invocation_executor: self
                     .application_invocation_executor
                     .clone(),
+                daemon_invocation_service: self.daemon_invocation_service.as_ref(),
                 dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
                 application_request_id,
                 application_deadline,

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::automation_config_api::effective_automation_config;
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, http_detail, internal_error, json_error};
 use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
 use tracedecay_agent_hosts::automation::config::AutomationConfig;
 use tracedecay_agent_hosts::automation::jobs::{
@@ -260,6 +260,15 @@ pub async fn run(
     AxumPath(job_id): AxumPath<String>,
 ) -> std::result::Result<(StatusCode, Json<Value>), JsonError> {
     let job = load_job_or_404(&state, &job_id).await?;
+    let observation_admission = state.automation_observation.as_ref().ok_or_else(|| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dashboard automation observation authority is unavailable",
+        )
+    })?;
+    let observation = observation_admission(state.project_root.clone())
+        .await
+        .map_err(|detail| json_error(StatusCode::SERVICE_UNAVAILABLE, detail))?;
     let config = load_effective_config(&state)?;
     let run_id = format!("dashboard_user_job_{}_{}", job.id, micros_now());
     let payload = json!({
@@ -281,10 +290,17 @@ pub async fn run(
                     profile_root: None,
                     project_root: Some(state.project_root.clone()),
                 };
-                run_user_job_with_backend(&state.dashboard_root, &config, &backend, &job, options)
-                    .await
-                    .map(|_| Value::Null)
-                    .map_err(|err| err.to_string())
+                let run = run_user_job_with_backend(
+                    &state.dashboard_root,
+                    &config,
+                    &backend,
+                    &job,
+                    options,
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+                observation(run.ledger_record.clone());
+                Ok(Value::Null)
             },
         )
         .await

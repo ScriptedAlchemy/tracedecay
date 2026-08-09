@@ -76,6 +76,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
@@ -176,6 +177,7 @@ impl McpServerConstructionContext {
             dashboard_graph_interactive_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
+            daemon_invocation_service: None,
             project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
@@ -382,6 +384,14 @@ impl McpServerConstructionContext {
         executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     ) -> Self {
         self.application_invocation_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_daemon_invocation_service(
+        mut self,
+        service: crate::daemon::DaemonInvocationService,
+    ) -> Self {
+        self.daemon_invocation_service = Some(service);
         self
     }
 

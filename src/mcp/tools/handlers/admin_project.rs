@@ -193,6 +193,7 @@ pub(super) async fn handle_admin_project(
     global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     profile_root: Option<&Path>,
+    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
 ) -> Result<ToolResult> {
     let action: AdminProjectAction =
         serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
@@ -351,7 +352,7 @@ pub(super) async fn handle_admin_project(
             json!({ "receipt": automatic_fact_receipt_json(&receipt) })
         }
         AdminProjectAction::AutomationRun { task, options } => {
-            run_automation(cg, profile_root, task, options).await?
+            run_automation(cg, profile_root, task, options, daemon_invocation_service).await?
         }
     };
     Ok(json_result(&value))
@@ -362,6 +363,7 @@ async fn run_automation(
     profile_root: Option<&Path>,
     task: AutomationRunTask,
     options: Value,
+    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
 ) -> Result<Value> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
     use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
@@ -371,6 +373,16 @@ async fn run_automation(
         SkillWriterAutomationOptions, run_memory_curator_with_backend,
         run_session_reflector_with_backend, run_skill_writer_with_backend,
     };
+
+    let invocation_service = require_manual_automation_observation(daemon_invocation_service)?;
+    let producer = crate::daemon::project_automation_observation_producer(
+        invocation_service,
+        cg.project_root(),
+    )
+    .await
+    .ok_or_else(|| TraceDecayError::Config {
+        message: "manual automation observation authority is unavailable".to_owned(),
+    })?;
 
     let pinned = cg
         .configuration_runtime()
@@ -386,49 +398,59 @@ async fn run_automation(
     let run = match task {
         AutomationRunTask::MemoryCuration => {
             let options = decode_options::<MemoryCurationOptions>(options)?;
-            serde_json::to_value(
-                run_memory_curator_with_backend(
-                    cg,
-                    &config,
-                    &pinned.revision_id,
-                    &backend,
-                    MemoryCuratorAutomationOptions {
-                        trigger: AutomationTrigger::ManualCli,
-                        run_id: None,
-                        max_clusters: options.max_clusters,
-                        min_confidence: options.min_confidence,
-                    },
-                )
-                .await?,
-            )?
+            let run = run_memory_curator_with_backend(
+                cg,
+                &config,
+                &pinned.revision_id,
+                &backend,
+                MemoryCuratorAutomationOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: None,
+                    max_clusters: options.max_clusters,
+                    min_confidence: options.min_confidence,
+                },
+            )
+            .await?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "manual_mcp",
+            );
+            serde_json::to_value(run)?
         }
         AutomationRunTask::SessionReflection => {
             let options = decode_options::<SessionReflectionOptions>(options)?;
-            serde_json::to_value(
-                run_session_reflector_with_backend(
-                    cg,
-                    &config,
-                    &pinned.revision_id,
-                    &backend,
-                    SessionReflectorAutomationOptions {
-                        trigger: AutomationTrigger::ManualCli,
-                        run_id: None,
-                        provider: options.provider,
-                        query: options.query,
-                        scope: options.scope,
-                        session_id: options.session_id,
-                        include_summaries: options.include_summaries,
-                        evidence_limit: options.evidence_limit,
-                        sort: options.sort,
-                        source: options.source,
-                        role: options.role,
-                        start_time: options.start_time,
-                        end_time: options.end_time,
-                        ..SessionReflectorAutomationOptions::default()
-                    },
-                )
-                .await?,
-            )?
+            let run = run_session_reflector_with_backend(
+                cg,
+                &config,
+                &pinned.revision_id,
+                &backend,
+                SessionReflectorAutomationOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: None,
+                    provider: options.provider,
+                    query: options.query,
+                    scope: options.scope,
+                    session_id: options.session_id,
+                    include_summaries: options.include_summaries,
+                    evidence_limit: options.evidence_limit,
+                    sort: options.sort,
+                    source: options.source,
+                    role: options.role,
+                    start_time: options.start_time,
+                    end_time: options.end_time,
+                    ..SessionReflectorAutomationOptions::default()
+                },
+            )
+            .await?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "manual_mcp",
+            );
+            serde_json::to_value(run)?
         }
         AutomationRunTask::SkillWriting => {
             let options = decode_options::<SkillWritingOptions>(options)?;
@@ -436,27 +458,40 @@ async fn run_automation(
                 message: "automation skill writing requires exact daemon profile authority"
                     .to_owned(),
             })?;
-            serde_json::to_value(
-                run_skill_writer_with_backend(
-                    cg,
-                    &config,
-                    &pinned.revision_id,
-                    &backend,
-                    SkillWriterAutomationOptions {
-                        trigger: AutomationTrigger::ManualCli,
-                        run_id: None,
-                        provider: options.provider,
-                        query: options.query,
-                        evidence_limit: options.evidence_limit,
-                        profile_root: Some(profile_root.to_path_buf()),
-                        ..SkillWriterAutomationOptions::default()
-                    },
-                )
-                .await?,
-            )?
+            let run = run_skill_writer_with_backend(
+                cg,
+                &config,
+                &pinned.revision_id,
+                &backend,
+                SkillWriterAutomationOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    run_id: None,
+                    provider: options.provider,
+                    query: options.query,
+                    evidence_limit: options.evidence_limit,
+                    profile_root: Some(profile_root.to_path_buf()),
+                    ..SkillWriterAutomationOptions::default()
+                },
+            )
+            .await?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "manual_mcp",
+            );
+            serde_json::to_value(run)?
         }
     };
     Ok(json!({ "run": run }))
+}
+
+fn require_manual_automation_observation(
+    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
+) -> Result<&crate::daemon::DaemonInvocationService> {
+    daemon_invocation_service.ok_or_else(|| TraceDecayError::Config {
+        message: "manual automation observation authority is unavailable".to_owned(),
+    })
 }
 
 fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
@@ -557,6 +592,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -575,6 +611,7 @@ mod tests {
             &handle_admin_project(
                 &cg,
                 json!({ "action": "automatic_fact_receipt_view", "id": apply_id }),
+                None,
                 None,
                 None,
                 None,
@@ -608,7 +645,7 @@ mod tests {
             }),
         ] {
             assert!(
-                handle_admin_project(&cg, action, None, None, None)
+                handle_admin_project(&cg, action, None, None, None, None)
                     .await
                     .is_err(),
                 "manual fact mutations must not be accepted"
@@ -623,6 +660,7 @@ mod tests {
                     "task": "memory_curation",
                     "options": { "max_clusters": 9, "min_confidence": 0.7 }
                 }),
+                None,
                 None,
                 None,
                 None,
@@ -808,5 +846,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(skill.evidence_limit, 13);
+    }
+
+    #[test]
+    fn manual_automation_without_observation_authority_fails_closed() {
+        let Err(error) = require_manual_automation_observation(None) else {
+            panic!("manual automation must not run without observation authority");
+        };
+
+        assert!(matches!(
+            error,
+            TraceDecayError::Config { message }
+                if message == "manual automation observation authority is unavailable"
+        ));
     }
 }

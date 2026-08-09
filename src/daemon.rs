@@ -340,6 +340,10 @@ mod lcm_summarization;
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
+pub(crate) use scheduler::automation_observation::{
+    project_run_observation_producer as project_automation_observation_producer,
+    record_project_run as record_project_automation_run,
+};
 mod service;
 pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;

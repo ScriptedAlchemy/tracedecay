@@ -315,7 +315,10 @@ fn matching_usage<'a>(
         .deltas
         .iter()
         .filter(same_scope)
-        .filter(|delta| delta.request_id.as_deref() == Some(provider_request_id))
+        .filter(|delta| {
+            delta.request_id.as_deref() == Some(provider_request_id)
+                || delta.turn_id.as_deref() == Some(provider_request_id)
+        })
         .collect()
 }
 
@@ -657,6 +660,20 @@ mod tests {
             1,
         )]);
         let identity = resolve_identity(SCOPE_REF, Some("request-1"), &aggregate, &usage_horizon());
+        assert_eq!(identity.provider.as_deref(), Some("codex"));
+        assert_eq!(identity.model.as_deref(), Some("gpt-test"));
+        assert_eq!(identity.source, MetricSourceV1::ProviderUsageObservation);
+        assert_eq!(identity.unavailable_reason, None);
+    }
+
+    #[test]
+    fn exact_turn_join_supplies_codex_model_identity() {
+        let mut delta = usage_delta("codex", Some("gpt-test"), "session-1", None, 1, 1);
+        delta.turn_id = Some("turn-1".to_owned());
+        let aggregate = complete_usage(vec![delta]);
+
+        let identity = resolve_identity(SCOPE_REF, Some("turn-1"), &aggregate, &usage_horizon());
+
         assert_eq!(identity.provider.as_deref(), Some("codex"));
         assert_eq!(identity.model.as_deref(), Some("gpt-test"));
         assert_eq!(identity.source, MetricSourceV1::ProviderUsageObservation);

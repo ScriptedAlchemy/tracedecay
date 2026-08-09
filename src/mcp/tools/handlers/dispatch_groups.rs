@@ -340,6 +340,7 @@ pub(super) async fn dispatch_admin_tools(
                 options.global_db.map(std::sync::Arc::as_ref),
                 options.automation_scheduler_reconciler.clone(),
                 options.profile_root,
+                options.daemon_invocation_service,
             )
             .await
         }
@@ -720,6 +721,7 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.diagnostics_lsp.clone(),
                 options.dashboard_application_invocation_executor.clone(),
                 options.dashboard_delivery_settlement_authority.clone(),
+                options.daemon_invocation_service.cloned(),
             )
             .await
         }

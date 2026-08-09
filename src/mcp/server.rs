@@ -494,6 +494,7 @@ pub struct McpServer {
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
+    daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
     delivery_settlement_authority:
         Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
     delivery_settlement_recorder:
@@ -773,6 +774,7 @@ impl McpServer {
             dashboard_graph_interactive_resolver,
             project_routes,
             application_invocation_executor,
+            daemon_invocation_service,
             delivery_settlement_authority,
             delivery_settlement_recorder,
             project_server_live,
@@ -1069,6 +1071,7 @@ impl McpServer {
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
+            daemon_invocation_service,
             delivery_settlement_authority,
             delivery_settlement_recorder,
             project_server_live,

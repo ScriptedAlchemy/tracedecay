@@ -212,6 +212,21 @@ pub type AutomationSchedulerReconcileFuture =
     Pin<Box<dyn Future<Output = AutomationSchedulerReconcileOutcome> + Send + 'static>>;
 pub type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
+pub type DashboardAutomationObservationRecorderV1 = Arc<
+    dyn Fn(tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord)
+        + Send
+        + Sync
+        + 'static,
+>;
+pub type DashboardAutomationObservationFuture = Pin<
+    Box<
+        dyn Future<Output = std::result::Result<DashboardAutomationObservationRecorderV1, String>>
+            + Send
+            + 'static,
+    >,
+>;
+pub type DashboardAutomationObservationPortV1 =
+    Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>;
 pub type DoctorReportReadFuture = Pin<
     Box<
         dyn Future<
@@ -254,6 +269,7 @@ pub struct DashboardStateCompositionV1 {
     /// managed-skill materialization capabilities. Standalone states leave it
     /// absent and automation mutation routes report typed unavailable.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
+    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -387,6 +403,7 @@ pub struct DashboardState {
     /// Daemon-selected profile and canonical automation mutation authority.
     /// HTTP handlers never reconstruct this capability from the environment.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
+    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,
@@ -615,6 +632,7 @@ async fn build_state_inner(
         git_correlation_read_authority,
         registered_savings_db,
         automation_authority,
+        automation_observation,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
@@ -696,6 +714,7 @@ async fn build_state_inner(
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority,
+        automation_observation,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader: None,
@@ -742,6 +761,7 @@ pub async fn build_selected_project_state(
             git_correlation_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
+            automation_observation: active.automation_observation.clone(),
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
             // Doctor authority is bound to the active project's exact scope.
@@ -936,6 +956,7 @@ where
                 .map(|authority| Arc::clone(&authority.profile_database)),
             automation_authority: test_authority
                 .and_then(|authority| authority.automation_authority.clone()),
+            automation_observation: None,
             automation_scheduler_reconciler: None,
             automation_writer: test_authority
                 .and_then(|authority| authority.automation_writer.clone())
@@ -2036,6 +2057,7 @@ mod authority_tests {
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,
+                automation_observation: None,
                 automation_scheduler_reconciler: None,
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,
@@ -2196,6 +2218,53 @@ mod authority_tests {
                 "{path} is not mounted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_user_job_run_without_observation_authority_fails_closed() {
+        let fixture = DashboardStateFixture::open("project.dashboard-job-observation").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/automation/jobs")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": "observation-required",
+                            "name": "Observation required",
+                            "prompt": "Review the current project"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("create automation job request"),
+            )
+            .await
+            .expect("create automation job response");
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/automation/jobs/observation-required/run")
+                    .body(Body::empty())
+                    .expect("run automation job request"),
+            )
+            .await
+            .expect("run automation job response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("automation unavailable body");
+        let payload: Value = serde_json::from_slice(&body).expect("automation unavailable json");
+        assert_eq!(
+            payload["detail"],
+            json!("dashboard automation observation authority is unavailable")
+        );
     }
 
     #[tokio::test]

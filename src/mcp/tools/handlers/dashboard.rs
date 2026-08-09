@@ -340,6 +340,7 @@ pub(super) async fn handle_dashboard(
     delivery_settlement_authority: Option<
         Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
     >,
+    daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -412,20 +413,30 @@ pub(super) async fn handle_dashboard(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained dashboard project graph is unavailable".to_string(),
             })?;
+            let automation_observation = daemon_invocation_service
+                .clone()
+                .map(crate::daemon::dashboard_automation::dashboard_automation_observation_port);
             let automation_authority = match (
                 daemon_profile_root,
                 daemon_user_profile_id.clone(),
                 retained_project_graph_resolver.clone(),
+                daemon_invocation_service,
             ) {
-                (Some(profile_root), Some(profile_id), Some(project_graph_resolver)) => Some(
+                (
+                    Some(profile_root),
+                    Some(profile_id),
+                    Some(project_graph_resolver),
+                    Some(invocation_service),
+                ) => Some(
                     crate::daemon::dashboard_automation::compose_dashboard_automation_authority(
                         profile_root,
                         profile_id,
                         project_graph_resolver,
                         Arc::clone(&automation_writer),
+                        invocation_service,
                     )?,
                 ),
-                (None, None, _) => None,
+                (None, None, _, None) => None,
                 _ => {
                     return Err(TraceDecayError::Config {
                         message: "dashboard automation requires one complete daemon profile and project authority"
@@ -494,6 +505,7 @@ pub(super) async fn handle_dashboard(
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_authority,
+                    automation_observation,
                     automation_writer,
                     doctor_report_reader,
                     code_index_freshness_reader,

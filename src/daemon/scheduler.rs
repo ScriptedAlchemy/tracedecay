@@ -114,7 +114,7 @@ fn log_daemon_scheduler_record(
     );
 }
 
-mod automation_observation;
+pub(crate) mod automation_observation;
 
 use automation_observation::{record_combined_scheduler_run, record_scheduler_run};
 

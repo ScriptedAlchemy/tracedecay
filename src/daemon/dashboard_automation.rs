@@ -22,10 +22,10 @@ use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_p
 use tracedecay_automation::managed_skills::validate_skill_id;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
-    DashboardAutomationRunInvocationV1, DashboardAutomationRunPortV1,
+    DashboardAutomationObservationRecorderV1, DashboardAutomationRunPortV1,
     DashboardAutomationRunRequestV1, DashboardAutomationWriter,
-    DashboardManagedSkillCommandInvocationV1, DashboardManagedSkillCommandOutcomeV1,
-    DashboardManagedSkillCommandPortV1, DashboardManagedSkillCommandV1,
+    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandPortV1,
+    DashboardManagedSkillCommandV1,
 };
 use tracedecay_domain::configuration::UserProfileId;
 
@@ -35,6 +35,32 @@ use crate::tracedecay::TraceDecay;
 
 type DashboardAutomationResult<T> = std::result::Result<T, DashboardAutomationAuthorityErrorV1>;
 
+pub(crate) fn dashboard_automation_observation_port(
+    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
+) -> tracedecay_dashboard_api::DashboardAutomationObservationPortV1 {
+    Arc::new(move |project_root| {
+        let invocation_service = invocation_service.clone();
+        Box::pin(async move {
+            let producer = crate::daemon::project_automation_observation_producer(
+                &invocation_service,
+                &project_root,
+            )
+            .await
+            .ok_or_else(|| {
+                "dashboard automation observation authority is unavailable".to_owned()
+            })?;
+            Ok(Arc::new(move |record| {
+                crate::daemon::record_project_automation_run(
+                    producer.as_ref(),
+                    &project_root,
+                    &record,
+                    "dashboard_user_job",
+                );
+            }) as DashboardAutomationObservationRecorderV1)
+        })
+    })
+}
+
 /// Builds the single exact-profile authority used by production dashboard
 /// states and their host-admission integration journeys.
 pub(crate) fn compose_dashboard_automation_authority(
@@ -42,11 +68,13 @@ pub(crate) fn compose_dashboard_automation_authority(
     daemon_user_profile_id: UserProfileId,
     project_graph_resolver: RetainedProjectGraphResolver,
     writer: DashboardAutomationWriter,
+    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
 ) -> Result<DashboardAutomationAuthorityV1> {
     let run_port = dashboard_automation_run_port(
         profile_root.clone(),
         daemon_user_profile_id.clone(),
         Arc::clone(&project_graph_resolver),
+        invocation_service,
     );
     let skill_port = dashboard_managed_skill_command_port(
         profile_root.clone(),
@@ -65,11 +93,13 @@ fn dashboard_automation_run_port(
     profile_root: PathBuf,
     daemon_user_profile_id: UserProfileId,
     project_graph_resolver: RetainedProjectGraphResolver,
+    invocation_service: crate::daemon::service::invocation::DaemonInvocationService,
 ) -> DashboardAutomationRunPortV1 {
     Arc::new(move |invocation| {
         let profile_root = profile_root.clone();
         let daemon_user_profile_id = daemon_user_profile_id.clone();
         let project_graph_resolver = Arc::clone(&project_graph_resolver);
+        let invocation_service = invocation_service.clone();
         Box::pin(async move {
             let cg = resolve_dashboard_automation_project(
                 project_graph_resolver,
@@ -80,7 +110,13 @@ fn dashboard_automation_run_port(
             // The canonical runner owns task locking, cooldowns, run-ledger
             // publication, and curation CAS. Holding the daemon's broad store
             // writer across a model turn would serialize unrelated projects.
-            execute_dashboard_automation_run(cg.as_ref(), profile_root, invocation.request).await
+            execute_dashboard_automation_run(
+                cg.as_ref(),
+                profile_root,
+                invocation.request,
+                &invocation_service,
+            )
+            .await
         })
     })
 }
@@ -204,7 +240,16 @@ async fn execute_dashboard_automation_run(
     cg: &TraceDecay,
     profile_root: PathBuf,
     request: DashboardAutomationRunRequestV1,
+    invocation_service: &crate::daemon::service::invocation::DaemonInvocationService,
 ) -> DashboardAutomationResult<Value> {
+    let producer = crate::daemon::project_automation_observation_producer(
+        invocation_service,
+        cg.project_root(),
+    )
+    .await
+    .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
+        detail: "dashboard automation observation authority is unavailable".to_owned(),
+    })?;
     let pinned = cg
         .configuration_runtime()
         .client()
@@ -219,8 +264,8 @@ async fn execute_dashboard_automation_run(
         DashboardAutomationRunRequestV1::MemoryCurator {
             max_clusters,
             min_confidence,
-        } => serde_json::to_value(
-            run_memory_curator_with_backend(
+        } => {
+            let run = run_memory_curator_with_backend(
                 cg,
                 &config,
                 &pinned.revision_id,
@@ -233,9 +278,15 @@ async fn execute_dashboard_automation_run(
                 },
             )
             .await
-            .map_err(automation_failed)?,
-        )
-        .map_err(automation_failed)?,
+            .map_err(automation_failed)?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "dashboard",
+            );
+            serde_json::to_value(run).map_err(automation_failed)?
+        }
         DashboardAutomationRunRequestV1::SessionReflection {
             provider,
             query,
@@ -248,8 +299,8 @@ async fn execute_dashboard_automation_run(
             role,
             start_time,
             end_time,
-        } => serde_json::to_value(
-            run_session_reflector_with_backend(
+        } => {
+            let run = run_session_reflector_with_backend(
                 cg,
                 &config,
                 &pinned.revision_id,
@@ -272,15 +323,21 @@ async fn execute_dashboard_automation_run(
                 },
             )
             .await
-            .map_err(automation_failed)?,
-        )
-        .map_err(automation_failed)?,
+            .map_err(automation_failed)?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "dashboard",
+            );
+            serde_json::to_value(run).map_err(automation_failed)?
+        }
         DashboardAutomationRunRequestV1::SkillWriting {
             provider,
             query,
             evidence_limit,
-        } => serde_json::to_value(
-            run_skill_writer_with_backend(
+        } => {
+            let run = run_skill_writer_with_backend(
                 cg,
                 &config,
                 &pinned.revision_id,
@@ -296,9 +353,15 @@ async fn execute_dashboard_automation_run(
                 },
             )
             .await
-            .map_err(automation_failed)?,
-        )
-        .map_err(automation_failed)?,
+            .map_err(automation_failed)?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "dashboard",
+            );
+            serde_json::to_value(run).map_err(automation_failed)?
+        }
     };
     Ok(json!({ "run": run }))
 }

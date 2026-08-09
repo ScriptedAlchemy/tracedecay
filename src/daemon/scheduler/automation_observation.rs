@@ -8,8 +8,11 @@ use tracedecay_domain::{
     ProjectId, UtcMicros,
 };
 use tracedecay_usecases::observability::{
-    WorkOwnerObservationResultV1, record_automation_funnel_observation,
+    BoundedObservabilityProducerV1, WorkOwnerObservationResultV1,
+    record_automation_funnel_observation,
 };
+
+use crate::daemon::service::invocation::DaemonInvocationService;
 
 use super::{DaemonEngine, log_daemon_event, log_daemon_scheduler_record};
 
@@ -82,14 +85,47 @@ pub(super) fn record_scheduler_run(
     record: &AutomationRunLedgerRecord,
 ) {
     log_daemon_scheduler_record(project_path, record);
+    let producer = engine
+        .invocation
+        .service
+        .observability_producer_for_project_id(project_id);
+    record_run_with_producer(producer.as_deref(), project_path, record, "scheduler");
+}
+
+/// Records a run executed outside the scheduler against the exact retained
+/// project producer. Missing project authority remains an unavailable
+/// observation; callers never create a second producer or write another log.
+pub(crate) async fn project_run_observation_producer(
+    service: &DaemonInvocationService,
+    project_path: &Path,
+) -> Option<std::sync::Arc<BoundedObservabilityProducerV1>> {
+    service.observability_producer(Some(project_path)).await
+}
+
+pub(crate) fn record_project_run(
+    producer: &BoundedObservabilityProducerV1,
+    project_path: &Path,
+    record: &AutomationRunLedgerRecord,
+    surface: &'static str,
+) {
+    record_run_with_producer(Some(producer), project_path, record, surface);
+}
+
+fn record_run_with_producer(
+    producer: Option<&BoundedObservabilityProducerV1>,
+    project_path: &Path,
+    record: &AutomationRunLedgerRecord,
+    surface: &'static str,
+) {
     let (observation, observed_at) = match automation_funnel_observation_from_record(record) {
         Ok(observation) => observation,
         Err(reason) => {
             log_daemon_event(
-                "scheduler_automation_observation",
+                "automation_observation",
                 &[
                     ("project", project_path.display().to_string()),
                     ("run_id", record.run_id.clone()),
+                    ("surface", surface.to_owned()),
                     ("outcome", "unavailable".to_owned()),
                     ("reason", reason.to_owned()),
                 ],
@@ -97,21 +133,17 @@ pub(super) fn record_scheduler_run(
             return;
         }
     };
-    let producer = engine
-        .invocation
-        .service
-        .observability_producer_for_project_id(project_id);
-    let outcome =
-        match record_automation_funnel_observation(producer.as_deref(), observation, observed_at) {
-            WorkOwnerObservationResultV1::Enqueued => return,
-            WorkOwnerObservationResultV1::DroppedAtCapacity => "dropped_at_capacity",
-            WorkOwnerObservationResultV1::Unavailable => "unavailable",
-        };
+    let outcome = match record_automation_funnel_observation(producer, observation, observed_at) {
+        WorkOwnerObservationResultV1::Enqueued => return,
+        WorkOwnerObservationResultV1::DroppedAtCapacity => "dropped_at_capacity",
+        WorkOwnerObservationResultV1::Unavailable => "unavailable",
+    };
     log_daemon_event(
-        "scheduler_automation_observation",
+        "automation_observation",
         &[
             ("project", project_path.display().to_string()),
             ("run_id", record.run_id.clone()),
+            ("surface", surface.to_owned()),
             ("outcome", outcome.to_owned()),
         ],
     );

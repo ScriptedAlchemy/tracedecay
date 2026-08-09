@@ -97,6 +97,9 @@ pub fn dashboard_automation_authority_for_test(
         cg.store_runtime_registry().profile_id().clone(),
         resolver,
         std::sync::Arc::clone(&writer),
+        crate::daemon::service::invocation::DaemonInvocationService::with_code_index_schedulers(
+            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+        ),
     )?;
     Ok((authority, writer))
 }
