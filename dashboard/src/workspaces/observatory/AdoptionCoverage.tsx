@@ -106,7 +106,7 @@ function CoverageReadModel({
   const failures = denominatorFailures(model);
   const denominatorTruth = denominatorFailureTruth(failures);
   const events = eventCoverageReading(model);
-  const adoption = adoptionCoverageReading();
+  const adoption = adoptionCoverageReading(model);
   const eventDisplay = eligibleDisplay(events.reading, events.integrity, events.coverage);
   const adoptionDisplay = eligibleDisplay(adoption);
   const stamp = (micros: number) => formatMicrosUtc(micros, { zeroAs: 'unbounded' });
@@ -223,8 +223,8 @@ function CoverageReadModel({
           </dl>
           <p className="text-3xs leading-snug text-text-muted">
             The first floor is enforced on every ledger cell on this page. The remaining three are
-            not cleared by anything published here, because no eligible denominator exists to
-            measure them against — which is a denominator failure, not a passing grade.
+            evaluated only when the canonical read carries their required denominators and
+            evidence; an unknown value is not treated as a passing grade.
           </p>
         </section>
 
@@ -244,7 +244,7 @@ function CoverageReadModel({
           <p className="text-3xs leading-snug text-text-muted">
             {failures.total === 0
               ? 'No metric payload reached this read, so an empty audit is unknown rather than a passing denominator check.'
-              : `${failures.missing} measurement${failures.missing === 1 ? '' : 's'} publish no eligible population at all, and ${failures.selfReferential} report one equal to their own observed count. Neither can disagree with its numerator, so no share is taken from either.`}
+              : `${failures.missing} measurement${failures.missing === 1 ? '' : 's'} publish no eligible population. Equal eligible and observed counts are retained as measured pairs because the dashboard does not infer denominator provenance from numeric equality.`}
           </p>
         </section>
 
@@ -273,13 +273,6 @@ function eligibleDisplay(
   coverage: CoverageStateV1 | 'missing' = 'known',
 ): EligibleDisplay {
   if (reading === null) {
-    if (integrity?.kind === 'self_referential') {
-      return {
-        kind: integrity.kind,
-        state: 'conflicting',
-        detail: `non-independent denominator: ${integrity.reason}`,
-      };
-    }
     if (integrity === undefined || integrity.kind === 'independent') {
       const coverageDisplay = limitedCoverageDisplay(coverage);
       if (coverageDisplay !== null) return coverageDisplay;
@@ -304,8 +297,6 @@ function eligibleDisplay(
         detail: 'the source published both counts; no rate or remainder is derived in the dashboard',
         pair: { observed: reading.observed, eligible: reading.eligible },
       };
-    case 'under_rate_floor':
-      return { kind: reading.kind, state: 'partial', detail: reading.reason };
     case 'contradiction':
       return { kind: reading.kind, state: 'conflicting', detail: reading.reason };
     case 'denominator_missing':

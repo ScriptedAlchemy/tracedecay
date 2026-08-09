@@ -28,12 +28,13 @@ function exportRustBundle(): { bundle: JsonSchema; source: string } {
       [
         "test",
         "--quiet",
-        "--test",
-        "dashboard_contract_schema_export",
+        "-p",
+        "tracedecay-dashboard-api",
+        "--lib",
+        "contract_schema::tests::writes_dashboard_contract_schema",
         "--",
         "--ignored",
         "--exact",
-        "writes_dashboard_contract_schema",
       ],
       {
         cwd: REPOSITORY_ROOT,

@@ -1,78 +1,27 @@
-/**
- * `retrieval-quality` — the Plan 26 required view (§"Required product views":
- * "`retrieval-quality` shows per-retriever budgets, candidate/rank/contribution,
- * source freshness/coverage/denial, planner/fan-out/synthesis spans, context
- * precision, task-outcome linkage, and equal-budget ablations").
- *
- * WHAT IS ACTUALLY BEHIND THIS SURFACE
- *
- * Two landed reads, answering two different kinds of question.
- *
- *   `GET /api/observatory` → `ObservatoryReadModelV1` carries the Plan 37
- *   feedback-system quality measurements. Four of them answer parts of this
- *   view's sentence directly and are bound as canonical measurements, with the
- *   wire's own denominator, coverage, descriptor revision, and watermark:
- *   `feedback_coverage`, `feedback_denial_rate`, `feedback_staleness_rate`,
- *   `feedback_diversity`, and `feedback_omission_rate`.
- *
- *   `GET /api/plugins/analytics/diagnostics` → `by_event_kind` carries the
- *   number of records each retrieval observation family produced. That is a
- *   support count, not a measurement, and it is rendered in its own ledger for
- *   the reasons in `observedFamilies.ts`.
- *
- * WHAT IS NOT
- *
- * The seven `retrieval.*` families are landed and recording — `RetrieverObservedV1`
- * carries requested/consumed/eligible/returned candidates and unique
- * contributions per retriever lane, `RetrievalPlannerObservedV1` carries the
- * requested and admitted lanes, `RetrievalSynthesisObservedV1` carries
- * candidate/context counts and tokens, `ContextOutcomeObservedV1` carries the
- * closed outcome vocabulary with its independently-observed and censored flags,
- * and `RetrievalAblationObservedV1` carries baseline/candidate values with a
- * declared unit and coverage. None of it is projected into a read model. The
- * diagnostics projector counts rows and never opens the envelope's JSON, so
- * every figure inside those records is unreachable from this dashboard.
- *
- * THE SUBSTITUTION THIS FILE REFUSES
- *
- * `feedback_relevance` is a ratio over `relevance_labels` — how much of the
- * labelled material was judged relevant. Context precision is a ratio over the
- * context a synthesis step actually admitted. Different numerator, different
- * denominator, different population. Printing the first under the second's
- * heading is the single most tempting error available on this surface, so
- * context precision is stated as unpublished and the reason names the metric
- * that was not substituted for it.
- */
+/** Plan 26 retrieval quality from the canonical Observatory projection. */
 import type { ObservatoryReadModelV1 } from '../../contracts/generated.ts';
 import { readMetric, type PlanDimension, type ReadAnchors } from './planDimension.ts';
 
 /** Why no per-retriever budget, candidate, rank, or contribution figure reaches
  * this surface. */
 const NO_RETRIEVER_PROJECTION =
-  'RetrieverObservedV1 records requested/consumed/eligible/returned candidates and unique ' +
-  'contributions per retriever lane, but no landed read route projects them and the diagnostics ' +
-  'projector counts records without opening the envelope';
+  'the canonical Observatory projection has no retriever evidence for this horizon';
 
 /** Why no planner, fan-out, or synthesis span reaches this surface. */
 const NO_SPAN_PROJECTION =
-  'RetrievalPlannerObservedV1, RetrieverObservedV1, and RetrievalSynthesisObservedV1 are ' +
-  'recorded per stage, but no landed read route projects a stage duration';
+  'the canonical Observatory projection has no retrieval-span evidence for this horizon';
 
 /** Why context precision is not read off the feedback relevance ratio. */
 const NO_CONTEXT_PRECISION =
-  'no landed read route projects context precision; feedback_relevance is a ratio over ' +
-  'relevance_labels, a different population from the admitted context set, and is not ' +
-  'substituted for it here';
+  'context precision is not recorded; feedback relevance uses a different population and is not substituted';
 
 /** Why no task-outcome linkage figure reaches this surface. */
 const NO_OUTCOME_LINKAGE =
-  'ContextOutcomeObservedV1 records the closed outcome vocabulary with independently-observed ' +
-  'and censored flags, but no landed read route projects a linkage rate';
+  'the canonical Observatory projection has no task-outcome evidence for this horizon';
 
 /** Why no ablation comparison reaches this surface. */
 const NO_ABLATION_PROJECTION =
-  'RetrievalAblationObservedV1 records baseline and candidate values with a declared unit and ' +
-  'coverage, but no landed read route projects the comparison';
+  'the canonical Observatory projection has no compatible equal-budget ablation evidence';
 
 /** One band of the view, in the order Plan 26 names them. */
 export interface RetrievalBand {
@@ -132,87 +81,99 @@ export function sourceDimensions(model: ObservatoryReadModelV1): PlanDimension[]
  * plan requires rank, so the card states the requirement and says nothing
  * records it, which is a stronger statement than omitting the row.
  */
-export function retrieverDimensions(): PlanDimension[] {
-  const unpublished = (id: string, label: string, requirement: string): PlanDimension => ({
+export function retrieverDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+  const projected = (
+    id: string,
+    label: string,
+    requirement: string,
+    metric: string,
+  ): PlanDimension => ({
     id,
     label,
     requirement,
-    reading: { kind: 'unpublished', reason: NO_RETRIEVER_PROJECTION },
+    reading: readMetric(model.metrics, metric, NO_RETRIEVER_PROJECTION),
   });
   return [
-    unpublished(
+    projected(
       'retriever_budget',
       'per-retriever budget',
       'requested against consumed candidate budget, per retriever lane and profile revision',
+      'retriever_consumed_candidates',
     ),
-    unpublished(
+    projected(
       'candidate_counts',
       'candidate counts',
       'eligible against returned candidates over the same retriever population',
+      'retriever_returned_candidates',
     ),
-    unpublished(
+    projected(
       'candidate_rank',
       'candidate rank',
       'rank position of contributing candidates within each retriever lane',
+      'retriever_candidate_rank',
     ),
-    unpublished(
+    projected(
       'unique_contribution',
       'unique contribution',
       'candidates a lane contributed that no other lane returned',
+      'retriever_unique_contributions',
     ),
   ];
 }
 
 /** Planner, fan-out, and synthesis spans, named individually for the same
  * reason the retriever band is split. */
-export function spanDimensions(): PlanDimension[] {
-  const span = (id: string, label: string, requirement: string): PlanDimension => ({
+export function spanDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+  const span = (id: string, label: string, requirement: string, metric: string): PlanDimension => ({
     id,
     label,
     requirement,
-    reading: { kind: 'unpublished', reason: NO_SPAN_PROJECTION },
+    reading: readMetric(model.metrics, metric, NO_SPAN_PROJECTION),
   });
   return [
     span(
       'planner_span',
       'planner span',
       'time to decide requested and admitted lanes, with the planner revision that decided them',
+      'retrieval_planner_span_p95',
     ),
     span(
       'fanout_span',
       'fan-out span',
       'time across the admitted retriever lanes running in parallel',
+      'retrieval_fanout_span_p95',
     ),
     span(
       'synthesis_span',
       'synthesis span',
       'time to reduce candidates to admitted context, and whether the step abstained',
+      'retrieval_synthesis_span_p95',
     ),
   ];
 }
 
 /** Precision, outcome linkage, and equal-budget ablations. */
-export function judgementDimensions(): PlanDimension[] {
+export function judgementDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'context_precision',
       label: 'context precision',
       requirement: 'share of admitted context items that contributed to the answer',
-      reading: { kind: 'unpublished', reason: NO_CONTEXT_PRECISION },
+      reading: readMetric(model.metrics, 'retrieval_context_precision', NO_CONTEXT_PRECISION),
     },
     {
       id: 'task_outcome_linkage',
       label: 'task-outcome linkage',
       requirement:
         'retrieval linked to an independently observed task outcome, with censored links kept separate',
-      reading: { kind: 'unpublished', reason: NO_OUTCOME_LINKAGE },
+      reading: readMetric(model.metrics, 'retrieval_task_outcome_linkage', NO_OUTCOME_LINKAGE),
     },
     {
       id: 'equal_budget_ablation',
       label: 'equal-budget ablation',
       requirement:
         'baseline against candidate at equal candidate, context, and token budget, in a declared unit',
-      reading: { kind: 'unpublished', reason: NO_ABLATION_PROJECTION },
+      reading: readMetric(model.metrics, 'retrieval_equal_budget_ablation', NO_ABLATION_PROJECTION),
     },
   ];
 }
@@ -227,13 +188,13 @@ export function retrievalQualityBands(model: ObservatoryReadModelV1): RetrievalB
     {
       marker: 'retrievers',
       label: 'Per-retriever budgets and contribution',
-      dimensions: retrieverDimensions(),
+      dimensions: retrieverDimensions(model),
     },
-    { marker: 'spans', label: 'Planner, fan-out, and synthesis spans', dimensions: spanDimensions() },
+    { marker: 'spans', label: 'Planner, fan-out, and synthesis spans', dimensions: spanDimensions(model) },
     {
       marker: 'judgement',
       label: 'Precision, outcome linkage, and ablations',
-      dimensions: judgementDimensions(),
+      dimensions: judgementDimensions(model),
     },
   ];
 }

@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{CoverageStateV1, ObservabilityEnvelopeV1};
+use tracedecay_domain::{AnalyticsModeV1, CoverageStateV1, ObservabilityEnvelopeV1};
 
 use crate::ApplicationContractError;
 
@@ -169,6 +169,41 @@ pub struct MetricValueV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct AnalyticsModeReadModelV1 {
+    pub current: Option<AnalyticsModeV1>,
+    pub transition_watermark: Option<String>,
+    pub coverage: MetricCoverageV1,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonDispositionV1 {
+    Promote,
+    Reject,
+    InsufficientEvidence,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+pub struct PerformanceComparisonReadModelV1 {
+    pub baseline_build: Option<String>,
+    pub candidate_build: Option<String>,
+    pub workload: Option<String>,
+    pub corpus: Option<String>,
+    pub environment: Option<String>,
+    pub oracle: Option<String>,
+    pub configuration: Option<String>,
+    pub platform: Option<String>,
+    pub rollback_profile: Option<String>,
+    pub eligible_outcomes: Option<u64>,
+    pub paired_outcomes: Option<u64>,
+    pub regression_observed: Option<bool>,
+    pub disposition: ComparisonDispositionV1,
+    pub coverage: MetricCoverageV1,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ObservatoryReadModelV1 {
     pub authorized_scope_ref: String,
     pub horizon: ObservabilityHorizonV1,
@@ -176,6 +211,8 @@ pub struct ObservatoryReadModelV1 {
     pub observed_at_micros: i64,
     pub current: bool,
     pub metrics: Vec<MetricValueV1>,
+    pub analytics_mode: AnalyticsModeReadModelV1,
+    pub comparison: PerformanceComparisonReadModelV1,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -247,7 +284,62 @@ mod tests {
                 calibration: None,
                 unavailable_reason: None,
             }],
+            analytics_mode: AnalyticsModeReadModelV1 {
+                current: None,
+                transition_watermark: None,
+                coverage: MetricCoverageV1 {
+                    eligible: None,
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: 1,
+                    excluded: 0,
+                    state: CoverageStateV1::Unknown,
+                },
+                unavailable_reason: Some("analytics_consent_not_observed".into()),
+            },
+            comparison: PerformanceComparisonReadModelV1 {
+                baseline_build: None,
+                candidate_build: None,
+                workload: None,
+                corpus: None,
+                environment: None,
+                oracle: None,
+                configuration: None,
+                platform: None,
+                rollback_profile: None,
+                eligible_outcomes: None,
+                paired_outcomes: None,
+                regression_observed: None,
+                disposition: ComparisonDispositionV1::InsufficientEvidence,
+                coverage: MetricCoverageV1 {
+                    eligible: None,
+                    observed: 0,
+                    completed: 0,
+                    censored: 0,
+                    unknown: 1,
+                    excluded: 0,
+                    state: CoverageStateV1::Unknown,
+                },
+                unavailable_reason: Some("comparison_evidence_not_recorded".into()),
+            },
         }
+    }
+
+    #[test]
+    fn observatory_contract_carries_controls_and_comparison_truth() {
+        let model = fixture();
+        assert_eq!(model.analytics_mode.current, None);
+        assert_eq!(
+            model.analytics_mode.coverage.state,
+            CoverageStateV1::Unknown
+        );
+        assert_eq!(model.comparison.baseline_build, None);
+        assert_eq!(
+            model.comparison.disposition,
+            ComparisonDispositionV1::InsufficientEvidence
+        );
+        assert_eq!(model.comparison.coverage.state, CoverageStateV1::Unknown);
     }
 
     #[test]

@@ -4,15 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MetricValueV1 } from '../../contracts/generated.ts';
 import { PerformanceBudgets } from './PerformanceBudgets.tsx';
 
-/**
- * The Plan 26 `performance-budgets` view over `/api/observatory`.
- *
- * Two of its thirteen dimensions have a projection behind them. The assertions
- * are therefore mostly about the eleven that do not: each occupies a card, each
- * states its own reason, each states support/denominator/censoring/interval/
- * horizon/descriptor-revision/anchors as not published, and none of them renders
- * a zero, an empty unit, or a bar.
- */
+/** The Plan 26 `performance-budgets` view over `/api/observatory`. */
 
 const NOW_MICROS = 1_753_003_600_000_000;
 
@@ -22,7 +14,7 @@ afterEach(() => {
 
 describe('Observatory performance budgets', () => {
   it('renders the p95 the wire publishes, converted with the exact figure kept', async () => {
-    renderBudgets(readModel([latency('feedback_latency_p95', 43_250)]));
+    renderBudgets(readModel([latency('operation_latency_p95', 43_250)]));
 
     expect(await screen.findByText('latency p95')).toBeTruthy();
     const card = document.querySelector('[data-dimension="latency_p95"]');
@@ -32,23 +24,23 @@ describe('Observatory performance budgets', () => {
     expect(card?.textContent).toContain('96 observed');
   });
 
-  it('renders p50 and p99 as unavailable with their reason, never as zero', async () => {
-    renderBudgets(readModel([latency('feedback_latency_p95', 43_250)]));
+  it('renders p50 and p99 as server-unknown with their reason, never as zero', async () => {
+    renderBudgets(readModel([latency('operation_latency_p95', 43_250)]));
 
     await screen.findByText('latency p95');
     for (const id of ['latency_p50', 'latency_p99']) {
       const card = document.querySelector(`[data-dimension="${id}"]`);
       expect(card?.getAttribute('data-dimension-available')).toBe('false');
-      expect(card?.getAttribute('data-dimension-state')).toBe('unsupported');
+      expect(card?.getAttribute('data-dimension-state')).toBe('unknown');
       expect(card?.textContent).toContain('—');
-      expect(card?.textContent).toContain('OperationResourceObservedV1');
+      expect(card?.textContent).toContain('not_observed');
       // The two failures this card exists to prevent.
       expect(card?.textContent).not.toContain('43.25');
       expect(card?.textContent).not.toContain('0 ms');
     }
   });
 
-  it('states every mandatory row on an unprojected card rather than omitting it', async () => {
+  it('states every mandatory row on an unknown card rather than omitting it', async () => {
     renderBudgets(readModel([]));
 
     await screen.findByText('queue span');
@@ -65,24 +57,23 @@ describe('Observatory performance budgets', () => {
     ]) {
       expect(text).toContain(term);
     }
-    expect(text).toContain('not published');
+    expect(text).toContain('not_observed');
     // Safe anchors: the scope and the watermark, and nothing path-shaped.
     expect(text).toContain('scope project.tracedecay');
   });
 
-  it('separates a percentile the projector could not value from one nothing projects', async () => {
+  it('keeps distinct unavailable reasons for distinct canonical metrics', async () => {
     renderBudgets(
       readModel([
-        { ...latency('feedback_latency_p95', null), unavailable_reason: 'no_latency_samples' },
+        { ...latency('operation_latency_p95', null), unavailable_reason: 'no_latency_samples' },
       ]),
     );
 
     await screen.findByText('latency p95');
     const unmeasured = document.querySelector('[data-dimension="latency_p95"]');
-    const unprojected = document.querySelector('[data-dimension="latency_p50"]');
-    // Both unavailable, for different reasons, on different chips.
+    const otherUnknown = document.querySelector('[data-dimension="latency_p50"]');
     expect(unmeasured?.getAttribute('data-dimension-state')).toBe('unknown');
-    expect(unprojected?.getAttribute('data-dimension-state')).toBe('unsupported');
+    expect(otherUnknown?.getAttribute('data-dimension-state')).toBe('unknown');
     expect(unmeasured?.textContent).toContain('no_latency_samples');
     // The daemon did publish this metric's frame, so the frame stays visible.
     expect(unmeasured?.textContent).toContain('latency samples');
@@ -91,7 +82,7 @@ describe('Observatory performance budgets', () => {
   it('states how many requirements the wire actually answered', async () => {
     renderBudgets(
       readModel([
-        latency('feedback_latency_p95', 43_250),
+        latency('operation_latency_p95', 43_250),
         latency('feedback_revocation_propagation_p95', 1_200),
       ]),
     );
@@ -116,13 +107,11 @@ describe('Observatory performance budgets', () => {
     expect(screen.getAllByRole('listitem').length).toBe(13);
   });
 
-  it('names the producing families behind the projection gap', async () => {
+  it('does not render the superseded projection-gap section', async () => {
     renderBudgets(readModel([]));
 
-    expect(await screen.findByText(/why most cards are unavailable/i)).toBeTruthy();
-    const gap = document.querySelector('[data-budgets-gap="unprojected"]');
-    expect(gap?.textContent).toContain('OperationResourceObservedV1');
-    expect(gap?.textContent).toContain('NoProgressObservedV1');
+    await screen.findByText('queue span');
+    expect(document.querySelector('[data-budgets-gap="unprojected"]')).toBeNull();
   });
 
   it('renders the server domain state and omission reasons without overriding them', async () => {
@@ -175,8 +164,41 @@ function readModel(metrics: MetricValueV1[]) {
     watermark: 'analytics:4821',
     observed_at_micros: NOW_MICROS,
     current: true,
-    metrics,
+    metrics: withRequiredMetrics(metrics),
+    analytics_mode: {
+      current: null,
+      transition_watermark: null,
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
+    comparison: {
+      baseline_build: null, candidate_build: null, workload: null, corpus: null,
+      environment: null, oracle: null, configuration: null, platform: null,
+      rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+      regression_observed: null, disposition: 'insufficient_evidence',
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
   };
+}
+
+const REQUIRED_METRICS = [
+  'operation_latency_p50', 'operation_latency_p95', 'operation_latency_p99',
+  'queue_span_p95', 'store_lock_span_p95', 'index_lock_span_p95',
+  'provider_negotiation_span_p95', 'process_rss_peak', 'cpu_time_total',
+  'io_amplification', 'no_progress_outcomes', 'accepted_budget_revision',
+] as const;
+
+function withRequiredMetrics(metrics: MetricValueV1[]): MetricValueV1[] {
+  const present = new Set(metrics.map((metric) => metric.metric));
+  return [
+    ...metrics,
+    ...REQUIRED_METRICS.filter((metric) => !present.has(metric)).map((metric) => ({
+      ...latency(metric, null),
+      unavailable_reason: 'not_observed',
+      uncertainty: { lower: null, upper: null, reason: 'not_observed' },
+    })),
+  ];
 }
 
 function envelope(payload: unknown, domainState: string, omissionReasons: string[]) {

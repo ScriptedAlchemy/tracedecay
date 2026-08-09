@@ -1,7 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  DashboardEnvelopeV1,
+  ObservatoryReadModelV1,
+} from '../../contracts/generated.ts';
 import { AnalyticsControls } from './AnalyticsControls.tsx';
+import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
 /**
  * The Plan 26 `analytics-controls` view.
@@ -21,46 +26,46 @@ afterEach(() => {
 });
 
 describe('Observatory analytics controls', () => {
-  it('describes all three collection modes without marking any of them current', async () => {
+  it('marks only the mode published by the canonical projection as current', async () => {
     renderControls();
 
     await screen.findByRole('region', { name: 'collection mode' });
     for (const mode of ['off', 'local_only', 'aggregate_share']) {
       const entry = document.querySelector(`[data-analytics-mode="${mode}"]`);
       expect(entry).toBeTruthy();
-      // No mode is asserted to be in force, because no read route says which is.
-      expect(entry?.getAttribute('data-analytics-mode-current')).toBe('unknown');
+      expect(entry?.getAttribute('data-analytics-mode-current')).toBe(
+        mode === 'local_only' ? 'true' : 'false',
+      );
     }
     expect(screen.getByText(/no network exporter · default/)).toBeTruthy();
     expect(screen.getByText(/network exporter · explicit opt-in required/)).toBeTruthy();
   });
 
-  it('reports the unpublished mode as unsupported and explicitly not Off', async () => {
+  it('reports the published mode without defaulting it in the browser', async () => {
     renderControls();
 
     const block = await screen.findByRole('region', { name: 'collection mode' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('unsupported');
-    expect(block.textContent).toContain('an unread mode is not Off');
-    expect(block.textContent).toContain('not published');
+    expect(block.getAttribute('data-analytics-control-state')).toBe('ready');
+    expect(block.textContent).toContain('An unavailable mode is never read as Off');
+    expect(block.textContent).toContain('Local only');
   });
 
-  it('reports share staging age as unpublished rather than as a zero age', async () => {
+  it('reports share staging age from the canonical projection', async () => {
     renderControls();
 
     const block = await screen.findByRole('region', { name: 'share staging age' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('unsupported');
-    expect(block.textContent).toContain('share_staging_age_seconds');
-    expect(block.textContent).toContain('no age — including an age of zero — is shown');
+    expect(block.getAttribute('data-analytics-control-state')).toBe('ready');
+    expect(block.textContent).toContain('17 s');
   });
 
   it('never reports zero egress failures for an exporter that does not exist', async () => {
     renderControls();
 
     const block = await screen.findByRole('region', { name: 'egress failures' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('unsupported');
-    expect(block.textContent).toContain('not a measurement of zero failures');
+    expect(block.getAttribute('data-analytics-control-state')).toBe('unknown');
+    expect(block.textContent).toContain('not zero failures');
     expect(document.querySelector('[data-egress-failures]')?.getAttribute('data-egress-failures'))
-      .toBe('unpublished');
+      .toBe('unknown');
   });
 
   it('reads the retention-backlog status the findings route publishes', async () => {
@@ -166,9 +171,80 @@ function renderControls(
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(
     <QueryClientProvider client={client}>
-      <AnalyticsControls />
+      <AnalyticsControls reads={accountingReads()} />
     </QueryClientProvider>,
   );
+}
+
+function accountingReads(): ObservatoryAccountingReads {
+  const metrics = [
+    controlMetric('analytics_share_staging_age_seconds', 17),
+    controlMetric('analytics_egress_failures', null),
+  ];
+  const payload = {
+    authorized_scope_ref: 'project.tracedecay',
+    horizon: { since_micros: 0, until_micros: NOW_MICROS },
+    watermark: 'analytics:4821',
+    observed_at_micros: NOW_MICROS,
+    current: true,
+    metrics,
+    analytics_mode: {
+      current: 'local_only',
+      transition_watermark: 'analytics:4820',
+      coverage: metricCoverage('known'),
+      unavailable_reason: null,
+    },
+    comparison: {
+      baseline_build: null, candidate_build: null, workload: null, corpus: null,
+      environment: null, oracle: null, configuration: null, platform: null,
+      rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+      regression_observed: null, disposition: 'insufficient_evidence',
+      coverage: metricCoverage('unknown'), unavailable_reason: 'not_observed',
+    },
+  };
+  return {
+    observatory: {
+      result: {
+        outcome: 'envelope',
+        envelope: envelope(payload) as DashboardEnvelopeV1<ObservatoryReadModelV1>,
+      },
+      pending: false,
+      refreshing: false,
+      refresh: () => undefined,
+    },
+    diagnostics: {
+      result: undefined,
+      pending: false,
+      refreshing: false,
+      refresh: () => undefined,
+    },
+  };
+}
+
+function metricCoverage(state: 'known' | 'unknown') {
+  return {
+    eligible: state === 'known' ? 1 : null,
+    observed: state === 'known' ? 1 : 0,
+    completed: state === 'known' ? 1 : 0,
+    censored: 0,
+    unknown: state === 'known' ? 0 : 1,
+    excluded: 0,
+    state,
+  };
+}
+
+function controlMetric(metric: string, value: number | null) {
+  return {
+    descriptor_revision: 'analytics-controls.v1', metric, value,
+    unit: metric.includes('age') ? 'seconds' : 'events',
+    denominator: 'latest_analytics_consent', denominator_value: value == null ? null : 1,
+    coverage: metricCoverage(value == null ? 'unknown' : 'known'), evidence_class: 'measurement',
+    provenance: { source: 'observability_envelope', source_revision: 'observability-envelope.v1', projector_revision: 'observatory-plan26-projector.v1', watermark: 'analytics:4821' },
+    cohort: { descriptor_revision: 'latest_analytics_consent.v1', eligible_population: 'latest_analytics_consent' },
+    temporal: { horizon: { since_micros: 0, until_micros: NOW_MICROS }, baseline_watermark: null, delta: null },
+    uncertainty: { lower: value, upper: value, reason: value == null ? 'not_observed' : null },
+    calibration: null, unavailable_reason: value == null ? 'not_observed' : null,
+  };
 }
 
 function findingsPayload(kindStatuses: unknown[]) {

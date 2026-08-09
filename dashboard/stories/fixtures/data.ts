@@ -24,6 +24,57 @@ const nowSecs = Math.floor(Date.now() / 1000);
 const nowMicros = Date.now() * 1000;
 const DAY = 86_400;
 
+const PLAN26_OBSERVATORY_METRICS = [
+  'adoption_eligible',
+  'adoption_enabled',
+  'adoption_available',
+  'adoption_invoked',
+  'adoption_terminal',
+  'adoption_independently_useful',
+  'adoption_repeat_useful',
+  'adoption_correct_abstention',
+  'adoption_censored_outcomes',
+  'adoption_unknown_outcomes',
+  'retriever_consumed_candidates',
+  'retriever_returned_candidates',
+  'retriever_candidate_rank',
+  'retriever_unique_contributions',
+  'retrieval_planner_span_p95',
+  'retrieval_fanout_span_p95',
+  'retrieval_synthesis_span_p95',
+  'retrieval_context_precision',
+  'retrieval_task_outcome_linkage',
+  'retrieval_equal_budget_ablation',
+  'operation_latency_p50',
+  'operation_latency_p95',
+  'operation_latency_p99',
+  'queue_span_p95',
+  'store_lock_span_p95',
+  'index_lock_span_p95',
+  'provider_negotiation_span_p95',
+  'process_rss_peak',
+  'cpu_time_total',
+  'io_amplification',
+  'no_progress_outcomes',
+  'accepted_budget_revision',
+  'comparison_baseline_build',
+  'comparison_candidate_build',
+  'comparison_workload_corpus',
+  'comparison_environment_platform',
+  'comparison_oracle',
+  'comparison_rollback_profile',
+  'comparison_outcome_counts',
+  'comparison_stratum_support',
+  'comparison_intervals',
+  'comparison_calibration',
+  'comparison_risk_coverage',
+  'comparison_flaky_indeterminate',
+  'comparison_deviations',
+  'comparison_paired_outcomes',
+  'analytics_share_staging_age_seconds',
+  'analytics_egress_failures',
+] as const;
+
 /** Cyclic array access with a non-undefined element type (fixtures always index
  * a non-empty constant array, so the bounds are known-good). */
 function pick<T>(arr: readonly T[], i: number): T {
@@ -2998,6 +3049,68 @@ function observabilityMetric(
   });
 }
 
+function plan26UnknownMetric(metric: string): Record<string, unknown> {
+  const microseconds = metric.includes('latency') || metric.includes('span');
+  return metricValue({
+    metric,
+    value: null,
+    unit: microseconds ? 'microseconds' : 'events',
+    denominator: 'eligible_observations',
+    eligible: null,
+    source: 'observability_envelope',
+    sourceRevision: 'observability-envelope.v1',
+    projectorRevision: 'observatory-plan26-projector.v1',
+    watermark: 'analytics:918422',
+    descriptorRevision: 'observatory-plan26.v1',
+    unavailableReason: 'observation_family_not_recorded',
+  });
+}
+
+function analyticsModeReadModel(): Record<string, unknown> {
+  return {
+    current: 'local_only',
+    transition_watermark: 'analytics:918421',
+    coverage: {
+      eligible: 1,
+      observed: 1,
+      completed: 1,
+      censored: 0,
+      unknown: 0,
+      excluded: 0,
+      state: 'known',
+    },
+    unavailable_reason: null,
+  };
+}
+
+function comparisonReadModel(): Record<string, unknown> {
+  return {
+    baseline_build: null,
+    candidate_build: null,
+    workload: null,
+    corpus: null,
+    environment: null,
+    oracle: null,
+    configuration: null,
+    platform: null,
+    rollback_profile: null,
+    eligible_outcomes: null,
+    paired_outcomes: null,
+    regression_observed: null,
+    disposition: 'insufficient_evidence',
+    coverage: {
+      eligible: null,
+      observed: 0,
+      completed: 0,
+      censored: 0,
+      unknown: 1,
+      excluded: 0,
+      state: 'unknown',
+    },
+    unavailable_reason: 'comparison_evidence_not_recorded',
+  };
+}
+
 function feedbackMetric(spec: {
   metric: string;
   value: number | null;
@@ -3020,7 +3133,9 @@ function feedbackMetric(spec: {
 /** GET /api/observatory (src/dashboard/analytics_api.rs `observatory`). */
 function observatoryEnvelope(): Record<string, unknown> {
   const metrics = [
+    observabilityMetric('observability_eligible_events', 6_142),
     observabilityMetric('observability_events', 6_142),
+    observabilityMetric('observability_late_arrivals', 14),
     observabilityMetric('observability_failures', 23),
     observabilityMetric('telemetry_drops_lower_bound', 0),
     feedbackMetric({
@@ -3091,6 +3206,7 @@ function observatoryEnvelope(): Record<string, unknown> {
       eligible: null,
       reason: 'no_stack_transition_observations',
     }),
+    ...PLAN26_OBSERVATORY_METRICS.map(plan26UnknownMetric),
   ];
   const payload = {
     authorized_scope_ref: 'proj_a5b3d7e3ebe14ca7',
@@ -3099,6 +3215,8 @@ function observatoryEnvelope(): Record<string, unknown> {
     observed_at_micros: nowMicros,
     current: false,
     metrics,
+    analytics_mode: analyticsModeReadModel(),
+    comparison: comparisonReadModel(),
   };
   return {
     ...envelope(payload, 'partial', [
@@ -3363,10 +3481,15 @@ function observatoryReadModel(): Record<string, unknown> {
     observed_at_micros: nowMicros,
     current: true,
     metrics: [
+      metric('observability_eligible_events', observed),
       metric('observability_events', observed),
+      metric('observability_late_arrivals', 0),
       metric('observability_failures', 37),
       metric('telemetry_drops_lower_bound', 0),
+      ...PLAN26_OBSERVATORY_METRICS.map(plan26UnknownMetric),
     ],
+    analytics_mode: analyticsModeReadModel(),
+    comparison: comparisonReadModel(),
   };
 }
 

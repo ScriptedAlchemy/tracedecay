@@ -1,19 +1,4 @@
-/**
- * PERFORMANCE COMPARISONS — `GET /api/observatory` (anchors) plus the Plan 26
- * comparison disposition rules.
- *
- * The surface renders exactly one disposition. It is drawn as one element,
- * carrying one `data-comparison-disposition` value, beside the two dispositions
- * that were *not* reached — stated as not-reached rather than omitted, because
- * a reader has to be able to see that `reject` was not quietly the same answer
- * as `insufficient_evidence`.
- *
- * Today the disposition is `insufficient_evidence`, and it is derived, not
- * hardcoded: no comparison record is published, so no baseline or candidate
- * build is pinned, and `decideDisposition` reaches insufficient evidence by the
- * plan's own first precondition. If a comparison read route lands, the same
- * function will produce `promote` or `reject` from the same rules.
- */
+/** Performance comparison evidence and disposition from `GET /api/observatory`. */
 import type { ReactNode } from 'react';
 import {
   ObservatoryReadModelV1Schema,
@@ -29,13 +14,11 @@ import { PlanDimensionGrid } from './PlanDimensionCard.tsx';
 import { planDimensionPresentation } from './planDimension.ts';
 import {
   COMPARISON_DISPOSITIONS,
-  UNPUBLISHED_COMPARISON_EVIDENCE,
   comparisonAnchors,
-  decideDisposition,
   dispositionPresentation,
   performanceComparisonBands,
-  type ComparisonDispositionV1,
 } from './performanceComparisons.ts';
+import type { ComparisonDispositionV1 } from '../../contracts/generated.ts';
 
 export function PerformanceComparisons() {
   const read = useEnvelope(
@@ -84,8 +67,8 @@ function ComparisonReadModel({
   truth: ReactNode;
 }) {
   const anchors = comparisonAnchors(model);
-  const bands = performanceComparisonBands();
-  const decision = decideDisposition(UNPUBLISHED_COMPARISON_EVIDENCE);
+  const bands = performanceComparisonBands(model);
+  const decision = model.comparison;
   const stamp = (micros: number) => formatMicrosUtc(micros, { zeroAs: 'unbounded' });
 
   return (
@@ -106,7 +89,10 @@ function ComparisonReadModel({
       </dl>
 
       <div className="flex flex-col gap-4 px-4 py-3">
-        <Disposition disposition={decision.disposition} reason={decision.reason} />
+        <Disposition
+          disposition={decision.disposition}
+          reason={decision.unavailable_reason ?? 'comparison evidence is complete'}
+        />
 
         {bands.map((band) => (
           <PlanDimensionGrid

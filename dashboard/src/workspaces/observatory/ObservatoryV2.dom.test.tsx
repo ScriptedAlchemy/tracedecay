@@ -97,7 +97,7 @@ describe('the mounted Observatory V2 accounting surface', () => {
     expect(window?.querySelector('[data-state]')?.getAttribute('data-state')).toBe('stale');
   });
 
-  it('renders an under-floor eligible-versus-observed pair as partial instead of unsupported', async () => {
+  it('renders a count pair without deriving a rate-floor result', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -115,10 +115,9 @@ describe('the mounted Observatory V2 accounting surface', () => {
     renderObservatory();
 
     const pair = await screen.findByLabelText('Eligible versus observed');
-    expect(pair.getAttribute('data-coverage-ratio')).toBe('under_rate_floor');
-    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
-    expect(pair.textContent).toContain('a rate requires 20 eligible units');
-    expect(pair.textContent).not.toContain('Unsupported');
+    expect(pair.getAttribute('data-coverage-ratio')).toBe('measured');
+    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('ready');
+    expect(pair.textContent).toContain('4 observed of 5 eligible');
   });
 
   it('does not promote a numerically populated partial metric to a measured ready pair', async () => {
@@ -145,7 +144,7 @@ describe('the mounted Observatory V2 accounting surface', () => {
     expect(pair.textContent).not.toContain('24 observed of 30 eligible');
   });
 
-  it('renders a self-referential denominator as non-independent conflict, not unsupported', async () => {
+  it('renders equal eligible and observed counts as a measured pair', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -163,10 +162,9 @@ describe('the mounted Observatory V2 accounting surface', () => {
     renderObservatory();
 
     const pair = await screen.findByLabelText('Eligible versus observed');
-    expect(pair.getAttribute('data-coverage-ratio')).toBe('self_referential');
-    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('conflicting');
-    expect(pair.textContent).toContain('non-independent denominator');
-    expect(pair.textContent).not.toContain('Unsupported');
+    expect(pair.getAttribute('data-coverage-ratio')).toBe('measured');
+    expect(pair.querySelector('[data-state]')?.getAttribute('data-state')).toBe('ready');
+    expect(pair.textContent).toContain('24 observed of 24 eligible');
   });
 });
 
@@ -187,7 +185,27 @@ function observatoryModel(metrics: unknown[] = []) {
     metrics,
     observed_at_micros: NOW_MICROS,
     watermark: 'analytics:4821',
+    analytics_mode: analyticsMode(),
+    comparison: comparison(),
   };
+}
+
+function analyticsMode() {
+  return { current: null, transition_watermark: null, coverage: unknownCoverage(), unavailable_reason: 'not_observed' };
+}
+
+function comparison() {
+  return {
+    baseline_build: null, candidate_build: null, workload: null, corpus: null,
+    environment: null, oracle: null, configuration: null, platform: null,
+    rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+    regression_observed: null, disposition: 'insufficient_evidence',
+    coverage: unknownCoverage(), unavailable_reason: 'not_observed',
+  };
+}
+
+function unknownCoverage() {
+  return { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' };
 }
 
 function diagnosticsModel() {

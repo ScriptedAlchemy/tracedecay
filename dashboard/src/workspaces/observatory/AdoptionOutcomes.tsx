@@ -1,23 +1,4 @@
-/**
- * ADOPTION OUTCOMES — the Plan 26 outcome funnel, correct abstention,
- * independently useful and retained use.
- *
- * Two independent reads, as on every accounting surface here:
- *
- *   `GET /api/observatory` supplies the safe anchors every card needs — the
- *   scope the read was authorized for, the watermark it was taken at, and the
- *   window it covers. It publishes no adoption measurement, and this view does
- *   not pretend otherwise: the anchors are labelled as the observatory read's
- *   own.
- *
- *   `GET /api/plugins/analytics/diagnostics` supplies how many records each
- *   adoption observation family produced.
- *
- * The whole funnel is unavailable, and that is the finding rather than a gap in
- * the page. Nothing here draws a funnel, infers a stage from a record count,
- * or reads the diagnostics outcome tally as a terminal count. See
- * `adoptionOutcomes.ts` for which field would have carried each stage.
- */
+/** Plan 26 adoption outcomes and independent observation-family coverage. */
 import type { ReactNode } from 'react';
 import {
   type AnalyticsDiagnosticsPayloadV1,
@@ -98,9 +79,9 @@ function OutcomeReadModel({
   families: ReadState<DashboardEnvelopeV1<AnalyticsDiagnosticsPayloadV1>>;
   truth: ReactNode;
 }) {
-  const bands = adoptionOutcomeBands();
+  const bands = adoptionOutcomeBands(model);
   const coverage = outcomeCoverage(bands);
-  const consistency = funnelConsistency(funnelStageCounts());
+  const consistency = funnelConsistency(funnelStageCounts(model));
   const anchors: ReadAnchors = {
     authorizedScopeRef: model.authorized_scope_ref,
     watermark: model.watermark,
@@ -130,9 +111,8 @@ function OutcomeReadModel({
       <div className="flex flex-col gap-4 px-4 py-3">
         <p className="text-2xs leading-relaxed text-text-secondary" data-outcomes-summary="">
           {coverage.measured} of {coverage.required} required outcome dimensions carry a figure.{' '}
-          {coverage.unprojected} are recorded server-side but projected by no landed read route.
-          The anchors above are the observatory read&apos;s own — that read publishes no adoption
-          measurement, and none is borrowed from it.
+          {coverage.required - coverage.measured} retain the daemon&apos;s unknown or partial state,
+          denominator, and reason rather than inferring a browser value.
         </p>
 
         {bands.map((band) => (

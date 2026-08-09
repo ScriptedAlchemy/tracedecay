@@ -45,14 +45,14 @@ describe('eligible versus observed coverage binding', () => {
 describe('denominator failure truth', () => {
   it('treats an empty 0-of-0 audit as unknown rather than ready', () => {
     expect(
-      denominatorFailureTruth({ failed: 0, total: 0, missing: 0, selfReferential: 0 }),
+      denominatorFailureTruth({ failed: 0, total: 0, missing: 0 }),
     ).toMatchObject({ state: 'unknown' });
   });
 
-  it('reports a self-referential denominator as a conflict, not unsupported', () => {
+  it('reports a missing denominator as unknown', () => {
     expect(
-      denominatorFailureTruth({ failed: 1, total: 1, missing: 0, selfReferential: 1 }),
-    ).toMatchObject({ state: 'conflicting' });
+      denominatorFailureTruth({ failed: 1, total: 1, missing: 1 }),
+    ).toMatchObject({ state: 'unknown' });
   });
 });
 
@@ -108,5 +108,19 @@ function readModel(
           ],
     observed_at_micros: NOW_MICROS,
     watermark: 'analytics:4821',
+    analytics_mode: {
+      current: null,
+      transition_watermark: null,
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
+    comparison: {
+      baseline_build: null, candidate_build: null, workload: null, corpus: null,
+      environment: null, oracle: null, configuration: null, platform: null,
+      rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+      regression_observed: null, disposition: 'insufficient_evidence',
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
   };
 }

@@ -1,22 +1,4 @@
-/**
- * RETRIEVAL QUALITY — two independent reads, never merged.
- *
- *   `GET /api/observatory` → the Plan 26 canonical measurements. Five of this
- *   view's dimensions are real figures from it; the other ten state that no
- *   landed read route projects them.
- *
- *   `GET /api/plugins/analytics/diagnostics` → per-family record counts for the
- *   seven `retrieval.*` observation families.
- *
- * They are read independently and rendered independently. A failed diagnostics
- * read must not blank the measured source ratios, and a failed observatory read
- * must not blank the record ledger — each says what it could not read, in its
- * own frame, and neither stands in for the other.
- *
- * Nothing on this surface divides a record count by a measurement, sums a span,
- * or derives a precision. See `retrievalQuality.ts` for what is bound to what,
- * and for the one substitution this view exists to refuse.
- */
+/** Plan 26 retrieval metrics and independent observation-family coverage. */
 import type { ReactNode } from 'react';
 import {
   type AnalyticsDiagnosticsPayloadV1,
@@ -122,8 +104,8 @@ function RetrievalReadModel({
       <div className="flex flex-col gap-4 px-4 py-3">
         <p className="text-2xs leading-relaxed text-text-secondary" data-retrieval-summary="">
           {coverage.measured} of {coverage.required} required retrieval dimensions carry a figure.{' '}
-          {coverage.unprojected} are recorded server-side but projected by no landed read route,
-          and each states its own reason below rather than reading as zero.
+          {coverage.required - coverage.measured} retain the daemon&apos;s unknown or partial state
+          and reason rather than reading as zero.
         </p>
 
         {bands.map((band) => (

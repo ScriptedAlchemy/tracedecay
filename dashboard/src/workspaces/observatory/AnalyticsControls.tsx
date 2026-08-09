@@ -24,15 +24,15 @@ import {
   DECLARED_RETENTION_LIFECYCLES,
   analyticsModeReading,
   egressFailureReading,
-  publishedAnalyticsMode,
   retentionBacklogReading,
   shareStagingReading,
   uploadSettingReading,
   type RetentionBacklogReading,
   type UploadSettingReading,
 } from './analyticsControls.ts';
+import type { ObservatoryAccountingReads } from './accountingReads.ts';
 
-export function AnalyticsControls() {
+export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads }) {
   const settings = useEnvelope(['settings', 'analytics-controls'], '/api/settings', SettingsPayloadV1Schema);
   const findings = useStorageFindings();
 
@@ -44,10 +44,23 @@ export function AnalyticsControls() {
     loading: 'requesting doctor storage findings',
     transport: 'doctor storage findings could not be read',
   });
+  const observatoryState = envelopeReadState(reads.observatory.pending, reads.observatory.result, {
+    loading: 'requesting analytics control projection',
+    transport: 'analytics control projection could not be read',
+  });
 
-  const mode = analyticsModeReading(publishedAnalyticsMode());
-  const staging = shareStagingReading();
-  const egress = egressFailureReading();
+  const mode =
+    observatoryState.kind === 'ready'
+      ? analyticsModeReading(observatoryState.value.payload.analytics_mode)
+      : { mode: null, label: observatoryState.detail, state: observatoryState.state, reason: null };
+  const staging =
+    observatoryState.kind === 'ready'
+      ? shareStagingReading(observatoryState.value.payload.metrics)
+      : { ageSeconds: null, state: observatoryState.state, reason: observatoryState.detail ?? null };
+  const egress =
+    observatoryState.kind === 'ready'
+      ? egressFailureReading(observatoryState.value.payload.metrics)
+      : { failures: null, state: observatoryState.state, reason: observatoryState.detail ?? null };
 
   return (
     <section className="border-b border-edge-subtle" aria-label="Analytics controls">
@@ -71,7 +84,9 @@ export function AnalyticsControls() {
                 key={entry.mode}
                 className="flex min-w-0 flex-col gap-0.5 border-l-2 border-edge-subtle pl-2"
                 data-analytics-mode={entry.mode}
-                data-analytics-mode-current="unknown"
+                data-analytics-mode-current={
+                  mode.mode == null ? 'unknown' : entry.mode === mode.mode ? 'true' : 'false'
+                }
               >
                 <span className="flex flex-wrap items-baseline gap-1.5">
                   <span className="td-value text-2xs text-text-primary">{entry.label}</span>
@@ -86,22 +101,22 @@ export function AnalyticsControls() {
             ))}
           </ul>
           <p className="text-3xs leading-snug text-text-muted">
-            The three modes above describe the taxonomy, not this installation. None is marked
-            current, because no read route reports which one is in force — and an unread mode is
-            not <span className="td-value">Off</span>.
+            The canonical observatory projection marks the current mode only when a retained
+            consent transition is complete. An unavailable mode is never read as{' '}
+            <span className="td-value">Off</span>.
           </p>
         </Block>
 
         <Block
           title="share staging age"
           state={staging.state}
-          detail="not published"
+          detail={staging.ageSeconds == null ? 'unavailable' : `${staging.ageSeconds.toLocaleString()} s`}
           reason={staging.reason}
           marker="share_staging"
         >
           <p className="text-3xs leading-snug text-text-muted">
-            Plan 26 gives staged share data 24 hours after opt-out. No staged-packet age is
-            published, so no age — including an age of zero — is shown.
+            Plan 26 gives staged share data 24 hours after opt-out. The latest retained consent
+            receipt supplies this age when it recorded one; otherwise the daemon leaves it unknown.
           </p>
         </Block>
 
@@ -150,13 +165,14 @@ export function AnalyticsControls() {
         <Block
           title="egress failures"
           state={egress.state}
-          detail="not published"
+          detail={egress.failures == null ? 'unavailable' : egress.failures.toLocaleString()}
           reason={egress.reason}
           marker="egress"
         >
-          <p className="text-3xs leading-snug text-text-muted" data-egress-failures="unpublished">
-            No failure count is shown. An absent exporter and an exporter that failed zero times
-            are different readings, and only the first is true here.
+          <p className="text-3xs leading-snug text-text-muted" data-egress-failures={egress.failures ?? 'unknown'}>
+            {egress.failures == null
+              ? 'No failure count is shown. An unrecorded exporter attempt is not zero failures.'
+              : `${egress.failures.toLocaleString()} failures were recorded by the canonical projection.`}
           </p>
         </Block>
 

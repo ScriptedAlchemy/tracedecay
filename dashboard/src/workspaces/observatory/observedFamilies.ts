@@ -161,19 +161,13 @@ export function familyState(reading: FamilyReading): DomainStateKind {
 /**
  * Eligible versus observed, without a dashboard-derived rate or remainder.
  *
- * Plan 26 §"Required product views": `adoption-coverage` shows "eligible versus
- * observed … and denominator failures". Today no landed read route projects an
- * eligible denominator for any adoption family, so every call resolves to
- * `denominator_missing` — but the state machine is written out rather than
- * hard-coded to that answer. When a denominator arrives, the two canonical
- * counts remain distinct; a rate or remainder would be a new dashboard metric
- * the read model never published.
+ * The two canonical counts remain distinct; a rate or remainder would be a new
+ * dashboard metric the read model never published.
  */
 export type EligibleVersusObserved =
   | { kind: 'measured'; observed: number; eligible: number }
   | { kind: 'denominator_missing'; observed: number | null; reason: string }
   | { kind: 'observed_missing'; eligible: number; reason: string }
-  | { kind: 'under_rate_floor'; observed: number; eligible: number; reason: string }
   | { kind: 'contradiction'; observed: number; eligible: number; reason: string };
 
 export function eligibleVersusObserved(
@@ -185,8 +179,7 @@ export function eligibleVersusObserved(
       kind: 'denominator_missing',
       observed,
       reason:
-        'no landed read route publishes the eligible denominator for this population, so the ' +
-        'remainder against it is withheld rather than assumed',
+        'the canonical read published no eligible denominator for this population, so the pair is withheld',
     };
   }
   if (observed == null) {
@@ -204,17 +197,6 @@ export function eligibleVersusObserved(
       reason:
         `${observed.toLocaleString()} observed against ${eligible.toLocaleString()} eligible is ` +
         'impossible; the remainder is reported as a contradiction rather than clamped to zero',
-    };
-  }
-  if (eligible < RATE_MIN_ELIGIBLE) {
-    return {
-      kind: 'under_rate_floor',
-      observed,
-      eligible,
-      reason:
-        `a rate requires ${RATE_MIN_ELIGIBLE} eligible units and ` +
-        `${Math.round(RATE_MIN_COVERAGE * 100)}% coverage; this population has ` +
-        `${eligible.toLocaleString()}`,
     };
   }
   return {

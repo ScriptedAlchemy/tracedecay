@@ -1,39 +1,4 @@
-/**
- * `adoption-coverage` — the Plan 26 required view (§"Required product views":
- * "`adoption-coverage` shows eligible versus observed, late/dropped/capped,
- * suppression, and denominator failures").
- *
- * This is the view that says whether any other adoption number may be believed,
- * so it is the one view that must not flatter itself.
- *
- * WHAT IS BOUND
- *
- *   `observability_events` and `telemetry_drops_lower_bound` on
- *   `GET /api/observatory` are real canonical measurements: how many envelopes
- *   the projection admitted, and the *proved lower bound* on how many were
- *   dropped. The second is bound with its bound-ness intact — a lower bound
- *   printed as "dropped" would understate a loss and read as a total.
- *
- *   `by_event_kind` on `GET /api/plugins/analytics/diagnostics` gives per-family
- *   record counts, which is eligible-versus-observed at producer granularity:
- *   which of the canonical families wrote anything at all.
- *
- * THE DENOMINATOR PROBLEM, STATED RATHER THAN HIDDEN
- *
- * `observatory_read_model` sets `coverage.eligible = observed` whenever the read
- * is complete. The eligible population of the metric is therefore the observed
- * count itself, and any "observed over eligible" ratio built from it is 1 by
- * construction, not by measurement. `denominatorIntegrity` detects that and the
- * view reports it as a denominator failure instead of printing a reassuring
- * 100%. It is the difference between "we saw everything" and "we counted what
- * we saw twice".
- *
- * Every other eligible denominator on this surface is simply absent:
- * `AdoptionEligibilityObservedV1.eligible` is recorded and unprojected. So no
- * adoption rate exists here, and the Plan 26 rate floor (20 eligible units and
- * 90% coverage) is stated as the bar that is not cleared rather than quietly
- * skipped.
- */
+/** Plan 26 adoption coverage over the canonical Observatory projection. */
 import type {
   CoverageStateV1,
   MetricValueV1,
@@ -48,16 +13,11 @@ import {
   type EligibleVersusObserved,
 } from './observedFamilies.ts';
 
-/** Why no eligible adoption denominator reaches this surface. */
 const NO_ELIGIBLE_PROJECTION =
-  'AdoptionEligibilityObservedV1 records the eligible population per capability, but no landed ' +
-  'read route projects it and the diagnostics projector counts records without opening the envelope';
+  'the canonical Observatory projection did not publish an eligible population for this horizon';
 
-/** Why no arrival lateness reaches this surface. */
 const NO_LATENESS_PROJECTION =
-  'OperationResourceObservedV1 records scheduled-arrival evidence and the observability envelope ' +
-  'carries a producer sequence per process boot, but no landed read route projects late or ' +
-  'out-of-order arrival';
+  'the canonical Observatory projection did not publish arrival evidence for this horizon';
 
 /**
  * The coverage state belongs to the metric, not to the enclosing snapshot.
@@ -95,18 +55,8 @@ export function coverageWindowTruth(model: ObservatoryReadModelV1): CoverageWind
   }
 }
 
-/**
- * Whether a measurement's eligible denominator is independent of its own
- * observed count.
- *
- * `self_referential` is not a defect in the read — an event projection that has
- * seen every event it knows about is genuinely complete over that set. It is a
- * defect in any *rate* built from it, which is why it is detected here rather
- * than left for a reader to notice that a coverage figure is always 100%.
- */
 export type DenominatorIntegrity =
   | { kind: 'independent'; eligible: number; observed: number }
-  | { kind: 'self_referential'; count: number; reason: string }
   | { kind: 'missing'; reason: string };
 
 export function denominatorIntegrity(metric: MetricValueV1 | undefined): DenominatorIntegrity {
@@ -122,15 +72,6 @@ export function denominatorIntegrity(metric: MetricValueV1 | undefined): Denomin
         'the projector published no eligible population for this measurement',
     };
   }
-  if (eligible === observed) {
-    return {
-      kind: 'self_referential',
-      count: observed,
-      reason:
-        `the eligible population is the observed count itself (${observed.toLocaleString()}), so ` +
-        'a share of it would be 1 by construction rather than by measurement',
-    };
-  }
   return { kind: 'independent', eligible, observed };
 }
 
@@ -138,10 +79,9 @@ export function denominatorIntegrity(metric: MetricValueV1 | undefined): Denomin
  * Eligible versus observed for the event population, resolved through the
  * integrity check first.
  *
- * A self-referential or missing denominator never reaches the arithmetic: the
- * ratio is withheld with the reason, exactly as it would be if the denominator
- * were absent, because a denominator that cannot disagree with its numerator is
- * not a denominator.
+ * A missing denominator never reaches the arithmetic. Equal eligible and
+ * observed counts remain a valid measured pair because denominator provenance
+ * is decided by the server, not guessed from coincidental numeric equality.
  */
 export function eventCoverageReading(model: ObservatoryReadModelV1): {
   integrity: DenominatorIntegrity;
@@ -164,11 +104,19 @@ export function eventCoverageReading(model: ObservatoryReadModelV1): {
   };
 }
 
-/** Eligible versus observed for the adoption population itself, which no route
- * publishes at all. Written through the same function so that a future
- * projection changes an argument, not a branch. */
-export function adoptionCoverageReading(): EligibleVersusObserved {
-  return eligibleVersusObserved(null, null);
+/** Eligible versus invoked for the adoption population. */
+export function adoptionCoverageReading(model: ObservatoryReadModelV1): EligibleVersusObserved {
+  const eligible = model.metrics.find((metric) => metric.metric === 'adoption_eligible');
+  const observed = model.metrics.find((metric) => metric.metric === 'adoption_invoked');
+  if (
+    eligible?.value == null ||
+    observed?.value == null ||
+    eligible.coverage.state !== 'known' ||
+    observed.coverage.state !== 'known'
+  ) {
+    return eligibleVersusObserved(null, null);
+  }
+  return eligibleVersusObserved(observed.value, eligible.value);
 }
 
 /** One band of the view. */
@@ -185,7 +133,7 @@ export function populationDimensions(model: ObservatoryReadModelV1): PlanDimensi
       id: 'eligible_units',
       label: 'eligible units',
       requirement: 'the eligible population every adoption numerator is taken over',
-      reading: { kind: 'unpublished', reason: NO_ELIGIBLE_PROJECTION },
+      reading: readMetric(model.metrics, 'adoption_eligible', NO_ELIGIBLE_PROJECTION),
     },
     {
       id: 'observed_events',
@@ -203,7 +151,7 @@ export function arrivalDimensions(model: ObservatoryReadModelV1): PlanDimension[
       id: 'late_arrivals',
       label: 'late arrivals',
       requirement: 'records that arrived after the window they belong to had been read',
-      reading: { kind: 'unpublished', reason: NO_LATENESS_PROJECTION },
+      reading: readMetric(model.metrics, 'observability_late_arrivals', NO_LATENESS_PROJECTION),
     },
     {
       id: 'dropped_lower_bound',
@@ -241,30 +189,23 @@ export function coverageAnchors(model: ObservatoryReadModelV1): ReadAnchors {
  * How many of a read model's measurements have no denominator that could
  * contradict them.
  *
- * A denominator failure is either an absent eligible population or one equal to
- * the observed count. Both mean the same thing for a reader: no rate may be
- * taken. Counting them is a statement about this read, derived from this read,
- * and it is the one number on this view that could not be wrong without the
- * payload being wrong.
+ * A denominator failure is an absent eligible population. Numeric equality is
+ * not evidence that two independently projected counts share an authority.
  */
 export function denominatorFailures(model: ObservatoryReadModelV1): {
   failed: number;
   total: number;
   missing: number;
-  selfReferential: number;
 } {
   let missing = 0;
-  let selfReferential = 0;
   for (const metric of model.metrics) {
     const integrity = denominatorIntegrity(metric);
     if (integrity.kind === 'missing') missing += 1;
-    if (integrity.kind === 'self_referential') selfReferential += 1;
   }
   return {
-    failed: missing + selfReferential,
+    failed: missing,
     total: model.metrics.length,
     missing,
-    selfReferential,
   };
 }
 
@@ -287,8 +228,8 @@ export function denominatorFailureTruth(failures: ReturnType<typeof denominatorF
     };
   }
   return {
-    state: 'conflicting',
-    detail: `${failures.failed} published measurement${failures.failed === 1 ? '' : 's'} lacks an independent denominator`,
+    state: 'unknown',
+    detail: `${failures.failed} published measurement${failures.failed === 1 ? '' : 's'} lacks an eligible denominator`,
   };
 }
 

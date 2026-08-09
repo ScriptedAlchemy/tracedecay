@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  AnalyticsModeReadModelV1,
+  MetricValueV1,
   SettingsPayloadV1,
   StorageFindingKindStatusV1,
 } from '../../contracts/generated.ts';
@@ -8,7 +10,6 @@ import {
   DECLARED_RETENTION_LIFECYCLES,
   analyticsModeReading,
   egressFailureReading,
-  publishedAnalyticsMode,
   retentionBacklogReading,
   shareStagingReading,
   uploadSettingReading,
@@ -55,49 +56,51 @@ describe('analytics mode ladder', () => {
 });
 
 describe('analyticsModeReading', () => {
-  it('reports an unpublished mode as unsupported and explicitly not Off', () => {
-    const reading = analyticsModeReading(null);
+  it('reports an unavailable mode as unknown and explicitly not Off', () => {
+    const reading = analyticsModeReading(mode(null, 'unknown', 'analytics_consent_not_observed'));
     expect(reading.mode).toBeNull();
-    expect(reading.state).toBe('unsupported');
-    expect(reading.label).toBe('not published');
+    expect(reading.state).toBe('unknown');
+    expect(reading.label).toBe('unavailable');
     // The specific falsification: an unread mode read back as "collection is off".
     expect(reading.label).not.toBe('Off');
-    expect(reading.reason).toContain('an unread mode is not Off');
+    expect(reading.reason).toBe('analytics_consent_not_observed');
   });
 
   it('reports a published mode by its own label', () => {
-    const reading = analyticsModeReading('aggregate_share');
+    const reading = analyticsModeReading(mode('aggregate_share', 'known', null));
     expect(reading.state).toBe('ready');
     expect(reading.label).toBe('Aggregate share');
     expect(reading.reason).toBeNull();
   });
 
-  it('publishes no mode today, because no read route carries one', () => {
-    expect(publishedAnalyticsMode()).toBeNull();
+  it('does not coerce an incomplete retained transition into a current mode', () => {
+    expect(analyticsModeReading(mode('aggregate_share', 'partial', 'source_partial')).mode).toBeNull();
   });
 });
 
 describe('shareStagingReading', () => {
   it('reports an unpublished staging age as unsupported, never as zero', () => {
-    const reading = shareStagingReading();
+    const reading = shareStagingReading([observationMetric('analytics_share_staging_age_seconds', null)]);
     expect(reading.ageSeconds).toBeNull();
     expect(reading.ageSeconds).not.toBe(0);
-    expect(reading.state).toBe('unsupported');
-    expect(reading.reason).toContain('share_staging_age_seconds');
+    expect(reading.state).toBe('unknown');
+    expect(reading.reason).toBe('not_observed');
   });
 
   it('reports a published age when one is supplied', () => {
-    expect(shareStagingReading(3_600)).toMatchObject({ ageSeconds: 3_600, state: 'ready' });
+    expect(
+      shareStagingReading([observationMetric('analytics_share_staging_age_seconds', 3_600)]),
+    ).toMatchObject({ ageSeconds: 3_600, state: 'ready' });
   });
 });
 
 describe('egressFailureReading', () => {
   it('never reports zero failures for an exporter that does not exist', () => {
-    const reading = egressFailureReading();
+    const reading = egressFailureReading([observationMetric('analytics_egress_failures', null)]);
     expect(reading.failures).toBeNull();
     expect(reading.failures).not.toBe(0);
-    expect(reading.state).toBe('unsupported');
-    expect(reading.reason).toContain('not a measurement of zero failures');
+    expect(reading.state).toBe('unknown');
+    expect(reading.reason).toBe('not_observed');
   });
 });
 
@@ -186,8 +189,6 @@ function status(
 function settings(uploadEnabled: boolean): SettingsPayloadV1 {
   return {
     user: {
-      legacy_config_path: '/home/agent/.tracedecay/config.json',
-      legacy_config_read_only: true,
       configuration_snapshot_id: 'snapshot-1',
       configuration_revision_id: 'revision-1',
       upload_enabled: uploadEnabled,
@@ -196,4 +197,61 @@ function settings(uploadEnabled: boolean): SettingsPayloadV1 {
       installed_agents: ['claude'],
     },
   } as SettingsPayloadV1;
+}
+
+function mode(
+  current: AnalyticsModeReadModelV1['current'],
+  state: AnalyticsModeReadModelV1['coverage']['state'],
+  unavailableReason: string | null,
+): AnalyticsModeReadModelV1 {
+  return {
+    current,
+    transition_watermark: current == null ? null : 'producer:7',
+    coverage: {
+      eligible: state === 'known' ? 1 : null,
+      observed: state === 'known' ? 1 : 0,
+      completed: state === 'known' ? 1 : 0,
+      censored: 0,
+      unknown: state === 'known' ? 0 : 1,
+      excluded: 0,
+      state,
+    },
+    unavailable_reason: unavailableReason,
+  };
+}
+
+function observationMetric(name: string, value: number | null): MetricValueV1 {
+  return {
+    descriptor_revision: 'analytics-controls.v1',
+    metric: name,
+    value,
+    unit: name.includes('age') ? 'seconds' : 'events',
+    denominator: 'analytics_observations',
+    denominator_value: value == null ? null : 1,
+    coverage: {
+      eligible: value == null ? null : 1,
+      observed: value == null ? 0 : 1,
+      completed: value == null ? 0 : 1,
+      censored: 0,
+      unknown: value == null ? 1 : 0,
+      excluded: 0,
+      state: value == null ? 'unknown' : 'known',
+    },
+    evidence_class: 'measurement',
+    provenance: {
+      source: 'observability_envelope',
+      source_revision: 'observability-envelope.v1',
+      projector_revision: 'observatory-plan26-projector.v1',
+      watermark: 'analytics:7',
+    },
+    cohort: { descriptor_revision: 'analytics.v1', eligible_population: 'analytics_observations' },
+    temporal: {
+      horizon: { since_micros: 1, until_micros: 2 },
+      baseline_watermark: null,
+      delta: null,
+    },
+    uncertainty: { lower: value, upper: value, reason: value == null ? 'not_observed' : null },
+    calibration: null,
+    unavailable_reason: value == null ? 'not_observed' : null,
+  };
 }

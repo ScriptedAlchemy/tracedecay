@@ -34,6 +34,7 @@ import { PerformanceBudgets } from './PerformanceBudgets.tsx';
 import { PerformanceComparisons } from './PerformanceComparisons.tsx';
 import { RetrievalQuality } from './RetrievalQuality.tsx';
 import { AnalyticsControls } from './AnalyticsControls.tsx';
+import { ExecutionTopologyMetrics } from './ExecutionTopologyMetrics.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
@@ -124,7 +125,9 @@ export function ObservatoryPage() {
 
       <PerformanceComparisons />
 
-      <AnalyticsControls />
+      <ExecutionTopologyMetrics />
+
+      <AnalyticsControls reads={accountingReads} />
 
       <EnvelopeSection
         title="Store telemetry"

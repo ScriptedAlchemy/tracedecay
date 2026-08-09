@@ -126,9 +126,13 @@ describe('eligibleVersusObserved', () => {
     expect(reading.reason).not.toContain('0 ');
   });
 
-  it('refuses a rate under the plan floor of twenty eligible units', () => {
+  it('retains a pair below the rate floor because the dashboard derives no rate', () => {
     const reading = eligibleVersusObserved(4, RATE_MIN_ELIGIBLE - 1);
-    expect(reading.kind).toBe('under_rate_floor');
+    expect(reading).toEqual({
+      kind: 'measured',
+      observed: 4,
+      eligible: RATE_MIN_ELIGIBLE - 1,
+    });
   });
 
   it('keeps an independently published count pair without deriving a dashboard ratio or remainder', () => {

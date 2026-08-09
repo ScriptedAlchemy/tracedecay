@@ -1,16 +1,4 @@
-/**
- * PERFORMANCE BUDGETS — `GET /api/observatory` (Plan 26 canonical measurements).
- *
- * Reads the same `ObservatoryReadModelV1` bytes the CLI and MCP serve, and
- * states every budget dimension Plan 26 requires: the two that projection
- * actually carries, and the eleven that no landed read route projects yet. See
- * `performanceBudgets.ts` for which is which and why.
- *
- * Nothing here derives a percentile, sums a span, or grades a budget. The one
- * thing this surface computes is how many of its own requirements the wire
- * answered, and it prints that beside the requirement count so a reader cannot
- * mistake a mostly-unavailable view for a healthy one.
- */
+/** Plan 26 performance budgets from `GET /api/observatory`. */
 import type { ReactNode } from 'react';
 import {
   ObservatoryReadModelV1Schema,
@@ -21,7 +9,6 @@ import { EnvelopeTruth, OmissionReasons } from '../../ui/EnvelopeTruth.tsx';
 import { EnvelopeSection } from '../../ui/ReadSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
-import { StateChip } from '../../ui/StateChip';
 import { PlanDimensionGrid } from './PlanDimensionCard.tsx';
 import { planDimensionPresentation } from './planDimension.ts';
 import { budgetAnchors, budgetCoverage, performanceBudgetBands } from './performanceBudgets.ts';
@@ -100,8 +87,8 @@ function BudgetReadModel({
       <div className="flex flex-col gap-4 px-4 py-3">
         <p className="text-2xs leading-relaxed text-text-secondary" data-budgets-summary="">
           {coverage.measured} of {coverage.required} required budget dimensions carry a figure.{' '}
-          {coverage.unprojected} are recorded server-side but projected by no landed read route,
-          and each states its own reason below rather than reading as zero.
+          {coverage.required - coverage.measured} carry an explicit unknown or partial state;
+          none are inferred in the browser or rendered as zero.
         </p>
 
         {bands.map((band) => (
@@ -115,26 +102,6 @@ function BudgetReadModel({
           />
         ))}
 
-        <section
-          className="flex flex-col gap-1.5 border border-edge-subtle bg-surface-1 px-3 py-2.5"
-          aria-label="Budget projection gap"
-          data-budgets-gap="unprojected"
-        >
-          <div className="flex min-w-0 items-center gap-2">
-            <h3 className="td-legend truncate">why most cards are unavailable</h3>
-            <span aria-hidden className="td-rule" />
-          </div>
-          <StateChip kind="unsupported" detail="no read route projects these families" />
-          <p className="text-3xs leading-snug text-text-muted">
-            The producing families are landed and recording:{' '}
-            <span className="td-value">OperationResourceObservedV1</span> carries the percentile-
-            eligible latencies, the closed span set, RSS/PSS, CPU, and I/O amplification, and{' '}
-            <span className="td-value">NoProgressObservedV1</span> carries the stalled frontier and
-            escalation. What does not exist is a read model that projects them, so this dashboard
-            has nothing to bind to. Deriving these in the browser from event counts would
-            fabricate a measurement the daemon never took.
-          </p>
-        </section>
       </div>
     </>
   );

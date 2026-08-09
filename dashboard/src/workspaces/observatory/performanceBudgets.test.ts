@@ -23,19 +23,19 @@ const NOW = 1_753_003_600_000_000;
 
 describe('latency dimensions', () => {
   it('reads the p95 the wire publishes', () => {
-    const dimensions = latencyDimensions(model([metric('feedback_latency_p95', 43_250)]));
+    const dimensions = latencyDimensions(model([metric('operation_latency_p95', 43_250)]));
     const p95 = dimensions.find((dimension) => dimension.id === 'latency_p95');
     expect(p95?.reading.kind).toBe('measured');
   });
 
   it('keeps p50 and p99 unpublished rather than repeating the p95 figure', () => {
     // One published percentile must never be printed as three readings.
-    const dimensions = latencyDimensions(model([metric('feedback_latency_p95', 43_250)]));
+    const dimensions = latencyDimensions(model([metric('operation_latency_p95', 43_250)]));
     for (const id of ['latency_p50', 'latency_p99']) {
       const dimension = dimensions.find((candidate) => candidate.id === id);
       expect(dimension?.reading.kind).toBe('unpublished');
       expect(dimension?.reading.kind === 'unpublished' && dimension.reading.reason).toContain(
-        'OperationResourceObservedV1',
+        'no operation-latency evidence',
       );
     }
   });
@@ -43,7 +43,7 @@ describe('latency dimensions', () => {
   it('separates a p95 the projector could not value from a p95 nothing projects', () => {
     const dimensions = latencyDimensions(
       model([
-        { ...metric('feedback_latency_p95', null), unavailable_reason: 'no_latency_samples' },
+        { ...metric('operation_latency_p95', null), unavailable_reason: 'no_latency_samples' },
       ]),
     );
     const p95 = dimensions.find((dimension) => dimension.id === 'latency_p95');
@@ -64,22 +64,22 @@ describe('latency dimensions', () => {
 
 describe('span, resource, and outcome dimensions', () => {
   it('names each span stage separately so one unavailable stage is visible', () => {
-    expect(spanDimensions().map((dimension) => dimension.id)).toEqual([
+    expect(spanDimensions(model([])).map((dimension) => dimension.id)).toEqual([
       'queue_span',
       'store_lock_span',
       'index_lock_span',
       'provider_negotiation_span',
     ]);
-    for (const dimension of spanDimensions()) {
+    for (const dimension of spanDimensions(model([]))) {
       expect(dimension.reading.kind).toBe('unpublished');
       expect(dimension.reading.kind === 'unpublished' && dimension.reading.reason).toContain(
-        'SpanStageV1',
+        'no span evidence',
       );
     }
   });
 
   it('keeps RSS, CPU, and I/O as three axes rather than one resource score', () => {
-    expect(resourceDimensions().map((dimension) => dimension.id)).toEqual([
+    expect(resourceDimensions(model([])).map((dimension) => dimension.id)).toEqual([
       'process_rss',
       'cpu_time',
       'io_amplification',
@@ -87,10 +87,10 @@ describe('span, resource, and outcome dimensions', () => {
   });
 
   it('names the no-progress producer and refuses to invent an accepted budget', () => {
-    const outcomes = outcomeDimensions();
+    const outcomes = outcomeDimensions(model([]));
     const noProgress = outcomes.find((dimension) => dimension.id === 'no_progress_outcomes');
     expect(noProgress?.reading.kind === 'unpublished' && noProgress.reading.reason).toContain(
-      'NoProgressObservedV1',
+      'no no-progress evidence',
     );
     const revision = outcomes.find((dimension) => dimension.id === 'accepted_budget_revision');
     // A projector revision is not an accepted budget, and the card says so.
@@ -115,7 +115,7 @@ describe('budget bands and coverage', () => {
   it('counts measured dimensions against the required total, not against itself', () => {
     const bands = performanceBudgetBands(
       model([
-        metric('feedback_latency_p95', 43_250),
+        metric('operation_latency_p95', 43_250),
         metric('feedback_revocation_propagation_p95', 1_200),
       ]),
     );
@@ -132,7 +132,7 @@ describe('budget bands and coverage', () => {
 
   it('states every mandatory card row as not published for an unprojected dimension', () => {
     const anchors = budgetAnchors(model([]));
-    const presented = planDimensionPresentation(spanDimensions()[0]!, anchors);
+    const presented = planDimensionPresentation(spanDimensions(model([]))[0]!, anchors);
     expect(presented.support).toBe(NOT_PUBLISHED);
     expect(presented.denominator).toBe(NOT_PUBLISHED);
     expect(presented.censoring).toBe(NOT_PUBLISHED);
@@ -151,6 +151,20 @@ function model(metrics: MetricValueV1[]): ObservatoryReadModelV1 {
     observed_at_micros: NOW,
     current: true,
     metrics,
+    analytics_mode: {
+      current: null,
+      transition_watermark: null,
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
+    comparison: {
+      baseline_build: null, candidate_build: null, workload: null, corpus: null,
+      environment: null, oracle: null, configuration: null, platform: null,
+      rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+      regression_observed: null, disposition: 'insufficient_evidence',
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
   };
 }
 

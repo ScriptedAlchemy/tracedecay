@@ -30,12 +30,12 @@ describe('Observatory performance comparisons', () => {
     ).toBe(1);
   });
 
-  it('reaches insufficient evidence, not reject, when no comparison is published', async () => {
+  it('renders the server disposition without re-deciding it in the browser', async () => {
     renderComparisons();
 
     const reached = await waitForDisposition();
     expect(reached.getAttribute('data-comparison-disposition')).toBe('insufficient_evidence');
-    expect(reached.textContent).toContain('baseline and candidate build are not published');
+    expect(reached.textContent).toContain('comparison_evidence_not_recorded');
     // The chip is the taxonomy's `unknown`, never `denied`.
     expect(reached.querySelector('[data-state="unknown"]')).toBeTruthy();
     expect(reached.querySelector('[data-state="denied"]')).toBeNull();
@@ -62,14 +62,14 @@ describe('Observatory performance comparisons', () => {
     expect(reached.textContent).toContain('not a rejection');
   });
 
-  it('renders baseline and candidate build as separate unavailable requirements', async () => {
+  it('renders baseline and candidate build as separate unknown requirements', async () => {
     renderComparisons();
 
     await screen.findByText('baseline build');
     for (const id of ['baseline_build', 'candidate_build', 'rollback_profile']) {
       const card = document.querySelector(`[data-dimension="${id}"]`);
       expect(card?.getAttribute('data-dimension-available')).toBe('false');
-      expect(card?.textContent).toContain('no landed read route publishes a comparison record');
+      expect(card?.textContent).toContain('comparison_evidence_not_recorded');
       // The figure cell itself: an em dash, never a count.
       const figure = card?.querySelector('[data-cell="numeric"]');
       expect(figure?.textContent).toBe('—');
@@ -174,7 +174,41 @@ function envelope() {
       watermark: 'analytics:4821',
       observed_at_micros: NOW_MICROS,
       current: true,
-      metrics: [],
+      metrics: comparisonMetrics(),
+      analytics_mode: {
+        current: null,
+        transition_watermark: null,
+        coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+        unavailable_reason: 'not_observed',
+      },
+      comparison: {
+        baseline_build: null, candidate_build: null, workload: null, corpus: null,
+        environment: null, oracle: null, configuration: null, platform: null,
+        rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+        regression_observed: null, disposition: 'insufficient_evidence',
+        coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+        unavailable_reason: 'comparison_evidence_not_recorded',
+      },
     },
   };
+}
+
+function comparisonMetrics() {
+  return [
+    'comparison_baseline_build', 'comparison_candidate_build', 'comparison_workload_corpus',
+    'comparison_environment_platform', 'comparison_oracle', 'comparison_rollback_profile',
+    'comparison_outcome_counts', 'comparison_stratum_support', 'comparison_intervals',
+    'comparison_calibration', 'comparison_risk_coverage', 'comparison_flaky_indeterminate',
+    'comparison_deviations', 'comparison_paired_outcomes',
+  ].map((metric) => ({
+    descriptor_revision: 'performance-comparisons.v1', metric, value: null, unit: 'events',
+    denominator: 'eligible_comparison_outcomes', denominator_value: null,
+    coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+    evidence_class: 'measurement',
+    provenance: { source: 'observability_envelope', source_revision: 'observability-envelope.v1', projector_revision: 'observatory-plan26-projector.v1', watermark: 'analytics:4821' },
+    cohort: { descriptor_revision: 'eligible_comparison_outcomes.v1', eligible_population: 'eligible_comparison_outcomes' },
+    temporal: { horizon: { since_micros: 0, until_micros: NOW_MICROS }, baseline_watermark: null, delta: null },
+    uncertainty: { lower: null, upper: null, reason: 'comparison_evidence_not_recorded' },
+    calibration: null, unavailable_reason: 'comparison_evidence_not_recorded',
+  }));
 }

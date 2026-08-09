@@ -223,6 +223,20 @@ function readModel(metrics: MetricValueV1[]) {
     observed_at_micros: NOW_MICROS,
     current: false,
     metrics,
+    analytics_mode: {
+      current: null,
+      transition_watermark: null,
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
+    comparison: {
+      baseline_build: null, candidate_build: null, workload: null, corpus: null,
+      environment: null, oracle: null, configuration: null, platform: null,
+      rollback_profile: null, eligible_outcomes: null, paired_outcomes: null,
+      regression_observed: null, disposition: 'insufficient_evidence',
+      coverage: { eligible: null, observed: 0, completed: 0, censored: 0, unknown: 1, excluded: 0, state: 'unknown' },
+      unavailable_reason: 'not_observed',
+    },
   };
 }
 
