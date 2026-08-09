@@ -107,6 +107,11 @@ fn duplicate_adjudication_receipt_pins_actor_revision_and_input_digest() {
     assert_eq!(receipt.actor_id().as_str(), "actor.adjudicator");
     assert_eq!(receipt.canonical_input_digest(), &input_digest);
     let payload = receipt.observability_payload();
+    assert_eq!(
+        payload.adjudication_ref,
+        receipt.adjudication_ref().as_str(),
+        "observability must retain the receipt's authority-bound relation identity"
+    );
     assert_eq!(payload.adjudication_revision, 1);
     assert_eq!(payload.kind, DuplicateEffortKindV1::SupersededOverlap);
     assert_eq!(payload.wall_micros, Some(42));
@@ -115,6 +120,15 @@ fn duplicate_adjudication_receipt_pins_actor_revision_and_input_digest() {
         [payload.adjudication_ref.clone()]
     );
     payload.validate().unwrap();
+    let mut invalid_revision = payload.clone();
+    invalid_revision.adjudication_revision = 0;
+    assert_eq!(
+        invalid_revision.validate(),
+        Err("duplicate_adjudication_revision")
+    );
+    let mut invalid_ref = payload.clone();
+    invalid_ref.adjudication_ref.clear();
+    assert_eq!(invalid_ref.validate(), Err("local_ref"));
     let wire = serde_json::to_value(&receipt).unwrap();
     assert_eq!(
         wire["adjudication_ref"],

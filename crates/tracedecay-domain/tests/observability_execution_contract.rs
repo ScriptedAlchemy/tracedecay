@@ -193,6 +193,8 @@ fn conflict_integration_drift_duplicate_and_rerun_family_round_trips() {
         ),
         ObservabilityPayloadV1::WorkDuplicateEffort(
             tracedecay_domain::WorkDuplicateEffortObservedV1 {
+                adjudication_ref: "duplicate.relation.contract".into(),
+                adjudication_revision: 1,
                 kind: tracedecay_domain::DuplicateEffortKindV1::ExactDuplicate,
                 wall_micros: Some(10),
                 token_count: Some(20),

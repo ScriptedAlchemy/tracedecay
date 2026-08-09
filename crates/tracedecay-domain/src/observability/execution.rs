@@ -367,6 +367,14 @@ closed_enum!(DuplicateEffectOutcomeV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkDuplicateEffortObservedV1 {
+    /// Authority-bound relation identity of the adjudicated attempt pair.
+    ///
+    /// The producer must carry this identity through every revision so
+    /// projections can replace or quarantine corrections without coalescing
+    /// unrelated duplicate relations.
+    pub adjudication_ref: String,
+    /// Monotonic revision of the receipt bound to `adjudication_ref`.
+    pub adjudication_revision: u64,
     pub kind: DuplicateEffortKindV1,
     pub wall_micros: Option<u64>,
     pub token_count: Option<u64>,
@@ -381,6 +389,10 @@ pub struct WorkDuplicateEffortObservedV1 {
 
 impl WorkDuplicateEffortObservedV1 {
     pub fn validate(&self) -> Result<(), &'static str> {
+        validate_local_ref(&self.adjudication_ref)?;
+        if self.adjudication_revision == 0 {
+            return Err("duplicate_adjudication_revision");
+        }
         validate_anchors(&self.local_anchor_refs)?;
         let has_quantity = self.wall_micros.is_some()
             || self.token_count.is_some()
