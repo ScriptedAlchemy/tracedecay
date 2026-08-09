@@ -28,8 +28,10 @@ current branch; do not reconstruct intent from commit subjects alone.
   611,153,508,016 bytes with zero failures, skips, or stale entries. The
   execution report is
   `/home/zack/.local/state/cargo-reclaim/reports/1786301785763-cleanup-execution-sha256-0cc2a4bff51ec62149b4ebea73acbdd1d9c7512f75c6f2230850703bcd4799ab.json`.
-  All Rust verification after reboot is therefore a cold build; do not infer a
-  regression merely from the first build's duration.
+  The sccache server was then stopped and its validated local store at
+  `/fast/cache/sccache/data` was emptied from 107,373,615,958 bytes to zero.
+  All Rust verification after reboot is therefore a fully cold build; do not
+  infer a regression merely from the first build's duration.
 - The shared Git index is stale relative to temporary-index commits. After all
   agents are confirmed stopped, reconcile only the index against `HEAD`; never
   use that reconciliation to modify the worktree.
