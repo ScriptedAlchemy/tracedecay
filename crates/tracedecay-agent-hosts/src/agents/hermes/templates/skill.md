@@ -74,9 +74,12 @@ compresses a session.
    agent before searching its messages.
 
 Freshness and lifecycle are explicit host decisions. When a read says refresh
-is required, invoke `tracedecay_session_refresh` only with clear host or user
-intent: its actions are `begin`, `status`, and `cancel`; `begin` returns the
-opaque handle used by `status` and `cancel`. Leave host context-window
+is required, invoke `tracedecay_session_refresh_begin` only with clear host or
+user intent. It returns the opaque handle used by
+`tracedecay_session_refresh_status` and `tracedecay_session_refresh_cancel`.
+The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
+`cancel`, using the same selectors and returned handle.
+Leave host context-window
 preflight, compression, and boundaries to the Hermes context engine rather
 than triggering them during recall.
 
