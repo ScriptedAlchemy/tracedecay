@@ -71,19 +71,67 @@ pub(super) async fn dispatch_lcm_tool(
         RetainedSurfaceOperation::LcmExpandQuery => {
             session::handle_lcm_expand_query(context, args).await
         }
-        RetainedSurfaceOperation::FactStore
+        // `fact_store` is the one broad compatibility name.  It is selected
+        // before the typed retained catalog and must remain owned by the
+        // legacy translator; it is not an LCM operation and must not be
+        // silently narrowed to the Hermes `fact_add` adapter.
+        RetainedSurfaceOperation::FactStore => Err(broad_fact_store_boundary_error()),
+        RetainedSurfaceOperation::FactStoreAdd
+        | RetainedSurfaceOperation::FactStoreSearch
+        | RetainedSurfaceOperation::FactStoreProbe
+        | RetainedSurfaceOperation::FactStoreRelated
+        | RetainedSurfaceOperation::FactStoreReason
+        | RetainedSurfaceOperation::FactStoreContradict
+        | RetainedSurfaceOperation::FactStoreGet
+        | RetainedSurfaceOperation::FactStoreUpdate
+        | RetainedSurfaceOperation::FactStoreRemove
+        | RetainedSurfaceOperation::FactStoreList
         | RetainedSurfaceOperation::FactFeedback
         | RetainedSurfaceOperation::MemoryStatus
         | RetainedSurfaceOperation::SessionRefresh
+        | RetainedSurfaceOperation::SessionRefreshStatus
+        | RetainedSurfaceOperation::SessionRefreshCancel
+        | RetainedSurfaceOperation::SessionRefreshBegin
         | RetainedSurfaceOperation::MessageSearch
         | RetainedSurfaceOperation::SessionsFor
-        | RetainedSurfaceOperation::Workflows
-        | RetainedSurfaceOperation::SessionStart
-        | RetainedSurfaceOperation::SessionEnd => Err(TraceDecayError::Config {
+        | RetainedSurfaceOperation::Workflows => Err(TraceDecayError::Config {
             message: format!(
                 "internal: retained operation `{}` is not an LCM handler",
                 operation.as_str()
             ),
         }),
+    }
+}
+
+fn broad_fact_store_boundary_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "internal: broad fact_store belongs to the legacy retained translator".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use tracedecay_application::RetainedSurfaceOperation;
+
+    use super::{broad_fact_store_boundary_error, dispatch_lcm_tool, session};
+
+    #[tokio::test]
+    async fn broad_fact_store_stays_on_legacy_translator_boundary() {
+        let result = dispatch_lcm_tool(
+            RetainedSurfaceOperation::FactStore,
+            Value::Null,
+            session::LcmHandlerContext::user(None),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::errors::TraceDecayError::Config { message })
+                if message == "internal: broad fact_store belongs to the legacy retained translator"
+        ));
+        assert!(matches!(
+            broad_fact_store_boundary_error(),
+            crate::errors::TraceDecayError::Config { .. }
+        ));
     }
 }
