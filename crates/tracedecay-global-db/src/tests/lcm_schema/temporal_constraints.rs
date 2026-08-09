@@ -1189,10 +1189,6 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
          INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at
          ) VALUES ('append-session', 1, 'building', '{}', 100);
-         INSERT INTO session_temporal_migration_receipts (
-            session_id, generation, batch_ordinal, source_digest,
-            frozen_watermarks_json, imported_items, committed_at
-         ) VALUES ('append-session', 1, 0, 'source', '{}', 1, 100);
          INSERT INTO session_temporal_projection_receipts (
             session_id, generation, batch_ordinal, batch_digest,
             frozen_watermarks_json, source_through, projection_through,
@@ -1212,10 +1208,6 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
         "UPDATE session_summary_nodes SET summary_text = 'rewrite'
          WHERE summary_id = 'append-summary'",
         "DELETE FROM session_summary_nodes WHERE summary_id = 'append-summary'",
-        "UPDATE session_temporal_migration_receipts SET imported_items = 2
-         WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
-        "DELETE FROM session_temporal_migration_receipts
-         WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
         "UPDATE session_temporal_projection_receipts SET fts_digest = 'rewrite'
          WHERE session_id = 'append-session' AND generation = 1 AND batch_ordinal = 0",
         "DELETE FROM session_temporal_projection_receipts

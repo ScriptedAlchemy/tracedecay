@@ -71,6 +71,16 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
         ON session_relation_receipts(state, created_at, session_id, generation);
 
+    CREATE TABLE IF NOT EXISTS session_relation_effect_journal (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        projection_json TEXT NOT NULL CHECK(json_valid(projection_json)),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, generation),
+        FOREIGN KEY(session_id, generation)
+            REFERENCES session_relation_receipts(session_id, generation) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS session_external_payload_manifests (
         payload_ref TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -587,6 +597,10 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "created_at",
             "applied_at",
         ],
+    ),
+    (
+        "session_relation_effect_journal",
+        &["session_id", "generation", "projection_json", "created_at"],
     ),
     (
         "session_external_payload_manifests",

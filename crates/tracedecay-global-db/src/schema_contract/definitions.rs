@@ -1718,65 +1718,6 @@ pub(super) const TABLES: &[Table] = &[
             ),
         ]
     ),
-    table!(
-        "session_temporal_migration_dispositions",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("batch_ordinal", "INTEGER", true, None, 3),
-            column("disposition_ordinal", "INTEGER", true, None, 4),
-            column("provider", "TEXT", true, None, 0),
-            column("message_id", "TEXT", true, None, 0),
-            column("output_ordinal", "INTEGER", true, None, 0),
-            column("observation_id", "TEXT", false, None, 0),
-            column("retrieval_anchor_id", "TEXT", false, None, 0),
-            column("disposition", "TEXT", true, None, 0),
-            column("reason", "TEXT", true, None, 0),
-            column("row_digest", "TEXT", true, None, 0),
-        ],
-        [
-            foreign_key(
-                "session_id",
-                "session_temporal_generations",
-                "session_id",
-                "CASCADE"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_temporal_generations",
-                "generation",
-                "CASCADE",
-                1
-            ),
-        ]
-    ),
-    table!(
-        "session_temporal_migration_receipts",
-        [
-            column("session_id", "TEXT", true, None, 1),
-            column("generation", "INTEGER", true, None, 2),
-            column("batch_ordinal", "INTEGER", true, None, 3),
-            column("source_digest", "TEXT", true, None, 0),
-            column("frozen_watermarks_json", "TEXT", true, None, 0),
-            column("imported_items", "INTEGER", true, None, 0),
-            column("committed_at", "INTEGER", true, None, 0),
-        ],
-        [
-            foreign_key(
-                "session_id",
-                "session_temporal_generations",
-                "session_id",
-                "CASCADE"
-            ),
-            foreign_key_sequence(
-                "generation",
-                "session_temporal_generations",
-                "generation",
-                "CASCADE",
-                1
-            ),
-        ]
-    ),
 ];
 
 pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
@@ -1831,6 +1772,13 @@ pub(super) const INDEXES: &[Index] = &[
         unique: true,
         origin: "u",
         columns: &["observation_id"],
+    },
+    Index {
+        table: "observations",
+        name: Some("idx_observations_identity_receipt"),
+        unique: false,
+        origin: "c",
+        columns: &["observation_id", "receipt_id"],
     },
     Index {
         table: "remote_observation_events",
@@ -1890,10 +1838,24 @@ pub(super) const INDEXES: &[Index] = &[
     },
     Index {
         table: "observation_projection_provenance",
+        name: Some("idx_observation_projection_provenance_output"),
+        unique: false,
+        origin: "c",
+        columns: &["projector_version", "output_provider", "output_message_id"],
+    },
+    Index {
+        table: "observation_projection_provenance",
         name: Some("idx_observation_projection_provenance_global_output"),
         unique: false,
         origin: "c",
         columns: &["output_provider", "output_message_id", "projector_version"],
+    },
+    Index {
+        table: "observation_projection_dispositions",
+        name: Some("idx_projection_dispositions_observation_receipt"),
+        unique: false,
+        origin: "c",
+        columns: &["observation_id", "receipt_id"],
     },
     Index {
         table: "observation_workflow_facts",
@@ -2319,27 +2281,6 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["session_id", "generation", "availability"],
-    },
-    Index {
-        table: "session_temporal_migration_receipts",
-        name: Some("idx_session_temporal_migration_receipts_source"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "source_digest", "generation"],
-    },
-    Index {
-        table: "session_temporal_migration_dispositions",
-        name: Some("idx_session_temporal_migration_dispositions_row"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "provider", "message_id", "output_ordinal"],
-    },
-    Index {
-        table: "session_temporal_migration_dispositions",
-        name: Some("idx_session_temporal_migration_dispositions_kind"),
-        unique: false,
-        origin: "c",
-        columns: &["session_id", "disposition", "generation"],
     },
 ];
 

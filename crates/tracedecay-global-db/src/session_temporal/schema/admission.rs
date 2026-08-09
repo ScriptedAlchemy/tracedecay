@@ -120,7 +120,6 @@ async fn validate_temporal_namespace_tables(
 
 fn belongs_to_temporal_namespace(name: &str) -> bool {
     [
-        "lcm_summary_",
         "session_agent_",
         "session_agents",
         "session_assertion",

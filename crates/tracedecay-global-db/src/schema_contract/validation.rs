@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
@@ -10,6 +13,76 @@ use super::pragma::{
 };
 
 const OPERATION: &str = "validate global database authority schema";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GraphPublicationSchemaObject {
+    object_type: String,
+    table: String,
+    sql: String,
+}
+
+type GraphPublicationSchemaInventory = BTreeMap<String, GraphPublicationSchemaObject>;
+type GraphPublicationSchemaBuildResult =
+    std::result::Result<GraphPublicationSchemaInventory, String>;
+
+static EXPECTED_GRAPH_PUBLICATION_SCHEMA: LazyLock<GraphPublicationSchemaBuildResult> =
+    LazyLock::new(build_expected_graph_publication_schema);
+
+fn build_expected_graph_publication_schema() -> GraphPublicationSchemaBuildResult {
+    let connection = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
+        .map_err(|error| {
+            format!("failed to install canonical graph publication schema: {error}")
+        })?;
+    read_rusqlite_graph_publication_inventory(&connection)
+}
+
+fn read_rusqlite_graph_publication_inventory(
+    connection: &rusqlite::Connection,
+) -> std::result::Result<GraphPublicationSchemaInventory, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(|error| format!("failed to prepare canonical graph schema inventory: {error}"))?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query canonical graph schema inventory: {error}"))?;
+    let mut inventory = GraphPublicationSchemaInventory::new();
+    for row in rows {
+        let (object_type, name, table, sql) =
+            row.map_err(|error| format!("failed to read canonical graph schema object: {error}"))?;
+        if inventory
+            .insert(
+                name.clone(),
+                GraphPublicationSchemaObject {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "canonical graph publication schema repeats object '{name}'"
+            ));
+        }
+    }
+    Ok(inventory)
+}
 
 fn outer_parentheses_enclose_value(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -159,6 +232,38 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             })
 }
 
+fn primary_key_index_columns(contract: &Table) -> Option<Vec<&str>> {
+    let mut columns = contract
+        .columns
+        .iter()
+        .filter(|column| column.primary_key_ordinal > 0)
+        .collect::<Vec<_>>();
+    columns.sort_unstable_by_key(|column| column.primary_key_ordinal);
+    if columns.is_empty()
+        || (columns.len() == 1 && columns[0].declared_type.eq_ignore_ascii_case("INTEGER"))
+    {
+        return None;
+    }
+    Some(columns.into_iter().map(|column| column.name).collect())
+}
+
+fn primary_key_index_matches(actual: &ActualIndex, expected_columns: &[&str]) -> bool {
+    actual.unique
+        && actual.origin.eq_ignore_ascii_case("pk")
+        && !actual.partial
+        && actual.columns.len() == expected_columns.len()
+        && actual
+            .columns
+            .iter()
+            .zip(expected_columns)
+            .all(|(actual, expected)| {
+                actual.cid >= 0
+                    && !actual.descending
+                    && actual.collation.eq_ignore_ascii_case("BINARY")
+                    && actual.name.eq_ignore_ascii_case(expected)
+            })
+}
+
 fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
     actual.unique
         && actual.origin.eq_ignore_ascii_case("u")
@@ -260,8 +365,13 @@ async fn validate_indexes_for_table(
         .iter()
         .filter(|contract| contract.table.eq_ignore_ascii_case(table))
         .collect::<Vec<_>>();
+    let mut matched_actual = vec![false; actual.len()];
     for contract in &expected {
-        if !actual.iter().any(|index| index_matches(index, contract)) {
+        let Some(actual_index) = actual
+            .iter()
+            .enumerate()
+            .position(|(index, actual)| !matched_actual[index] && index_matches(actual, contract))
+        else {
             return Err(global_db_operation_message(
                 OPERATION,
                 format!(
@@ -271,28 +381,35 @@ async fn validate_indexes_for_table(
                     contract.columns.join(", ")
                 ),
             ));
-        }
+        };
+        matched_actual[actual_index] = true;
+    }
+    let table_contract = TABLES
+        .iter()
+        .find(|contract| contract.name.eq_ignore_ascii_case(table));
+    if expected
+        .iter()
+        .all(|contract| !contract.origin.eq_ignore_ascii_case("pk"))
+        && let Some(primary_key_columns) = table_contract.and_then(primary_key_index_columns)
+    {
+        let Some(actual_index) = actual.iter().enumerate().position(|(index, actual)| {
+            !matched_actual[index] && primary_key_index_matches(actual, &primary_key_columns)
+        }) else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "table '{table}' is missing required primary-key index on ({})",
+                    primary_key_columns.join(", ")
+                ),
+            ));
+        };
+        matched_actual[actual_index] = true;
     }
 
-    let actual_unique = actual
-        .iter()
-        .filter(|index| index.unique && !index.origin.eq_ignore_ascii_case("pk"))
-        .collect::<Vec<_>>();
-    let expected_unique = expected
-        .iter()
-        .copied()
-        .filter(|index| index.unique)
-        .collect::<Vec<_>>();
-    if actual_unique.len() != expected_unique.len()
-        || expected_unique.iter().any(|expected| {
-            !actual_unique
-                .iter()
-                .any(|actual| index_matches(actual, expected))
-        })
-    {
+    if matched_actual.iter().any(|matched| !matched) {
         return Err(global_db_operation_message(
             OPERATION,
-            format!("table '{table}' has incompatible unique-key indexes"),
+            format!("table '{table}' has an incompatible total index inventory"),
         ));
     }
     Ok(())
@@ -410,6 +527,117 @@ async fn validate_named_tables_and_indexes(
         validate_indexes_for_table(conn, contract.name).await?;
     }
     Ok(())
+}
+
+pub async fn validate_session_temporal_schema_contract(
+    conn: &impl QueryExecutor,
+    table_names: &[&str],
+) -> tracedecay_runtime_core::errors::Result<()> {
+    validate_named_tables_and_indexes(conn, table_names).await
+}
+
+pub async fn validate_session_graph_publication_schema_contract(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let actual = read_graph_publication_inventory(conn).await?;
+    let expected = EXPECTED_GRAPH_PUBLICATION_SCHEMA
+        .as_ref()
+        .map_err(|error| global_db_operation_message(OPERATION, error.clone()))?;
+
+    for (name, expected_object) in expected {
+        let Some(actual_object) = actual.get(name) else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "graph publication schema is missing required {} '{name}'",
+                    expected_object.object_type
+                ),
+            ));
+        };
+        if actual_object != expected_object {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "graph publication schema has incompatible {} '{name}'",
+                    expected_object.object_type
+                ),
+            ));
+        }
+    }
+    if let Some((name, object)) = actual
+        .iter()
+        .find(|(name, _object)| !expected.contains_key(*name))
+    {
+        return Err(global_db_operation_message(
+            OPERATION,
+            format!(
+                "graph publication schema contains unexpected {} '{name}'",
+                object.object_type
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn read_graph_publication_inventory(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<GraphPublicationSchemaInventory> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut inventory = GraphPublicationSchemaInventory::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        let object_type = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let name = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let table = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sql = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if !belongs_to_graph_publication_namespace(&name, &table) {
+            continue;
+        }
+        if inventory
+            .insert(
+                name.clone(),
+                GraphPublicationSchemaObject {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!("graph publication schema repeats object '{name}'"),
+            ));
+        }
+    }
+    Ok(inventory)
+}
+
+fn belongs_to_graph_publication_namespace(name: &str, table: &str) -> bool {
+    [name, table].iter().any(|value| {
+        value.starts_with("graph_publication_") || value.starts_with("graph_verified_")
+    })
 }
 
 pub async fn validate_registry_schema_contract(

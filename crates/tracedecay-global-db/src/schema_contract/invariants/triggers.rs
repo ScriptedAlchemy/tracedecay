@@ -597,38 +597,6 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
                 SELECT RAISE(ABORT, 'session cursor keys are append-only');
             END",
     },
-    Trigger {
-        name: "session_temporal_migration_receipts_immutable_update_v1",
-        table: "session_temporal_migration_receipts",
-        create_sql: "CREATE TRIGGER session_temporal_migration_receipts_immutable_update_v1
-            BEFORE UPDATE ON session_temporal_migration_receipts BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_temporal_migration_receipts_immutable_delete_v1",
-        table: "session_temporal_migration_receipts",
-        create_sql: "CREATE TRIGGER session_temporal_migration_receipts_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_migration_receipts BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_temporal_migration_dispositions_immutable_update_v1",
-        table: "session_temporal_migration_dispositions",
-        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_update_v1
-            BEFORE UPDATE ON session_temporal_migration_dispositions BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_temporal_migration_dispositions_immutable_delete_v1",
-        table: "session_temporal_migration_dispositions",
-        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_migration_dispositions BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
-            END",
-    },
 ];
 
 const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[

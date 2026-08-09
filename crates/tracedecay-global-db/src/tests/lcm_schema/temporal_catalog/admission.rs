@@ -1,5 +1,22 @@
 use super::*;
 
+async fn persisted_column_names(db_path: &Path, table: &str) -> Vec<String> {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_xinfo(?1) ORDER BY cid",
+            params![table],
+        )
+        .await
+        .unwrap();
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        columns.push(row.get::<String>(0).unwrap());
+    }
+    columns
+}
+
 #[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();
@@ -269,51 +286,6 @@ async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
 }
 
 #[tokio::test]
-async fn temporal_schema_rejects_legacy_lcm_summary_storage_without_mutation() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path)
-        .await
-        .expect("fresh store should receive the final temporal schema");
-    drop(db);
-
-    let raw_db = TestConnection::open(&db_path);
-    let conn = (*raw_db).clone();
-    conn.execute_batch(
-        "CREATE TABLE lcm_summary_nodes (branch_local_row INTEGER NOT NULL);
-         INSERT INTO lcm_summary_nodes(branch_local_row) VALUES (91);",
-    )
-    .await
-    .unwrap();
-    drop(conn);
-    drop(raw_db);
-    let before_version = temporal_schema_version(&db_path).await;
-
-    let error = match open_global_db(&db_path).await {
-        Ok(_) => panic!("obsolete LCM summary storage must require reset"),
-        Err(error) => error,
-    };
-    let (authority, reason) = error
-        .reset_required_context()
-        .expect("obsolete summary storage must return typed reset-required");
-    assert_eq!(authority, "session temporal");
-    assert!(
-        reason.contains("lcm_summary_nodes"),
-        "unexpected reason: {reason}"
-    );
-    assert!(
-        table_exists(&db_path, "lcm_summary_nodes").await,
-        "typed refusal must not delete obsolete storage"
-    );
-    assert_eq!(
-        row_count(&db_path, "lcm_summary_nodes").await,
-        1,
-        "typed refusal must not rewrite obsolete summary data"
-    );
-    assert_eq!(temporal_schema_version(&db_path).await, before_version);
-}
-
-#[tokio::test]
 async fn temporal_schema_rejects_retired_summary_sources_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -444,6 +416,203 @@ async fn temporal_schema_is_not_installed_into_a_nonempty_store() {
     assert!(
         !table_exists(&db_path, "session_summary_nodes").await,
         "a rejected nonempty store must not gain temporal authority tables"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_extra_temporal_column_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install the final temporal schema");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "ALTER TABLE session_summary_nodes
+         ADD COLUMN branch_local_metadata BLOB;",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("extra persisted temporal column metadata must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("extra temporal column metadata must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("session_summary_nodes"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        persisted_column_names(&db_path, "session_summary_nodes")
+            .await
+            .last()
+            .map(String::as_str),
+        Some("branch_local_metadata"),
+        "typed refusal must not rewrite incompatible temporal column metadata"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_missing_temporal_occurrence_time_index() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install the final temporal indexes");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch("DROP INDEX idx_session_occurrences_session_time;")
+        .await
+        .unwrap();
+    drop(conn);
+    drop(raw_db);
+    let rejected_catalog = temporal_schema_object_catalog(&db_path).await;
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a missing required temporal query index must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a missing temporal index must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("session_occurrences") && reason.contains("session_id, knowledge_at"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        rejected_catalog,
+        "typed refusal must not recreate the missing temporal index"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_missing_graph_publication_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install graph publication authority");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch("DROP TABLE graph_verified_heads_v1;")
+        .await
+        .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a missing graph publication table must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a missing graph publication table must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("graph_verified_heads_v1"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        !table_exists(&db_path, "graph_verified_heads_v1").await,
+        "typed refusal must not recreate a missing graph publication table"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_incompatible_graph_publication_column_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install graph publication authority");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "ALTER TABLE graph_verified_heads_v1
+         ADD COLUMN branch_local_metadata TEXT;",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("incompatible graph publication column metadata must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("incompatible graph metadata must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("graph_verified_heads_v1"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        persisted_column_names(&db_path, "graph_verified_heads_v1")
+            .await
+            .last()
+            .map(String::as_str),
+        Some("branch_local_metadata"),
+        "typed refusal must not rewrite incompatible graph publication metadata"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_extra_graph_publication_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install graph publication authority");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "CREATE TABLE graph_publication_branch_local_v1 (
+             retained_row INTEGER NOT NULL
+         );
+         INSERT INTO graph_publication_branch_local_v1(retained_row) VALUES (91);",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("an extra graph publication table must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("an extra graph table must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("graph_publication_branch_local_v1"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        row_count(&db_path, "graph_publication_branch_local_v1").await,
+        1,
+        "typed refusal must not delete an extra graph publication object"
     );
 }
 

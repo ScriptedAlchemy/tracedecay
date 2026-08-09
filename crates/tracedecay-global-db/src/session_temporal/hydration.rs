@@ -1310,6 +1310,7 @@ mod graph_relation_tests;
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::future::Future;
     use std::path::PathBuf;

@@ -23,28 +23,6 @@ async fn temporal_schema_complete_object_catalog() {
 }
 
 #[tokio::test]
-async fn final_schema_omits_legacy_lcm_summary_storage() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-
-    let db = open_global_db(&db_path)
-        .await
-        .expect("fresh initialization should install the final schema");
-    drop(db);
-
-    for object in [
-        "lcm_summary_nodes",
-        "lcm_summary_sources",
-        "lcm_summary_nodes_fts",
-    ] {
-        assert!(
-            !table_exists(&db_path, object).await,
-            "final schema must not install obsolete legacy LCM summary storage: {object}"
-        );
-    }
-}
-
-#[tokio::test]
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
