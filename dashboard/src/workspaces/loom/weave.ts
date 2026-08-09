@@ -351,28 +351,29 @@ export interface ChainSummary {
   truncated: boolean;
 }
 
-/** Reduce a session-detail payload to the chain the rail draws. Ordering is
- * the store's `ordinal` where present, falling back to wire order — never to
- * a timestamp, because there is none. */
-export function summarizeChain(
-  messages: readonly {
-    message_id: string;
-    role?: string | null | undefined;
-    content?: string | null | undefined;
-    ordinal?: number | null | undefined;
-    timestamp?: number | null | undefined;
-    tool_name?: string | null | undefined;
-    token_count?: number | null | undefined;
-    token_count_provenance?:
-      | 'o200k_approximate'
-      | 'unavailable'
-      | null
-      | undefined;
-  }[],
-  counts?: { message_count?: number } | undefined,
-  truncated = false,
-): ChainSummary {
-  const ordered = messages
+/**
+ * The LCM session authority orders turns by its durable ordinal. A missing
+ * ordinal has no synthetic replacement; its wire position is the only order
+ * the response supplied. Both the summary and the playback cursor consume
+ * this one ordering helper so they cannot drift apart.
+ */
+export interface ChainMessageInput {
+  message_id: string;
+  role?: string | null | undefined;
+  content?: string | null | undefined;
+  ordinal?: number | null | undefined;
+  timestamp?: number | null | undefined;
+  tool_name?: string | null | undefined;
+  token_count?: number | null | undefined;
+  token_count_provenance?:
+    | 'o200k_approximate'
+    | 'unavailable'
+    | null
+    | undefined;
+}
+
+export function orderChainMessages<T extends ChainMessageInput>(messages: readonly T[]): T[] {
+  return messages
     .map((message, index) => ({ message, index }))
     .sort((a, b) => {
       const left = a.message.ordinal;
@@ -383,6 +384,17 @@ export function summarizeChain(
       return a.index - b.index;
     })
     .map(({ message }) => message);
+}
+
+/** Reduce a session-detail payload to the chain the rail draws. Ordering is
+ * the store's `ordinal` where present, falling back to wire order — never to
+ * a timestamp, because there is none. */
+export function summarizeChain(
+  messages: readonly ChainMessageInput[],
+  counts?: { message_count?: number } | undefined,
+  truncated = false,
+): ChainSummary {
+  const ordered = orderChainMessages(messages);
 
   const roleCounts = new Map<string, number>();
   const toolCounts = new Map<string, number>();

@@ -6,6 +6,7 @@ import { formatCount } from '../../ui/format.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
+import { ThreadPlayback } from './ThreadPlayback.tsx';
 import {
   LcmSessionPayloadV1Schema,
   type LoomBranchSpanV1,
@@ -136,6 +137,14 @@ export function ThreadChain({
             );
             return (
               <div className="flex flex-col gap-3">
+                <ThreadPlayback
+                  key={thread.id}
+                  messages={data.messages}
+                  summaryNodes={data.summary_nodes}
+                  totalMessages={data.counts.message_count}
+                  hasMoreMessages={data.has_more_messages || data.next_cursor != null}
+                  hasMoreSummaryNodes={data.has_more_summary_nodes}
+                />
                 <div className="flex flex-col gap-1">
                   <Legend
                     trailing={

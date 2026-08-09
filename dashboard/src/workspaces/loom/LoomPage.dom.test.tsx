@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
+import { useScope } from '../../data/scope/store.ts';
 
 /**
  * What this suite guards is not layout — it is the surface's claims.
@@ -336,7 +337,10 @@ function readyEnvelope(payload: unknown) {
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    const hit = Object.entries(routes).find(([path]) => url.includes(path));
+    // Project-scoped dashboard reads travel through the gateway prefix. The
+    // fixtures name the canonical route after gateway resolution.
+    const canonicalUrl = url.replace(/\/api\/projects\/[^/]+\//, '/api/');
+    const hit = Object.entries(routes).find(([path]) => canonicalUrl.includes(path));
     const { status, body } = hit?.[1] ?? { status: 404, body: { status: 'not_found' } };
     return {
       ok: status >= 200 && status < 300,
@@ -366,6 +370,21 @@ function renderLoom(routes: Record<string, { status: number; body: unknown }> = 
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.setState({ scope: { kind: 'all' } });
+});
+
+beforeEach(() => {
+  // Loom's temporal authority is project-scoped. The dashboard no longer lets
+  // the all-projects aggregate silently fall through to whichever project is
+  // active, so this fixture selects the exact project represented by TEMPORAL.
+  useScope.setState({
+    scope: {
+      kind: 'project',
+      projectId: 'project-loom',
+      label: 'project loom',
+      activation: 'active',
+    },
+  });
 });
 
 describe('LoomPage', () => {
@@ -391,7 +410,7 @@ describe('LoomPage', () => {
     );
     await screen.findByText('Deliver Git primitive runtime');
     const urls = fetchMock.mock.calls.map((call) => String(call[0]));
-    expect(urls.some((url) => url.includes('/api/loom/temporal'))).toBe(true);
+    expect(urls.some((url) => url.includes('/loom/temporal'))).toBe(true);
     expect(urls.some((url) => url.includes('/api/plugins/hermes-lcm/overview'))).toBe(
       false,
     );
@@ -415,7 +434,7 @@ describe('LoomPage', () => {
     const row = await screen.findByText('Deliver Git primitive runtime');
     expect(
       fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes('/api/loom/temporal'),
+        String(call[0]).includes('/loom/temporal'),
       ),
     ).toBe(true);
     await userEvent.click(row);
@@ -499,6 +518,85 @@ describe('LoomPage', () => {
     expect(await screen.findByText('~12 tokens · o200k approximate')).toBeTruthy();
     expect(screen.getByText('~20 tokens · o200k approximate')).toBeTruthy();
     expect(screen.getByText('tokens unknown')).toBeTruthy();
+  });
+
+  it('replays only the canonical loaded raw-turn order and keeps compaction linked', async () => {
+    const user = userEvent.setup();
+    renderLoom({
+      ...HAPPY,
+      '/api/plugins/hermes-lcm/session/': {
+        status: 200,
+        body: readyEnvelope({
+          ...CHAIN,
+          has_more: true,
+          has_more_messages: true,
+          next_cursor: 'opaque-next-page',
+          summary_nodes: [
+            {
+              category: 'checkpoint',
+              created_at: NOW - 100,
+              depth: 1,
+              expand_hint: 'open the canonical transcript page',
+              latest_at: null,
+              node_id: 'summary-raw-0',
+              recency: null,
+              session_id: 'sess-open',
+              snippet: 'compacted setup',
+              source_token_count: 30,
+              source_type: 'message',
+              summary: 'The setup was compacted.',
+              token_count: 8,
+            },
+          ],
+          messages: [
+            chainMessage({
+              message_id: 'm2',
+              role: 'assistant',
+              content: 'Running the suite.',
+              ordinal: 2,
+              timestamp: NOW - 60,
+            }),
+            chainMessage({
+              message_id: 'm0',
+              role: 'user',
+              content: 'Verify durable code-generation restart.',
+              ordinal: 0,
+              timestamp: NOW - 120,
+              summary_node_ids: ['summary-raw-0'],
+            }),
+            chainMessage({
+              message_id: 'm1',
+              role: 'assistant',
+              content: 'Reading the reconciliation path.',
+              ordinal: 1,
+              timestamp: NOW - 90,
+            }),
+          ],
+        }),
+      },
+    });
+
+    await user.click(await screen.findByText('Deliver Git primitive runtime'));
+    expect(await screen.findByText('stored ordinal 2')).toBeTruthy();
+    expect(screen.getByText('following loaded tail')).toBeTruthy();
+    expect(screen.getByText(/later pages remain outside this replay/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
+    expect(screen.getByText('stored ordinal 1')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Return replay to latest loaded event' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
+    expect(screen.getByText('stored ordinal 0')).toBeTruthy();
+    expect(screen.getByText('linked compaction boundaries')).toBeTruthy();
+    expect(screen.getByText(/checkpoint · depth 1/)).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText('Replay speed'), '2');
+    expect((screen.getByLabelText('Replay speed') as HTMLSelectElement).value).toBe('2');
+    await user.click(screen.getByRole('button', { name: 'Play replay' }));
+    expect(screen.getByRole('button', { name: 'Pause replay' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Pause replay' }));
+    await user.click(screen.getByRole('button', { name: 'Return replay to latest loaded event' }));
+    expect(screen.getByText('following loaded tail')).toBeTruthy();
   });
 
   it('continues the chain through durable causal rows', async () => {
