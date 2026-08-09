@@ -769,6 +769,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
     )
     .await;
 
@@ -866,6 +867,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
     )
     .await;
     let observed = std::fs::read_to_string(&environment_marker).unwrap();
@@ -936,6 +938,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
     )
     .await;
 
@@ -1102,6 +1105,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
             &provider,
             &admitted_environment,
             Arc::clone(&cancel),
+            None,
         ) => {}
         _ = driver => unreachable!("the driver loops until execution settles"),
     }
@@ -1285,6 +1289,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         &selection,
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
     )
     .await;
 
@@ -1415,6 +1420,7 @@ async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
             state: denial.state,
         },
         denial.fallback.clone(),
+        None,
     );
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
     let evidence = fixture.sealed_evidence();
@@ -1556,6 +1562,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         ),
         &admitted_environment,
         Arc::new(Notify::new()),
+        None,
     )
     .await;
 
@@ -1596,6 +1603,7 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
         WorkAttemptProviderOutcomeV1::ProviderUnavailable {
             state: WorkProviderAvailabilityV1::Unsupported,
         },
+        None,
         None,
     );
 

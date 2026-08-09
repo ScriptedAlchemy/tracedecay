@@ -67,6 +67,9 @@ use tracedecay_domain::{
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerSummaryConfig, run_work_with_codex_app_server,
 };
+use tracedecay_usecases::observability::{
+    BoundedObservabilityProducerV1, record_terminal_attempt_product_views,
+};
 
 use crate::config::work_executable_binding::{
     PinnedWorkExecutableBindingResolver, WorkExecutableBindingError, WorkExecutableBindingResolver,
@@ -148,6 +151,7 @@ pub(super) fn spawn_attempt_execution(
     registry: Arc<WorkAttemptProcessRegistryV1>,
     project_root: PathBuf,
     attempt: WorkAttemptV1,
+    observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
 ) {
     let Some(cancel) = registry.register(attempt.identity()) else {
         return;
@@ -163,6 +167,7 @@ pub(super) fn spawn_attempt_execution(
             attempt,
             admitted_environment,
             cancel,
+            observability_producer,
         )
         .await;
         registry.release(&identity);
@@ -176,6 +181,7 @@ async fn run_attempt(
     attempt: WorkAttemptV1,
     admitted_environment: BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
+    observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
 ) {
     let Ok(context) = work_background_context(&registered, attempt.identity()) else {
         tracing::warn!(
@@ -208,6 +214,7 @@ async fn run_attempt(
                     &selection,
                     &admitted_environment,
                     cancel,
+                    observability_producer.as_deref(),
                 )
                 .await;
             }
@@ -219,6 +226,7 @@ async fn run_attempt(
                     &selection,
                     &admitted_environment,
                     cancel,
+                    observability_producer.as_deref(),
                 )
                 .await;
             }
@@ -233,6 +241,7 @@ async fn run_attempt(
                     state: denial.state,
                 },
                 denial.fallback,
+                observability_producer.as_deref(),
             );
         }
     }
@@ -412,6 +421,7 @@ fn settle_unstarted<S>(
     attempt: &WorkAttemptV1,
     outcome: WorkAttemptProviderOutcomeV1,
     provider_fallback: Option<WorkProviderFallbackRecordV1>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
 {
@@ -434,12 +444,17 @@ fn settle_unstarted<S>(
         provider_fallback,
         observed_at: current_micros(),
     };
-    if let Err(problem) = attempts.fail_recovery(context, identity, &evidence) {
-        tracing::warn!(
-            task = identity.task_id().as_str(),
-            ?problem,
-            "work attempt provider denial could not be sealed"
-        );
+    match attempts.fail_recovery(context, identity, &evidence) {
+        Ok(settled) => {
+            let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?problem,
+                "work attempt provider denial could not be sealed"
+            );
+        }
     }
 }
 
@@ -468,6 +483,7 @@ async fn execute_provider_with_environment<S>(
     selection: &ProviderSelection,
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
 {
@@ -504,6 +520,7 @@ async fn execute_provider_with_environment<S>(
                 attempt,
                 WorkAttemptProviderOutcomeV1::LaunchFailed,
                 selection.fallback.clone(),
+                observability_producer,
             );
             return;
         }
@@ -578,12 +595,17 @@ async fn execute_provider_with_environment<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
-    if let Err(problem) = attempts.settle(context, &identity, &evidence) {
-        tracing::warn!(
-            task = identity.task_id().as_str(),
-            ?problem,
-            "work attempt terminal evidence could not be sealed"
-        );
+    match attempts.settle(context, &identity, &evidence) {
+        Ok(settled) => {
+            let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?problem,
+                "work attempt terminal evidence could not be sealed"
+            );
+        }
     }
 }
 
@@ -616,6 +638,7 @@ async fn execute_app_server<S>(
     selection: &ProviderSelection,
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
 {
@@ -670,10 +693,11 @@ async fn execute_app_server<S>(
         .and_then(|summary| {
             let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
                 provider_id,
-                tracedecay_domain::SessionId::new(summary.thread_id)
-                    .map_err(|error| crate::errors::TraceDecayError::Config {
+                tracedecay_domain::SessionId::new(summary.thread_id).map_err(|error| {
+                    crate::errors::TraceDecayError::Config {
                         message: format!("Codex app-server returned an invalid thread id: {error}"),
-                    })?,
+                    }
+                })?,
             )
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!("Codex app-server session identity is invalid: {error}"),
@@ -758,12 +782,17 @@ async fn execute_app_server<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
-    if let Err(problem) = attempts.settle(context, &identity, &evidence) {
-        tracing::warn!(
-            task = identity.task_id().as_str(),
-            ?problem,
-            "work attempt terminal evidence could not be sealed"
-        );
+    match attempts.settle(context, &identity, &evidence) {
+        Ok(settled) => {
+            let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?problem,
+                "work attempt terminal evidence could not be sealed"
+            );
+        }
     }
 }
 
