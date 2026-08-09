@@ -150,6 +150,12 @@ pub enum WorkGraphChangeV1 {
     TaskAdded {
         item: Box<WorkItemV1>,
     },
+    TaskCreated {
+        initiative: WorkInitiativeV1,
+        plan: WorkPlanV1,
+        milestone: WorkMilestoneV1,
+        item: Box<WorkItemV1>,
+    },
     RelationReplanDecided {
         proposal: WorkRelationReplanProposalV1,
         disposition: WorkProposalDispositionV1,
@@ -354,6 +360,51 @@ impl WorkProductGraphV1 {
     pub fn apply(mut self, change: WorkGraphChangeV1) -> Result<Self, WorkProductContractError> {
         match change {
             WorkGraphChangeV1::TaskAdded { item } => self.items.push(*item),
+            WorkGraphChangeV1::TaskCreated {
+                initiative,
+                plan,
+                milestone,
+                item,
+            } => {
+                if plan.initiative_id() != initiative.id()
+                    || milestone.plan_id() != plan.id()
+                    || item.hierarchy().initiative_id() != initiative.id()
+                    || item.hierarchy().plan_id() != plan.id()
+                    || item.hierarchy().milestone_id() != milestone.id()
+                {
+                    return Err(WorkProductContractError::UnknownHierarchy);
+                }
+                match self
+                    .initiatives
+                    .iter()
+                    .find(|current| current.id() == initiative.id())
+                {
+                    Some(current) if current != &initiative => {
+                        return Err(WorkProductContractError::DuplicateIdentity);
+                    }
+                    Some(_) => {}
+                    None => self.initiatives.push(initiative),
+                }
+                match self.plans.iter().find(|current| current.id() == plan.id()) {
+                    Some(current) if current != &plan => {
+                        return Err(WorkProductContractError::DuplicateIdentity);
+                    }
+                    Some(_) => {}
+                    None => self.plans.push(plan),
+                }
+                match self
+                    .milestones
+                    .iter()
+                    .find(|current| current.id() == milestone.id())
+                {
+                    Some(current) if current != &milestone => {
+                        return Err(WorkProductContractError::DuplicateIdentity);
+                    }
+                    Some(_) => {}
+                    None => self.milestones.push(milestone),
+                }
+                self.items.push(*item);
+            }
             WorkGraphChangeV1::RelationReplanDecided {
                 proposal,
                 disposition,

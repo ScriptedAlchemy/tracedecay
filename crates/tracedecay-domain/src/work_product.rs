@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     ActorId, ManifestDigest, ProposalId, RetrievalAnchorId, TaskId, UtcMicros,
-    WorkAttemptIdentityV1, WorkProviderRouteV1,
+    WorkAttemptIdentityV1, WorkProductAuthorizedRelationScopeV1, WorkProviderRouteV1,
 };
 
 pub const MAX_WORK_PRODUCT_TEXT_BYTES: usize = 4_096;
@@ -153,6 +153,49 @@ impl<'de> Deserialize<'de> for WorkGraphVersionV1 {
         D: Deserializer<'de>,
     {
         Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The exact owner-relative relation set selected for a canonical Work graph.
+///
+/// This identity lives in the domain because Plan 32 attempt admission must
+/// retain it byte-for-byte through provider settlement. Reconstructing it
+/// from a project context would conflate explicit no-Git work with a scoped
+/// repository relation.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "selection", rename_all = "snake_case")]
+pub enum WorkProductSelectionScopeV1 {
+    ProfileOwnedNoGit,
+    Relations {
+        relation_scopes: BTreeSet<WorkProductAuthorizedRelationScopeV1>,
+    },
+}
+
+impl WorkProductSelectionScopeV1 {
+    pub fn relations(
+        relation_scopes: BTreeSet<WorkProductAuthorizedRelationScopeV1>,
+    ) -> Result<Self, WorkProductContractError> {
+        if relation_scopes.is_empty() {
+            return Err(WorkProductContractError::InvalidIdentity);
+        }
+        Ok(Self::Relations { relation_scopes })
+    }
+
+    pub const fn relation_scopes(&self) -> Option<&BTreeSet<WorkProductAuthorizedRelationScopeV1>> {
+        match self {
+            Self::ProfileOwnedNoGit => None,
+            Self::Relations { relation_scopes } => Some(relation_scopes),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), WorkProductContractError> {
+        if matches!(
+            self,
+            Self::Relations { relation_scopes } if relation_scopes.is_empty()
+        ) {
+            return Err(WorkProductContractError::InvalidIdentity);
+        }
+        Ok(())
     }
 }
 

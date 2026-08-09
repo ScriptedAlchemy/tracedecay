@@ -22,6 +22,8 @@ mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
 mod registered_provider_usage;
+#[cfg(test)]
+mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
 pub use observability_rollup::{
@@ -50,7 +52,13 @@ pub mod registry_maintenance;
 mod remote_deletion;
 pub mod schema_contract;
 pub mod schema_stages;
+mod stack_delivery;
 pub use schema_stages::ensure_registered_schema;
+pub use stack_delivery::{
+    GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
+    GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
+    MAX_GITHUB_STACK_ACTIVE_PENDING_V1, MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
+};
 
 /// Installs the canonical registered global/session schema installer into the
 /// kernel's fail-closed [`tracedecay_runtime_core::ports::registered_schema`]

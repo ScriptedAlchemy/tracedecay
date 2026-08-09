@@ -35,8 +35,9 @@ pub use execution_emit::{
 pub use export::RegisteredAggregateShareExporterV1;
 pub use github_stack_emit::{
     GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
-    GitHubStackProbeOutcomeV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
-    record_github_stack_capability,
+    GitHubStackDriftObservationResultV1, GitHubStackDriftObservationUnavailableV1,
+    GitHubStackDriftRecoveryErrorV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
+    record_github_stack_capability, record_github_stack_drifts, recover_open_github_stack_drifts,
 };
 pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
