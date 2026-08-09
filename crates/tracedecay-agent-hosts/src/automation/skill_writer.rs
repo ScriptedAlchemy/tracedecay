@@ -334,9 +334,13 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
+    let exports = project_root.map_or_else(
+        || crate::agents::export_managed_skills_to_agents(&home, profile_root),
+        |project_root| {
+            crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root)
+        },
+    );
     let project_root = project_root.unwrap_or(home.as_path());
-    let exports =
-        crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root);
     let (scopes, errors) =
         super::skill_materialization::reconcile_detected_scopes(profile_root, &home, project_root);
     let materialization_scopes = scopes
