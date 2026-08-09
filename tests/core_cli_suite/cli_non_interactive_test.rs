@@ -547,17 +547,12 @@ fn copy_dir_recursive(source: &Path, destination: &Path) {
 /// native `codex plugin add` (non-zero exit with remediation), the test
 /// simulates that native activation, and the retry completes install plus
 /// daemon-loop automation enablement.
-fn run_codex_automation_install(
-    home: &TempDir,
-    project_root: &Path,
-    extra_args: &[&str],
-) -> Output {
+fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 
     let mut deferred = tracedecay_command(home.path(), project_root);
     let _shim = add_tracedecay_path_shim(&mut deferred, home.path());
     deferred.args(["install", "--agent", "codex", "--automation"]);
-    deferred.args(extra_args);
     let deferred_output = run_with_timeout(deferred, cli_timeout());
     assert!(
         !deferred_output.status.success(),
@@ -614,7 +609,6 @@ fn run_codex_automation_install(
     let mut install = tracedecay_command(home.path(), project_root);
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
     install.args(["install", "--agent", "codex", "--automation"]);
-    install.args(extra_args);
     let output = run_with_timeout(install, cli_timeout());
     assert!(
         output.status.success(),
@@ -625,31 +619,23 @@ fn run_codex_automation_install(
     output
 }
 
-fn read_codex_automation_sidecar(home: &TempDir) -> serde_json::Value {
-    let projects_dir = profile_root(home.path()).join("projects");
-    let sidecars = std::fs::read_dir(&projects_dir)
-        .unwrap()
-        .map(|entry| {
-            entry
-                .unwrap()
-                .path()
-                .join("dashboard/automation_config.json")
-        })
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+fn read_codex_daemon_automation_config(home: &TempDir, project_root: &Path) -> serde_json::Value {
+    let mut get = tracedecay_command(home.path(), project_root);
+    get.args(["automation", "config", "get", "--json"]);
+    let output = run_with_timeout(get, cli_timeout());
     assert_eq!(
-        sidecars.len(),
-        1,
-        "codex automation install should write one TraceDecay project scheduler sidecar"
+        output.status.code(),
+        Some(0),
+        "codex automation config read should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(
-        &std::fs::read(&sidecars[0]).expect("automation sidecar should be readable"),
-    )
-    .expect("automation sidecar should be valid JSON")
+    serde_json::from_slice(&output.stdout)
+        .expect("codex automation config read should return canonical JSON")
 }
 
 #[test]
-fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
+fn install_codex_automation_enables_daemon_owned_project_configuration_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -666,7 +652,12 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
     )
     .unwrap();
 
-    run_codex_automation_install(&home, &project_root, &[]);
+    let output = run_codex_automation_install(&home, &project_root);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("daemon-managed project configuration"),
+        "automation install must report the configuration authority it used\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert!(
         home.path()
@@ -686,58 +677,77 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
         !project_root.join(".codex/automations").exists(),
         "Codex automation install must not create repo-local Codex automation files"
     );
-    let sidecar = read_codex_automation_sidecar(&home);
-    assert_eq!(sidecar["enabled"], true);
-    assert_eq!(sidecar["backend"], "codex_app_server");
-    assert_eq!(sidecar["host_mode"], "standalone");
-    assert!(sidecar.get("model").is_none());
-    assert!(sidecar.get("require_dashboard_approval").is_none());
-    assert!(
-        sidecar.get("auto_apply_memory_ops").is_none(),
-        "install must not enable unattended memory ops by default: {sidecar}"
+    let config = read_codex_daemon_automation_config(&home, &project_root);
+    assert_eq!(config["source"], "daemon_pinned_snapshot");
+    assert_eq!(config["effective"]["enabled"], true);
+    assert_eq!(config["effective"]["backend"], "codex_app_server");
+    assert_eq!(config["effective"]["host_mode"], "standalone");
+    assert_eq!(config["effective"]["model_id"], "gpt-5.6-mini");
+    assert_eq!(
+        config["effective"]["tasks"]["memory_curator"]["enabled"],
+        true
     );
-    assert!(
-        sidecar.get("auto_enable_skills").is_none(),
-        "install must leave skill auto-enablement at its default: {sidecar}"
+    assert_eq!(
+        config["effective"]["tasks"]["memory_curator"]["schedule"],
+        "interval"
     );
-    assert_eq!(sidecar["memory_curator"]["enabled"], true);
-    assert_eq!(sidecar["memory_curator"]["schedule"], "interval");
-    assert_eq!(sidecar["memory_curator"]["interval_secs"], 900);
-    assert_eq!(sidecar["session_reflector"]["enabled"], true);
-    assert_eq!(sidecar["session_reflector"]["interval_secs"], 900);
-    assert_eq!(sidecar["skill_writer"]["enabled"], true);
-    assert_eq!(sidecar["skill_writer"]["interval_secs"], 3600);
-    assert_eq!(sidecar["skill_writer"]["min_idle_secs"], 900);
+    assert_eq!(
+        config["effective"]["tasks"]["memory_curator"]["interval_secs"],
+        900
+    );
+    assert_eq!(
+        config["effective"]["tasks"]["session_reflector"]["enabled"],
+        true
+    );
+    assert_eq!(
+        config["effective"]["tasks"]["session_reflector"]["interval_secs"],
+        900
+    );
+    assert_eq!(
+        config["effective"]["tasks"]["skill_writer"]["enabled"],
+        true
+    );
+    assert_eq!(
+        config["effective"]["tasks"]["skill_writer"]["interval_secs"],
+        3600
+    );
+    assert_eq!(
+        config["effective"]["tasks"]["skill_writer"]["min_idle_secs"],
+        900
+    );
+
+    let user_config: toml::Value = toml::from_str(
+        &std::fs::read_to_string(profile_root(home.path()).join("config.toml"))
+            .expect("install should save host lifecycle settings"),
+    )
+    .expect("host lifecycle settings should remain valid TOML");
+    assert!(
+        user_config.get("automation").is_none(),
+        "automation install must not persist retired user automation defaults: {user_config:?}"
+    );
+
+    let projects_dir = profile_root(home.path()).join("projects");
+    let sidecars = std::fs::read_dir(&projects_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join("dashboard/automation_config.json")
+                })
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        sidecars.is_empty(),
+        "automation install must not write retired dashboard sidecars: {sidecars:?}"
+    );
 }
 
 #[test]
-fn install_codex_automation_auto_apply_flag_opts_into_unattended_memory_ops() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let project_root = canonical_temp_path(project.path());
-    std::fs::create_dir_all(project_root.join("src")).unwrap();
-    std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
-
-    let output = run_codex_automation_install(&home, &project_root, &["--auto-apply"]);
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("without dashboard approval"),
-        "opting into --auto-apply should print an explicit warning\nstderr:\n{stderr}"
-    );
-
-    let sidecar = read_codex_automation_sidecar(&home);
-    assert_eq!(sidecar["enabled"], true);
-    assert!(sidecar.get("require_dashboard_approval").is_none());
-    assert_eq!(sidecar["auto_apply_memory_ops"], true);
-    assert!(
-        sidecar.get("auto_enable_skills").is_none(),
-        "--auto-apply must not touch skill auto-enablement: {sidecar}"
-    );
-}
-
-#[test]
-fn automation_config_enable_writes_project_sidecar_noninteractively() {
+fn automation_config_enable_writes_canonical_project_setting_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -755,10 +765,12 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
     );
     let payload: serde_json::Value = serde_json::from_slice(&enable_output.stdout)
         .expect("automation config enable should print JSON");
-    assert_eq!(payload["project"]["enabled"], true);
-    assert_eq!(payload["project"]["backend"], "codex_app_server");
     assert_eq!(payload["effective"]["enabled"], true);
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-mini");
+    assert_eq!(payload["source"], "daemon_pinned_snapshot");
+    assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
+    assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
 
     let mut explain = tracedecay_command(home.path(), project.path());
     explain.args(["automation", "config", "explain", "--json"]);
@@ -771,7 +783,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
     );
     let explain_payload: serde_json::Value = serde_json::from_slice(&explain_output.stdout)
         .expect("automation config explain should print JSON");
-    assert_eq!(explain_payload["explanation"]["source"], "project");
+    assert_eq!(explain_payload["source"], "daemon_pinned_snapshot");
     assert_eq!(
         explain_payload["explanation"]["trace_decay_backend_calls"],
         true
@@ -781,27 +793,10 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
         explain_payload["backend_availability"]["backend"],
         "codex_app_server"
     );
-
-    let projects_dir = profile_root(home.path()).join("projects");
-    let sidecars = std::fs::read_dir(&projects_dir)
-        .unwrap()
-        .map(|entry| {
-            entry
-                .unwrap()
-                .path()
-                .join("dashboard/automation_config.json")
-        })
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        sidecars.len(),
-        1,
-        "automation config should write one project sidecar under {projects_dir:?}, got {sidecars:?}"
-    );
 }
 
 #[test]
-fn automation_config_set_global_defaults_noninteractively() {
+fn automation_config_rejects_retired_global_scope() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path()).unwrap();
@@ -826,62 +821,29 @@ fn automation_config_set_global_defaults_noninteractively() {
     ]);
     let output = run_with_timeout(set, cli_timeout());
     assert!(
-        output.status.success(),
-        "automation config global set should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "automation config global set should be rejected\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let payload: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("global set should print JSON");
-    assert_eq!(payload["project"], serde_json::Value::Null);
-    assert_eq!(payload["global"]["backend"], "codex_app_server");
-    assert!(payload["effective"].get("model").is_none());
-    assert!(payload["effective"].get("max_tokens").is_none());
-    assert!(payload["effective"].get("temperature").is_none());
-    assert_eq!(
-        payload["effective"]["tasks"]["session_reflector"]["interval_secs"],
-        1800
-    );
-
-    let config_toml = std::fs::read_to_string(profile_root(home.path()).join("config.toml"))
-        .expect("global config should be saved");
-    assert!(config_toml.contains("[automation]"));
-    assert!(!config_toml.contains("model"));
-
-    let projects_dir = profile_root(home.path()).join("projects");
     assert!(
-        !projects_dir.exists(),
-        "global automation config must not create a project sidecar"
+        String::from_utf8_lossy(&output.stderr).contains("automation settings are project-scoped")
     );
-
-    let mut get = tracedecay_command(home.path(), project.path());
-    get.args(["automation", "config", "get", "--scope", "global", "--json"]);
-    let get_output = run_with_timeout(get, cli_timeout());
-    assert!(
-        get_output.status.success(),
-        "automation config global get should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&get_output.stdout),
-        String::from_utf8_lossy(&get_output.stderr)
-    );
-    let get_payload: serde_json::Value =
-        serde_json::from_slice(&get_output.stdout).expect("global get should print JSON");
-    assert_eq!(get_payload["effective"]["backend"], "codex_app_server");
-    assert!(get_payload["effective"].get("model").is_none());
 }
 
 #[test]
 fn automation_config_set_rejects_unimplemented_external_backend() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    std::fs::create_dir_all(project.path()).unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
+    init_project_fixture(home.path(), project.path());
 
     let mut set = tracedecay_command(home.path(), project.path());
     set.args([
         "automation",
         "config",
         "set",
-        "--scope",
-        "global",
         "--backend",
         "external-command",
     ]);
@@ -898,7 +860,7 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
 }
 
 #[test]
-fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
+fn automation_config_set_writes_complete_canonical_project_setting_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -917,10 +879,6 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         "standalone",
         "--timeout-secs",
         "90",
-        "--auto-apply-memory-ops",
-        "true",
-        "--auto-enable-skills",
-        "true",
         "--export-memory-digest",
         "false",
         "--memory-curator",
@@ -955,25 +913,19 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("project set should print JSON");
-    assert_eq!(payload["project"]["backend"], "codex_app_server");
-    assert!(payload["project"].get("model").is_none());
-    assert!(payload["project"].get("max_tokens").is_none());
-    assert!(payload["project"].get("temperature").is_none());
-    assert!(
-        payload["project"]
-            .get("require_dashboard_approval")
-            .is_none()
-    );
-    assert_eq!(payload["project"]["auto_apply_memory_ops"], true);
-    assert_eq!(payload["project"]["auto_enable_skills"], true);
-    assert_eq!(payload["project"]["export_memory_digest"], false);
+    assert_eq!(payload["effective"]["backend"], "codex_app_server");
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-mini");
     assert_eq!(payload["effective"]["export_memory_digest"], false);
+    assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
+    assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
     assert_eq!(
-        payload["project"]["session_reflector"]["interval_secs"],
+        payload["effective"]["tasks"]["session_reflector"]["interval_secs"],
         1800
     );
-    assert_eq!(payload["project"]["skill_writer"]["stale_lock_secs"], 7200);
-    assert!(payload["effective"].get("model").is_none());
+    assert_eq!(
+        payload["effective"]["tasks"]["skill_writer"]["stale_lock_secs"],
+        7200
+    );
     assert_eq!(
         payload["effective"]["tasks"]["memory_curator"]["cooldown_secs"],
         300
@@ -983,29 +935,25 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
         60
     );
 
-    let projects_dir = profile_root(home.path()).join("projects");
-    let sidecars = std::fs::read_dir(&projects_dir)
-        .unwrap()
-        .map(|entry| {
-            entry
-                .unwrap()
-                .path()
-                .join("dashboard/automation_config.json")
-        })
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        sidecars.len(),
-        1,
-        "automation config set should write one project sidecar under {projects_dir:?}, got {sidecars:?}"
+    let mut get = tracedecay_command(home.path(), project.path());
+    get.args(["automation", "config", "get", "--json"]);
+    let get_output = run_with_timeout(get, cli_timeout());
+    assert!(
+        get_output.status.success(),
+        "automation config get should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&get_output.stdout),
+        String::from_utf8_lossy(&get_output.stderr)
     );
-    let sidecar: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&sidecars[0]).unwrap()).unwrap();
-    assert_eq!(sidecar["skill_writer"]["interval_secs"], 3600);
+    let restored: serde_json::Value =
+        serde_json::from_slice(&get_output.stdout).expect("project get should print JSON");
+    assert_eq!(
+        restored["effective"]["tasks"]["skill_writer"]["interval_secs"],
+        3600
+    );
 }
 
 #[test]
-fn automation_run_memory_curation_skips_without_backend_when_disabled() {
+fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -1018,7 +966,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
     let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
-        "disabled automation run should skip cleanly\nstdout:\n{}\nstderr:\n{}",
+        "manual automation run should remain supported and skip cleanly when disabled\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&run_output.stdout),
         String::from_utf8_lossy(&run_output.stderr)
     );
