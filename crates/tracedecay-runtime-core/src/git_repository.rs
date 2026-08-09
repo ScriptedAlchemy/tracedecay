@@ -3,7 +3,7 @@
 //! Repository topology, refs, HEAD, object format, operation state, status,
 //! and bounded history are read through `gix`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use gix::bstr::ByteSlice as _;
@@ -212,8 +212,8 @@ impl GitRepositoryAuthority {
             .into_iter(Vec::<gix::bstr::BString>::new())
             .map_err(|error| operation("status", error))?;
 
-        let mut tracked = BTreeMap::<String, TrackedStatusBuilder>::new();
-        let mut loose = BTreeMap::<String, GitStatusEntryV1>::new();
+        let mut tracked = HashMap::<String, TrackedStatusBuilder>::new();
+        let mut loose = HashMap::<String, GitStatusEntryV1>::new();
         for item in status {
             match item.map_err(|error| operation("status", error))? {
                 Item::TreeIndex(change) => match change {

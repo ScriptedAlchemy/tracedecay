@@ -7,11 +7,13 @@ use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
+    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
+    PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
     TerminalStateContract, UnavailabilityReason, UseCaseId,
 };
 
@@ -62,16 +64,16 @@ const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-/// advisory producers retain the shared transport reads and additionally
-/// project the same canonical result through the mounted LSP/native host path.
-/// Hook delivery is host-registration metadata rather than a callable catalog
-/// surface. Dashboard consumes their results through the canonical feedback
-/// readers above rather than advertising producer operations it cannot invoke.
-const ADVISORY_SURFACES: [BindingSurface; 4] = [
+/// Advisory producers retain the shared callable transports. Their LSP/native
+/// delivery is an internal event path, not a JSON-RPC method binding. Hook
+/// delivery is likewise host-registration metadata rather than a callable
+/// catalog surface. Dashboard consumes their results through the canonical
+/// feedback readers above rather than advertising producer operations it
+/// cannot invoke.
+const ADVISORY_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
-    BindingSurface::Lsp,
 ];
 
 /// Producer contributions are application-callable only through the combined
@@ -227,6 +229,79 @@ pub fn feedback_surface_catalog_contribution()
     feedback_surface_catalog_contribution_for_handlers(&handlers)
 }
 
+/// Daemon-owned public HTTP bindings for every feedback operation mounted by
+/// the complete application router.
+pub fn feedback_http_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contribution = feedback_surface_catalog_contribution()?;
+    let feedback_service_id = ServiceId::new("service.application.feedback")?;
+    let primitive_service_id = ServiceId::new("service.application.primitive")?;
+    let mut bindings = Vec::new();
+    for spec in FEEDBACK_SPECS
+        .iter()
+        .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
+    {
+        let capability_id = CapabilityId::new(spec.capability)?;
+        let manifest = contribution
+            .capabilities()
+            .iter()
+            .find(|manifest| manifest.capability_id() == &capability_id)
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "feedback HTTP executable capability",
+            })?;
+        let schema = contribution.executable_schema(&capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "feedback HTTP executable schema",
+            },
+        )?;
+        let http_binding = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.capability_id() == &capability_id
+                    && binding.surface() == BindingSurface::Http
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "feedback HTTP surface binding",
+            })?;
+        let route_path = match spec.operation {
+            "affected_tests" => "/application/tests/affected".to_owned(),
+            "test_results" => "/application/tests/results".to_owned(),
+            operation => format!(
+                "/application/feedback/{}",
+                operation.strip_prefix("feedback_").ok_or(
+                    ApplicationContractError::Inconsistent {
+                        field: "feedback HTTP route operation",
+                    },
+                )?
+            ),
+        };
+        let service_id = if spec.operation == "test_results" {
+            primitive_service_id.clone()
+        } else {
+            feedback_service_id.clone()
+        };
+        bindings.push(ExecutableBindingAvailabilityV1::available(
+            ExecutableBindingV1::daemon_owned(
+                manifest,
+                OperationId::new(format!("operation.application.{}", spec.operation))?,
+                service_id,
+                schema.request_schema().clone(),
+                schema.result_schema().clone(),
+                CodecBindingKey::new(format!(
+                    "codec.application.feedback.{}.json.v1",
+                    spec.operation
+                ))?,
+                RouteExposureV1::Public {
+                    binding_id: http_binding.binding_id().clone(),
+                    route_path,
+                },
+            )?,
+        ));
+    }
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
+}
+
 fn feedback_surface_catalog_contribution_for_handlers(
     handlers: &[ApplicationHandlerDescriptor],
 ) -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -265,8 +340,8 @@ fn feedback_surface_catalog_contribution_for_handlers(
     Ok(contribution.with_executable_schemas(schemas)?)
 }
 
-/// Rust-owned request/result schema bodies for the four canonical feedback
-/// reads.
+/// Rust-owned request/result schema bodies for the eight mounted feedback
+/// operations.
 ///
 /// Handle-based reads admit one daemon-minted opaque handle
 /// ([`FeedbackHandleRequestV1`]); `test_results` has its own exact empty wire

@@ -113,8 +113,8 @@ mod work;
 mod workflow;
 
 use configuration_wire::{
-    build_configuration_wire_schema_registry, configuration_invocation_payload,
-    is_configuration_operation, validate_configuration_outcome,
+    CONFIGURATION_WIRE_OPERATIONS, build_configuration_wire_schema_registry,
+    configuration_invocation_payload, is_configuration_operation, validate_configuration_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
@@ -1292,22 +1292,6 @@ where
     .into_http_response()
 }
 
-const DASHBOARD_CONFIGURATION_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
-    ApplicationSurfaceOperation::ConfigurationList,
-    ApplicationSurfaceOperation::ConfigurationExplain,
-    ApplicationSurfaceOperation::ConfigurationGet,
-    ApplicationSurfaceOperation::ConfigurationSet,
-    ApplicationSurfaceOperation::ConfigurationUnset,
-    ApplicationSurfaceOperation::ConfigurationBatch,
-    ApplicationSurfaceOperation::ConfigurationWriteCredential,
-    ApplicationSurfaceOperation::ConfigurationObservedState,
-    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
-    ApplicationSurfaceOperation::ConfigurationProtectedApply,
-    ApplicationSurfaceOperation::ConfigurationRollbackPreview,
-    ApplicationSurfaceOperation::ConfigurationRollbackApply,
-    ApplicationSurfaceOperation::ConfigurationAudit,
-];
-
 const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
     ApplicationSurfaceOperation::FeedbackGet,
     ApplicationSurfaceOperation::FeedbackExpand,
@@ -1323,7 +1307,7 @@ pub fn dashboard_configuration_application_invoker(
     application_invoker_for_surface(
         Arc::new(client),
         BindingSurface::Dashboard,
-        &DASHBOARD_CONFIGURATION_OPERATIONS,
+        &CONFIGURATION_WIRE_OPERATIONS,
     )
 }
 
@@ -1402,7 +1386,7 @@ pub fn dashboard_configuration_application_router_with_executor(
         tracedecay_api::configuration_application_router(application_invoker_for_surface(
             executor,
             BindingSurface::Dashboard,
-            &DASHBOARD_CONFIGURATION_OPERATIONS,
+            &CONFIGURATION_WIRE_OPERATIONS,
         )?)
         .layer(axum::middleware::from_fn_with_state(
             cancellations,

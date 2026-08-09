@@ -1,10 +1,10 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationOutcome, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
-    ApplicationWireSchemaV1, CancellationStage, ComponentConfigurationState,
-    ConfigurationAuditPage, ConfigurationMutationReceipt, OperationTermination, ResolvedSetting,
-    SettingSummary, configuration_surface_catalog_contribution, configuration_surface_operation,
+    ApplicationOutcome, CancellationStage, ComponentConfigurationState, ConfigurationAuditPage,
+    ConfigurationMutationReceipt, ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1,
+    OperationTermination, ResolvedSetting, SettingSummary,
+    configuration_surface_catalog_contribution, configuration_surface_operation,
 };
 use tracedecay_domain::configuration::{CredentialReferenceMetadataV1, ProtectedChangePlan};
 use tracedecay_tool_catalog::{
@@ -14,33 +14,33 @@ use tracedecay_tool_catalog::{
 
 use super::{ApplicationSurfaceAdapterError, ApplicationSurfaceOperation};
 
+pub(super) const CONFIGURATION_WIRE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
+    ApplicationSurfaceOperation::ConfigurationList,
+    ApplicationSurfaceOperation::ConfigurationExplain,
+    ApplicationSurfaceOperation::ConfigurationGet,
+    ApplicationSurfaceOperation::ConfigurationSet,
+    ApplicationSurfaceOperation::ConfigurationUnset,
+    ApplicationSurfaceOperation::ConfigurationBatch,
+    ApplicationSurfaceOperation::ConfigurationWriteCredential,
+    ApplicationSurfaceOperation::ConfigurationObservedState,
+    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
+    ApplicationSurfaceOperation::ConfigurationProtectedApply,
+    ApplicationSurfaceOperation::ConfigurationRollbackPreview,
+    ApplicationSurfaceOperation::ConfigurationRollbackApply,
+    ApplicationSurfaceOperation::ConfigurationAudit,
+];
+
 pub(super) fn is_configuration_operation(operation: ApplicationSurfaceOperation) -> bool {
-    matches!(
-        operation,
-        ApplicationSurfaceOperation::ConfigurationList
-            | ApplicationSurfaceOperation::ConfigurationExplain
-            | ApplicationSurfaceOperation::ConfigurationGet
-            | ApplicationSurfaceOperation::ConfigurationSet
-            | ApplicationSurfaceOperation::ConfigurationUnset
-            | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
-            | ApplicationSurfaceOperation::ConfigurationObservedState
-            | ApplicationSurfaceOperation::ConfigurationProtectedPreview
-            | ApplicationSurfaceOperation::ConfigurationProtectedApply
-            | ApplicationSurfaceOperation::ConfigurationRollbackPreview
-            | ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | ApplicationSurfaceOperation::ConfigurationAudit
-    )
+    CONFIGURATION_WIRE_OPERATIONS.contains(&operation)
 }
 
 pub(super) fn build_configuration_wire_schema_registry(
     catalog: &CatalogSnapshotV1,
-) -> Result<ApplicationWireSchemaRegistryV1, ApplicationSurfaceAdapterError> {
+) -> Result<ConfigurationWireSchemaRegistryV1, ApplicationSurfaceAdapterError> {
     let contribution = configuration_surface_catalog_contribution()?;
     let mut schemas = Vec::new();
-    for name in tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
-        let operation = ApplicationWireOperation::from_catalog_name(name)
-            .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    for operation in CONFIGURATION_WIRE_OPERATIONS {
+        let name = operation.as_str();
         let application_operation = configuration_surface_operation(name)?
             .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
         let manifest = catalog
@@ -53,8 +53,8 @@ pub(super) fn build_configuration_wire_schema_registry(
             let binding = catalog
                 .binding(binding_id)
                 .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
-            schemas.push(ApplicationWireSchemaV1::from_catalog(
-                operation,
+            schemas.push(ConfigurationWireSchemaV1::from_catalog(
+                name,
                 manifest,
                 binding,
                 authority.request_schema().clone(),
@@ -62,7 +62,7 @@ pub(super) fn build_configuration_wire_schema_registry(
             )?);
         }
     }
-    ApplicationWireSchemaRegistryV1::new(schemas).map_err(Into::into)
+    ConfigurationWireSchemaRegistryV1::new(schemas).map_err(Into::into)
 }
 
 /// The application invocation payload for a configuration operation is the
@@ -200,13 +200,13 @@ pub(super) fn validate_configuration_outcome(
 #[cfg(test)]
 mod tests {
     use tracedecay_application::{
-        ApplicationWireOperation, OperationTermination,
-        configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_surface_operation,
+        OperationTermination, configuration::CONFIGURATION_SURFACE_OPERATION_NAMES,
+        configuration_surface_operation,
     };
 
     use super::{
-        SettingSummary, build_configuration_wire_schema_registry, configuration_terminal_is_legal,
-        payload_decodes,
+        CONFIGURATION_WIRE_OPERATIONS, SettingSummary, build_configuration_wire_schema_registry,
+        configuration_terminal_is_legal, payload_decodes,
     };
 
     #[test]
@@ -220,23 +220,40 @@ mod tests {
     }
 
     #[test]
-    fn configuration_catalog_bindings_resolve_concrete_schema_bodies() {
+    fn configuration_catalog_bindings_resolve_only_mounted_schema_bodies() {
         let catalog = super::super::application_surface_catalog_ref().unwrap();
         let registry = build_configuration_wire_schema_registry(catalog).unwrap();
 
-        for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
-            let operation = ApplicationWireOperation::from_catalog_name(name).unwrap();
+        for operation in CONFIGURATION_WIRE_OPERATIONS {
+            let name = operation.as_str();
             let application_operation = configuration_surface_operation(name).unwrap().unwrap();
             let manifest = catalog
                 .capability(application_operation.capability_id())
                 .unwrap();
             for binding_id in manifest.binding_ids() {
+                let binding = catalog.binding(binding_id).unwrap();
                 let schema = registry.get(binding_id).unwrap();
-                assert_eq!(schema.operation(), operation);
                 assert_eq!(schema.capability_id(), manifest.capability_id());
                 assert_eq!(schema.binding_id(), binding_id);
+                assert_eq!(schema.surface(), binding.surface());
                 assert_eq!(schema.request().schema_ref(), manifest.request_schema());
                 assert_eq!(schema.result().schema_ref(), manifest.result_schema());
+            }
+        }
+
+        for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+            if CONFIGURATION_WIRE_OPERATIONS
+                .iter()
+                .any(|operation| operation.as_str() == name)
+            {
+                continue;
+            }
+            let application_operation = configuration_surface_operation(name).unwrap().unwrap();
+            let manifest = catalog
+                .capability(application_operation.capability_id())
+                .unwrap();
+            for binding_id in manifest.binding_ids() {
+                assert!(registry.get(binding_id).is_none());
             }
         }
     }

@@ -9,6 +9,7 @@ pub mod advisory;
 pub mod authorization;
 pub mod clock;
 pub mod configuration;
+mod configuration_wire;
 pub mod context;
 pub mod context_scout;
 pub mod dashboard_graph;
@@ -47,7 +48,6 @@ pub mod settings_preview;
 pub mod source_edit;
 mod source_edit_rollback;
 pub mod storage;
-pub mod wire;
 pub mod work;
 pub mod work_artifact_hydration;
 pub mod work_attempt;
@@ -101,6 +101,7 @@ pub use configuration::{
     configuration_surface_operation, configuration_surface_request_schema,
     configuration_surface_result_schema,
 };
+pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestAdmission,
@@ -157,8 +158,9 @@ pub use external_source::{
 pub use feedback::{
     FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1,
     FeedbackHandleRequestV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
-    FeedbackReadService, feedback_surface_catalog_contribution,
-    feedback_surface_handler_descriptors, feedback_surface_operation,
+    FeedbackReadService, feedback_http_executable_binding_registry,
+    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
+    feedback_surface_operation,
 };
 #[cfg(feature = "native-git")]
 pub use git::NativeHistoricalBlobReaderV1;
@@ -261,6 +263,7 @@ pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
     application_catalog_contributions, code_search_executable_binding_registry,
+    primitive_http_executable_binding_registry,
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
@@ -317,10 +320,6 @@ pub use tracedecay_domain::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len,
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
-};
-pub use wire::{
-    ApplicationOwnerKind, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
-    ApplicationWireSchemaV1,
 };
 pub use work::*;
 pub use work_artifact_hydration::*;

@@ -8,9 +8,8 @@ use serde_json::{Value, json};
 
 use super::util::{JsonError, http_detail, internal_error};
 use super::{
-    DashboardAutomationAuthorityErrorV1, DashboardManagedSkillCommandOutcomeV1,
-    DashboardManagedSkillCommandV1, DashboardState, automation_authority_error_response,
-    exact_automation_authority,
+    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
+    automation_authority_error_response, exact_automation_authority,
 };
 use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
@@ -258,6 +257,7 @@ fn is_bad_request(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::DashboardAutomationAuthorityErrorV1;
     use super::*;
 
     #[test]

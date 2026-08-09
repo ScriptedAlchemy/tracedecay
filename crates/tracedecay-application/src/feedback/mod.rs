@@ -14,8 +14,9 @@ mod read;
 mod service;
 
 pub use catalog::{
-    feedback_read_operations, feedback_surface_catalog_contribution,
-    feedback_surface_handler_descriptors, feedback_surface_operation,
+    feedback_http_executable_binding_registry, feedback_read_operations,
+    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
+    feedback_surface_operation,
 };
 
 pub use adapters::GenerationBoundFeedbackDiagnosticsAdapter;

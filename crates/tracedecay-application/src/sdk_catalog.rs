@@ -17,12 +17,12 @@ use tracedecay_tool_catalog::{
 use crate::{
     ApplicationContractError, application_catalog_contributions,
     code_search_executable_binding_registry, configuration_executable_binding_registry,
-    context_scout_executable_binding_registry,
+    context_scout_executable_binding_registry, feedback_http_executable_binding_registry,
     git::{git_surface_executable_binding_registry, native_worktree_executable_binding_registry},
     handoff_executable_binding_registry,
     multi_root::multi_root_executable_binding_registry,
-    retained_surface_executable_binding_registry, work_executable_binding_registry,
-    workflow_executable_binding_registry,
+    primitive_http_executable_binding_registry, retained_surface_executable_binding_registry,
+    work_executable_binding_registry, workflow_executable_binding_registry,
 };
 
 /// Every mounted HTTP executable registry the SDK projects.
@@ -38,6 +38,8 @@ fn mounted_executable_binding_registries()
         git_surface_executable_binding_registry()?,
         native_worktree_executable_binding_registry()?,
         code_search_executable_binding_registry()?,
+        feedback_http_executable_binding_registry()?,
+        primitive_http_executable_binding_registry()?,
         work_executable_binding_registry()?,
         workflow_executable_binding_registry()?,
         configuration_executable_binding_registry()?,
@@ -420,6 +422,75 @@ mod tests {
                     if route_path == &format!("/application/code/{operation}")
             ));
         }
+    }
+
+    #[test]
+    fn sdk_registry_selects_live_feedback_and_non_session_primitive_http_routes() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        for (operation, route) in [
+            ("feedback_diagnostics", "/application/feedback/diagnostics"),
+            ("feedback_get", "/application/feedback/get"),
+            ("feedback_expand", "/application/feedback/expand"),
+            ("feedback_list", "/application/feedback/list"),
+            ("feedback_impact", "/application/feedback/impact"),
+            (
+                "feedback_advisory_cycle",
+                "/application/feedback/advisory_cycle",
+            ),
+            ("affected_tests", "/application/tests/affected"),
+            ("test_results", "/application/tests/results"),
+            ("qualified_name", "/application/primitives/qualified_name"),
+            ("call_chain", "/application/primitives/call_chain"),
+            ("file_dependents", "/application/primitives/file_dependents"),
+            ("source_lines", "/application/primitives/source_lines"),
+            ("source_body", "/application/primitives/source_body"),
+            ("source_outline", "/application/primitives/source_outline"),
+            ("module_api", "/application/primitives/module_api"),
+            ("file_metadata", "/application/primitives/file_metadata"),
+            ("health_read", "/application/primitives/health_read"),
+            ("health_delta", "/application/primitives/health_delta"),
+            ("storage_status", "/application/primitives/storage_status"),
+            (
+                "diagnostics_read",
+                "/application/primitives/diagnostics_read",
+            ),
+        ] {
+            let operation_id = OperationId::new(format!("operation.application.{operation}"))
+                .expect("operation ID");
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} must be SDK-callable"));
+            assert!(matches!(
+                binding.transport(),
+                SdkTransportBindingV1::Http { route_path } if route_path == route
+            ));
+            assert_eq!(
+                binding.sdk_method().as_str(),
+                format!("application_{operation}")
+            );
+            let expected_service =
+                if operation == "test_results" || route.starts_with("/application/primitives/") {
+                    "service.application.primitive"
+                } else {
+                    "service.application.feedback"
+                };
+            assert!(matches!(
+                binding.binding().owner(),
+                tracedecay_tool_catalog::ExecutionOwnerV1::DaemonOwned { service_id }
+                    if service_id.as_str() == expected_service
+            ));
+        }
+
+        let session_lookup = registry
+            .get(&OperationId::new("operation.application.session_lookup").expect("operation ID"))
+            .and_then(|availability| availability.binding())
+            .expect("session lookup remains independently callable");
+        assert!(matches!(
+            session_lookup.transport(),
+            SdkTransportBindingV1::McpTool { tool_name }
+                if tool_name == "tracedecay_session_lookup"
+        ));
     }
 
     #[test]

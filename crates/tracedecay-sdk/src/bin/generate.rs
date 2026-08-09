@@ -888,6 +888,10 @@ fn quote(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "generate/transport_conformance_tests.rs"]
+mod transport_conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1235,9 +1239,6 @@ mod tests {
         );
 
         let generated_rust = render_rust_operations(&operations, &unavailable).unwrap();
-        // The typed_operation! macro owns descriptor expansion, so the
-        // rendered source carries one macro invocation per operation rather
-        // than literal expanded structs; assert the invocation shape.
         assert!(generated_rust.contains("pub mod application_configuration_set"));
         let configuration_set = generated_rust
             .split("typed_operation!")
@@ -1245,8 +1246,6 @@ mod tests {
             .expect("configuration_set typed operation invocation");
         assert!(configuration_set.contains("EffectClass::ConfigurationWrite"));
         assert!(configuration_set.contains("IdempotencyContract::Required"));
-        // The lone boolean macro argument is CANCELLABLE; writes are not
-        // cancellable.
         assert!(configuration_set.contains("false"));
         assert!(generated_rust.contains("ReconciliationContract::Required"));
         assert!(generated_rust.contains("ReceiptContract::DurableEffect"));

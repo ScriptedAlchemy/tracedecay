@@ -139,6 +139,67 @@ pub fn code_search_executable_binding_registry()
     Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
+/// Daemon-owned public HTTP bindings for the mounted primitive read routes.
+///
+/// Code queries have their own `/application/code` registry above. Session
+/// lookup is intentionally absent because its independently owned transport
+/// cutover is not part of this route family.
+pub fn primitive_http_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let contribution = primitive_read_contribution()?;
+    let service_id = ServiceId::new("service.application.primitive")?;
+    let mut bindings = Vec::new();
+    for spec in PRIMITIVE_READ_SPECS
+        .iter()
+        .filter(|spec| !spec.operation.starts_with("code_") && spec.operation != "session_lookup")
+    {
+        let capability_id = CapabilityId::new(format!(
+            "capability.application.primitive.{}",
+            spec.capability.replace('_', "-")
+        ))?;
+        let manifest = contribution
+            .capabilities()
+            .iter()
+            .find(|manifest| manifest.capability_id() == &capability_id)
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "primitive HTTP executable capability",
+            })?;
+        let schema = contribution.executable_schema(&capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "primitive HTTP executable schema",
+            },
+        )?;
+        let http_binding = contribution
+            .bindings()
+            .iter()
+            .find(|binding| {
+                binding.capability_id() == &capability_id
+                    && binding.surface() == BindingSurface::Http
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "primitive HTTP surface binding",
+            })?;
+        bindings.push(ExecutableBindingAvailabilityV1::available(
+            ExecutableBindingV1::daemon_owned(
+                manifest,
+                OperationId::new(format!("operation.application.{}", spec.operation))?,
+                service_id.clone(),
+                schema.request_schema().clone(),
+                schema.result_schema().clone(),
+                CodecBindingKey::new(format!(
+                    "codec.application.primitive.{}.json.v1",
+                    spec.operation
+                ))?,
+                RouteExposureV1::Public {
+                    binding_id: http_binding.binding_id().clone(),
+                    route_path: format!("/application/primitives/{}", spec.operation),
+                },
+            )?,
+        ));
+    }
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
+}
+
 struct PrimitiveReadSpec {
     operation: &'static str,
     capability: &'static str,
