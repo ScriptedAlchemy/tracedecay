@@ -23,6 +23,8 @@ use crate::advisory::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
     GitHubReadOnlyDescriptorSetV1, GitHubRestDescriptorV1,
 };
+use crate::stack_coordinator::DaemonGitHubStackCoordinatorV1;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::Database;
 
 pub struct GitHubReviewRuntimeOwnerConfigV1 {
@@ -33,6 +35,8 @@ pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub credential: GitHubReadOnlyCredentialV1,
     pub http: GitHubHttpReadConfigV1,
     pub identity: GitHubReviewProviderIdentityV1,
+    pub stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    pub stack_anchor_db: Arc<RegisteredGlobalDb>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +64,11 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     >,
     anchors: A,
     source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    stack_client: GitHubReadOnlyClientV1,
+    stack_scope: ResolvedScope,
+    stack_provider: tracedecay_domain::ProviderId,
+    stack_coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    stack_anchors: super::ProjectGitHubStackAnchorAuthorityV1,
 }
 
 impl<R, A> GitHubReviewRuntimeOwnerV1<R, A>
@@ -72,7 +81,103 @@ where
         context: &'a RequestContext,
         request: &'a GitHubReviewReadRequestV1,
     ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
-        self.coordinator.refresh(context, request)
+        Box::pin(async move {
+            let outcome = self.coordinator.refresh(context, request).await;
+            let stack_read_enabled = match self
+                .stack_coordinator
+                .should_read_provider_stack(&self.stack_scope)
+            {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "github_stack_policy_read_failed",
+                        error = ?error,
+                        "GitHub stack policy observation failed"
+                    );
+                    false
+                }
+            };
+            if matches!(outcome, GitHubReviewRefreshOutcomeV1::Stored(_)) && stack_read_enabled {
+                let client = self.stack_client.clone();
+                let stack_context = context.clone();
+                let stack_review_request = request.clone();
+                let stack_provider = self.stack_provider.clone();
+                let stack_anchors = self.stack_anchors.clone();
+                let stack_request = super::GitHubGraphQlReadRequestV1 {
+                    scope: request.scope.clone(),
+                    pull_request_id: request.pull_request_id.clone(),
+                    resume: super::GitHubReadResumeV1::empty(),
+                };
+                let provider_outcome = match tokio::task::spawn_blocking(move || {
+                    client.read_stack(
+                        &stack_context,
+                        &stack_request,
+                        &stack_review_request,
+                        &stack_provider,
+                        &stack_anchors,
+                    )
+                })
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "github_stack_read_task_failed",
+                            error = %error,
+                            "GitHub stack read task failed"
+                        );
+                        crate::stack_coordinator::GitHubStackProviderOutcomeV1::Unavailable
+                    }
+                };
+                let stack_observed_at = tracedecay_application::now_micros();
+                let Some(source_binding) = self.stack_anchors.source_binding(
+                    context,
+                    request,
+                    &provider_outcome,
+                    stack_observed_at,
+                ) else {
+                    tracing::warn!(
+                        event = "github_stack_source_binding_failed",
+                        "GitHub stack evidence could not be bound to its exact source owner"
+                    );
+                    return outcome;
+                };
+                match self.stack_coordinator.observe_provider(
+                    self.stack_scope.clone(),
+                    self.stack_provider.clone(),
+                    provider_outcome,
+                    source_binding,
+                    stack_observed_at,
+                ) {
+                    Ok(observation) => {
+                        let anchor_publication = self
+                            .stack_anchors
+                            .publish(context, request, &observation, self.source_access.as_ref())
+                            .await;
+                        if !matches!(
+                            anchor_publication,
+                            super::GitHubStackAnchorPublicationOutcomeV1::Published
+                                | super::GitHubStackAnchorPublicationOutcomeV1::Replayed
+                        ) {
+                            tracing::warn!(
+                                event = "github_stack_anchor_publication_failed",
+                                outcome = ?anchor_publication,
+                                "GitHub stack evidence was not published to the retrieval-anchor authority"
+                            );
+                            return outcome;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "github_stack_provider_observation_failed",
+                            error = ?error,
+                            "GitHub stack provider observation failed"
+                        );
+                    }
+                }
+            }
+            outcome
+        })
     }
 
     pub fn authorize<'a>(
@@ -116,13 +221,22 @@ where
         rest_descriptor(GitHubReviewReadOperationV1::RestListPullRequestReviewComments),
     ])
     .map_err(map_admission_error)?;
+    let stack_scope = config.resolved_scope.clone();
+    let stack_provider = config.identity.provider.clone();
+    let stack_coordinator = Arc::clone(&config.stack_coordinator);
+    let stack_anchors = super::ProjectGitHubStackAnchorAuthorityV1::new(
+        Arc::clone(&config.stack_anchor_db),
+        config.feedback_scope.clone(),
+    )
+    .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::StoreUnavailable)?;
     let store = ProjectGitHubReviewStoreV1::new(config.database, config.feedback_scope)
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::StoreUnavailable)?;
     let client = GitHubReadOnlyClientV1::new(config.target, config.credential, config.http)
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidNetworkConfiguration)?;
     let decoder = GitHubOfficialResponseDecoderV1::new(config.identity, anchors.clone())
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidDecoderConfiguration)?;
-    let transport = GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
+    let stack_client = client.clone();
+    let transport = GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client, decoder);
     let connector = GitHubReadOnlyConnector::new(descriptors, transport, remapper)
         .map_err(map_admission_error)?;
     Ok(GitHubReviewRuntimeOwnerV1 {
@@ -133,6 +247,11 @@ where
         ),
         anchors,
         source_access,
+        stack_client,
+        stack_scope,
+        stack_provider,
+        stack_coordinator,
+        stack_anchors,
     })
 }
 

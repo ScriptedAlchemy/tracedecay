@@ -10,7 +10,14 @@ mod discovery;
 mod dto;
 mod network;
 mod owner;
+mod stack;
+mod stack_anchors;
 mod store;
+
+pub use stack_anchors::{
+    GitHubStackAnchorPublicationOutcomeV1, GitHubStackAnchorReadOutcomeV1,
+    GitHubStackDurableObservationV1, ProjectGitHubStackAnchorAuthorityV1,
+};
 
 use std::collections::BTreeMap;
 

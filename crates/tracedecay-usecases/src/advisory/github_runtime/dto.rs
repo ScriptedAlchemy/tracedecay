@@ -14,6 +14,11 @@ pub(crate) struct RestPullRequestV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RestComparisonV1 {
+    pub(crate) merge_base_commit: RestCommitRefV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RestReviewV1 {
     pub(crate) id: u64,
     pub(crate) node_id: Option<String>,
@@ -56,6 +61,31 @@ pub(crate) struct GraphQlResponseV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlStackResponseV1 {
+    pub(crate) data: Option<GraphQlStackDataV1>,
+    #[serde(default)]
+    pub(crate) errors: Vec<GraphQlErrorV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlStackDataV1 {
+    pub(crate) repository: Option<GraphQlStackRepositoryV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlStackRepositoryV1 {
+    pub(crate) pull_request: Option<GraphQlSelectedStackPullRequestV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlSelectedStackPullRequestV1 {
+    pub(crate) stack_entry: Option<GraphQlStackPositionV1>,
+    pub(crate) stack: Option<GraphQlPullRequestStackV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GraphQlErrorV1 {
     pub(crate) message: String,
@@ -91,6 +121,88 @@ pub(crate) struct GraphQlPullRequestV1 {
     pub(crate) base_ref_oid: String,
     pub(crate) head_ref_oid: String,
     pub(crate) review_threads: GraphQlReviewThreadConnectionV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlCommitTargetV1 {
+    pub(crate) oid: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlRefV1 {
+    pub(crate) name: String,
+    pub(crate) target: Option<GraphQlCommitTargetV1>,
+    pub(crate) branch_protection_rule: Option<GraphQlBranchProtectionRuleV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlBranchProtectionRuleV1 {
+    pub(crate) id: String,
+    pub(crate) pattern: String,
+    pub(crate) requires_approving_reviews: bool,
+    pub(crate) requires_code_owner_reviews: bool,
+    pub(crate) requires_status_checks: bool,
+    pub(crate) requires_strict_status_checks: bool,
+    pub(crate) required_approving_review_count: Option<u32>,
+    #[serde(default)]
+    pub(crate) required_status_check_contexts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlStatusCheckRollupV1 {
+    pub(crate) state: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlMergeQueueEntryV1 {
+    pub(crate) id: String,
+    pub(crate) position: u32,
+    pub(crate) state: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GraphQlStackPositionV1 {
+    pub(crate) position: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlPullRequestStackV1 {
+    pub(crate) id: String,
+    pub(crate) number: u64,
+    pub(crate) base_ref_name: String,
+    pub(crate) size: u32,
+    pub(crate) entries: GraphQlPullRequestStackEntriesV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlPullRequestStackEntriesV1 {
+    pub(crate) total_count: u32,
+    pub(crate) page_info: GraphQlPageInfoV1,
+    pub(crate) nodes: Vec<GraphQlPullRequestStackEntryV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlPullRequestStackEntryV1 {
+    pub(crate) position: u32,
+    pub(crate) pull_request: Option<GraphQlPullRequestStackLayerV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GraphQlPullRequestStackLayerV1 {
+    pub(crate) number: u64,
+    pub(crate) base_ref_name: String,
+    pub(crate) head_ref_name: String,
+    pub(crate) base_ref_oid: String,
+    pub(crate) head_ref_oid: String,
+    pub(crate) base_ref: Option<GraphQlRefV1>,
+    pub(crate) status_check_rollup: Option<GraphQlStatusCheckRollupV1>,
+    pub(crate) merge_queue_entry: Option<GraphQlMergeQueueEntryV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
