@@ -7,7 +7,7 @@ const DAY: i64 = SECS_PER_DAY;
 
 fn summary(skill_id: &str) -> SkillUsageRecord {
     SkillUsageRecord {
-        schema_version: 1,
+        schema_version: 2,
         skill_id: skill_id.to_string(),
         title: Some(format!("{skill_id} title")),
         category: Some("maintenance".to_string()),
@@ -24,9 +24,9 @@ fn summary(skill_id: &str) -> SkillUsageRecord {
         last_viewed_at: None,
         last_used_at: None,
         last_patched_at: None,
-        approved_at: None,
-        view_count_at_approval: None,
-        use_count_at_approval: None,
+        activated_at: None,
+        view_count_at_activation: None,
+        use_count_at_activation: None,
     }
 }
 
@@ -56,69 +56,69 @@ fn telemetry() -> FactOutcomeTelemetry {
 }
 
 #[test]
-fn skill_outcome_requires_an_approval_timestamp() {
+fn skill_outcome_requires_an_activation_timestamp() {
     assert!(skill_outcome(&summary("draft-skill"), 100 * DAY).is_none());
 }
 
 #[test]
-fn skill_used_after_approval_is_adopted() {
+fn skill_used_after_activation_is_adopted() {
     let mut record = summary("adopted-skill");
-    record.approved_at = Some(10 * DAY);
-    record.view_count_at_approval = Some(3);
-    record.use_count_at_approval = Some(1);
+    record.activated_at = Some(10 * DAY);
+    record.view_count_at_activation = Some(3);
+    record.use_count_at_activation = Some(1);
     record.view_count = 5;
     record.use_count = 4;
     record.last_used_at = Some(11 * DAY);
 
     let outcome = skill_outcome(&record, 12 * DAY).unwrap();
     assert_eq!(outcome.verdict, SkillOutcomeVerdict::Adopted);
-    assert_eq!(outcome.views_since_approval, 2);
-    assert_eq!(outcome.uses_since_approval, 3);
-    assert_eq!(outcome.days_since_approval, 2);
+    assert_eq!(outcome.views_since_activation, 2);
+    assert_eq!(outcome.uses_since_activation, 3);
+    assert_eq!(outcome.days_since_activation, 2);
 }
 
 #[test]
 fn unused_skill_inside_window_is_too_early() {
     let mut record = summary("fresh-skill");
-    record.approved_at = Some(10 * DAY);
-    record.view_count_at_approval = Some(0);
-    record.use_count_at_approval = Some(0);
+    record.activated_at = Some(10 * DAY);
+    record.view_count_at_activation = Some(0);
+    record.use_count_at_activation = Some(0);
 
-    let outcome = skill_outcome(&record, 10 * DAY + SKILL_ADOPTION_WINDOW_SECS - 1).unwrap();
+    let outcome = skill_outcome(&record, 10 * DAY + SKILL_ACTIVATION_WINDOW_SECS - 1).unwrap();
     assert_eq!(outcome.verdict, SkillOutcomeVerdict::TooEarly);
-    assert_eq!(outcome.uses_since_approval, 0);
+    assert_eq!(outcome.uses_since_activation, 0);
 }
 
 #[test]
 fn unused_skill_past_window_is_ignored() {
     let mut record = summary("ignored-skill");
-    record.approved_at = Some(10 * DAY);
-    record.view_count_at_approval = Some(2);
-    record.use_count_at_approval = Some(0);
+    record.activated_at = Some(10 * DAY);
+    record.view_count_at_activation = Some(2);
+    record.use_count_at_activation = Some(0);
     record.view_count = 4;
     record.last_viewed_at = Some(12 * DAY);
 
-    let outcome = skill_outcome(&record, 10 * DAY + SKILL_ADOPTION_WINDOW_SECS).unwrap();
+    let outcome = skill_outcome(&record, 10 * DAY + SKILL_ACTIVATION_WINDOW_SECS).unwrap();
     assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
-    assert_eq!(outcome.views_since_approval, 2);
-    assert_eq!(outcome.uses_since_approval, 0);
+    assert_eq!(outcome.views_since_activation, 2);
+    assert_eq!(outcome.uses_since_activation, 0);
 }
 
 #[test]
-fn legacy_ledger_without_baseline_uses_last_activity_fallback() {
+fn ledger_without_activation_baseline_uses_last_activity_fallback() {
     let mut record = summary("legacy-skill");
-    record.approved_at = Some(10 * DAY);
+    record.activated_at = Some(10 * DAY);
     record.use_count = 2;
     record.last_used_at = Some(11 * DAY);
 
     let outcome = skill_outcome(&record, 20 * DAY).unwrap();
     assert_eq!(outcome.verdict, SkillOutcomeVerdict::Adopted);
-    assert_eq!(outcome.uses_since_approval, 2);
+    assert_eq!(outcome.uses_since_activation, 2);
 
     record.last_used_at = Some(9 * DAY);
     let outcome = skill_outcome(&record, 20 * DAY).unwrap();
     assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
-    assert_eq!(outcome.uses_since_approval, 0);
+    assert_eq!(outcome.uses_since_activation, 0);
 }
 
 #[test]
@@ -211,12 +211,12 @@ fn legacy_outcome_snapshot_fact_keeps_numeric_mapping() {
 #[test]
 fn outcome_eval_definitions_reflect_task_scope_and_verdicts() {
     let mut adopted = summary("adopted-skill");
-    adopted.approved_at = Some(10 * DAY);
-    adopted.use_count_at_approval = Some(0);
+    adopted.activated_at = Some(10 * DAY);
+    adopted.use_count_at_activation = Some(0);
     adopted.use_count = 1;
     adopted.last_used_at = Some(11 * DAY);
     let snapshot = AutomationOutcomesSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         skills: compute_skill_outcomes(&[adopted], 20 * DAY),
         facts: vec![fact_outcome(
             fact_input("fact_dead", 5 * DAY, None),
@@ -255,11 +255,11 @@ fn outcome_eval_definitions_reflect_task_scope_and_verdicts() {
 #[test]
 fn feedback_section_counts_verdicts_per_task() {
     let mut ignored = summary("ignored-skill");
-    ignored.approved_at = Some(0);
-    ignored.view_count_at_approval = Some(0);
-    ignored.use_count_at_approval = Some(0);
+    ignored.activated_at = Some(0);
+    ignored.view_count_at_activation = Some(0);
+    ignored.use_count_at_activation = Some(0);
     let snapshot = AutomationOutcomesSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         skills: compute_skill_outcomes(&[ignored], 30 * DAY),
         facts: Vec::new(),
         skills_refreshed_at: Some(30 * DAY),
@@ -280,14 +280,14 @@ fn feedback_section_counts_verdicts_per_task() {
 #[tokio::test]
 async fn refresh_skill_outcomes_persists_snapshot() {
     use super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
-        create_managed_skill_draft, default_managed_skill_targets,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
+        default_managed_skill_targets,
     };
 
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let dashboard_root = temp.path().join("dashboard");
-    let skill = create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "outcome-skill".to_string(),
@@ -306,10 +306,6 @@ async fn refresh_skill_outcomes_persists_snapshot() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, &skill.metadata.id)
-        .await
-        .unwrap();
-
     let now = crate::tracedecay::current_timestamp();
     let outcomes = refresh_skill_outcomes(&profile_root, &dashboard_root, now)
         .await
@@ -324,13 +320,13 @@ async fn refresh_skill_outcomes_persists_snapshot() {
     assert!(snapshot.facts.is_empty());
 }
 
-async fn seed_approved_skill(profile_root: &Path) {
+async fn seed_activated_skill(profile_root: &Path) {
     use super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
-        create_managed_skill_draft, default_managed_skill_targets,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
+        default_managed_skill_targets,
     };
 
-    let skill = create_managed_skill_draft(
+    create_managed_skill(
         profile_root,
         ManagedSkillDraft {
             id: "outcome-lock-skill".to_string(),
@@ -349,14 +345,11 @@ async fn seed_approved_skill(profile_root: &Path) {
     )
     .await
     .unwrap();
-    approve_managed_skill(profile_root, &skill.metadata.id)
-        .await
-        .unwrap();
 }
 
 async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database {
     use crate::application::memory::MemoryApplication;
-    use crate::automation::fact_proposals::{apply_fact_proposal, record_session_fact_proposals};
+    use crate::automation::fact_proposals::{FactProposalState, record_session_fact_proposals};
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
@@ -392,9 +385,7 @@ async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database
     )
     .await
     .unwrap();
-    apply_fact_proposal(&memory, &records[0].proposal_id, None)
-        .await
-        .unwrap();
+    assert_eq!(records[0].state, FactProposalState::Applied);
     database
 }
 
@@ -408,7 +399,7 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let dashboard_root = temp.path().join("dashboard");
-    seed_approved_skill(&profile_root).await;
+    seed_activated_skill(&profile_root).await;
     let database = seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
@@ -438,7 +429,7 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let dashboard_root = temp.path().join("dashboard");
-    seed_approved_skill(&profile_root).await;
+    seed_activated_skill(&profile_root).await;
     let database = seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();

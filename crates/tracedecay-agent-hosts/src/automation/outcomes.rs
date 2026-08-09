@@ -43,8 +43,8 @@ static AUTOMATION_OUTCOMES_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sy
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static AUTOMATION_OUTCOMES_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
-/// A skill is `too_early` to judge until this long after approval.
-pub const SKILL_ADOPTION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+/// A skill is `too_early` to judge until this long after activation.
+pub const SKILL_ACTIVATION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SECS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -91,10 +91,10 @@ pub struct SkillOutcomeRecord {
     pub skill_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    pub approved_at: i64,
-    pub days_since_approval: i64,
-    pub views_since_approval: u64,
-    pub uses_since_approval: u64,
+    pub activated_at: i64,
+    pub days_since_activation: i64,
+    pub views_since_activation: u64,
+    pub uses_since_activation: u64,
     pub verdict: SkillOutcomeVerdict,
 }
 
@@ -162,26 +162,26 @@ impl AutomationOutcomesSnapshot {
     }
 }
 
-/// Computes the adoption verdict for one approved skill. `None` when the
-/// skill has never been approved (no post-approval window to measure).
+/// Computes the adoption verdict for one activated skill. `None` when the
+/// skill has never been activated (no post-activation window to measure).
 pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {
-    let approved_at = summary.approved_at?;
-    let secs_since_approval = now_unix.saturating_sub(approved_at);
-    let views_since_approval = count_since_approval(
+    let activated_at = summary.activated_at?;
+    let secs_since_activation = now_unix.saturating_sub(activated_at);
+    let views_since_activation = count_since_activation(
         summary.view_count,
-        summary.view_count_at_approval,
+        summary.view_count_at_activation,
         summary.last_viewed_at,
-        approved_at,
+        activated_at,
     );
-    let uses_since_approval = count_since_approval(
+    let uses_since_activation = count_since_activation(
         summary.use_count,
-        summary.use_count_at_approval,
+        summary.use_count_at_activation,
         summary.last_used_at,
-        approved_at,
+        activated_at,
     );
-    let verdict = if uses_since_approval > 0 {
+    let verdict = if uses_since_activation > 0 {
         SkillOutcomeVerdict::Adopted
-    } else if secs_since_approval < SKILL_ADOPTION_WINDOW_SECS {
+    } else if secs_since_activation < SKILL_ACTIVATION_WINDOW_SECS {
         SkillOutcomeVerdict::TooEarly
     } else {
         SkillOutcomeVerdict::Ignored
@@ -189,27 +189,27 @@ pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<Skill
     Some(SkillOutcomeRecord {
         skill_id: summary.skill_id.clone(),
         title: summary.title.clone(),
-        approved_at,
-        days_since_approval: secs_since_approval / SECS_PER_DAY,
-        views_since_approval,
-        uses_since_approval,
+        activated_at,
+        days_since_activation: secs_since_activation / SECS_PER_DAY,
+        views_since_activation,
+        uses_since_activation,
         verdict,
     })
 }
 
-/// Activity since approval, preferring the exact baseline captured at
-/// approval time. Ledgers written before baselines existed fall back to the
-/// last-activity timestamp: activity at or after approval counts the full
+/// Activity since activation, preferring the exact baseline captured at
+/// activation time. Ledgers written before baselines existed fall back to the
+/// last-activity timestamp: activity at or after activation counts the full
 /// total (a conservative over-count is fine for adoption detection).
-fn count_since_approval(
+fn count_since_activation(
     total: u64,
-    baseline_at_approval: Option<u64>,
+    baseline_at_activation: Option<u64>,
     last_activity_at: Option<i64>,
-    approved_at: i64,
+    activated_at: i64,
 ) -> u64 {
-    match baseline_at_approval {
+    match baseline_at_activation {
         Some(baseline) => total.saturating_sub(baseline),
-        None if last_activity_at.is_some_and(|at| at >= approved_at) => total,
+        None if last_activity_at.is_some_and(|at| at >= activated_at) => total,
         None => 0,
     }
 }
@@ -343,7 +343,7 @@ pub async fn refresh_skill_outcomes(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 1;
+    snapshot.schema_version = 2;
     snapshot.skills = outcomes.clone();
     snapshot.skills_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
@@ -361,7 +361,7 @@ pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 1;
+    snapshot.schema_version = 2;
     snapshot.facts = outcomes.clone();
     snapshot.facts_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
@@ -576,7 +576,7 @@ pub(super) fn outcome_feedback_section(
         } else {
             "available"
         },
-        "source": "post_approval_outcome_tracking",
+        "source": "post_activation_outcome_tracking",
         "skills_refreshed_at": snapshot.skills_refreshed_at,
         "facts_refreshed_at": snapshot.facts_refreshed_at,
         "skill_verdicts": skill_verdicts,
@@ -586,7 +586,7 @@ pub(super) fn outcome_feedback_section(
     })
 }
 
-/// Generated-eval entries derived from real post-approval outcomes rather
+/// Generated-eval entries derived from real post-activation outcomes rather
 /// than validation-time signals. Kept separate from the validation-replay
 /// definitions so the replay gate keeps checking only validation examples.
 pub(super) fn outcome_eval_definitions(
@@ -607,10 +607,10 @@ pub(super) fn outcome_eval_definitions(
             "passed": record.verdict == SkillOutcomeVerdict::Adopted,
             "pending": record.verdict == SkillOutcomeVerdict::TooEarly,
             "metrics": {
-                "approved_at": record.approved_at,
-                "days_since_approval": record.days_since_approval,
-                "views_since_approval": record.views_since_approval,
-                "uses_since_approval": record.uses_since_approval,
+                "activated_at": record.activated_at,
+                "days_since_activation": record.days_since_activation,
+                "views_since_activation": record.views_since_activation,
+                "uses_since_activation": record.uses_since_activation,
             },
             "assertions": [{
                 "type": "outcome_equals",

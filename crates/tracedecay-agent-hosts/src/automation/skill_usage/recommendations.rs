@@ -61,7 +61,7 @@ fn stale_skill_recommendation(
         return SkillStaleRecommendation {
             skill_id: summary.skill_id.clone(),
             stale: true,
-            recommendation: "archive_review".to_string(),
+            recommendation: "archive_candidate".to_string(),
             reason: "no view, use, or patch activity has been recorded".to_string(),
             evidence,
         };
@@ -72,22 +72,22 @@ fn stale_skill_recommendation(
         return SkillStaleRecommendation {
             skill_id: summary.skill_id.clone(),
             stale: true,
-            recommendation: "archive_review".to_string(),
+            recommendation: "archive_candidate".to_string(),
             reason: format!("last viewed {age_secs} seconds ago with no recorded uses or patches"),
             evidence,
         };
     }
 
-    // Outcome feedback: an approved skill that agents never used since
-    // approval is a real-quality failure even when views keep it "active".
+    // Outcome feedback: an activated skill that agents never use is a
+    // real-quality failure even when views keep it "active".
     if let Some(outcome) = ignored_outcome(summary, now_unix) {
         return SkillStaleRecommendation {
             skill_id: summary.skill_id.clone(),
             stale: true,
-            recommendation: "archive_review".to_string(),
+            recommendation: "archive_candidate".to_string(),
             reason: format!(
-                "skill was approved {} days ago but has not been used since approval",
-                outcome.days_since_approval
+                "skill was activated {} days ago but has not been used since activation",
+                outcome.days_since_activation
             ),
             evidence,
         };
@@ -100,7 +100,7 @@ fn stale_skill_recommendation(
     )
 }
 
-/// The post-approval outcome when it is an actionable `ignored` verdict.
+/// The post-activation outcome when it is an actionable `ignored` verdict.
 fn ignored_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {
     skill_outcome(summary, now_unix).filter(|outcome| {
         outcome.verdict == SkillOutcomeVerdict::Ignored
@@ -142,7 +142,7 @@ fn skill_improvement_recommendation(
         return SkillImprovementRecommendation {
             skill_id: summary.skill_id.clone(),
             improvement: true,
-            recommendation: "patch_review".to_string(),
+            recommendation: "repair_candidate".to_string(),
             reason: "skill has been patched but still has no recorded successful uses".to_string(),
             priority: "high".to_string(),
             evidence,
@@ -152,7 +152,7 @@ fn skill_improvement_recommendation(
         return SkillImprovementRecommendation {
             skill_id: summary.skill_id.clone(),
             improvement: true,
-            recommendation: "patch_review".to_string(),
+            recommendation: "repair_candidate".to_string(),
             reason: "repeated patches suggest the skill instructions may still be unstable"
                 .to_string(),
             priority: "medium".to_string(),
@@ -171,8 +171,8 @@ fn skill_improvement_recommendation(
         };
     }
 
-    // Outcome feedback: approval was supposed to put the skill to work, so a
-    // post-approval `ignored` verdict is a stronger review signal than raw
+    // Outcome feedback: activation was supposed to put the skill to work, so a
+    // post-activation `ignored` verdict is a stronger signal than raw
     // lifetime counts.
     if let Some(outcome) = ignored_outcome(summary, now_unix) {
         return SkillImprovementRecommendation {
@@ -180,9 +180,9 @@ fn skill_improvement_recommendation(
             improvement: true,
             recommendation: "clarify_activation".to_string(),
             reason: format!(
-                "skill has not been used in the {} days since approval; \
-                 review whether it should be revised or archived",
-                outcome.days_since_approval
+                "skill has not been used in the {} days since activation; \
+                 revise or archive it automatically when validation admits it",
+                outcome.days_since_activation
             ),
             priority: "medium".to_string(),
             evidence,
@@ -240,8 +240,8 @@ fn usage_evidence(summary: &SkillUsageSummary) -> Vec<String> {
     if let Some(source) = summary.provenance_source {
         evidence.push(format!("provenance_source={}", source_key(source)));
     }
-    if let Some(approved_at) = summary.approved_at {
-        evidence.push(format!("approved_at={approved_at}"));
+    if let Some(activated_at) = summary.activated_at {
+        evidence.push(format!("activated_at={activated_at}"));
     }
     evidence
 }
@@ -266,16 +266,16 @@ fn source_key(source: ManagedSkillSource) -> &'static str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::super::outcomes::SKILL_ADOPTION_WINDOW_SECS;
+    use super::super::super::outcomes::SKILL_ACTIVATION_WINDOW_SECS;
     use super::super::SkillUsageRecord;
     use super::*;
 
-    /// An approved, active, automation-authored skill with recent views but
-    /// no uses since approval: kept by the plain activity heuristics, so any
+    /// An activated, active, automation-authored skill with recent views but
+    /// no uses since activation: kept by the plain activity heuristics, so any
     /// stale recommendation must come from the outcome verdict.
-    fn ignored_since_approval_summary(now: i64) -> SkillUsageRecord {
+    fn ignored_since_activation_summary(now: i64) -> SkillUsageRecord {
         SkillUsageRecord {
-            schema_version: 1,
+            schema_version: 2,
             skill_id: "ignored-skill".to_string(),
             title: Some("Ignored skill".to_string()),
             category: Some("maintenance".to_string()),
@@ -292,33 +292,33 @@ mod tests {
             last_viewed_at: Some(now),
             last_used_at: None,
             last_patched_at: None,
-            approved_at: Some(now - SKILL_ADOPTION_WINDOW_SECS - 1),
-            view_count_at_approval: Some(0),
-            use_count_at_approval: Some(0),
+            activated_at: Some(now - SKILL_ACTIVATION_WINDOW_SECS - 1),
+            view_count_at_activation: Some(0),
+            use_count_at_activation: Some(0),
         }
     }
 
     #[test]
     fn ignored_outcome_strengthens_stale_recommendation() {
         let now = 100 * 24 * 60 * 60;
-        let summary = ignored_since_approval_summary(now);
+        let summary = ignored_since_activation_summary(now);
 
         let recommendation = stale_skill_recommendation(&summary, now, 365 * 24 * 60 * 60);
         assert!(recommendation.stale);
-        assert_eq!(recommendation.recommendation, "archive_review");
-        assert!(recommendation.reason.contains("since approval"));
+        assert_eq!(recommendation.recommendation, "archive_candidate");
+        assert!(recommendation.reason.contains("since activation"));
         assert!(
             recommendation
                 .evidence
                 .iter()
-                .any(|entry| entry.starts_with("approved_at="))
+                .any(|entry| entry.starts_with("activated_at="))
         );
     }
 
     #[test]
     fn adopted_outcome_keeps_skill() {
         let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_approval_summary(now);
+        let mut summary = ignored_since_activation_summary(now);
         summary.use_count = 3;
         summary.last_used_at = Some(now);
 
@@ -330,9 +330,9 @@ mod tests {
     #[test]
     fn too_early_outcome_does_not_flag_stale() {
         let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_approval_summary(now);
-        summary.approved_at = Some(now - 1);
-        summary.view_count_at_approval = Some(2);
+        let mut summary = ignored_since_activation_summary(now);
+        summary.activated_at = Some(now - 1);
+        summary.view_count_at_activation = Some(2);
 
         let recommendation = stale_skill_recommendation(&summary, now, 365 * 24 * 60 * 60);
         assert!(!recommendation.stale);
@@ -341,22 +341,22 @@ mod tests {
     #[test]
     fn ignored_outcome_triggers_improvement_review() {
         let now = 100 * 24 * 60 * 60;
-        let summary = ignored_since_approval_summary(now);
+        let summary = ignored_since_activation_summary(now);
 
         let recommendation = skill_improvement_recommendation(&summary, now);
         assert!(recommendation.improvement);
         assert_eq!(recommendation.recommendation, "clarify_activation");
-        assert!(recommendation.reason.contains("since approval"));
+        assert!(recommendation.reason.contains("since activation"));
         assert_eq!(recommendation.priority, "medium");
     }
 
     #[test]
-    fn never_approved_skill_gets_no_outcome_driven_improvement() {
+    fn never_activated_skill_gets_no_outcome_driven_improvement() {
         let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_approval_summary(now);
-        summary.approved_at = None;
-        summary.view_count_at_approval = None;
-        summary.use_count_at_approval = None;
+        let mut summary = ignored_since_activation_summary(now);
+        summary.activated_at = None;
+        summary.view_count_at_activation = None;
+        summary.use_count_at_activation = None;
 
         let recommendation = skill_improvement_recommendation(&summary, now);
         assert!(!recommendation.improvement);

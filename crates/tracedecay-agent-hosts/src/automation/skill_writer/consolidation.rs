@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    discard_pending_managed_skill_update, stage_managed_skill_archive, stage_managed_skill_update,
+    apply_managed_skill_consolidation,
 };
 use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
@@ -54,9 +54,6 @@ fn consolidation_guard<'a>(
     }
     if skill.metadata.state == ManagedSkillState::Archived {
         return Err(format!("managed skill '{id}' is already archived"));
-    }
-    if skill.pending_update.is_some() {
-        return Err(format!("managed skill '{id}' already has a pending update"));
     }
     Ok(skill)
 }
@@ -167,46 +164,31 @@ fn merge_update_changes_target(update: &ManagedSkillUpdate, target: &ManagedSkil
             .is_some_and(|support_files| target.support_files != *support_files)
 }
 
-pub(super) async fn stage_skill_merge(
+/// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
+/// transaction. The source stays on disk in `Archived` state, preserving its
+/// provenance without leaving an intermediate revision behind.
+pub(super) async fn apply_skill_merge(
     profile_root: &Path,
     merge: &SkillMergeProposal,
 ) -> Result<(ManagedSkill, Option<ManagedSkill>)> {
-    let staged_target = match &merge.update {
-        Some(update) => Some(
-            stage_managed_skill_update(
-                profile_root,
-                &merge.target_skill_id,
-                &merge.base_checksum,
-                update.clone(),
-            )
-            .await?,
-        ),
-        None => None,
-    };
     let archive_reason = format!("merged into '{}': {}", merge.target_skill_id, merge.reason);
-    let staged_source = match stage_managed_skill_archive(
+    let result = apply_managed_skill_consolidation(
         profile_root,
+        Some(&merge.target_skill_id),
+        Some(&merge.base_checksum),
+        merge.update.clone(),
         &merge.source_skill_id,
         &merge.source_base_checksum,
-        Some(archive_reason),
+        &archive_reason,
     )
-    .await
-    {
-        Ok(skill) => skill,
-        Err(err) => {
-            if staged_target.is_some() {
-                discard_pending_managed_skill_update(profile_root, &merge.target_skill_id).await?;
-            }
-            return Err(err);
-        }
-    };
-    Ok((staged_source, staged_target))
+    .await?;
+    Ok((result.source, result.target))
 }
 
-pub(super) fn staged_consolidation_record(
+pub(super) fn applied_consolidation_record(
     action: SkillProposalAction,
     proposal: &Value,
-    staged_source: &ManagedSkill,
+    applied_source: &ManagedSkill,
     archive_base_checksum: &str,
     merge: Option<&SkillMergeProposal>,
 ) -> Value {
@@ -216,9 +198,9 @@ pub(super) fn staged_consolidation_record(
         "proposal_action": action.as_str(),
         "reason": reason.clone(),
         "proposal_reason": reason,
-        "approval_status": "staged_consolidation",
+        "application_status": "applied",
         "resulting_state": "archived",
-        "archived_skill_id": staged_source.metadata.id,
+        "archived_skill_id": applied_source.metadata.id,
     });
     if let Some(object) = record.as_object_mut() {
         if let Some(merge) = merge {
@@ -230,13 +212,13 @@ pub(super) fn staged_consolidation_record(
                 json!(merge.source_base_checksum),
             );
             object.insert(
-                "target_update_staged".to_string(),
+                "target_update_applied".to_string(),
                 json!(merge.update.is_some()),
             );
         } else {
             object.insert(
                 "target_skill_id".to_string(),
-                json!(staged_source.metadata.id),
+                json!(applied_source.metadata.id),
             );
             object.insert("base_checksum".to_string(), json!(archive_base_checksum));
         }
@@ -247,7 +229,7 @@ pub(super) fn staged_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillPendingUpdate, ManagedSkillProvenance,
+        ManagedSkillDraft, ManagedSkillProvenance, create_managed_skill,
         default_managed_skill_targets,
     };
     use super::super::skill_proposal_action;
@@ -299,7 +281,7 @@ mod tests {
             fixture_skill("workflow-a", ManagedSkillSource::AutomationRun, false),
             fixture_skill("workflow-b", ManagedSkillSource::AutomationRun, false),
             fixture_skill("pinned-skill", ManagedSkillSource::AutomationRun, true),
-            fixture_skill("user-skill", ManagedSkillSource::UserDraft, false),
+            fixture_skill("user-skill", ManagedSkillSource::User, false),
             fixture_skill("imported-skill", ManagedSkillSource::Import, false),
             archived,
         ]
@@ -416,35 +398,6 @@ mod tests {
                 &skills,
             ),
             "managed skill 'archived-skill' is already archived",
-        );
-    }
-
-    #[test]
-    fn archive_proposals_reject_targets_with_pending_updates() {
-        let mut skills = consolidation_fixture();
-        let pending_metadata = skills["workflow-a"].metadata.clone();
-        if let Some(skill) = skills.get_mut("workflow-a") {
-            skill.pending_update = Some(ManagedSkillPendingUpdate {
-                base_checksum: pending_metadata.checksum.clone(),
-                staged_at: 1,
-                metadata: pending_metadata,
-                body_markdown: "staged body".to_string(),
-                support_files: Vec::new(),
-                resulting_state: ManagedSkillState::Active,
-                staged_reason: None,
-            });
-        }
-        assert_err_eq(
-            skill_archive_from_proposal(
-                &json!({
-                    "action": "archive",
-                    "id": "workflow-a",
-                    "base_checksum": checksum(&skills, "workflow-a"),
-                    "reason": "x"
-                }),
-                &skills,
-            ),
-            "managed skill 'workflow-a' already has a pending update",
         );
     }
 
@@ -566,6 +519,47 @@ mod tests {
         assert_eq!(
             assert_ok(skill_proposal_action(&json!({"action": "archive"}))),
             SkillProposalAction::Archive
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_applies_target_update_and_source_archive_together() {
+        let profile = tempfile::tempdir().unwrap();
+        let target = fixture_skill("workflow-a", ManagedSkillSource::AutomationRun, false);
+        let source = fixture_skill("workflow-b", ManagedSkillSource::AutomationRun, false);
+        create_managed_skill(profile.path(), target.clone())
+            .await
+            .unwrap();
+        create_managed_skill(profile.path(), source.clone())
+            .await
+            .unwrap();
+        let skills = [
+            (target.metadata.id.clone(), target),
+            (source.metadata.id.clone(), source),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let merge = skill_merge_from_proposal(
+            &json!({
+                "action": "merge",
+                "id": "workflow-a",
+                "base_checksum": checksum(&skills, "workflow-a"),
+                "source_skill_id": "workflow-b",
+                "source_base_checksum": checksum(&skills, "workflow-b"),
+                "body_markdown": "Merged workflow guidance covering both variants.",
+                "reason": "duplicate guidance"
+            }),
+            &skills,
+        )
+        .unwrap();
+
+        let (source, target) = apply_skill_merge(profile.path(), &merge).await.unwrap();
+
+        assert_eq!(source.metadata.state, ManagedSkillState::Archived);
+        assert_eq!(source.metadata.absorbed_into.as_deref(), Some("workflow-a"));
+        assert_eq!(
+            target.unwrap().body_markdown,
+            "Merged workflow guidance covering both variants."
         );
     }
 }

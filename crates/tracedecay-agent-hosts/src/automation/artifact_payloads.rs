@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-use super::apply_policy::record_has_auto_applied_memory_ops;
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -30,7 +29,7 @@ pub(super) struct ArtifactPayloadContext<'a> {
     pub(super) request: &'a AgentTaskRequest,
     pub(super) response: &'a AgentTaskResponse,
     pub(super) record: &'a AutomationRunLedgerRecord,
-    /// Post-approval outcomes of previously applied changes, when a snapshot
+    /// Post-activation outcomes of previously applied changes, when a snapshot
     /// has been recorded for this project.
     pub(super) outcomes: &'a AutomationOutcomesSnapshot,
 }
@@ -42,7 +41,7 @@ pub(super) struct GeneratedEvalPayloads {
     pub(super) replay_results: Vec<Value>,
     pub(super) status: &'static str,
     pub(super) validation_decision: &'static str,
-    /// Evals derived from real post-approval outcomes; tracked separately
+    /// Evals derived from real post-activation outcomes; tracked separately
     /// from the validation-replay definitions so the replay gate semantics
     /// stay unchanged.
     pub(super) outcome_definitions: Vec<Value>,
@@ -187,16 +186,7 @@ pub(super) fn generated_evals_payload(
             "status": evals.runner_status,
             "results": evals.replay_results.clone(),
         },
-        "promotion": {
-            "state": match evals.runner_status {
-                "passed" => "validated",
-                "failed" => "blocked_failed_replay",
-                _ if evals.count == 0 => "blocked_no_examples",
-                _ => "candidate",
-            },
-            "requires_human_review": true,
-            "auto_apply": false,
-        },
+        "automatic_application": generated_eval_application_effect(ctx.record, evals),
         "eval_definitions": evals.definitions.clone(),
         "outcome_eval_definitions": evals.outcome_definitions.clone(),
         "result_refs": [{
@@ -226,9 +216,7 @@ pub(super) fn validation_gate_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
-    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
-    let approval_required =
-        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
+    let automatic_application = automatic_application_effect(ctx.record);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -239,8 +227,8 @@ pub(super) fn validation_gate_payload(
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
             "reviewed_count": ctx.record.reviewed_count,
-            "approval_required": approval_required,
             "report": ctx.record.validation_report,
+            "automatic_application": automatic_application.clone(),
         },
         "improvement_gate": {
             "decision": gate.decision,
@@ -258,14 +246,13 @@ pub(super) fn validation_gate_payload(
             } else if gate.decision == "ready_for_handoff" {
                 "ready"
             } else {
-                "pending_optimizer_review"
+                "ready_for_optimizer"
             },
             "criteria": {
                 "has_feedback": ctx.record.reviewed_count > 0,
                 "has_generated_evals": evals.count > 0,
                 "validation_report_hash": validation_report_hash(ctx.record.validation_report.as_ref()),
-                "approval_required": approval_required,
-                "auto_apply_allowed": auto_applied,
+                "automatic_application": automatic_application,
             },
             "source_refs": [
                 trace_ref.clone(),
@@ -333,9 +320,7 @@ pub(super) fn codex_handoff_payload(
     evals: &GeneratedEvalPayloads,
     gate: &ImprovementGatePayload,
 ) -> Value {
-    let auto_applied = record_has_auto_applied_memory_ops(ctx.task, ctx.record);
-    let approval_required =
-        automation_record_requires_dashboard_approval(ctx.task, ctx.record, auto_applied);
+    let automatic_application = automatic_application_effect(ctx.record);
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -365,8 +350,7 @@ pub(super) fn codex_handoff_payload(
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
             "blockers": gate.blockers.clone(),
-            "approval_required": approval_required,
-            "auto_apply_allowed": auto_applied,
+            "automatic_application": automatic_application.clone(),
         },
         "source_refs": [
             refs.validation_gate.clone(),
@@ -381,7 +365,7 @@ pub(super) fn codex_handoff_payload(
                 "blocked_pending_feedback_or_evals" => "collect_feedback_or_evals",
                 "blocked_pending_eval_run" => "run_generated_evals",
                 "blocked_failed_eval_replay" => "fix_generated_evals",
-                _ => "codex_review",
+                _ => "monitor_applied_outcomes",
             },
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
@@ -395,10 +379,8 @@ pub(super) fn codex_handoff_payload(
             ],
         },
         "validation_requirements": {
-            "must_review_artifact_refs": true,
             "must_run_tests": ctx.policy.handoff_tests(),
-            "must_preserve_approval_gate": !auto_applied,
-            "must_not_auto_apply": !auto_applied,
+            "automatic_application": true,
         },
         "artifact_manifest": {
             "api_list": automation_run_artifacts_api(ctx.run_id),
@@ -422,21 +404,73 @@ pub(super) fn codex_handoff_payload(
             "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
             "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
             "commands": ctx.policy.eval_replay_commands(),
-            "requires_human_review": true,
+            "application": automatic_application,
         },
         "next_actions": ctx.policy.next_actions(ctx.record),
         "tests_to_run": ctx.policy.handoff_tests(),
     })
 }
 
-fn automation_record_requires_dashboard_approval(
-    task: AgentTaskKind,
+fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
+    let deployment = record
+        .applied_ops
+        .as_ref()
+        .and_then(|operations| operations.get("deployment"))
+        .cloned();
+    let deployment_retry = deployment
+        .as_ref()
+        .and_then(|receipt| receipt.get("retry_required"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let recorded_status = record
+        .validation_report
+        .as_ref()
+        .and_then(|report| report.get("status"))
+        .and_then(Value::as_str);
+    let status = match recorded_status {
+        Some("no_candidate") => "no_candidate",
+        Some("quarantined") => "quarantined",
+        Some("failed_after_partial_effects") => "partial",
+        Some("applied") if deployment_retry => "partial",
+        Some("applied") => "applied",
+        _ if deployment_retry || record.error_retryable == Some(true) => "retry",
+        _ if record.error.is_some() => "quarantined",
+        _ if record.accepted_count > 0 && record.applied_ops.is_some() => "applied",
+        _ => "unknown",
+    };
+    json!({
+        "status": status,
+        "accepted_count": record.accepted_count,
+        "rejected_count": record.rejected_count,
+        "retry_required": deployment_retry || record.error_retryable == Some(true),
+        "deployment_receipt": deployment,
+    })
+}
+
+fn generated_eval_application_effect(
     record: &AutomationRunLedgerRecord,
-    auto_applied: bool,
-) -> bool {
-    match task {
-        AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector => false,
-        _ => record.accepted_count > 0 && !auto_applied,
+    evals: &GeneratedEvalPayloads,
+) -> Value {
+    match evals.runner_status {
+        "passed" => automatic_application_effect(record),
+        "failed" => json!({
+            "status": "quarantined",
+            "reason": "validation_replay_failed",
+            "retry_required": false,
+            "deployment_receipt": Value::Null,
+        }),
+        _ if evals.count == 0 => json!({
+            "status": "no_candidate",
+            "reason": "no_validation_examples",
+            "retry_required": false,
+            "deployment_receipt": Value::Null,
+        }),
+        _ => json!({
+            "status": "retry",
+            "reason": "validation_replay_incomplete",
+            "retry_required": true,
+            "deployment_receipt": Value::Null,
+        }),
     }
 }
 
@@ -510,14 +544,14 @@ mod tests {
 
     fn outcomes_snapshot() -> AutomationOutcomesSnapshot {
         AutomationOutcomesSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             skills: vec![SkillOutcomeRecord {
                 skill_id: "ignored-skill".to_string(),
                 title: Some("Ignored skill".to_string()),
-                approved_at: 1_000,
-                days_since_approval: 30,
-                views_since_approval: 2,
-                uses_since_approval: 0,
+                activated_at: 1_000,
+                days_since_activation: 30,
+                views_since_activation: 2,
+                uses_since_activation: 0,
                 verdict: SkillOutcomeVerdict::Ignored,
             }],
             facts: Vec::new(),
@@ -633,15 +667,23 @@ mod tests {
     }
 
     #[test]
-    fn codex_handoff_reports_auto_applied_records_without_approval_gate() {
+    fn codex_handoff_reports_applied_effect_with_deployment_receipt() {
         let (request, response, mut record) = payload_fixture();
         record.accepted_count = 1;
         record.reviewed_count = 1;
-        record.applied_ops = Some(json!(["proposal-1"]));
+        record.applied_ops = Some(json!({
+            "created_skills": [{ "skill_id": "outcome-skill" }],
+            "deployment": {
+                "status": "complete",
+                "exports": [],
+                "materialization_scopes": [],
+                "errors": [],
+                "reason": null,
+                "retry_required": false,
+            },
+        }));
         record.validation_report = Some(json!({
-            "session_fact_apply_policy": {
-                "mutates_store": true,
-            }
+            "status": "applied",
         }));
         let outcomes = AutomationOutcomesSnapshot::default();
         let ctx = ArtifactPayloadContext {
@@ -675,155 +717,53 @@ mod tests {
 
         assert_eq!(
             validation_payload
-                .pointer("/task_validation/approval_required")
+                .pointer("/task_validation/automatic_application/status")
                 .unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            validation_payload
-                .pointer("/improvement_gate/criteria/auto_apply_allowed")
-                .unwrap(),
-            &json!(true)
-        );
-        assert_eq!(
-            payload.pointer("/readiness/approval_required").unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
-            &json!(true)
+            &json!("applied")
         );
         assert_eq!(
             payload
-                .pointer("/validation_requirements/must_not_auto_apply")
+                .pointer("/readiness/automatic_application/deployment_receipt/status")
                 .unwrap(),
-            &json!(false)
+            &json!("complete")
+        );
+        assert_eq!(
+            payload
+                .pointer("/validation_requirements/automatic_application")
+                .unwrap(),
+            &json!(true)
         );
     }
 
     #[test]
-    fn codex_handoff_reports_partial_memory_apply_without_approval_gate() {
-        let (request, response, mut record) = payload_fixture();
-        record.accepted_count = 2;
-        record.reviewed_count = 2;
-        record.applied_ops = Some(json!([
-            { "op": "delete", "fact_id": 102 },
-            { "op": "delete", "fact_id": 102 }
-        ]));
-        record.validation_report = Some(json!({
-            "applied": 1,
-            "results": [
-                { "op": "delete", "fact_id": 102, "status": "deleted" },
-                { "op": "delete", "fact_id": 102, "status": "error" }
-            ],
-            "apply_policy": {
-                "accepted_count": 2,
-                "mutates_store": true,
-            }
+    fn automatic_application_effect_reports_no_candidate_quarantine_and_partial_retry() {
+        let (_, _, mut no_candidate) = payload_fixture();
+        no_candidate.validation_report = Some(json!({"status": "no_candidate"}));
+        assert_eq!(
+            automatic_application_effect(&no_candidate).pointer("/status"),
+            Some(&json!("no_candidate"))
+        );
+
+        let (_, _, mut quarantined) = payload_fixture();
+        quarantined.validation_report = Some(json!({"status": "quarantined"}));
+        assert_eq!(
+            automatic_application_effect(&quarantined).pointer("/status"),
+            Some(&json!("quarantined"))
+        );
+
+        let (_, _, mut partial) = payload_fixture();
+        partial.accepted_count = 1;
+        partial.rejected_count = 1;
+        partial.error_retryable = Some(true);
+        partial.applied_ops = Some(json!({
+            "deployment": {
+                "status": "partial_failure",
+                "retry_required": true,
+            },
         }));
-        let outcomes = AutomationOutcomesSnapshot::default();
-        let ctx = ArtifactPayloadContext {
-            run_id: "run-outcomes",
-            task: AgentTaskKind::MemoryCurator,
-            task_key: "memory_curator",
-            prompt_version: "memory_curator:v1",
-            policy: artifact_policy(AgentTaskKind::MemoryCurator),
-            request: &request,
-            response: &response,
-            record: &record,
-            outcomes: &outcomes,
-        };
-        let refs = ArtifactRefs {
-            trace: json!({"kind": "traces"}),
-            feedback: json!({"kind": "feedback"}),
-            generated_evals: json!({"kind": "generated_evals"}),
-            validation_gate: json!({"kind": "validation_gate"}),
-            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
-        };
-        let evals = generated_eval_payloads(&ctx);
-        let gate = improvement_gate_payload(&ctx, &evals);
-        let validation_payload = validation_gate_payload(
-            &ctx,
-            (&refs.trace, &refs.feedback, &refs.generated_evals),
-            &evals,
-            &gate,
-        );
-
-        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
-
-        assert_eq!(
-            validation_payload
-                .pointer("/task_validation/approval_required")
-                .unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            validation_payload
-                .pointer("/improvement_gate/criteria/auto_apply_allowed")
-                .unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            payload.pointer("/readiness/approval_required").unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
-            &json!(false)
-        );
-    }
-
-    #[test]
-    fn codex_handoff_does_not_treat_skill_writer_applied_ops_as_memory_auto_apply() {
-        let (request, response, mut record) = payload_fixture();
-        record.accepted_count = 1;
-        record.reviewed_count = 1;
-        record.applied_ops = Some(json!({
-            "created_skills": [],
-            "updated_skills": [],
-            "staged_consolidations": [],
-        }));
-        record.validation_report = Some(json!({
-            "status": "needs_approval",
-            "dry_run": true,
-        }));
-        let outcomes = AutomationOutcomesSnapshot::default();
-        let ctx = ArtifactPayloadContext {
-            run_id: "run-outcomes",
-            task: AgentTaskKind::SkillWriter,
-            task_key: "skill_writer",
-            prompt_version: "skill_writer:v1",
-            policy: artifact_policy(AgentTaskKind::SkillWriter),
-            request: &request,
-            response: &response,
-            record: &record,
-            outcomes: &outcomes,
-        };
-        let refs = ArtifactRefs {
-            trace: json!({"kind": "traces"}),
-            feedback: json!({"kind": "feedback"}),
-            generated_evals: json!({"kind": "generated_evals"}),
-            validation_gate: json!({"kind": "validation_gate"}),
-            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
-        };
-        let evals = generated_eval_payloads(&ctx);
-        let gate = improvement_gate_payload(&ctx, &evals);
-
-        let payload = codex_handoff_payload(&ctx, &refs, &evals, &gate);
-
-        assert_eq!(
-            payload.pointer("/readiness/approval_required").unwrap(),
-            &json!(true)
-        );
-        assert_eq!(
-            payload.pointer("/readiness/auto_apply_allowed").unwrap(),
-            &json!(false)
-        );
-        assert_eq!(
-            payload
-                .pointer("/validation_requirements/must_not_auto_apply")
-                .unwrap(),
-            &json!(true)
-        );
+        partial.validation_report = Some(json!({"status": "failed_after_partial_effects"}));
+        let effect = automatic_application_effect(&partial);
+        assert_eq!(effect.pointer("/status"), Some(&json!("partial")));
+        assert_eq!(effect.pointer("/retry_required"), Some(&json!(true)));
     }
 }

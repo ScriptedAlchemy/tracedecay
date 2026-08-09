@@ -258,7 +258,11 @@ fn persist_skill_transaction_unlocked(profile_root: &Path, skills: &[&ManagedSki
     }
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|error| {
+            config_error(format!(
+                "managed skill transaction clock is invalid: {error}"
+            ))
+        })?
         .as_nanos();
     let mut entries = Vec::with_capacity(skills.len());
     for skill in skills {
