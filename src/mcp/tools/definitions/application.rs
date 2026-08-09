@@ -294,6 +294,24 @@ pub(super) fn def_git_apply() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_github_stack_signal_expand() -> ToolDefinition {
+    def(
+        "tracedecay_github_stack_signal_expand",
+        "Expand GitHub stack signal",
+        "Authorize and expand one durable GitHub stack signal by opaque identity. The daemon mints actor authority; callers cannot name recipients, queue state, or stack content.",
+        closed_object_schema(
+            json!({
+                "signal_id": string_property("Opaque durable GitHub stack signal identity."),
+                "expected_watermark_id": {
+                    "type": ["string", "null"],
+                    "description": "Optional exact host-delivery watermark guard."
+                }
+            }),
+            &["signal_id"],
+        ),
+    )
+}
+
 pub(super) fn def_feedback_diagnostics() -> ToolDefinition {
     feedback_surface_definition(
         "tracedecay_feedback_diagnostics",

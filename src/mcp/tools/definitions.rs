@@ -505,6 +505,7 @@ pub(super) fn get_maximal_tool_definitions()
         def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
+        def_github_stack_signal_expand(),
         def_stack_snapshot(),
         def_preflight_native_integration(),
         def_approve_native_integration(),

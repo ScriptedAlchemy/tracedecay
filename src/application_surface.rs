@@ -23,7 +23,9 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
     WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
-pub use tracedecay_application::git::NativeIntegrationApproveSurfaceRequest;
+pub use tracedecay_application::git::{
+    GitHubStackSignalExpandSurfaceRequest, NativeIntegrationApproveSurfaceRequest,
+};
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
@@ -752,6 +754,7 @@ pub enum ApplicationSurfaceRequest {
     GitRead(GitReadSurfaceRequest),
     GitPreview(GitPreviewSurfaceRequest),
     GitApply(GitApplySurfaceRequest),
+    GitHubStackSignalExpand(GitHubStackSignalExpandSurfaceRequest),
     NativeIntegration(NativeIntegrationSurfaceRequest),
     Feedback(FeedbackSurfaceRequest),
     FeedbackAdvisoryCycle(FeedbackAdvisoryCycleSurfaceRequest),
@@ -2637,6 +2640,9 @@ impl ApplicationSurfaceRequest {
                     | ApplicationSurfaceOperation::GitHistory
                     | ApplicationSurfaceOperation::GitBlame
                     | ApplicationSurfaceOperation::GitHunks
+            ) | (
+                Self::GitHubStackSignalExpand(_),
+                ApplicationSurfaceOperation::GitHubStackSignalExpand
             ) | (Self::GitPreview(_), ApplicationSurfaceOperation::GitPreview)
                 | (Self::GitApply(_), ApplicationSurfaceOperation::GitApply)
                 | (
@@ -3051,6 +3057,9 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::GitHunks => {
             parse_git_read_surface_request(operation, value).map(ApplicationSurfaceRequest::GitRead)
         }
+        ApplicationSurfaceOperation::GitHubStackSignalExpand => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::GitHubStackSignalExpand)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::GitPreview => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::GitPreview)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
@@ -3526,6 +3535,15 @@ pub async fn execute_application_surface(
         }
         ApplicationSurfaceRequest::GitApply(request) => {
             crate::daemon_contract::DaemonInvocationRequest::git_apply(
+                request_id.as_str(),
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
+        ApplicationSurfaceRequest::GitHubStackSignalExpand(request) => {
+            crate::daemon_contract::DaemonInvocationRequest::github_stack_signal_expand(
                 request_id.as_str(),
                 request,
                 observed_at,

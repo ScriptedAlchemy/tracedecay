@@ -8,7 +8,7 @@
 //! routing. A project without a mounted owner keeps answering the typed
 //! unavailable result; nothing here guesses or falls back to local mutation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ use tracedecay_application::{
     NativeIntegrationPortError, NativeIntegrationRecoveryRequestV1, NativeIntegrationService,
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
     NativeIntegrationStackResolutionRequestV1, NativeIntegrationStackSnapshotService,
+    ResolvedScope,
 };
 use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, UtcMicros};
 use tracedecay_store::{NativeIntegrationStore, NativeIntegrationStoreResult};
@@ -25,11 +26,16 @@ use tracedecay_usecases::native_integration::{
     DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
     GixNativeIntegrationAdapter, NativeIntegrationTransactionCoordinator,
 };
+use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::stack_coordinator::{
+    DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1,
+};
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
 use crate::global_db::RegisteredGlobalDb;
 
+use super::stack_runtime::DaemonGitHubStackRuntimeV1;
 use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
 
 /// The one exact composition served to invocation routing.
@@ -150,6 +156,7 @@ pub(crate) struct DaemonNativeIntegrationOwner {
     service: Arc<DaemonProjectNativeIntegrationService>,
     snapshots: Arc<NativeIntegrationStackSnapshotService<SharedProjectNativeIntegrationTopology>>,
     store: SharedDaemonNativeIntegrationStore,
+    stack_runtimes: Arc<Mutex<BTreeMap<ManifestDigest, Arc<DaemonGitHubStackRuntimeV1>>>>,
 }
 
 impl DaemonNativeIntegrationOwner {
@@ -171,6 +178,55 @@ impl DaemonNativeIntegrationOwner {
 
     pub(crate) fn store(&self) -> &SharedDaemonNativeIntegrationStore {
         &self.store
+    }
+
+    /// Mounts exactly one stack-delivery runtime for one exact project scope.
+    /// Re-opening the project refreshes its source-access expiry but never
+    /// creates a second queue actor or a second background drain task.
+    pub(crate) fn mount_github_stack_runtime(
+        &self,
+        database: Arc<RegisteredGlobalDb>,
+        scope: ResolvedScope,
+        access: ProjectSourceAccessSnapshot,
+        coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
+    ) -> Result<Arc<DaemonGitHubStackRuntimeV1>, StackCoordinatorErrorV1> {
+        if self.project_id != scope.project_id || self.repository_id != scope.repository_id {
+            return Err(StackCoordinatorErrorV1::Stale);
+        }
+        let mut runtimes = self
+            .stack_runtimes
+            .lock()
+            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?;
+        if let Some(existing) = runtimes.get(&scope.scope_digest) {
+            existing.refresh_access(access)?;
+            return Ok(Arc::clone(existing));
+        }
+        let runtime = DaemonGitHubStackRuntimeV1::mount(
+            self.project_id.clone(),
+            scope.clone(),
+            access,
+            database,
+            coordinator,
+            self.service_arc(),
+        )?;
+        runtimes.insert(scope.scope_digest.clone(), Arc::clone(&runtime));
+        Ok(runtime)
+    }
+
+    /// Returns the runtime for a scope already admitted by project-open. A
+    /// missing runtime is intentionally indistinguishable from an unmounted
+    /// owner to callers that need to conceal stack signal existence.
+    pub(crate) fn github_stack_runtime(
+        &self,
+        scope: &ResolvedScope,
+    ) -> Result<Option<Arc<DaemonGitHubStackRuntimeV1>>, NativeIntegrationPortError> {
+        if self.project_id != scope.project_id || self.repository_id != scope.repository_id {
+            return Ok(None);
+        }
+        self.stack_runtimes
+            .lock()
+            .map_err(|_| NativeIntegrationPortError::Unavailable)
+            .map(|runtimes| runtimes.get(&scope.scope_digest).cloned())
     }
 }
 
@@ -356,6 +412,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             service,
             snapshots,
             store,
+            stack_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let key = OwnerKey {
             database_path,

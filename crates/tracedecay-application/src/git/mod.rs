@@ -7,6 +7,7 @@ mod native_integration;
 mod native_integration_surface;
 mod public_wire;
 mod read;
+mod stack_signal_expand;
 mod surface_catalog;
 mod transactions;
 mod worktree;
@@ -50,7 +51,15 @@ pub use read::{
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
     GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
 };
-pub use surface_catalog::{git_surface_catalog_contribution, git_surface_handler_descriptors};
+pub use stack_signal_expand::{
+    GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
+    GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
+    GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceRequest,
+    GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandUnavailableV1,
+};
+pub use surface_catalog::{
+    git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,
+};
 pub use transactions::{
     GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,

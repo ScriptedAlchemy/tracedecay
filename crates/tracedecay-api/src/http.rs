@@ -103,6 +103,7 @@ pub enum HttpApplicationOperation {
     GitHunks,
     GitPreview,
     GitApply,
+    GitHubStackSignalExpand,
     NativeIntegrationStackSnapshot,
     NativeIntegrationPreflight,
     NativeIntegrationApprove,
@@ -188,7 +189,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 77] = [
+    pub const ALL: [Self; 78] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -196,6 +197,7 @@ impl HttpApplicationOperation {
         Self::GitHunks,
         Self::GitPreview,
         Self::GitApply,
+        Self::GitHubStackSignalExpand,
         Self::NativeIntegrationStackSnapshot,
         Self::NativeIntegrationPreflight,
         Self::NativeIntegrationApprove,
@@ -291,6 +293,7 @@ impl HttpApplicationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
+            Self::GitHubStackSignalExpand => "github_stack_signal_expand",
             Self::NativeIntegrationStackSnapshot => "stack_snapshot",
             Self::NativeIntegrationPreflight => "preflight_native_integration",
             Self::NativeIntegrationApprove => "approve_native_integration",
@@ -372,7 +375,8 @@ impl HttpApplicationOperation {
             | Self::GitBlame
             | Self::GitHunks
             | Self::GitPreview
-            | Self::GitApply => HttpApplicationOwnerKind::Git,
+            | Self::GitApply
+            | Self::GitHubStackSignalExpand => HttpApplicationOwnerKind::Git,
             Self::NativeIntegrationStackSnapshot
             | Self::NativeIntegrationPreflight
             | Self::NativeIntegrationApprove
@@ -494,6 +498,7 @@ impl HttpApplicationOperation {
 
     pub fn route_path(self) -> String {
         match self {
+            Self::GitHubStackSignalExpand => "/github-stack/signal-expand".to_owned(),
             operation if operation.owner_kind() == HttpApplicationOwnerKind::Git => {
                 format!(
                     "/git/{}",

@@ -21,9 +21,10 @@ use tracedecay_tool_catalog::{
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::{
-    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
-    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1,
-    GitStatusSurfaceRequest,
+    GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitApplySurfaceRequest, GitBlameSurfaceRequest,
+    GitDiffSurfaceRequest, GitHistorySurfaceRequest, GitHubStackSignalExpandSurfaceRequest,
+    GitHubStackSignalExpandSurfaceResultV1, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadResultV1, GitStatusSurfaceRequest,
 };
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -48,7 +49,7 @@ const TRANSPORT_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Mcp,
     BindingSurface::Http,
 ];
-const SURFACE_SPECS: [SurfaceSpec; 7] = [
+const SURFACE_SPECS: [SurfaceSpec; 8] = [
     SurfaceSpec {
         capability: "capability.application.git.status",
         use_case: "use-case.application.git.status",
@@ -135,6 +136,18 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         example: "Apply the previewed Git index mutation",
         surfaces: &CLI_MCP_SURFACES,
     },
+    SurfaceSpec {
+        capability: "capability.application.github-stack.signal-expand",
+        use_case: "use-case.application.github-stack.signal-expand",
+        request_schema: "schema.application.github-stack.signal-expand.request",
+        result_schema: "schema.application.github-stack.signal-expand.result",
+        operation: GITHUB_STACK_SIGNAL_EXPAND_OPERATION,
+        effect: EffectClass::Read,
+        summary: "Expand one admitted GitHub stack signal",
+        description: "Authorize and expand one durable GitHub stack signal through its exact signal identity and optional delivery-watermark guard.",
+        example: "Expand this admitted GitHub stack signal",
+        surfaces: &TRANSPORT_SURFACES,
+    },
 ];
 
 /// Catalog contribution for public Git read and preview/apply bindings.
@@ -214,6 +227,11 @@ fn git_executable_schemas(
         GitApplySurfaceRequest,
         GitIndexTransactionReceiptV1
     );
+    add!(
+        "github_stack_signal_expand",
+        GitHubStackSignalExpandSurfaceRequest,
+        GitHubStackSignalExpandSurfaceResultV1
+    );
     Ok(schemas)
 }
 
@@ -253,6 +271,26 @@ pub fn git_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     SURFACE_SPECS.iter().map(handler_descriptor).collect()
 }
+/// Resolve one public Git-surface operation to the exact capability and use
+/// case a daemon-minted request grant must name.
+pub fn git_surface_operation(
+    name: &str,
+) -> Result<Option<ApplicationOperation>, ApplicationContractError> {
+    SURFACE_SPECS
+        .iter()
+        .find(|spec| spec.operation == name)
+        .map(|spec| {
+            let result_schema = schema(spec.result_schema)?;
+            Ok(ApplicationOperation::new(
+                CapabilityId::new(spec.capability)?,
+                UseCaseId::new(spec.use_case)?,
+                ResultContractRef::from_schema(&result_schema),
+                true,
+            ))
+        })
+        .transpose()
+}
+
 
 fn capability(
     spec: &SurfaceSpec,

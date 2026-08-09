@@ -29,7 +29,8 @@ use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
 use tracedecay_application::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
-    NativeIntegrationPreflightRequestV1, NativeIntegrationReceiptProjectionV1,
+    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
+    NativeIntegrationReceiptProjectionV1,
     NativeIntegrationStatusProjectionV1, NativeIntegrationStatusRequestV1,
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
     native_integration_surface_operation,
@@ -39,8 +40,12 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
 };
 use tracedecay_store::NativeIntegrationStore;
+use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use crate::application_surface::NativeIntegrationSurfaceRequest;
+use crate::daemon::native_integration::stack_signals::{
+    signal_from_preflight, signal_from_receipt,
+};
 use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
 
 /// How long a minted preview stays approvable. The preview must outlive its
@@ -167,6 +172,11 @@ async fn execute_with_owner(
                     .0
                     .saturating_add(NATIVE_INTEGRATION_PREVIEW_TTL_MICROS),
             );
+            let stack_runtime = owner
+                .github_stack_runtime(context.scope())
+                .map_err(|_| unavailable_native_integration())?;
+            let signal_scope = context.scope().clone();
+            let signal_context = context.clone();
             let application_request = NativeIntegrationPreflightRequestV1 {
                 context,
                 topology: preflight.snapshot.into_resolution_request(observed_at),
@@ -177,7 +187,22 @@ async fn execute_with_owner(
                 observed_at,
             };
             let outcome = tokio::task::spawn_blocking(move || {
-                owner.service().preflight(application_request, &signal)
+                let outcome = match stack_runtime.as_ref() {
+                    Some(runtime) => runtime
+                        .preflight(&application_request, &signal)
+                        .map_err(stack_coordinator_contract_error),
+                    None => owner.service().preflight(application_request, &signal),
+                };
+                if let (Some(runtime), Ok(NativeIntegrationPreflightOutcomeV1::Preview(preview))) =
+                    (stack_runtime.as_ref(), &outcome)
+                    && let Some(stack_signal) = signal_from_preflight(&signal_scope, preview)
+                        .map_err(stack_coordinator_contract_error)?
+                {
+                    runtime
+                        .enqueue_from_preflight(stack_signal, &signal_context)
+                        .map_err(stack_coordinator_contract_error)?;
+                }
+                outcome
             })
             .await
             .map_err(|_| unavailable_native_integration())?;
@@ -274,6 +299,11 @@ async fn execute_with_owner(
             .map_err(|_| unavailable_native_integration())?
         }
         NativeIntegrationSurfaceRequest::Apply(apply) => {
+            let stack_runtime = owner
+                .github_stack_runtime(context.scope())
+                .map_err(|_| unavailable_native_integration())?;
+            let signal_scope = context.scope().clone();
+            let signal_context = context.clone();
             tokio::task::spawn_blocking(move || {
                 // The caller names its preview and one-use approval by exact
                 // identity and digest; both must already be durable. A
@@ -300,6 +330,8 @@ async fn execute_with_owner(
                     }
                     Err(_) => return Err(unavailable_native_integration()),
                 };
+                let signal_preview = preview.clone();
+                let signal_approval = approval.clone();
                 let application_request = NativeIntegrationApplyRequestV1 {
                     context,
                     transaction_id: apply.transaction_id,
@@ -308,9 +340,24 @@ async fn execute_with_owner(
                     observed_at,
                 };
                 match owner.service().apply(application_request, &signal) {
-                    Ok(receipt) => NativeIntegrationReceiptProjectionV1::project(&receipt)
+                    Ok(receipt) => {
+                        if let Some(runtime) = stack_runtime.as_ref()
+                            && let Some(stack_signal) =
+                                signal_from_receipt(&signal_scope, &signal_preview, &receipt)
+                                    .map_err(stack_coordinator_contract_error)?
+                        {
+                            runtime
+                                .enqueue_from_approval(
+                                    stack_signal,
+                                    &signal_approval,
+                                    &signal_context,
+                                )
+                                .map_err(stack_coordinator_contract_error)?;
+                        }
+                        NativeIntegrationReceiptProjectionV1::project(&receipt)
                         .map(NativeIntegrationSurfaceResultV1::Receipt)
-                        .map_err(|_| invalid_native_integration_request()),
+                        .map_err(|_| invalid_native_integration_request())
+                    }
                     Err(error) => surface_result_from_contract_error(error),
                 }
             })
@@ -395,6 +442,21 @@ fn unavailable_native_integration() -> ApplicationProblem {
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![tracedecay_application::LegalAction::Retry],
     }
+}
+
+fn stack_coordinator_contract_error(
+    error: StackCoordinatorErrorV1,
+) -> NativeIntegrationContractError {
+    let port = match error {
+        StackCoordinatorErrorV1::Cancelled => NativeIntegrationPortError::Cancelled,
+        StackCoordinatorErrorV1::Stale => NativeIntegrationPortError::Stale,
+        StackCoordinatorErrorV1::Denied => NativeIntegrationPortError::Denied,
+        StackCoordinatorErrorV1::Unavailable | StackCoordinatorErrorV1::Saturated => {
+            NativeIntegrationPortError::Unavailable
+        }
+        StackCoordinatorErrorV1::Invalid(message) => NativeIntegrationPortError::Native(message),
+    };
+    NativeIntegrationContractError::Port(port)
 }
 
 /// The typed problem for a native-integration request that does not satisfy

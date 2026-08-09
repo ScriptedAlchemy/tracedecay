@@ -187,6 +187,7 @@ mod configuration;
 mod dispatch;
 mod feedback;
 mod git;
+mod github_stack_signal;
 mod handoff;
 mod invocation_observability;
 mod lsp;
@@ -208,6 +209,7 @@ use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
+use github_stack_signal::execute_github_stack_signal_expand;
 use handoff::*;
 #[cfg(test)]
 use invocation_observability::invocation_rejected_argument;

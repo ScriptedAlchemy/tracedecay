@@ -651,7 +651,8 @@ pub(super) fn invocation_is_native_integration_operation(
 ) -> bool {
     matches!(
         operation,
-        service::invocation::DaemonInvocationOperation::NativeIntegrationStackSnapshot
+        service::invocation::DaemonInvocationOperation::GitHubStackSignalExpand
+            | service::invocation::DaemonInvocationOperation::NativeIntegrationStackSnapshot
             | service::invocation::DaemonInvocationOperation::NativeIntegrationPreflight
             | service::invocation::DaemonInvocationOperation::NativeIntegrationApprove
             | service::invocation::DaemonInvocationOperation::NativeIntegrationApply

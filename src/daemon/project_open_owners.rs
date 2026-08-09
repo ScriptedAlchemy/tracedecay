@@ -1122,7 +1122,7 @@ pub(super) async fn register_project_open_production_owners(
     // stale/denied predicates and the handler's minted grants agree on one
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
-    let native_git_fallback_mounted = if let Some(repository_root) =
+    let native_owner = if let Some(repository_root) =
         crate::worktree::git_worktree_root(project_root)
     {
         let native_owner = native_integration
@@ -1147,9 +1147,9 @@ pub(super) async fn register_project_open_production_owners(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project-open worktree cleanup recovery fencing failed: {error}"),
             })?;
-        true
+        Some(native_owner)
     } else {
-        false
+        None
     };
     let work_grant = project_open_work_grant(&access, now_micros()).map_err(|error| {
         TraceDecayError::Config {
@@ -1172,59 +1172,42 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open work topology policy is unavailable: {error}"),
             })?
             .clone();
-    // A disabled GitHub stacked-PR private preview is a policy fact, not a
-    // credential inference. It is therefore mounted for an exact GitHub
-    // remote even when no review credential exists. Conversely, a requested
-    // private-preview read has no installed provider stack endpoint and the
-    // owner returns its typed unavailable state without emitting a guess.
-    if let Some((github_owner, github_repository)) = crate::tracedecay::git_remote_url(project_root)
+    // Project-open has no authenticated GitHub response or persisted source
+    // record. It mounts policy and delivery only; the review refresh owner is
+    // the sole producer of canonical provider observations and anchors.
+    if crate::tracedecay::git_remote_url(project_root)
         .as_deref()
         .and_then(github_repository_from_remote)
+        .is_some()
     {
-        let observability_producer = invocation
-            .service
-            .observability_producer(Some(project_root))
-            .await
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open GitHub stack capability producer is unavailable".to_owned(),
+        let stack_coordinator = invocation.github_stack_coordinator();
+        stack_coordinator
+            .register_scope(
+                &scope,
+                work_topology_policy.review_topology.github_stacked_prs,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "project-open GitHub stack coordinator registration failed: {error:?}"
+                ),
             })?;
-        let stack_probe = tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
-            scope.clone(),
-            work_topology_policy.clone(),
-            &github_owner,
-            &github_repository,
-            native_git_fallback_mounted,
-            now_micros(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open GitHub stack capability owner failed: {error:?}"),
-        })?;
-        let capability_observation =
-            tracedecay_usecases::observability::record_github_stack_capability(
-                session_db.as_ref(),
-                Some(observability_producer.as_ref()),
-                &stack_probe,
+        if let Some(native_owner) = native_owner.as_ref() {
+            let stack_runtime = native_owner
+                .mount_github_stack_runtime(
+                    Arc::clone(&session_db),
+                    scope.clone(),
+                    access.clone(),
+                    Arc::clone(&stack_coordinator),
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "project-open GitHub stack delivery runtime registration failed: {error:?}"
+                    ),
+                })?;
+            crate::daemon::native_integration::register_github_stack_hook_runtime(
+                &scope,
+                &stack_runtime,
             );
-        match capability_observation {
-            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::Unavailable {
-                reason,
-                ..
-            } => {
-                tracing::info!(
-                    event = "project_open_github_stack_capability",
-                    state = "unavailable",
-                    reason = ?reason,
-                    "GitHub stacked-PR capability remains unavailable"
-                );
-            }
-            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::DroppedAtCapacity => {
-                tracing::info!(
-                    event = "project_open_github_stack_capability",
-                    state = "dropped_at_capacity",
-                    "GitHub stacked-PR capability receipt was dropped at producer capacity"
-                );
-            }
-            tracedecay_usecases::observability::GitHubStackCapabilityObservationResultV1::Enqueued => {}
         }
     }
     invocation

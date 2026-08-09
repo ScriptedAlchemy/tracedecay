@@ -193,6 +193,20 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
+            DaemonInvocationPayload::GitHubStackSignalExpand {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => execute_github_stack_signal_expand(
+                request_id,
+                configuration_runtime.clone(),
+                native_integration_service,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            ),
             DaemonInvocationPayload::NativeIntegration {
                 surface_operation,
                 request,
