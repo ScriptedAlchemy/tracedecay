@@ -11,6 +11,7 @@ use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
 use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::RequestContext;
+use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationProblem, ApplicationResult, AuthorityReceipt, RetryDirective, SafeDiagnostic,
@@ -255,7 +256,7 @@ macro_rules! callable_code_service_method {
             context: &RequestContext,
             request: $request,
             observed_at: UtcMicros,
-        ) -> ApplicationResult<CodeQueryPage<$item>> {
+        ) -> Result<ApplicationResult<CodeQueryPage<$item>>, ApplicationContractError> {
             let operation = self.operations.get(CallableCodeOperationKind::$kind);
             if request.validate().is_err() {
                 return problem_envelope(context, operation, invalid_code_query_problem());

@@ -287,6 +287,7 @@ fn execute_exact_in_scope(
         ExactOccurrenceRequest::new("ApplicationOperation", None, scope, meta()).unwrap(),
         UtcMicros(2),
     ))
+    .expect("typed callable-code envelope construction succeeds")
 }
 
 #[test]
@@ -306,6 +307,7 @@ fn callable_code_service_accepts_route_owned_authorization() {
         ExactOccurrenceRequest::new("ApplicationOperation", None, scope(), meta()).unwrap(),
         UtcMicros(2),
     ))
+    .expect("typed callable-code envelope construction succeeds")
     .unwrap();
     let ApplicationOutcome::Evidence(packet) = result.outcome else {
         panic!("route-authorized callable query returns evidence");
@@ -413,7 +415,9 @@ fn callable_code_service_reauthorizes_then_delegates_cursor_to_port() {
     )
     .unwrap();
 
-    let result = block_on(service.exact_occurrence(&context, request, UtcMicros(2))).unwrap();
+    let result = block_on(service.exact_occurrence(&context, request, UtcMicros(2)))
+        .expect("typed callable-code envelope construction succeeds")
+        .unwrap();
     assert!(matches!(result.outcome, ApplicationOutcome::Evidence(_)));
 }
 

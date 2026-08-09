@@ -8,6 +8,7 @@ use std::future::Future;
 use tracedecay_domain::UtcMicros;
 
 use crate::context::{RequestAdmission, RequestContext};
+use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
@@ -22,12 +23,12 @@ pub(super) fn problem_envelope<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     problem: ApplicationProblem,
-) -> ApplicationResult<T> {
-    Err(ApplicationProblemEnvelope::new(
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    Ok(Err(ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         context.request_id().clone(),
         problem,
-    ))
+    )?))
 }
 
 pub(super) async fn evidence_envelope_with_async_publication_recheck<T, F, Fut>(
@@ -37,7 +38,7 @@ pub(super) async fn evidence_envelope_with_async_publication_recheck<T, F, Fut>(
     outcome: RetrievalPortOutcome<T>,
     started_at: UtcMicros,
     recheck_publication: F,
-) -> ApplicationResult<T>
+) -> Result<ApplicationResult<T>, ApplicationContractError>
 where
     F: FnOnce(UtcMicros) -> Fut,
     Fut: Future<Output = Result<AuthorityReceipt, ApplicationProblem>>,
@@ -145,7 +146,7 @@ fn finish_evidence_envelope<T>(
     authority: AuthorityReceipt,
     prepared: PreparedEvidence<T>,
     started_at: UtcMicros,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     let PreparedEvidence {
         termination,
         evidence,
@@ -165,22 +166,19 @@ fn finish_evidence_envelope<T>(
             return problem_envelope(
                 context,
                 operation,
-                ApplicationProblem::unavailable(
-                    SafeDiagnostic::new(
-                        "application.retrieval.invalid-port-evidence",
-                        "The retrieval result could not be verified.",
-                    )
-                    .expect("static safe diagnostic is valid"),
-                ),
+                ApplicationProblem::unavailable(SafeDiagnostic::new(
+                    "application.retrieval.invalid-port-evidence",
+                    "The retrieval result could not be verified.",
+                )?),
             );
         }
     };
-    Ok(ApplicationEnvelope::evidence(
+    Ok(Ok(ApplicationEnvelope::evidence(
         operation.result_contract().clone(),
         context.request_id().clone(),
         context.scope().clone(),
         packet,
-    ))
+    )))
 }
 
 fn suppress_unpublished_evidence<T>(
