@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "memory-multiturn-continuity",
   "title": "Facts stored in one session are recalled in the next",
-  "description": "A continuity note stored in session one must be recallable in session two via memory state, not chat context. The deterministic layer verifies persistence plus a real recall hit (retrieval_count bump).",
+  "description": "A continuity note stored in session one must be recallable in session two via memory state, not chat context. The deterministic layer verifies persistence plus a real exact-search hit.",
   "adapted_from": "mnemon `memory-multiturn-continuity` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
   "contract": "stable",
   "setup": {
@@ -13,9 +13,8 @@
     "well_behaved": [
       {
         "kind": "tool",
-        "tool": "fact_store",
+        "tool": "tracedecay_fact_store_add",
         "args": {
-          "action": "add",
           "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
           "category": "decision",
           "source": "eval-agent"
@@ -23,9 +22,8 @@
       },
       {
         "kind": "tool",
-        "tool": "fact_store",
+        "tool": "tracedecay_fact_store_search",
         "args": {
-          "action": "search",
           "query": "continuity note memory regression"
         }
       }
@@ -35,9 +33,8 @@
       "steps": [
         {
           "kind": "tool",
-          "tool": "fact_store",
+          "tool": "tracedecay_fact_store_add",
           "args": {
-            "action": "add",
             "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
             "category": "decision",
             "source": "eval-agent"
@@ -55,19 +52,18 @@
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "content-count",
       "name": "continuity_note_persisted",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%Continuity note%' OR content LIKE '%continuity note%'",
+      "contains": "Continuity note",
       "op": "gte",
       "value": 1,
       "phase": "both"
     },
     {
-      "kind": "sql",
+      "kind": "search-source",
       "name": "continuity_note_recalled",
-      "sql": "SELECT COALESCE(MAX(retrieval_count), 0) FROM memory_facts WHERE content LIKE '%ontinuity note%'",
-      "op": "gte",
-      "value": 1,
+      "query": "continuity note memory regression",
+      "source": "eval-agent",
       "phase": "both"
     }
   ]

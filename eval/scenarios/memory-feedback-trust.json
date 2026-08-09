@@ -2,17 +2,16 @@
   "schema_version": 1,
   "id": "memory-feedback-trust",
   "title": "helpful fact_feedback raises trust and records an audit event",
-  "description": "Proves the fact_feedback tool is wired end-to-end: a `helpful` action on a seeded fact must raise its trust_score above the seeded value and append a matching row to the memory_feedback_events audit table. Guards against a regression where feedback is silently dropped or stops moving trust.",
+  "description": "Proves the exact fact-feedback operation is wired end-to-end: a `helpful` action on a seeded FactId must raise its FactRecordV1 trust score and appear in that fact's typed history.",
   "contract": "stable",
-  "contract_notes": "Deterministic write-path check with no LLM. helpful applies +0.05 to trust_score (store.rs apply_feedback) and inserts a memory_feedback_events row with action='helpful'. The single seeded fact is fact_id=1 in the fresh fixture.",
+  "contract_notes": "Deterministic write-path check with no LLM. The harness captures the exact FactId returned during setup and verifies the typed get/history response after feedback.",
   "setup": {
     "facts": [
       {
         "content": "Payments service exposes an idempotency key on POST /charges",
         "category": "project",
         "source": "feedback-target",
-        "trust": 0.3,
-        "retrieval_count": 0
+        "trust": 0.3
       }
     ],
     "files": {}
@@ -21,9 +20,9 @@
     "well_behaved": [
       {
         "kind": "tool",
-        "tool": "fact_feedback",
+        "tool": "tracedecay_fact_feedback",
         "args": {
-          "fact_id": 1,
+          "fact_id": "$fact:feedback-target",
           "action": "helpful"
         }
       }
@@ -32,23 +31,24 @@
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "source-count",
       "name": "feedback_target_fixture_loaded",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'feedback-target'",
+      "source": "feedback-target",
       "op": "eq",
       "value": 1
     },
     {
-      "kind": "sql",
+      "kind": "source-trust",
       "name": "helpful_feedback_raised_trust_above_seed",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'feedback-target' AND trust_score > 0.3",
-      "op": "eq",
-      "value": 1
+      "source": "feedback-target",
+      "op": "gt",
+      "value": 0.3
     },
     {
-      "kind": "sql",
+      "kind": "feedback-history",
       "name": "helpful_feedback_event_recorded",
-      "sql": "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id = 1 AND action = 'helpful'",
+      "source": "feedback-target",
+      "action": "helpful",
       "op": "eq",
       "value": 1
     }

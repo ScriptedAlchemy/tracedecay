@@ -12,36 +12,31 @@
         "content": "Hetzner runner keeps the self-hosted CI queue under two minutes.",
         "category": "project",
         "source": "eval-protected",
-        "trust": 0.95,
-        "retrieval_count": 60
+        "trust": 0.95
       },
       {
         "content": "Dashboard bundles are prebuilt before cargo package ships them.",
         "category": "code_area",
         "source": "eval-protected",
-        "trust": 0.92,
-        "retrieval_count": 35
+        "trust": 0.92
       },
       {
         "content": "Branch databases live under .tracedecay/branches keyed by branch name.",
         "category": "code_area",
         "source": "eval-protected",
-        "trust": 0.9,
-        "retrieval_count": 25
+        "trust": 0.9
       },
       {
         "content": "Demo note: the staging banner color is mauve for this project.",
         "category": "general",
         "source": "eval-dup",
-        "trust": 0.45,
-        "retrieval_count": 0
+        "trust": 0.45
       },
       {
         "content": "Demo note: the staging banner color is mauve in this project.",
         "category": "general",
         "source": "eval-dup",
-        "trust": 0.45,
-        "retrieval_count": 0
+        "trust": 0.45
       }
     ],
     "files": {}
@@ -74,17 +69,17 @@
       "expected": true
     },
     {
-      "kind": "sql",
+      "kind": "source-count",
       "name": "protected_facts_survive_apply",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'eval-protected'",
+      "source": "eval-protected",
       "op": "eq",
       "value": 3,
       "phase": "both"
     },
     {
-      "kind": "sql",
+      "kind": "source-count",
       "name": "duplicates_collapsed_after_apply",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'eval-dup'",
+      "source": "eval-dup",
       "op": "eq",
       "value": 1,
       "phase": "both"

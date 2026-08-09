@@ -11,36 +11,31 @@
         "content": "Use pnpm for installing dependencies in this monorepo",
         "category": "project",
         "source": "on-topic-install-morph",
-        "trust": 0.5,
-        "retrieval_count": 0
+        "trust": 0.5
       },
       {
         "content": "Use npm to install packages",
         "category": "project",
         "source": "off-topic-install-exact",
-        "trust": 0.5,
-        "retrieval_count": 0
+        "trust": 0.5
       },
       {
         "content": "Always back up the database nightly before deploy",
         "category": "project",
         "source": "on-topic-backup-split",
-        "trust": 0.5,
-        "retrieval_count": 0
+        "trust": 0.5
       },
       {
         "content": "Database backups run via pg_dump every night",
         "category": "project",
         "source": "on-topic-backup-plural",
-        "trust": 0.5,
-        "retrieval_count": 0
+        "trust": 0.5
       },
       {
         "content": "Acme primary database runs on Postgres",
         "category": "project",
         "source": "off-topic-backup-exact",
-        "trust": 0.5,
-        "retrieval_count": 0
+        "trust": 0.5
       }
     ],
     "files": {}
@@ -51,9 +46,8 @@
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "fact-count",
       "name": "morphology_fixture_loaded",
-      "sql": "SELECT COUNT(*) FROM memory_facts",
       "op": "eq",
       "value": 5
     },

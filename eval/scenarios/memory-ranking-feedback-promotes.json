@@ -2,24 +2,22 @@
   "schema_version": 1,
   "id": "memory-ranking-feedback-promotes",
   "title": "helpful/unhelpful feedback reorders real search results",
-  "description": "Proves the full feedback loop end-to-end: rating one fact `helpful` and an equally-relevant rival `unhelpful` moves their trust scores and, through the trust-weighted combined_score, flips their order in the real fact_store search tool. This is the payoff the feedback instruction (surfaced in tracedecay_context and the digest) is meant to produce.",
+  "description": "Proves the full feedback loop end-to-end: rating one fact `helpful` and an equally-relevant rival `unhelpful` moves their trust scores and, through the trust-weighted combined_score, flips their order in the exact fact search tool. This is the payoff the feedback instruction (surfaced in tracedecay_context and the digest) is meant to produce.",
   "contract": "stable",
-  "contract_notes": "Deterministic, no LLM. Two facts share every query-matching token and seed at trust 0.7. A helpful step (+0.05) lifts fact_id=1 to 0.75; an unhelpful step (-0.10) drops fact_id=2 to 0.60. Both stay above the default min-trust floor, and the 0.75-vs-0.60 trust gate makes the praised fact rank first. Assertions run after the well-behaved feedback steps.",
+  "contract_notes": "Deterministic, no LLM. Two facts share every query-matching token and seed at trust 0.7. The harness resolves each feedback target from the FactId returned by its exact setup write, then verifies trust and ranking through the same retained surface.",
   "setup": {
     "facts": [
       {
         "content": "Checkout service validates coupons against the promo ledger tango",
         "category": "project",
         "source": "praised",
-        "trust": 0.7,
-        "retrieval_count": 0
+        "trust": 0.7
       },
       {
         "content": "Checkout service validates coupons against the promo ledger foxtrot",
         "category": "project",
         "source": "panned",
-        "trust": 0.7,
-        "retrieval_count": 0
+        "trust": 0.7
       }
     ],
     "files": {}
@@ -28,38 +26,37 @@
     "well_behaved": [
       {
         "kind": "tool",
-        "tool": "fact_feedback",
-        "args": { "fact_id": 1, "action": "helpful" }
+        "tool": "tracedecay_fact_feedback",
+        "args": { "fact_id": "$fact:praised", "action": "helpful" }
       },
       {
         "kind": "tool",
-        "tool": "fact_feedback",
-        "args": { "fact_id": 2, "action": "unhelpful" }
+        "tool": "tracedecay_fact_feedback",
+        "args": { "fact_id": "$fact:panned", "action": "unhelpful" }
       }
     ],
     "violation": null
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "fact-count",
       "name": "feedback_ranking_fixture_loaded",
-      "sql": "SELECT COUNT(*) FROM memory_facts",
       "op": "eq",
       "value": 2
     },
     {
-      "kind": "sql",
+      "kind": "source-trust",
       "name": "helpful_raised_praised_trust",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'praised' AND trust_score > 0.7",
-      "op": "eq",
-      "value": 1
+      "source": "praised",
+      "op": "gt",
+      "value": 0.7
     },
     {
-      "kind": "sql",
+      "kind": "source-trust",
       "name": "unhelpful_lowered_panned_trust",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE source = 'panned' AND trust_score < 0.65",
-      "op": "eq",
-      "value": 1
+      "source": "panned",
+      "op": "lt",
+      "value": 0.65
     },
     {
       "kind": "search-rank",

@@ -13,9 +13,8 @@
     "well_behaved": [
       {
         "kind": "tool",
-        "tool": "fact_store",
+        "tool": "tracedecay_fact_store_add",
         "args": {
-          "action": "add",
           "content": "Durable decision: memory eval scenarios gate hygiene regressions before broader host expansion.",
           "category": "decision",
           "source": "eval-agent"
@@ -27,9 +26,8 @@
       "steps": [
         {
           "kind": "tool",
-          "tool": "fact_store",
+          "tool": "tracedecay_fact_store_add",
           "args": {
-            "action": "add",
             "content": "Temporary task token 742913 is active for this run.",
             "category": "general",
             "source": "eval-agent"
@@ -46,21 +44,20 @@
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "content-count",
       "name": "no_transient_token_fact",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%742913%'",
+      "contains": "742913",
       "op": "eq",
       "value": 0,
       "phase": "both"
     },
     {
-      "kind": "sql",
+      "kind": "content-count",
       "name": "durable_decision_stored",
-      "sql": "SELECT COUNT(*) FROM memory_facts WHERE content LIKE '%memory eval scenarios%'",
+      "contains": "memory eval scenarios",
       "op": "eq",
       "value": 1,
-      "phase": "well-behaved-only",
-      "deterministic_only": true
+      "phase": "well-behaved-only"
     }
   ]
 }

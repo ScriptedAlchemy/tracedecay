@@ -2,9 +2,9 @@
   "schema_version": 1,
   "id": "memory-ranking-retrieval-reinforcement",
   "title": "A frequently-retrieved fact outranks an equal-trust, never-retrieved rival",
-  "description": "Proves the retrieval-frequency reinforcement in combined_score end-to-end through the real fact_store search tool: two facts with identical trust and equivalent query relevance rank by retrieval_count, so a fact the agent actually keeps recalling floats above an otherwise-identical cold fact even with no explicit feedback.",
+  "description": "Proves retrieval-frequency reinforcement end-to-end through the exact fact search tool: two facts with identical trust and equivalent query relevance are distinguished only after the hot fact is recalled through that same tool.",
   "contract": "stable",
-  "contract_notes": "Deterministic, no LLM. Both facts share every query-matching token (trust 0.6, same length) and differ only in one non-matching trailing token and in retrieval_count. combined_score applies usage_boost = 1 + min(0.5, 0.02*ln(1+retrieval_count)); retrieval_count 5000 -> ~+17% vs 0 -> +0%, which dominates the negligible content difference. If the reinforcement is removed the two tie on base relevance and the ordering is no longer guaranteed.",
+  "contract_notes": "Deterministic, no LLM. Both facts share every query-matching token and are seeded at trust 0.6. The hot fact is recalled through the exact search route before the ranking assertion, so no test-only store mutation supplies usage state.",
   "setup": {
     "facts": [
       {
@@ -12,14 +12,14 @@
         "category": "project",
         "source": "hot",
         "trust": 0.6,
-        "retrieval_count": 5000
+        "preload_query": "zulu",
+        "preload_searches": 12
       },
       {
         "content": "Release pipeline caching uses sccache to speed Rust compilation yankee",
         "category": "project",
         "source": "cold",
-        "trust": 0.6,
-        "retrieval_count": 0
+        "trust": 0.6
       }
     ],
     "files": {}
@@ -30,9 +30,8 @@
   },
   "assertions": [
     {
-      "kind": "sql",
+      "kind": "fact-count",
       "name": "reinforcement_fixture_loaded",
-      "sql": "SELECT COUNT(*) FROM memory_facts",
       "op": "eq",
       "value": 2
     },
