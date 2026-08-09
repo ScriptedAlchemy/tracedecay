@@ -28,7 +28,7 @@ pub use project_memory::{automatic_fact_add_command, with_automation_run_id};
 
 #[cfg(test)]
 use tracedecay_domain::{
-    ActorId, DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecordV2,
+    DomainError, FactId, FactLineageEventV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 #[cfg(test)]
 use tracedecay_runtime_core::memory::types::{FeedbackAction, FeedbackRequest};

@@ -67,17 +67,24 @@ static PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
         .unwrap_or_else(|_| panic!("static primitive sort contract is valid"))
 });
 
-pub type PrimitiveDispatchFuture<'a> =
-    Pin<Box<dyn Future<Output = ApplicationResult<Value>> + Send + 'a>>;
+type PrimitiveResult<T> = Result<ApplicationResult<T>, ApplicationContractError>;
 
-pub type PrimitiveTransportDispatchFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<ApplicationResult<Value>, ApplicationContractError>> + Send + 'a,
-    >,
->;
+macro_rules! value_or_problem {
+    ($result:expr, $context:expr, $operation:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(_) => return contract_problem($context, $operation),
+        }
+    };
+}
+
+pub type PrimitiveDispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
+pub type PrimitiveTransportDispatchFuture<'a> =
+    Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
 
 pub type OperationalPrimitiveFuture<'a> =
-    Pin<Box<dyn Future<Output = ApplicationResult<Value>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
 
 pub type ExtendedPrimitiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
@@ -451,7 +458,7 @@ impl PrimitiveDispatch for OwnedPrimitiveRuntime {
                 observed_at,
                 &deadline,
                 &cancellation,
-            ) {
+            )? {
                 return Ok(Err(problem));
             }
             if observed_at >= self.access.grant_expires_at {
@@ -459,7 +466,7 @@ impl PrimitiveDispatch for OwnedPrimitiveRuntime {
                     operation.result_contract().clone(),
                     request_id,
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )));
+                )?));
             }
             let context = transport_context(
                 &self.scope,
@@ -470,13 +477,12 @@ impl PrimitiveDispatch for OwnedPrimitiveRuntime {
                 deadline,
                 cancellation,
             )?;
-            Ok(self
-                .dispatch_invocation(
-                    PrimitiveInvocation { operation, request },
-                    context,
-                    observed_at,
-                )
-                .await)
+            self.dispatch_invocation(
+                PrimitiveInvocation { operation, request },
+                context,
+                observed_at,
+            )
+            .await
         })
     }
 }
@@ -495,8 +501,8 @@ impl OwnedPrimitiveRuntime {
                 &context,
                 &invocation.operation,
                 observed_at,
-            ) {
-                return Err(problem);
+            )? {
+                return Ok(Err(problem));
             }
             let Some(_permit) = self.capacity.try_acquire() else {
                 return saturated(&context, &invocation.operation);
@@ -512,19 +518,19 @@ fn pre_admission_problem(
     observed_at: UtcMicros,
     deadline: &Deadline,
     cancellation: &CancellationContext,
-) -> Option<ApplicationProblemEnvelope> {
+) -> Result<Option<ApplicationProblemEnvelope>, ApplicationContractError> {
     let problem = if cancellation.is_cancelled() {
         ApplicationProblem::cancelled_before_admission()
     } else if deadline.is_elapsed_at(observed_at) {
         ApplicationProblem::timed_out_before_admission()
     } else {
-        return None;
+        return Ok(None);
     };
-    Some(ApplicationProblemEnvelope::new(
+    Ok(Some(ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),
         problem,
-    ))
+    )?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,7 +576,7 @@ fn transport_context(
 ///
 /// Exact constructor signature:
 ///
-/// `open_primitive_project_runtime(database, graph, symbol_graph_cursors,
+/// `open_primitive_project_runtime(database, graph, code_graph, symbol_graph_cursors,
 /// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
 /// operational, scope, access,
 /// admitted_root_uri, operation_events, test_run_scope) ->
@@ -580,6 +586,7 @@ fn transport_context(
 pub fn open_primitive_project_runtime(
     database: Database,
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,
     lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
@@ -605,8 +612,11 @@ pub fn open_primitive_project_runtime(
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
         CanonicalSymbolGraphAdapter::new(Arc::clone(&graph), symbol_graph_cursors),
     );
-    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> =
-        Arc::new(SourceReadAdapter::new(Arc::clone(&graph), scope.clone())?);
+    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(SourceReadAdapter::new(
+        Arc::clone(&graph),
+        Arc::clone(&code_graph),
+        scope.clone(),
+    )?);
     let services = PrimitiveProjectServices::new(
         symbol_graph,
         source,
@@ -616,7 +626,7 @@ pub fn open_primitive_project_runtime(
         Arc::new(TraceDecayComplexityAuthorityV1::new(Arc::clone(&graph))),
         redundancy,
         Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
-            &graph,
+            &code_graph,
         ))),
         temporal,
         source_lines,
@@ -672,39 +682,39 @@ fn admission_problem(
     context: &RequestContext,
     operation: &ApplicationOperation,
     observed_at: UtcMicros,
-) -> Option<ApplicationProblemEnvelope> {
+) -> Result<Option<ApplicationProblemEnvelope>, ApplicationContractError> {
     if context.validate().is_err() || context.scope() != scope {
-        return Some(ApplicationProblemEnvelope::new(
+        return Ok(Some(ApplicationProblemEnvelope::new(
             operation.result_contract().clone(),
             context.request_id().clone(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )?));
     }
     match context.admission_at(observed_at) {
         RequestAdmission::Cancelled => {
-            return Some(ApplicationProblemEnvelope::new(
+            return Ok(Some(ApplicationProblemEnvelope::new(
                 operation.result_contract().clone(),
                 context.request_id().clone(),
                 ApplicationProblem::cancelled_before_admission(),
-            ));
+            )?));
         }
         RequestAdmission::TimedOut => {
-            return Some(ApplicationProblemEnvelope::new(
+            return Ok(Some(ApplicationProblemEnvelope::new(
                 operation.result_contract().clone(),
                 context.request_id().clone(),
                 ApplicationProblem::timed_out_before_admission(),
-            ));
+            )?));
         }
         RequestAdmission::Admitted => {}
     }
     if !access.allows(context, operation, observed_at) {
-        return Some(ApplicationProblemEnvelope::new(
+        return Ok(Some(ApplicationProblemEnvelope::new(
             operation.result_contract().clone(),
             context.request_id().clone(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )?));
     }
-    None
+    Ok(None)
 }
 
 async fn dispatch_admitted(
@@ -712,7 +722,7 @@ async fn dispatch_admitted(
     invocation: PrimitiveInvocation,
     context: RequestContext,
     observed_at: UtcMicros,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let operation = invocation.operation;
     if !valid_owned_primitive_request(&invocation.request) {
         return invalid_request(&context, &operation);
@@ -1088,7 +1098,7 @@ fn retrieval_outcome<T: Serialize>(
     operation: &ApplicationOperation,
     outcome: RetrievalPortOutcome<T>,
     started_at: UtcMicros,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let (termination, mut evidence) = match outcome {
         RetrievalPortOutcome::Completed(evidence) => (OperationTermination::Completed, evidence),
         RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
@@ -1110,9 +1120,8 @@ fn retrieval_outcome<T: Serialize>(
             observed_at: evidence.finished_at,
         });
     }
-    let evidence =
-        erase_retrieval_evidence(evidence).map_err(|_| contract_problem(context, operation))?;
-    let authority = authority_receipt(access, context, operation, evidence.finished_at)?;
+    let evidence = value_or_problem!(erase_retrieval_evidence(evidence), context, operation);
+    let authority = authority_receipt(access, context, evidence.finished_at)?;
     let execution = OperationReceipt {
         started_at,
         ended_at: evidence.finished_at,
@@ -1121,14 +1130,17 @@ fn retrieval_outcome<T: Serialize>(
         budget: evidence.budget,
         termination,
     };
-    let packet = EvidencePacket::from_retrieval(evidence, authority, execution)
-        .map_err(|_| contract_problem(context, operation))?;
-    Ok(ApplicationEnvelope::evidence(
+    let packet = value_or_problem!(
+        EvidencePacket::from_retrieval(evidence, authority, execution),
+        context,
+        operation
+    );
+    Ok(Ok(ApplicationEnvelope::evidence(
         operation.result_contract().clone(),
         context.request_id().clone(),
         context.scope().clone(),
         packet,
-    ))
+    )))
 }
 
 fn erase_retrieval_evidence<T: Serialize>(
@@ -1153,8 +1165,9 @@ fn validate_operational_result(
     context: &RequestContext,
     operation: &ApplicationOperation,
     maximum_output_bytes: usize,
-    result: ApplicationResult<Value>,
-) -> ApplicationResult<Value> {
+    result: Result<ApplicationResult<Value>, ApplicationContractError>,
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
+    let result = result?;
     match result {
         Ok(envelope)
             if envelope.contract == *operation.result_contract()
@@ -1171,7 +1184,7 @@ fn validate_operational_result(
                 _ => false,
             };
             if bounded {
-                Ok(envelope)
+                Ok(Ok(envelope))
             } else {
                 unavailable(context, operation)
             }
@@ -1180,7 +1193,7 @@ fn validate_operational_result(
             if problem.contract == *operation.result_contract()
                 && problem.request_id == *context.request_id() =>
         {
-            Err(problem)
+            Ok(Err(problem))
         }
         Ok(_) | Err(_) => unavailable(context, operation),
     }
@@ -1229,7 +1242,7 @@ fn symbol_outcome<T: Serialize>(
     operation: &ApplicationOperation,
     domain: EvidenceDomain,
     outcome: SymbolGraphPortOutcome<T>,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     match outcome {
         SymbolGraphPortOutcome::Completed {
             page,
@@ -1275,11 +1288,11 @@ fn symbol_page<T: Serialize>(
     finished_at: UtcMicros,
     budget: OperationBudgetUsage,
     partial: bool,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let returned = page.items.len() as u64;
     let total = page.total;
     let continuation = page.next_cursor.clone();
-    let payload = serde_json::to_value(page).map_err(|_| contract_problem(context, operation))?;
+    let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     evidence_result(
         access,
         context,
@@ -1309,15 +1322,14 @@ fn source_outcome(
     context: &RequestContext,
     operation: &ApplicationOperation,
     outcome: SourceReadPortOutcome,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     match outcome {
         SourceReadPortOutcome::Completed {
             result,
             finished_at,
             budget,
         } => {
-            let payload =
-                serde_json::to_value(result).map_err(|_| contract_problem(context, operation))?;
+            let payload = value_or_problem!(serde_json::to_value(result), context, operation);
             evidence_result(
                 access,
                 context,
@@ -1336,8 +1348,7 @@ fn source_outcome(
             finished_at,
             budget,
         } => {
-            let payload =
-                serde_json::to_value(result).map_err(|_| contract_problem(context, operation))?;
+            let payload = value_or_problem!(serde_json::to_value(result), context, operation);
             evidence_result(
                 access,
                 context,
@@ -1360,7 +1371,7 @@ fn test_map_outcome(
     context: &RequestContext,
     operation: &ApplicationOperation,
     outcome: TestPrimitivePortOutcome<TestMapPrimitiveResultV1>,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     test_outcome(access, context, operation, outcome, |result| {
         (
             (result.coverage.len() + result.uncovered.len()) as u64,
@@ -1375,7 +1386,7 @@ fn affected_file_tests_outcome(
     context: &RequestContext,
     operation: &ApplicationOperation,
     outcome: TestPrimitivePortOutcome<AffectedFileTestsPrimitiveResultV1>,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     test_outcome(access, context, operation, outcome, |result| {
         (
             result.affected_tests.len() as u64,
@@ -1391,7 +1402,7 @@ fn test_outcome<T: Serialize>(
     operation: &ApplicationOperation,
     outcome: TestPrimitivePortOutcome<T>,
     page: impl Fn(&T) -> (u64, Option<u64>, Option<OpaqueCursor>),
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     match outcome {
         TestPrimitivePortOutcome::Completed {
             result,
@@ -1450,8 +1461,8 @@ fn typed_result<T: Serialize>(
     finished_at: UtcMicros,
     budget: OperationBudgetUsage,
     partial: bool,
-) -> ApplicationResult<Value> {
-    let payload = serde_json::to_value(result).map_err(|_| contract_problem(context, operation))?;
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
+    let payload = value_or_problem!(serde_json::to_value(result), context, operation);
     let mut coverage = simple_coverage(partial, returned);
     coverage.visited = total;
     coverage.eligible = total;
@@ -1475,7 +1486,7 @@ fn grep_outcome<T: Serialize>(
     operation: &ApplicationOperation,
     domain: EvidenceDomain,
     outcome: PrimitiveOutcomeV1<T>,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     match outcome {
         PrimitiveOutcomeV1::Completed(page) => {
             grep_page(access, context, operation, domain, page, false)
@@ -1496,11 +1507,11 @@ fn grep_page<T: Serialize>(
     domain: EvidenceDomain,
     page: tracedecay_application::retrieval::grep_analysis::PrimitivePageV1<T>,
     partial: bool,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let coverage = page.coverage.clone();
     let continuation = page.continuation.clone();
     let finished_at = page.finished_at;
-    let payload = serde_json::to_value(page).map_err(|_| contract_problem(context, operation))?;
+    let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     evidence_result(
         access,
         context,
@@ -1527,13 +1538,12 @@ fn evidence_result(
     finished_at: UtcMicros,
     budget: OperationBudgetUsage,
     partial: bool,
-) -> ApplicationResult<Value> {
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|_| contract_problem(context, operation))?;
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
+    let payload_bytes = value_or_problem!(serde_json::to_vec(&payload), context, operation);
     if payload_bytes.len() > MAX_OPERATION_OUTPUT_BYTES {
         return unavailable(context, operation);
     }
-    let authority = authority_receipt(access, context, operation, finished_at)?;
+    let authority = authority_receipt(access, context, finished_at)?;
     let complete = coverage.completeness == CoverageCompleteness::Complete;
     let visited = coverage
         .visited
@@ -1552,16 +1562,19 @@ fn evidence_result(
             completeness: coverage.completeness,
         }],
     };
-    evidence_coverage
-        .validate()
-        .map_err(|_| contract_problem(context, operation))?;
-    let mut page = PageState::first_page(
-        PRIMITIVE_SORT_CONTRACT.clone(),
-        1,
-        eligible,
-        coverage.returned,
-    )
-    .map_err(|_| contract_problem(context, operation))?;
+    if evidence_coverage.validate().is_err() {
+        return contract_problem(context, operation);
+    }
+    let mut page = value_or_problem!(
+        PageState::first_page(
+            PRIMITIVE_SORT_CONTRACT.clone(),
+            1,
+            eligible,
+            coverage.returned,
+        ),
+        context,
+        operation
+    );
     page.cursor = continuation;
     if page.cursor.is_some() {
         page.expires_at = Some(context.deadline().expires_at);
@@ -1578,10 +1591,10 @@ fn evidence_result(
             OperationTermination::Completed
         },
     };
-    execution
-        .validate()
-        .map_err(|_| contract_problem(context, operation))?;
-    Ok(ApplicationEnvelope::evidence(
+    if execution.validate().is_err() {
+        return contract_problem(context, operation);
+    }
+    Ok(Ok(ApplicationEnvelope::evidence(
         operation.result_contract().clone(),
         context.request_id().clone(),
         context.scope().clone(),
@@ -1597,7 +1610,7 @@ fn evidence_result(
             execution,
             payload: Some(payload),
         },
-    ))
+    )))
 }
 
 async fn recent_test_results(
@@ -1606,7 +1619,7 @@ async fn recent_test_results(
     operation: &ApplicationOperation,
     page: &PageRequest,
     observed_at: UtcMicros,
-) -> ApplicationResult<Value> {
+) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let current = match runtime.test_run_scope.current_identity().await {
         Ok(identity) => ManagedTestRunCurrentScope {
             root_uri: runtime.admitted_root_uri.clone(),
@@ -1625,13 +1638,10 @@ async fn recent_test_results(
             return problem(
                 context,
                 operation,
-                ApplicationProblem::stale(
-                    SafeDiagnostic::new(
-                        "application.retrieval.test-results-stale",
-                        "The retained managed test result does not match the current source identity.",
-                    )
-                    .unwrap_or_else(|_| panic!("static diagnostic is valid")),
-                ),
+                ApplicationProblem::stale(SafeDiagnostic::new(
+                    "application.retrieval.test-results-stale",
+                    "The retained managed test result does not match the current source identity.",
+                )?),
             );
         }
         ManagedTestRunReadOutcome::Unavailable(_) => return unavailable(context, operation),
@@ -1707,9 +1717,9 @@ fn simple_coverage(partial: bool, returned: u64) -> PrimitiveCoverageV1 {
 fn authority_receipt(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
-    operation: &ApplicationOperation,
     observed_at: UtcMicros,
-) -> Result<AuthorityReceipt, ApplicationProblemEnvelope> {
+) -> Result<AuthorityReceipt, ApplicationContractError> {
+    let component_version = ComponentVersion::new("project-source-access.v1")?;
     let policy = PolicyDecisionRef::new(
         format!(
             "route.application.retrieval.{}",
@@ -1717,19 +1727,16 @@ fn authority_receipt(
         ),
         1,
         access.configuration_provenance_digest.clone(),
-        ComponentVersion::new("project-source-access.v1")
-            .unwrap_or_else(|_| panic!("static component version is valid")),
-    )
-    .map_err(|_| contract_problem(context, operation))?;
+        component_version,
+    )?;
     AuthorityReceipt::from_context(context, policy, observed_at)
-        .map_err(|_| contract_problem(context, operation))
 }
 
 fn primitive_failure<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     failure: tracedecay_application::retrieval::PrimitiveFailure,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     use tracedecay_application::retrieval::PrimitiveFailureKind;
     let application_problem = match failure.kind {
         PrimitiveFailureKind::InvalidRequest => ApplicationProblem::InvalidRequest {
@@ -1759,7 +1766,7 @@ fn grep_problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     failure: GrepAnalysisProblemV1,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     match failure {
         GrepAnalysisProblemV1::Denied => problem(
             context,
@@ -1788,7 +1795,7 @@ fn interrupted<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     cancelled: bool,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     let problem_value = if cancelled {
         ApplicationProblem::cancelled_before_admission()
     } else {
@@ -1800,7 +1807,7 @@ fn interrupted<T>(
 fn invalid_request<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(
         context,
         operation,
@@ -1818,24 +1825,21 @@ fn invalid_request<T>(
 fn unavailable<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(
         context,
         operation,
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "application.retrieval.unavailable",
-                "The admitted primitive authority is unavailable.",
-            )
-            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
-        ),
+        ApplicationProblem::unavailable(SafeDiagnostic::new(
+            "application.retrieval.unavailable",
+            "The admitted primitive authority is unavailable.",
+        )?),
     )
 }
 
 fn saturated<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationResult<T> {
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(
         context,
         operation,
@@ -1843,8 +1847,7 @@ fn saturated<T>(
             diagnostic: SafeDiagnostic::new(
                 "application.retrieval.saturated",
                 "The admitted primitive authority has reached its bounded capacity.",
-            )
-            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
+            )?,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
@@ -1855,28 +1858,25 @@ fn problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
     problem: ApplicationProblem,
-) -> ApplicationResult<T> {
-    Err(ApplicationProblemEnvelope::new(
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    Ok(Err(ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         context.request_id().clone(),
         problem,
-    ))
+    )?))
 }
 
-fn contract_problem(
+fn contract_problem<T>(
     context: &RequestContext,
     operation: &ApplicationOperation,
-) -> ApplicationProblemEnvelope {
-    ApplicationProblemEnvelope::new(
-        operation.result_contract().clone(),
-        context.request_id().clone(),
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "application.retrieval.contract",
-                "The primitive authority returned an invalid result.",
-            )
-            .unwrap_or_else(|_| panic!("static diagnostic is valid")),
-        ),
+) -> Result<ApplicationResult<T>, ApplicationContractError> {
+    problem(
+        context,
+        operation,
+        ApplicationProblem::unavailable(SafeDiagnostic::new(
+            "application.retrieval.contract",
+            "The primitive authority returned an invalid result.",
+        )?),
     )
 }
 
@@ -1962,16 +1962,19 @@ mod tests {
             &deadline,
             &cancelled,
         )
+        .expect("cancelled problem construction")
         .expect("cancelled problem");
         assert_eq!(problem.problem.kind(), ApplicationProblemKind::Cancelled);
 
         let active = CancellationContext::active("cancel.primitive").expect("active");
         let problem =
             pre_admission_problem(&request_id, &operation, UtcMicros(200), &deadline, &active)
+                .expect("timeout problem construction")
                 .expect("timeout problem");
         assert_eq!(problem.problem.kind(), ApplicationProblemKind::TimedOut);
         assert!(
             pre_admission_problem(&request_id, &operation, UtcMicros(100), &deadline, &active)
+                .expect("active problem construction")
                 .is_none()
         );
     }

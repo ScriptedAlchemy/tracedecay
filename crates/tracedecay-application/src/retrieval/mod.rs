@@ -2,6 +2,7 @@ mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
 pub mod catalog;
+mod git_topology_anchor;
 pub mod grep_analysis;
 mod ports;
 mod requests;
@@ -18,8 +19,8 @@ pub use callable_code::{
     CodeSymbolSearchRequest, CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord,
     ExactOccurrenceRequest, LexicalOccurrenceRecord, MAX_CALLABLE_CODE_DEPTH,
     MAX_CALLABLE_CODE_FILTERS, MAX_CALLABLE_CODE_FUZZY_EXPANSIONS, MAX_CALLABLE_CODE_QUERY_BYTES,
-    MAX_SOURCE_METADATA_FILES, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
-    SourceMetadataRecord, SourceMetadataRequest,
+    MAX_SOURCE_METADATA_FILES, ModuleApiRequest, PhraseSearchRequest, PhraseSearchSurfaceRequest,
+    QualifiedNameRequest, SourceMetadataRecord, SourceMetadataRequest,
 };
 pub use callable_code_catalog::{
     callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
@@ -29,6 +30,12 @@ pub use callable_code_service::{
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, CallableCodeQueryFuture, CallableCodeQueryPort,
     CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+};
+pub use git_topology_anchor::{
+    GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
+    GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
+    GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
+    MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2,
 };
 pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
@@ -58,7 +65,8 @@ pub use source_read::{
     SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceReadResultV1,
 };
 pub use symbol_graph::{
-    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
+    CallableCodeSurfaceMetaV1, CodeSymbolSearchSurfaceRequestV1, ExactSymbolRequest,
+    GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
     ImplementationsRequest, MAX_SYMBOL_GRAPH_DEPTH, MAX_SYMBOL_GRAPH_FILTERS,
     MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
     SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,

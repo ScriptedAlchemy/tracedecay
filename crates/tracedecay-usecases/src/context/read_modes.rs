@@ -1,27 +1,15 @@
-// Rust guideline compliant 2025-10-17
-//! Mode-aware file reads for `tracedecay_read`.
-//!
-//! Four modes are implemented in 5.0:
-//!
-//! - `full` — verbatim file content (parity with the raw `Read` tool)
-//! - `lines` — explicit line slice (`A-B`, 1-based, inclusive)
-//! - `map` — flat list of every top-level symbol in the file, sourced from
-//!   the code graph (cheap; no source bytes touched)
-//! - `signatures` — `map` filtered to function/type kinds, with the cached
-//!   `signature` column included
-//!
-//! Each function returns the rendered body as a `String`. Token-counting and
-//! cache I/O happen one layer up, in the MCP handler.
+use std::sync::Arc;
 
 use serde_json::{Value, json};
-
-use tracedecay_runtime_core::db::Database;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::types::{Node, NodeKind};
 
 const MAX_CONTEXT_SYMBOLS: usize = 12;
+const MAX_FILE_SYMBOLS: usize = 100_000;
 
-/// Mode selector for `tracedecay_read`. Parsed from the JSON `mode` argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadMode {
     Full,
@@ -39,7 +27,6 @@ impl ReadMode {
             Self::Signatures => "signatures",
         }
     }
-
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "full" => Some(Self::Full),
@@ -51,8 +38,6 @@ impl ReadMode {
     }
 }
 
-/// Inclusive 1-based line range parsed from `"A-B"` (or just `"A"` for a
-/// single line). Out-of-range values are clamped at render time.
 #[derive(Debug, Clone, Copy)]
 pub struct LineRange {
     pub start: u32,
@@ -61,20 +46,13 @@ pub struct LineRange {
 
 impl LineRange {
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if let Some((a, b)) = s.split_once('-') {
-            let start: u32 = a.trim().parse().ok()?;
-            let end: u32 = b.trim().parse().ok()?;
-            if start == 0 || end < start {
-                return None;
-            }
-            Some(Self { start, end })
+        if let Some((a, b)) = s.trim().split_once('-') {
+            let start = a.trim().parse().ok()?;
+            let end = b.trim().parse().ok()?;
+            (start > 0 && end >= start).then_some(Self { start, end })
         } else {
-            let line: u32 = s.parse().ok()?;
-            if line == 0 {
-                return None;
-            }
-            Some(Self {
+            let line = s.trim().parse().ok()?;
+            (line > 0).then_some(Self {
                 start: line,
                 end: line,
             })
@@ -82,399 +60,111 @@ impl LineRange {
     }
 }
 
-/// Renders the `full` mode body — entire file content as UTF-8 text.
 pub fn render_full(source: &str) -> String {
-    source.to_string()
+    source.to_owned()
 }
-
-/// Approximates the token count of a UTF-8 string. Uses the ~4-chars-per-token
-/// rule of thumb that holds for English source code; it is not exact, but
-/// good enough for the metric tracedecay reports back to the caller.
 pub fn estimate_tokens(s: &str) -> u32 {
-    let chars = s.chars().count();
-    chars.div_ceil(4).min(u32::MAX as usize) as u32
+    s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
-
-/// Renders the `lines` mode body — slices `range.start..=range.end` (1-based,
-/// inclusive). Out-of-range lines are silently clamped.
 pub fn render_lines(source: &str, range: LineRange) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let start = (range.start.saturating_sub(1)) as usize;
+    let lines = source.lines().collect::<Vec<_>>();
+    let start = range.start.saturating_sub(1) as usize;
     let end = (range.end as usize).min(lines.len());
-    if start >= lines.len() || start >= end {
-        return String::new();
+    if start >= end {
+        String::new()
+    } else {
+        lines[start..end].join("\n")
     }
-    lines[start..end].join("\n")
 }
 
-/// Renders the `map` mode body — JSON list of every top-level symbol in the
-/// file, sourced from the graph. No source bytes are touched.
-///
-/// `kinds` is an optional case-insensitive filter on `NodeKind::as_str()`
-/// values (e.g. `["function", "struct"]`). When `None` or empty, every kind
-/// is included.
-pub async fn render_map(db: &Database, file_path: &str, kinds: Option<&[String]>) -> Result<Value> {
-    let nodes = fetch_nodes(db, file_path).await?;
-    let entries: Vec<Value> = nodes
+pub fn render_map(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    file_path: &str,
+    kinds: Option<&[String]>,
+) -> Result<Value> {
+    let nodes = fetch_nodes(reader, cancellation, file_path)?;
+    let symbols = nodes
         .iter()
-        .filter(|n| kind_matches_filter(&n.kind, kinds))
-        .map(map_symbol_entry)
-        .collect();
-    Ok(json!({
-        "file": file_path,
-        "symbol_count": entries.len(),
-        "symbols": entries,
-    }))
+        .filter(|node| {
+            kinds.is_none_or(|kinds| {
+                kinds.is_empty()
+                    || kinds.iter().any(|kind| {
+                        node.metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case(kind))
+                    })
+            })
+        })
+        .map(symbol_entry)
+        .collect::<Vec<_>>();
+    Ok(json!({"file": file_path, "symbol_count": symbols.len(), "symbols": symbols}))
 }
 
-/// Renders the `signatures` mode body — `map` filtered to function/type kinds
-/// with the cached `signature` string. Skips items without a signature so the
-/// result stays compact.
-pub async fn render_signatures(db: &Database, file_path: &str) -> Result<Value> {
-    let nodes = fetch_nodes(db, file_path).await?;
-    let entries: Vec<Value> = nodes
-        .iter()
-        .filter(|n| is_signature_kind(&n.kind))
-        .filter_map(signature_symbol_entry)
-        .collect();
-    Ok(json!({
-        "file": file_path,
-        "signature_count": entries.len(),
-        "signatures": entries,
-    }))
+pub fn render_signatures(
+    _reader: &CodeGraphInteractiveReader,
+    _cancellation: Arc<dyn GraphCancellation>,
+    file_path: &str,
+) -> Result<Value> {
+    Err(unavailable(&format!(
+        "signature text is not published for {file_path} in the verified graph projection"
+    )))
 }
 
-/// Renders graph context for source reads. For full-file reads, this is a
-/// compact signature overview; for line reads, it is the overlapping symbols.
-pub async fn render_symbol_context(
-    db: &Database,
+pub fn render_symbol_context(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
     file_path: &str,
     range: Option<LineRange>,
 ) -> Result<Value> {
-    let nodes = fetch_nodes(db, file_path).await?;
-    let mut entries = Vec::new();
-    let mut symbol_count = 0usize;
-
-    for node in nodes
-        .iter()
-        .filter(|node| is_signature_kind(&node.kind))
-        .filter(|node| range.is_none_or(|range| symbol_overlaps_range(node, range)))
-        .filter_map(context_symbol_entry)
-    {
-        symbol_count += 1;
-        if entries.len() < MAX_CONTEXT_SYMBOLS {
-            entries.push(node);
-        }
+    if range.is_some() {
+        return Err(unavailable(
+            "line-range symbol context requires a line/byte map that the verified graph projection does not publish",
+        ));
     }
-
-    Ok(json!({
-        "file": file_path,
-        "range": range.map(|range| json!({
-            "start": range.start,
-            "end": range.end,
-        })),
-        "symbol_count": symbol_count,
-        "truncated": symbol_count > entries.len(),
-        "symbols": entries,
-    }))
+    let nodes = fetch_nodes(reader, cancellation, file_path)?;
+    let symbols = nodes
+        .iter()
+        .take(MAX_CONTEXT_SYMBOLS)
+        .map(symbol_entry)
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"file": file_path, "range": Value::Null, "symbol_count": nodes.len(), "truncated": nodes.len() > symbols.len(), "symbols": symbols}),
+    )
 }
 
-async fn fetch_nodes(db: &Database, file_path: &str) -> Result<Vec<Node>> {
-    db.get_nodes_by_file(file_path)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("read_modes: failed to load nodes for {file_path}: {e}"),
-            operation: "read_modes::fetch_nodes".to_string(),
+fn fetch_nodes(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    file_path: &str,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+    reader
+        .symbols_in_logical_file(file_path, MAX_FILE_SYMBOLS, cancellation)
+        .map_err(|error| {
+            super::super::graph::map_code_graph_read_runtime_error(
+                super::super::graph::map_projection_error(error),
+            )
         })
 }
 
-fn kind_matches_filter(kind: &NodeKind, kinds: Option<&[String]>) -> bool {
-    let Some(filter) = kinds.filter(|k| !k.is_empty()) else {
-        return true;
-    };
-    let kind = kind.as_str();
-    filter.iter().any(|want| want.eq_ignore_ascii_case(kind))
-}
-
-fn map_symbol_entry(node: &Node) -> Value {
+fn symbol_entry(node: &CodeGraphSymbolSummaryV1) -> Value {
+    let span = node
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.source_span);
     json!({
-        "kind": node.kind.as_str(),
-        "name": node.name,
-        "line": node.start_line,
-        "end_line": node.end_line,
-        "visibility": node.visibility.as_str(),
+        "id": node.occurrence.as_str(),
+        "kind": node.metadata.as_ref().map(|metadata| metadata.kind.as_str()),
+        "qualified_name": node.metadata.as_ref().map(|metadata| metadata.qualified_name.as_str()),
+        "start_byte": span.map(|span| span.start_byte),
+        "end_byte": span.map(|span| span.end_byte),
     })
 }
 
-fn signature_symbol_entry(node: &Node) -> Option<Value> {
-    let signature = node.signature.as_deref()?;
-    Some(json!({
-        "kind": node.kind.as_str(),
-        "name": node.name,
-        "qualified_name": node.qualified_name,
-        "line": node.start_line,
-        "end_line": node.end_line,
-        "visibility": node.visibility.as_str(),
-        "signature": signature,
-        "is_async": node.is_async,
-    }))
-}
-
-fn context_symbol_entry(node: &Node) -> Option<Value> {
-    let signature = node.signature.as_deref()?;
-    let (line, end_line) = node_user_line_span(node);
-    Some(json!({
-        "kind": node.kind.as_str(),
-        "name": node.name,
-        "qualified_name": node.qualified_name,
-        "line": line,
-        "end_line": end_line,
-        "visibility": node.visibility.as_str(),
-        "signature": signature,
-        "is_async": node.is_async,
-    }))
-}
-
-fn symbol_overlaps_range(node: &Node, range: LineRange) -> bool {
-    let (start, end) = node_user_line_span(node);
-    start <= range.end && end >= range.start
-}
-
-fn node_user_line_span(node: &Node) -> (u32, u32) {
-    (
-        node.start_line.saturating_add(1),
-        node.end_line.saturating_add(1),
-    )
-}
-
-/// Kinds whose `signature` column carries useful information for the
-/// `signatures` mode. Excludes plain identifiers, modules, and string-literal
-/// nodes whose "signature" would be redundant with the name.
-fn is_signature_kind(kind: &NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::Function
-            | NodeKind::Method
-            | NodeKind::Struct
-            | NodeKind::Trait
-            | NodeKind::Interface
-            | NodeKind::Enum
-            | NodeKind::Class
-            | NodeKind::TypeAlias
-            | NodeKind::Const
-            | NodeKind::Static
-    )
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use tracedecay_runtime_core::types::Visibility;
-
-    fn node_fixture(kind: NodeKind, signature: Option<&str>) -> Node {
-        Node {
-            id: "node-1".to_string(),
-            kind,
-            name: "sample".to_string(),
-            qualified_name: "crate::sample".to_string(),
-            file_path: "src/sample.rs".to_string(),
-            start_line: 12,
-            attrs_start_line: 10,
-            end_line: 18,
-            start_column: 4,
-            end_column: 1,
-            signature: signature.map(str::to_string),
-            docstring: Some("sample docs".to_string()),
-            visibility: Visibility::Pub,
-            is_async: true,
-            branches: 1,
-            loops: 2,
-            returns: 3,
-            max_nesting: 4,
-            unsafe_blocks: 5,
-            unchecked_calls: 6,
-            assertions: 7,
-            updated_at: 8,
-            parent_id: Some("parent-1".to_string()),
-        }
-    }
-
-    #[test]
-    fn parse_mode_known_values() {
-        assert_eq!(ReadMode::parse("full"), Some(ReadMode::Full));
-        assert_eq!(ReadMode::parse("lines"), Some(ReadMode::Lines));
-        assert_eq!(ReadMode::parse("map"), Some(ReadMode::Map));
-        assert_eq!(ReadMode::parse("signatures"), Some(ReadMode::Signatures));
-        assert_eq!(ReadMode::parse("nope"), None);
-    }
-
-    #[test]
-    fn parse_line_range_pair() {
-        let r = LineRange::parse("3-5").unwrap();
-        assert_eq!(r.start, 3);
-        assert_eq!(r.end, 5);
-    }
-
-    #[test]
-    fn parse_line_range_single() {
-        let r = LineRange::parse("7").unwrap();
-        assert_eq!(r.start, 7);
-        assert_eq!(r.end, 7);
-    }
-
-    #[test]
-    fn parse_line_range_invalid() {
-        assert!(LineRange::parse("0").is_none());
-        assert!(LineRange::parse("5-3").is_none());
-        assert!(LineRange::parse("a-b").is_none());
-    }
-
-    #[test]
-    fn render_lines_clamps_out_of_range() {
-        let src = "alpha\nbeta\ngamma\n";
-        let r = LineRange { start: 2, end: 99 };
-        assert_eq!(render_lines(src, r), "beta\ngamma");
-    }
-
-    #[test]
-    fn render_lines_single_line() {
-        let src = "alpha\nbeta\ngamma\n";
-        let r = LineRange { start: 2, end: 2 };
-        assert_eq!(render_lines(src, r), "beta");
-    }
-
-    #[test]
-    fn render_lines_empty_when_past_end() {
-        let src = "alpha\nbeta\n";
-        let r = LineRange { start: 5, end: 8 };
-        assert_eq!(render_lines(src, r), "");
-    }
-
-    #[test]
-    fn render_full_returns_input() {
-        let src = "hello\nworld\n";
-        assert_eq!(render_full(src), src);
-    }
-
-    #[test]
-    fn kind_filter_is_empty_or_case_insensitive() {
-        assert!(kind_matches_filter(&NodeKind::Function, None));
-        assert!(kind_matches_filter(&NodeKind::Function, Some(&[])));
-        assert!(kind_matches_filter(
-            &NodeKind::Function,
-            Some(&["FUNCTION".to_string()])
-        ));
-        assert!(!kind_matches_filter(
-            &NodeKind::Function,
-            Some(&["struct".to_string()])
-        ));
-    }
-
-    #[test]
-    fn map_symbol_entry_preserves_outline_schema() {
-        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
-
-        assert_eq!(
-            map_symbol_entry(&node),
-            json!({
-                "kind": "function",
-                "name": "sample",
-                "line": 12,
-                "end_line": 18,
-                "visibility": "public",
-            })
-        );
-    }
-
-    #[test]
-    fn signature_symbol_entry_preserves_signature_schema() {
-        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
-
-        assert_eq!(
-            signature_symbol_entry(&node),
-            Some(json!({
-                "kind": "function",
-                "name": "sample",
-                "qualified_name": "crate::sample",
-                "line": 12,
-                "end_line": 18,
-                "visibility": "public",
-                "signature": "pub async fn sample()",
-                "is_async": true,
-            }))
-        );
-    }
-
-    #[test]
-    fn signature_symbol_entry_skips_missing_signature() {
-        let node = node_fixture(NodeKind::Function, None);
-
-        assert_eq!(signature_symbol_entry(&node), None);
-    }
-
-    #[test]
-    fn context_symbol_entry_uses_user_facing_line_numbers() {
-        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
-
-        assert_eq!(
-            context_symbol_entry(&node),
-            Some(json!({
-                "kind": "function",
-                "name": "sample",
-                "qualified_name": "crate::sample",
-                "line": 13,
-                "end_line": 19,
-                "visibility": "public",
-                "signature": "pub async fn sample()",
-                "is_async": true,
-            }))
-        );
-    }
-
-    #[test]
-    fn symbol_overlap_detects_enclosing_ranges() {
-        let node = node_fixture(NodeKind::Function, Some("pub async fn sample()"));
-
-        assert!(symbol_overlaps_range(
-            &node,
-            LineRange { start: 14, end: 16 }
-        ));
-        assert!(symbol_overlaps_range(
-            &node,
-            LineRange { start: 1, end: 13 }
-        ));
-        assert!(symbol_overlaps_range(
-            &node,
-            LineRange { start: 19, end: 30 }
-        ));
-        assert!(!symbol_overlaps_range(
-            &node,
-            LineRange { start: 1, end: 12 }
-        ));
-        assert!(!symbol_overlaps_range(
-            &node,
-            LineRange { start: 20, end: 30 }
-        ));
-    }
-
-    #[test]
-    fn symbol_overlap_handles_single_line_boundaries() {
-        let mut node = node_fixture(NodeKind::Function, Some("pub fn sample()"));
-        node.start_line = 12;
-        node.end_line = 12;
-
-        assert!(symbol_overlaps_range(
-            &node,
-            LineRange { start: 13, end: 13 }
-        ));
-        assert!(!symbol_overlaps_range(
-            &node,
-            LineRange { start: 12, end: 12 }
-        ));
-        assert!(!symbol_overlaps_range(
-            &node,
-            LineRange { start: 14, end: 14 }
-        ));
+fn unavailable(detail: &str) -> TraceDecayError {
+    TraceDecayError::ProjectRoute {
+        reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
+        retryable: false,
+        detail: detail.to_owned(),
     }
 }

@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -8,6 +9,8 @@ use super::read_modes::{
     render_symbol_context,
 };
 use crate::tracedecay::TraceDecay;
+use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
 
@@ -33,6 +36,8 @@ pub struct SourceReadOutput {
 
 pub async fn read_source(
     graph: &TraceDecay,
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
     request: SourceReadRequest<'_>,
 ) -> Result<SourceReadOutput> {
     let SourceReadRequest {
@@ -43,7 +48,8 @@ pub async fn read_source(
         include_symbols,
         project_id,
     } = request;
-    let (absolute_path, display_file) = resolve_indexed_source_file(graph, file).await?;
+    let (absolute_path, display_file) =
+        resolve_indexed_source_file(graph, reader, Arc::clone(&cancellation), file)?;
     let mtime_ns =
         read_cache::file_mtime_ns(&absolute_path).map_err(|error| TraceDecayError::Config {
             message: format!("cannot read file metadata for '{file}': {error}"),
@@ -75,8 +81,14 @@ pub async fn read_source(
     .await?
     {
         return Ok(SourceReadOutput {
-            context: source_symbol_context(graph, &display_file, mode, line_range, include_symbols)
-                .await?,
+            context: source_symbol_context(
+                reader,
+                Arc::clone(&cancellation),
+                &display_file,
+                mode,
+                line_range,
+                include_symbols,
+            )?,
             file: display_file,
             mode,
             mtime_ns: cached.mtime_ns,
@@ -105,21 +117,32 @@ pub async fn read_source(
                 message: "lines mode requires a parsed range".to_owned(),
             })?,
         ),
-        ReadMode::Map => {
-            serde_json::to_string_pretty(&render_map(graph.db(), &display_file, None).await?)
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("cannot render map for '{file}': {error}"),
-                })?
-        }
-        ReadMode::Signatures => {
-            serde_json::to_string_pretty(&render_signatures(graph.db(), &display_file).await?)
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("cannot render signatures for '{file}': {error}"),
-                })?
-        }
+        ReadMode::Map => serde_json::to_string_pretty(&render_map(
+            reader,
+            Arc::clone(&cancellation),
+            &display_file,
+            None,
+        )?)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("cannot render map for '{file}': {error}"),
+        })?,
+        ReadMode::Signatures => serde_json::to_string_pretty(&render_signatures(
+            reader,
+            Arc::clone(&cancellation),
+            &display_file,
+        )?)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("cannot render signatures for '{file}': {error}"),
+        })?,
     };
-    let context =
-        source_symbol_context(graph, &display_file, mode, line_range, include_symbols).await?;
+    let context = source_symbol_context(
+        reader,
+        cancellation,
+        &display_file,
+        mode,
+        line_range,
+        include_symbols,
+    )?;
     let token_count = read_modes::estimate_tokens(&body);
     let digest = read_cache::digest_bytes(body.as_bytes());
     if !graph.is_read_only() {
@@ -149,8 +172,10 @@ pub async fn read_source(
     })
 }
 
-pub async fn resolve_indexed_source_file(
+pub fn resolve_indexed_source_file(
     graph: &TraceDecay,
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
     file: &str,
 ) -> Result<(PathBuf, String)> {
     if file.contains('\0') {
@@ -182,7 +207,15 @@ pub async fn resolve_indexed_source_file(
             ),
         });
     };
-    if graph.get_nodes_by_file(&display_file).await?.is_empty() {
+    if reader
+        .symbols_in_logical_file(&display_file, 1, cancellation)
+        .map_err(|error| {
+            crate::graph::map_code_graph_read_runtime_error(crate::graph::map_projection_error(
+                error,
+            ))
+        })?
+        .is_empty()
+    {
         return Err(TraceDecayError::Config {
             message: format!(
                 "path '{}' escapes project root '{}' and is not indexed",
@@ -199,8 +232,9 @@ pub async fn resolve_indexed_source_file(
     Ok((absolute_path, display_file))
 }
 
-async fn source_symbol_context(
-    graph: &TraceDecay,
+fn source_symbol_context(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
     display_file: &str,
     mode: ReadMode,
     line_range: Option<LineRange>,
@@ -209,9 +243,7 @@ async fn source_symbol_context(
     if !include_symbols || !matches!(mode, ReadMode::Full | ReadMode::Lines) {
         return Ok(None);
     }
-    render_symbol_context(graph.db(), display_file, line_range)
-        .await
-        .map(Some)
+    render_symbol_context(reader, cancellation, display_file, line_range).map(Some)
 }
 
 fn relative_source_key(path: &Path) -> Result<Option<String>> {

@@ -232,15 +232,15 @@ where
                     Ok(claim) => claim,
                     Err(failure) => return failed_with(context, failure),
                 };
-            let Ok(functions) = self.graph.db().get_nodes_by_kind(NodeKind::Function).await else {
-                return failed(context, "signature function lookup failed");
-            };
-            let Ok(methods) = self.graph.db().get_nodes_by_kind(NodeKind::Method).await else {
-                return failed(context, "signature method lookup failed");
+            let Ok(nodes) = self.graph.get_all_nodes().await else {
+                return failed(context, "signature symbol lookup failed");
             };
 
             let mut records = Vec::new();
-            for node in functions.into_iter().chain(methods) {
+            for node in nodes
+                .into_iter()
+                .filter(|node| matches!(node.kind, NodeKind::Function | NodeKind::Method))
+            {
                 if !in_scope(&node, &request.scope) || !signature_matches(&node, request) {
                     continue;
                 }
@@ -565,11 +565,7 @@ async fn trait_implementations(
     name: &str,
     scope: &SymbolGraphScope,
 ) -> Result<Vec<SymbolRelationRecord>, ()> {
-    let candidates = graph
-        .db()
-        .search_nodes_by_exact_name(&[name.to_owned()], 50)
-        .await
-        .map_err(|_| ())?;
+    let candidates = graph.get_nodes_by_name(name).await.map_err(|_| ())?;
     let mut records = Vec::new();
     for trait_node in candidates.into_iter().filter(|node| {
         matches!(
@@ -578,11 +574,13 @@ async fn trait_implementations(
         )
     }) {
         let edges = graph
-            .db()
-            .get_incoming_edges(&trait_node.id, &[EdgeKind::Implements])
+            .get_incoming_edges(&trait_node.id)
             .await
             .map_err(|_| ())?;
-        for edge in edges {
+        for edge in edges
+            .into_iter()
+            .filter(|edge| edge.kind == EdgeKind::Implements)
+        {
             let Some(implementation) = graph.get_node(&edge.source).await.map_err(|_| ())? else {
                 continue;
             };

@@ -20,10 +20,10 @@ use tracedecay_application::retrieval::{
     TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
-    RetrievalEvidence, TemporalState,
+    ApplicationContractError, ApplicationResult, CoverageCompleteness, CoverageDomainState,
+    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
+    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission,
+    RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
@@ -54,6 +54,12 @@ use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
+};
+use crate::graph::health_delta::compute_verified_health_delta;
+use crate::graph::queries::GraphQueryManager;
+use crate::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest,
+    request_graph_cancellation,
 };
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
@@ -166,7 +172,16 @@ fn diagnostics_unavailable(
     finished_at: UtcMicros,
     reason: OmissionReason,
 ) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
-    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+    evidence_unavailable(EvidenceDomain::Diagnostic, finished_at, reason, 0)
+}
+
+fn omitted_evidence<T>(
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+    omitted: u64,
+) -> RetrievalEvidence<T> {
+    RetrievalEvidence {
         payload: None,
         temporal: TemporalState {
             freshness: if reason == OmissionReason::Stale {
@@ -178,19 +193,19 @@ fn diagnostics_unavailable(
         },
         evidence_authorities: Vec::new(),
         coverage: EvidenceCoverage {
-            requested_domains: vec![EvidenceDomain::Diagnostic],
+            requested_domains: vec![domain],
             visited: None,
             eligible: None,
             returned: 0,
             completeness: CoverageCompleteness::Unknown,
             domains: vec![CoverageDomainState {
-                domain: EvidenceDomain::Diagnostic,
+                domain,
                 completeness: CoverageCompleteness::Unknown,
             }],
         },
         omissions: vec![Omission {
-            domain: EvidenceDomain::Diagnostic,
-            count: 0,
+            domain,
+            count: omitted,
             reason,
         }],
         scores: Vec::new(),
@@ -200,7 +215,35 @@ fn diagnostics_unavailable(
         finished_at,
         budget: OperationBudgetUsage::default(),
         cancellation: None,
-    })
+    }
+}
+
+fn evidence_unavailable<T>(
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+    omitted: u64,
+) -> RetrievalPortOutcome<T> {
+    RetrievalPortOutcome::Unavailable(omitted_evidence(domain, finished_at, reason, omitted))
+}
+
+fn graph_read_outcome<T>(
+    error: &CodeGraphReadError,
+    domain: EvidenceDomain,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    let reason = match error {
+        CodeGraphReadError::Cancelled => OmissionReason::Cancelled,
+        CodeGraphReadError::TimedOut => OmissionReason::TimedOut,
+        CodeGraphReadError::Stale { .. } => OmissionReason::Stale,
+        _ => OmissionReason::Unavailable,
+    };
+    let evidence = omitted_evidence(domain, finished_at, reason, 0);
+    match error {
+        CodeGraphReadError::Cancelled => RetrievalPortOutcome::Cancelled(evidence),
+        CodeGraphReadError::TimedOut => RetrievalPortOutcome::TimedOut(evidence),
+        _ => RetrievalPortOutcome::Unavailable(evidence),
+    }
 }
 
 fn diagnostics_result(
@@ -544,11 +587,12 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
 
 pub struct TraceDecayTestPrimitivePortV1 {
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayTestPrimitivePortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(graph: Arc<TraceDecay>, code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
+        Self { graph, code_graph }
     }
 }
 
@@ -669,8 +713,28 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             else {
                 return test_primitive_failed(context);
             };
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(verified) = self
+                .code_graph
+                .open(CodeGraphReadRequest::new(
+                    context.request,
+                    context.observed_at,
+                    Arc::clone(&cancellation),
+                ))
+                .await
+            else {
+                return test_primitive_failed(context);
+            };
+            let Ok(reader) = verified.reader_with_cancellation(
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            ) else {
+                return test_primitive_failed(context);
+            };
+            let graph = GraphQueryManager::new(&reader, cancellation);
             let Ok(traversal) = collect_affected_test_files(
-                self.graph.as_ref(),
+                &graph,
                 &request.files,
                 request.maximum_depth,
                 custom_glob.as_ref(),
@@ -865,6 +929,7 @@ fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRec
 
 pub struct TraceDecayExtendedPrimitivePortV1 {
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     database: Database,
     observation_database: Arc<RegisteredGlobalDb>,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -875,6 +940,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 impl TraceDecayExtendedPrimitivePortV1 {
     fn new(
         graph: Arc<TraceDecay>,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         database: Database,
         observation_database: Arc<RegisteredGlobalDb>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -883,6 +949,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
     ) -> Self {
         Self {
             graph,
+            code_graph,
             database,
             observation_database,
             code_index,
@@ -1149,12 +1216,44 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn file_dependents<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a FileDependentsPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
         Box::pin(async move {
-            let Ok(dependent_files) = self.graph.get_file_dependents(&request.file).await else {
-                return failed(EvidenceDomain::Graph, now_observed());
+            let observed_at = now_observed();
+            let cancellation = request_graph_cancellation(context.request);
+            let verified = match self
+                .code_graph
+                .open(CodeGraphReadRequest::new(
+                    context.request,
+                    observed_at,
+                    Arc::clone(&cancellation),
+                ))
+                .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
+                }
+            };
+            let reader = match verified.reader_with_cancellation(
+                context.request,
+                observed_at,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    return graph_read_outcome(&error, EvidenceDomain::Graph, observed_at);
+                }
+            };
+            let query = GraphQueryManager::new(&reader, cancellation);
+            let Ok(dependent_files) = query.get_file_dependents(&request.file).await else {
+                return evidence_unavailable(
+                    EvidenceDomain::Graph,
+                    now_observed(),
+                    OmissionReason::Unavailable,
+                    0,
+                );
             };
             completed(
                 FileDependentsPrimitiveResult {
@@ -1272,21 +1371,53 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn health_delta<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a HealthDeltaRequest,
     ) -> ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
         Box::pin(async move {
-            match self
-                .graph
-                .health_delta(
-                    self.observation_database.as_ref(),
-                    request.before_cursor.as_deref(),
-                    request.path_prefix.as_deref(),
-                )
+            let observed_at = now_observed();
+            let cancellation = request_graph_cancellation(context.request);
+            let verified = match self
+                .code_graph
+                .open(CodeGraphReadRequest::new(
+                    context.request,
+                    observed_at,
+                    Arc::clone(&cancellation),
+                ))
                 .await
             {
+                Ok(verified) => verified,
+                Err(error) => {
+                    return graph_read_outcome(&error, EvidenceDomain::Operational, observed_at);
+                }
+            };
+            let reader = match verified.reader_with_cancellation(
+                context.request,
+                observed_at,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    return graph_read_outcome(&error, EvidenceDomain::Operational, observed_at);
+                }
+            };
+            let query = GraphQueryManager::new(&reader, cancellation);
+            match compute_verified_health_delta(
+                Some(context.request.scope().project_id.as_str().to_owned()),
+                &query,
+                self.observation_database.as_ref(),
+                request.before_cursor.as_deref(),
+                request.path_prefix.as_deref(),
+            )
+            .await
+            {
                 Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
-                Err(_) => failed(EvidenceDomain::Operational, now_observed()),
+                Err(_) => evidence_unavailable(
+                    EvidenceDomain::Operational,
+                    observed_at,
+                    OmissionReason::Unavailable,
+                    0,
+                ),
             }
         })
     }
@@ -1518,17 +1649,19 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                 "serving_db_exists": branch.serving_db_exists,
                 "is_fallback": branch.is_fallback,
             });
-            let policy = PolicyDecisionRef::new(
+            let policy = match PolicyDecisionRef::new(
                 "route.application.retrieval.operational",
                 1,
-                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
-                    .unwrap_or_else(|_| panic!("digest")),
-                ComponentVersion::new("application-retrieval.operational")
-                    .unwrap_or_else(|_| panic!("component")),
-            )
-            .map_err(|_| operational_problem(context, operation))?;
-            let authority = AuthorityReceipt::from_context(context, policy, observed_at)
-                .map_err(|_| operational_problem(context, operation))?;
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))?,
+                ComponentVersion::new("application-retrieval.operational")?,
+            ) {
+                Ok(policy) => policy,
+                Err(_) => return operational_problem(context, operation),
+            };
+            let authority = match AuthorityReceipt::from_context(context, policy, observed_at) {
+                Ok(authority) => authority,
+                Err(_) => return operational_problem(context, operation),
+            };
             let coverage = EvidenceCoverage {
                 requested_domains: vec![EvidenceDomain::Operational],
                 visited: Some(1),
@@ -1540,8 +1673,7 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                     completeness: CoverageCompleteness::Complete,
                 }],
             };
-            let page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1)
-                .unwrap_or_else(|_| panic!("page"));
+            let page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1)?;
             let execution = OperationReceipt {
                 started_at: observed_at,
                 ended_at: observed_at,
@@ -1550,7 +1682,7 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                 budget: OperationBudgetUsage::default(),
                 termination: OperationTermination::Completed,
             };
-            Ok(ApplicationEnvelope::evidence(
+            Ok(Ok(ApplicationEnvelope::evidence(
                 operation.result_contract().clone(),
                 context.request_id().clone(),
                 context.scope().clone(),
@@ -1566,7 +1698,7 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                     execution,
                     payload: Some(payload),
                 },
-            ))
+            )))
         })
     }
 }
@@ -2160,19 +2292,16 @@ fn affected_tests_evidence(
 fn operational_problem(
     context: &RequestContext,
     operation: &tracedecay_application::ApplicationOperation,
-) -> tracedecay_application::ApplicationProblemEnvelope {
+) -> Result<ApplicationResult<serde_json::Value>, ApplicationContractError> {
     use tracedecay_application::{ApplicationProblem, ApplicationProblemEnvelope, SafeDiagnostic};
-    ApplicationProblemEnvelope::new(
+    Ok(Err(ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         context.request_id().clone(),
-        ApplicationProblem::unavailable(
-            SafeDiagnostic::new(
-                "application.retrieval.operational",
-                "The operational primitive authority could not complete.",
-            )
-            .unwrap_or_else(|_| panic!("static diagnostic")),
-        ),
-    )
+        ApplicationProblem::unavailable(SafeDiagnostic::new(
+            "application.retrieval.operational",
+            "The operational primitive authority could not complete.",
+        )?),
+    )?))
 }
 
 /// Owned authorities and admitted project state required to open the complete
@@ -2180,6 +2309,7 @@ fn operational_problem(
 pub struct ProductionPrimitiveOpenRequestV1 {
     database: Database,
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     session_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -2194,6 +2324,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
 impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
         graph: Arc<TraceDecay>,
+        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
         session_db: Arc<RegisteredGlobalDb>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
@@ -2208,6 +2339,7 @@ impl ProductionPrimitiveOpenRequestV1 {
         Self {
             database,
             graph,
+            code_graph,
             session_db,
             project_root,
             code_index,
@@ -2228,6 +2360,7 @@ pub async fn open_production_primitive_runtime(
     let ProductionPrimitiveOpenRequestV1 {
         database,
         graph,
+        code_graph,
         session_db,
         project_root,
         code_index,
@@ -2280,6 +2413,7 @@ pub async fn open_production_primitive_runtime(
         ));
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
         Arc::clone(&graph),
+        Arc::clone(&code_graph),
         database.clone(),
         Arc::clone(&session_db),
         code_index,
@@ -2293,8 +2427,12 @@ pub async fn open_production_primitive_runtime(
     open_primitive_project_runtime(
         database,
         Arc::clone(&graph),
+        Arc::clone(&code_graph),
         cursors,
-        Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&graph))),
+        Arc::new(TraceDecayTestPrimitivePortV1::new(
+            Arc::clone(&graph),
+            Arc::clone(&code_graph),
+        )),
         Arc::new(TraceDecayLexicalGrepAuthorityV1::new(Arc::clone(&graph))),
         Arc::new(TraceDecayRedundancyAuthorityV1::new(Arc::clone(&graph))),
         Arc::new(TraceDecayTemporalPortV1::new(session_db)),

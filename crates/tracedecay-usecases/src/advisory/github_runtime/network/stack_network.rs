@@ -17,7 +17,7 @@ impl GitHubReadOnlyClientV1 {
     /// Reads the optional GitHub stack through an authenticated static GraphQL
     /// query and fixed compare GETs for exact merge-base evidence. No query
     /// text, HTTP verb, or provider mutation is supplied by the caller.
-    pub(super) fn read_stack(
+    pub(in crate::advisory::github_runtime) fn read_stack(
         &self,
         context: &RequestContext,
         request: &GitHubGraphQlReadRequestV1,
@@ -142,10 +142,14 @@ mod tests {
 
     use serde_json::json;
     use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
+    use tracedecay_application::retrieval::{
+        GitTopologyAnchorAuthorityV2, GitTopologyAnchorResolutionOutcomeV2,
+        GitTopologyAnchorResolutionV2,
+    };
     use tracedecay_application::{RequestContext, now_micros};
+    use tracedecay_domain::ObservationScopeV1;
     use tracedecay_domain::{CommitId, ProviderId, UtcMicros};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
-    use tracedecay_store::{RetrievalAnchorOwnerV1, StoredRetrievalAnchorRecordV1};
 
     use super::super::test_support::{
         read_http_request, read_http_request_with_headers, write_http_json,
@@ -154,8 +158,7 @@ mod tests {
         FixtureCredentialAuthorityModeV1, context, registered_fixture_credential, request, scope,
     };
     use super::super::{
-        GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubRepositoryTargetV1,
-        RegisteredGitHubReadOnlyCredentialV1,
+        GitHubHttpReadConfigV1, GitHubRepositoryTargetV1, RegisteredGitHubReadOnlyCredentialV1,
     };
     use super::*;
     use crate::advisory::github_runtime::{
@@ -442,7 +445,7 @@ mod tests {
             anchors
                 .publish(&context, &request, &observation, &ReadyStackSourceAccess)
                 .await,
-            crate::advisory::GitHubStackAnchorPublicationOutcomeV1::Published
+            crate::advisory::github_runtime::GitHubStackAnchorPublicationOutcomeV1::Published
         );
         drop(anchors);
         drop(database);
@@ -455,34 +458,42 @@ mod tests {
         .await
         .unwrap();
         let database = restarted.project_database_arc().unwrap();
-        let durable = ProjectGitHubStackAnchorAuthorityV1::resolve_published_observation(
-            database.as_ref(),
-            context.scope(),
-            observation,
-        )
-        .unwrap();
+        let anchors =
+            ProjectGitHubStackAnchorAuthorityV1::new(database.clone(), scope.clone()).unwrap();
+        let durable = anchors
+            .resolve_published_observation(context.scope(), observation)
+            .await
+            .unwrap();
         let snapshot = durable.snapshot_anchor.as_ref().unwrap();
         let mut lineage = durable.capability_anchor.source_anchors().to_vec();
         lineage.extend_from_slice(snapshot.source_anchors());
         for source in lineage {
-            let Some(StoredRetrievalAnchorRecordV1::V3(source_record)) = database
-                .resolve_retrieval_anchor_record(
-                    RetrievalAnchorOwnerV1::from(source_binding.owner.clone()),
-                    source.anchor_id().clone(),
+            let store =
+                tracedecay_global_db::RegisteredGitTopologyAnchorAuthorityV2::new(database.clone());
+            let owner = ObservationScopeV1::Project {
+                project_id: scope.project_id.clone(),
+            };
+            let Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(source_record)) = store
+                .resolve(
+                    GitTopologyAnchorResolutionV2::new(owner.clone(), source.anchor_id().clone())
+                        .unwrap(),
                 )
-                .unwrap()
+                .await
             else {
                 panic!("every stack lineage source must resolve after restart");
             };
             for nested in source_record.source_anchors() {
                 assert!(matches!(
-                    database
-                        .resolve_retrieval_anchor_record(
-                            RetrievalAnchorOwnerV1::from(source_binding.owner.clone()),
-                            nested.anchor_id().clone(),
+                    store
+                        .resolve(
+                            GitTopologyAnchorResolutionV2::new(
+                                owner.clone(),
+                                nested.anchor_id().clone(),
+                            )
+                            .unwrap(),
                         )
-                        .unwrap(),
-                    Some(StoredRetrievalAnchorRecordV1::V3(_))
+                        .await,
+                    Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(_))
                 ));
             }
         }

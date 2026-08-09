@@ -79,6 +79,7 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub requester: ActorId,
     pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
     pub graph: Arc<TraceDecay>,
+    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
@@ -350,6 +351,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         crate::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
             Arc::clone(&input.project_runtime_db),
             Arc::clone(&input.graph),
+            Arc::clone(&input.code_graph),
             feedback_scope.clone(),
             input.project_root.clone(),
             Arc::clone(&input.code_index_identity),

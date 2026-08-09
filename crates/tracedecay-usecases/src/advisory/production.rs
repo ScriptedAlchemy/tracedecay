@@ -67,6 +67,7 @@ impl AdvisoryProductionAuthoritiesV1 {
 pub struct AdvisoryProductionOpenV1 {
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
+    pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
     pub project_root: PathBuf,
@@ -97,6 +98,7 @@ pub fn open_advisory_production_authorities(
     let AdvisoryProductionOpenV1 {
         project_runtime_db,
         graph,
+        code_graph,
         code_index_identity,
         project_root,
         feedback_scope,
@@ -112,12 +114,14 @@ pub fn open_advisory_production_authorities(
         database,
         project_root.clone(),
         feedback_scope.clone(),
+        Arc::clone(&code_graph),
         Arc::clone(&code_index_identity),
     )
     .ok_or(AdvisoryProductionOpenErrorV1::GitHubAuthorityUnavailable)?;
     let proximity_evidence = production_proximity_evidence_authority_v1(
         Arc::clone(&project_runtime_db),
         graph,
+        code_graph,
         feedback_scope.clone(),
         project_root,
         code_index_identity,

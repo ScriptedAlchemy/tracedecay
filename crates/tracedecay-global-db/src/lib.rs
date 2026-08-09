@@ -15,6 +15,7 @@ pub mod configuration;
 mod delivery_settlement_tests;
 mod discovery_queue;
 mod git_index_transactions;
+mod git_topology_anchor;
 mod native_integration;
 mod observability_rollup;
 pub mod observation;
@@ -26,6 +27,7 @@ mod registered_provider_usage;
 mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
+pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
     ObservabilityRollupCompactionV1, ObservabilityRollupDirtyDayClaimV1,

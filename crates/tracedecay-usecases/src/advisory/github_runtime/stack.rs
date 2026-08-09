@@ -1,4 +1,7 @@
-use tracedecay_domain::{CommitId, GitHubPullRequestIdV1, ManifestDigest, RefId, canonical_sha256};
+use tracedecay_domain::{
+    CommitId, GitHubPullRequestIdV1, ManifestDigest, PrivacyDomainBoundLocatorDigest, RefId,
+    canonical_sha256,
+};
 
 use super::dto::GraphQlPullRequestStackV1;
 use super::network::GitHubRepositoryTargetV1;
@@ -171,13 +174,18 @@ pub(super) fn decode_stack_snapshot(
     let Some(final_layer) = layers.first() else {
         return Err(response_digest);
     };
-    let Ok(provider_stack_id_digest) = canonical_sha256(&(
+    let Ok(provider_stack_id_manifest) = canonical_sha256(&(
         "tracedecay.github-stack.provider-id.v1",
         &target.owner,
         &target.repository,
         stack.number,
         &stack.id,
     )) else {
+        return Err(response_digest);
+    };
+    let Ok(provider_stack_id_digest) =
+        PrivacyDomainBoundLocatorDigest::new(provider_stack_id_manifest.as_str())
+    else {
         return Err(response_digest);
     };
     Ok(DecodedGitHubStackSnapshotV1 {

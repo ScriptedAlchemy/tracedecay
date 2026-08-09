@@ -11,10 +11,10 @@ use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
 use tracedecay_domain::{
     ActorId, AnchorOwnerBindingV1, CommitId, GitHubStackCapabilitySnapshotV1,
     GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1,
-    GitTopologyAnchorTargetV1, ManifestDigest, PrivacyDomainBoundLocatorDigest,
+    GitTopologyAnchorTargetV1, ManifestDigest, ObservationScopeV1, PrivacyDomainBoundLocatorDigest,
     ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1, RefId, RepositoryId,
     RetrievalAnchorId, StackSignalId, UtcMicros, WorkStackDriftObservedV1, canonical_sha256,
-    derive_git_topology_anchor_id_v3,
+    derive_git_topology_anchor_id,
 };
 
 mod transition;
@@ -760,8 +760,11 @@ impl DaemonGitHubStackCoordinatorV1 {
             source_binding.capability_source_anchor_id.clone(),
         )
         .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        let capability_anchor_id = derive_git_topology_anchor_id_v3(
-            &source_binding.owner,
+        let anchor_owner = ObservationScopeV1::Project {
+            project_id: scope.project_id.clone(),
+        };
+        let capability_anchor_id = derive_git_topology_anchor_id(
+            &anchor_owner,
             &GitTopologyAnchorTargetV1::GitHubStackCapability(capability.clone()),
         )
         .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
@@ -783,8 +786,8 @@ impl DaemonGitHubStackCoordinatorV1 {
         let snapshot_anchor_id = snapshot
             .as_ref()
             .map(|snapshot| {
-                derive_git_topology_anchor_id_v3(
-                    &source_binding.owner,
+                derive_git_topology_anchor_id(
+                    &anchor_owner,
                     &GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone()),
                 )
             })

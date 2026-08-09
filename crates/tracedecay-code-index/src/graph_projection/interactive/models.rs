@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1,
+    SymbolOccurrenceId,
 };
 
 use super::super::CodeGraphSymbolBindingV1;
@@ -110,6 +111,7 @@ pub(in crate::graph_projection) struct SymbolCatalog {
     /// logical path in one generation is a corrupt projection, refused while
     /// the catalog is built rather than resolved by picking a winner.
     pub(super) by_logical_path: BTreeMap<String, FileOccurrenceId>,
+    pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
 }
 
 impl SymbolCatalog {

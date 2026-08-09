@@ -40,7 +40,20 @@ fn symbol(
         occurrence: id::<SymbolOccurrenceId>(occurrence),
         identity: digest::<SymbolIdentityDigest>(identity),
         qualified_name: qualified_name.to_owned(),
+        simple_name: qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(qualified_name)
+            .to_owned(),
         kind: "function".to_owned(),
+        visibility: "private".to_owned(),
+        branches: 0,
+        loops: 0,
+        max_nesting: 0,
+        line_span: 1,
+        start_line: 0,
+        signature: None,
+        skip_test_coverage: false,
         file_identity: digest::<FileIdentityDigest>(file_identity),
         content_digest: digest::<ContentDigest>(content),
     }

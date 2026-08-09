@@ -28,16 +28,22 @@ use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecu
 /// project/repository/worktree scope.
 pub struct SourceReadAdapter {
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     scope: ResolvedScope,
 }
 
 impl SourceReadAdapter {
     pub fn new(
         graph: Arc<TraceDecay>,
+        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
         scope.validate()?;
-        Ok(Self { graph, scope })
+        Ok(Self {
+            graph,
+            code_graph,
+            scope,
+        })
     }
 }
 
@@ -51,7 +57,7 @@ impl SourceReadPrimitivePort for SourceReadAdapter {
             if context.request.scope() != &self.scope || request.validate().is_err() {
                 return source_read_failed(context.observed_at);
             }
-            match self.read(request).await {
+            match self.read(context, request).await {
                 Ok(result) => SourceReadPortOutcome::Completed {
                     result,
                     finished_at: context.observed_at,
@@ -66,6 +72,7 @@ impl SourceReadPrimitivePort for SourceReadAdapter {
 impl SourceReadAdapter {
     async fn read(
         &self,
+        context: SourceReadPortContext<'_>,
         request: &SourceReadPrimitiveRequest,
     ) -> Result<tracedecay_application::retrieval::SourceReadResultV1, ()> {
         let mode = source_read_mode(request.mode);
@@ -79,8 +86,27 @@ impl SourceReadAdapter {
             ),
             SourceReadModeV1::Full | SourceReadModeV1::Map | SourceReadModeV1::Signatures => None,
         };
+        let cancellation = crate::graph::request_graph_cancellation(context.request);
+        let verified = self
+            .code_graph
+            .open(crate::graph::CodeGraphReadRequest::new(
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            ))
+            .await
+            .map_err(|_| ())?;
+        let reader = verified
+            .reader_with_cancellation(
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            )
+            .map_err(|_| ())?;
         let output = read_source(
             self.graph.as_ref(),
+            &reader,
+            cancellation,
             SourceReadRequest {
                 file: &request.file,
                 mode,

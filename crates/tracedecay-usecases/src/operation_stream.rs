@@ -20,11 +20,12 @@ use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget, LegalAction,
-    OpaqueCursor, OperationReceipt, OperationTermination, PageRequest, ProblemOwningLayer,
-    RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken, RetryDirective,
-    SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
+    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
+    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, InvocationTarget,
+    LegalAction, OpaqueCursor, OperationReceipt, OperationTermination, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResolvedScope, ResultContractRef, ResumeToken,
+    RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
+    StreamTermination,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
@@ -262,7 +263,10 @@ pub enum OperationEventError {
 impl OperationEventError {
     /// Converts runtime stream failures into the one canonical application
     /// problem envelope used by every transport.
-    pub fn into_problem_envelope(self, request_id: RequestId) -> ApplicationProblemEnvelope {
+    pub fn into_problem_envelope(
+        self,
+        request_id: RequestId,
+    ) -> Result<ApplicationProblemEnvelope, ApplicationContractError> {
         let saturated = matches!(self, Self::Saturated);
         let problem = match self {
             Self::NotFoundOrNotAuthorized => {
@@ -272,8 +276,7 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.resume_expired",
                     "The operation-event resume frontier has expired",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
@@ -281,8 +284,7 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.invalid_frontier",
                     "The requested operation-event frontier is invalid",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
@@ -291,8 +293,7 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.saturated",
                     "Operation-event capacity is temporarily saturated",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::AfterDelay,
                 legal_actions: vec![LegalAction::Retry],
             },
@@ -305,8 +306,7 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.invalid_request",
                     "The operation-event request is invalid",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::Never,
                 legal_actions: vec![LegalAction::CorrectRequest],
             },
@@ -317,8 +317,7 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.already_published",
                     "The operation-event identity is already published",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
@@ -329,32 +328,26 @@ impl OperationEventError {
                 diagnostic: SafeDiagnostic::new(
                     "operation_event.unsupported",
                     "The operation-event authority is not configured for this operation",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                )?,
                 retry: RetryDirective::Never,
                 legal_actions: vec![LegalAction::ContactAdministrator],
             },
             // Genuinely transient: the resume-token authority could not answer.
-            Self::ResumeUnavailable => ApplicationProblem::unavailable(
-                SafeDiagnostic::new(
-                    "operation_event.unavailable",
-                    "The operation-event service is unavailable",
-                )
-                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
-            ),
+            Self::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "operation_event.unavailable",
+                "The operation-event service is unavailable",
+            )?),
         };
         let envelope = ApplicationProblemEnvelope::new(
             OPERATION_EVENT_PROBLEM_CONTRACT.clone(),
             request_id,
             problem,
-        )
+        )?
         .with_owning_layer(ProblemOwningLayer::Runtime);
         if saturated {
-            envelope
-                .with_retry_after_millis(Some(250))
-                .unwrap_or_else(|_| panic!("the operation-event retry delay is bounded"))
+            envelope.with_retry_after_millis(Some(250))
         } else {
-            envelope
+            Ok(envelope)
         }
     }
 }
@@ -1791,15 +1784,17 @@ mod tests {
 
     #[test]
     fn operation_stream_errors_use_canonical_problem_envelopes() {
-        let saturated = OperationEventError::Saturated.into_problem_envelope(
-            RequestId::new("request.operation.saturated").expect("request id"),
-        );
+        let saturated = OperationEventError::Saturated
+            .into_problem_envelope(
+                RequestId::new("request.operation.saturated").expect("request id"),
+            )
+            .expect("saturated problem envelope");
         assert_eq!(saturated.problem.kind(), ApplicationProblemKind::Saturated);
         assert_eq!(saturated.problem.retry_after_millis, Some(250));
 
-        let expired = OperationEventError::ResumeExpired.into_problem_envelope(
-            RequestId::new("request.operation.expired").expect("request id"),
-        );
+        let expired = OperationEventError::ResumeExpired
+            .into_problem_envelope(RequestId::new("request.operation.expired").expect("request id"))
+            .expect("expired problem envelope");
         assert_eq!(expired.problem.kind(), ApplicationProblemKind::Stale);
         assert_eq!(
             expired.problem.code,

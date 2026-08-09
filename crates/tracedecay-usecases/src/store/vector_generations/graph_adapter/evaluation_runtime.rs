@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_code_index::{
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION_V2, CodeGraphProjectionStore,
+        CODE_GRAPH_PROJECTOR_REVISION_V3, CodeGraphProjectionStore,
         build_published_code_graph_manifest_checked, code_graph_generation_id,
         code_graph_idempotency_key, code_graph_projection_identity,
     },
@@ -357,7 +357,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
             }
         };
         let projector_revision =
-            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let projection =
             code_graph_projection_identity(GraphNamespace::new("semantic-evaluation-code")?)

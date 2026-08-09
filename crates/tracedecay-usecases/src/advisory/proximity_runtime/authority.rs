@@ -11,14 +11,17 @@ use tracedecay_application::feedback::{
     FeedbackPortFuture, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
     ProximityEvaluationRequestV1,
 };
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, ProximityAddressV1, ProximityBranchWorktreeIncompatibilityV1,
     ProximityCoverageV1, ProximityRelationPathKindV1, ProximityRelationPathV1,
     ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, FileOccurrenceId, ObservationScopeV1, SourceSpan,
-    SymbolOccurrenceId, UtcMicros,
+    CanonicalObservationEnvelopeV1, ContentDigest, ObservationScopeV1, RelationEdgeKindV1,
+    SourceSpan, SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
@@ -27,6 +30,7 @@ use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
+use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use crate::store::GlobalDbObservationStore;
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -67,7 +71,7 @@ struct ProximityCandidate {
 /// worktree. The authority performs reads only and owns no cache or store.
 pub struct ProductionProximityEvidenceAuthorityV1 {
     sessions: Arc<RegisteredGlobalDb>,
-    graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
     normalized_worktree: String,
@@ -78,23 +82,11 @@ pub struct ProductionProximityEvidenceAuthorityV1 {
 pub type SharedCanonicalProximityEvidenceAuthorityV1 =
     Arc<dyn CanonicalProximityEvidenceAuthorityV1 + Send + Sync>;
 
-fn verify_graph_generation(
-    last_synced_commit: Option<&str>,
-    scope: &FeedbackScopeV1,
-) -> Result<(), CanonicalProximityEvidenceBatchV1> {
-    if last_synced_commit == Some(scope.head_commit_id.as_str()) {
-        return Ok(());
-    }
-    Err(CanonicalProximityEvidenceBatchV1 {
-        evidence: Vec::new(),
-        coverage: ProximityCoverageV1::Partial,
-    })
-}
-
 impl ProductionProximityEvidenceAuthorityV1 {
     pub(crate) fn new(
         sessions: Arc<RegisteredGlobalDb>,
         graph: Arc<TraceDecay>,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         scope: FeedbackScopeV1,
         _worktree_root: PathBuf,
     ) -> Option<Self> {
@@ -113,7 +105,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
         }
         Some(Self {
             sessions,
-            graph,
+            code_graph,
             scope,
             worktree_root,
             normalized_worktree,
@@ -133,14 +125,22 @@ impl ProductionProximityEvidenceAuthorityV1 {
 
     async fn load(
         &self,
+        context: &RequestContext,
         request: &ProximityEvaluationRequestV1,
     ) -> Option<CanonicalProximityEvidenceBatchV1> {
-        if let Err(partial) = verify_graph_generation(
-            self.graph.last_synced_commit().await.as_deref(),
-            &self.scope,
-        ) {
-            return Some(partial);
-        }
+        let cancellation = request_graph_cancellation(context);
+        let verified = self
+            .code_graph
+            .open(CodeGraphReadRequest::new(
+                context,
+                request.observed_at,
+                Arc::clone(&cancellation),
+            ))
+            .await
+            .ok()?;
+        let reader = verified
+            .reader_with_cancellation(context, request.observed_at, Arc::clone(&cancellation))
+            .ok()?;
         let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
             let Some(identity) = resolver.resolve(self.worktree_root.clone()).await else {
                 return Some(CanonicalProximityEvidenceBatchV1 {
@@ -296,20 +296,24 @@ impl ProductionProximityEvidenceAuthorityV1 {
         }
         partial |= active.keys().any(|key| !observations.contains_key(key));
 
-        let mut graph_nodes = BTreeMap::<String, Vec<tracedecay_runtime_core::types::Node>>::new();
+        let mut graph_nodes = BTreeMap::<String, Vec<CodeGraphSymbolSummaryV1>>::new();
         let mut verified_graph_paths = BTreeMap::new();
         for path in edits.keys() {
-            match self.graph.get_nodes_by_file(path).await {
+            match reader.symbols_in_logical_file(path, 100_000, Arc::clone(&cancellation)) {
                 Ok(nodes) => {
                     graph_nodes.insert(path.clone(), nodes);
                     let source = std::fs::read_to_string(self.worktree_root.join(path));
-                    let record = self.graph.db().get_file(path).await;
+                    let record = reader.file_by_logical_path(path, Arc::clone(&cancellation));
                     match (source, record) {
                         (Ok(source), Ok(Some(record)))
-                            if tracedecay_runtime_core::sync::content_hash(&source)
-                                == record.content_hash =>
+                            if normalized_content_digest(
+                                &tracedecay_runtime_core::sync::content_hash(&source),
+                            ) == Some(record.content_digest.clone()) =>
                         {
-                            verified_graph_paths.insert(path.clone(), record.content_hash);
+                            verified_graph_paths.insert(
+                                path.clone(),
+                                (record.file_occurrence_id, record.content_digest),
+                            );
                         }
                         _ => {
                             partial = true;
@@ -357,22 +361,25 @@ impl ProductionProximityEvidenceAuthorityV1 {
                         } else {
                             (right_path.clone(), left_path.clone())
                         };
-                        let (relation, relation_partial) = if let Some(cached) =
-                            relation_cache.get(&path_pair)
-                        {
-                            cached.clone()
-                        } else {
-                            let (Some(left_nodes), Some(right_nodes)) =
-                                (graph_nodes.get(&path_pair.0), graph_nodes.get(&path_pair.1))
-                            else {
-                                partial = true;
-                                continue;
+                        let (relation, relation_partial) =
+                            if let Some(cached) = relation_cache.get(&path_pair) {
+                                cached.clone()
+                            } else {
+                                let (Some(left_nodes), Some(right_nodes)) =
+                                    (graph_nodes.get(&path_pair.0), graph_nodes.get(&path_pair.1))
+                                else {
+                                    partial = true;
+                                    continue;
+                                };
+                                let resolved = graph_relation(
+                                    &reader,
+                                    Arc::clone(&cancellation),
+                                    left_nodes,
+                                    right_nodes,
+                                );
+                                relation_cache.insert(path_pair.clone(), resolved.clone());
+                                resolved
                             };
-                            let resolved =
-                                graph_relation(self.graph.as_ref(), left_nodes, right_nodes).await;
-                            relation_cache.insert(path_pair.clone(), resolved.clone());
-                            resolved
-                        };
                         partial |= relation_partial;
                         let Some(relation) = relation else {
                             continue;
@@ -407,21 +414,21 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     partial = true;
                     continue;
                 };
-                let Some(graph_digest) = verified_graph_paths.get(&candidate.path) else {
+                let Some((_, graph_digest)) = verified_graph_paths.get(&candidate.path) else {
                     partial = true;
                     continue;
                 };
-                if indexed_digest.as_str() != graph_digest {
+                if indexed_digest != graph_digest {
                     partial = true;
                     continue;
                 }
                 file.clone()
             } else {
-                let Ok(file) = FileOccurrenceId::new(candidate.path.clone()) else {
+                let Some((file, _)) = verified_graph_paths.get(&candidate.path) else {
                     partial = true;
                     continue;
                 };
-                file
+                file.clone()
             };
             let selected = candidate
                 .session_keys
@@ -446,10 +453,12 @@ impl ProductionProximityEvidenceAuthorityV1 {
             } else {
                 let seeds = path_nodes
                     .iter()
-                    .map(|node| node.id.clone())
+                    .map(|node| node.occurrence.clone())
                     .collect::<Vec<_>>();
-                if let Ok(nodes) = self.graph.get_impact_radius_multi(&seeds, 1).await {
-                    u32::try_from(nodes.len().max(1)).unwrap_or(u32::MAX)
+                if let Ok(nodes) =
+                    reader.impact(&seeds, &[], 1, 100_000, 100_000, Arc::clone(&cancellation))
+                {
+                    u32::try_from(nodes.impacted.len().max(1)).unwrap_or(u32::MAX)
                 } else {
                     partial = true;
                     u32::try_from(path_nodes.len()).unwrap_or(u32::MAX)
@@ -577,7 +586,7 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
             {
                 return None;
             }
-            self.load(request).await
+            self.load(context, request).await
         })
     }
 }
@@ -587,6 +596,7 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
 pub(crate) fn production_proximity_evidence_authority_v1(
     sessions: Arc<RegisteredGlobalDb>,
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
     code_index_identity: Arc<
@@ -594,8 +604,14 @@ pub(crate) fn production_proximity_evidence_authority_v1(
     >,
 ) -> Option<SharedCanonicalProximityEvidenceAuthorityV1> {
     Some(Arc::new(
-        ProductionProximityEvidenceAuthorityV1::new(sessions, graph, scope, worktree_root)?
-            .with_code_index_identity(code_index_identity),
+        ProductionProximityEvidenceAuthorityV1::new(
+            sessions,
+            graph,
+            code_graph,
+            scope,
+            worktree_root,
+        )?
+        .with_code_index_identity(code_index_identity),
     ))
 }
 
@@ -606,18 +622,19 @@ struct GraphRelation {
     strength: ProximityRelationStrengthV1,
 }
 
-async fn graph_relation(
-    graph: &TraceDecay,
-    left_nodes: &[tracedecay_runtime_core::types::Node],
-    right_nodes: &[tracedecay_runtime_core::types::Node],
+fn graph_relation(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    left_nodes: &[CodeGraphSymbolSummaryV1],
+    right_nodes: &[CodeGraphSymbolSummaryV1],
 ) -> (Option<GraphRelation>, bool) {
     let left_ids = left_nodes
         .iter()
-        .map(|node| node.id.as_str())
+        .map(|node| node.occurrence.clone())
         .collect::<BTreeSet<_>>();
     let right_ids = right_nodes
         .iter()
-        .map(|node| node.id.as_str())
+        .map(|node| node.occurrence.clone())
         .collect::<BTreeSet<_>>();
     if left_ids.iter().any(|node_id| right_ids.contains(node_id)) {
         return (
@@ -630,14 +647,21 @@ async fn graph_relation(
         );
     }
 
-    for node in left_nodes.iter().take(32) {
-        let Ok(edges) = graph.get_outgoing_edges(&node.id).await else {
-            return (None, true);
-        };
-        if edges.iter().any(|edge| {
-            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls
-                && right_ids.contains(edge.target.as_str())
-        }) {
+    let left_seeds = left_ids.iter().take(32).cloned().collect::<Vec<_>>();
+    let right_seeds = right_ids.iter().take(32).cloned().collect::<Vec<_>>();
+    let Ok(left_edges) = graph.callees(
+        &left_seeds,
+        &[RelationEdgeKindV1::Calls],
+        100_000,
+        Arc::clone(&cancellation),
+    ) else {
+        return (None, true);
+    };
+    for edges in left_edges {
+        if edges
+            .iter()
+            .any(|edge| right_ids.contains(&edge.edge.to_occurrence))
+        {
             return (
                 Some(GraphRelation {
                     warning_class: ProximityWarningClassV1::Neighborhood,
@@ -648,14 +672,19 @@ async fn graph_relation(
             );
         }
     }
-    for node in right_nodes.iter().take(32) {
-        let Ok(edges) = graph.get_outgoing_edges(&node.id).await else {
-            return (None, true);
-        };
-        if edges.iter().any(|edge| {
-            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls
-                && left_ids.contains(edge.target.as_str())
-        }) {
+    let Ok(right_edges) = graph.callees(
+        &right_seeds,
+        &[RelationEdgeKindV1::Calls],
+        100_000,
+        Arc::clone(&cancellation),
+    ) else {
+        return (None, true);
+    };
+    for edges in right_edges {
+        if edges
+            .iter()
+            .any(|edge| left_ids.contains(&edge.edge.to_occurrence))
+        {
             return (
                 Some(GraphRelation {
                     warning_class: ProximityWarningClassV1::Neighborhood,
@@ -668,12 +697,12 @@ async fn graph_relation(
     }
 
     let Some((left_callers, left_dependencies, left_tests)) =
-        graph_neighborhood(graph, left_nodes).await
+        graph_neighborhood(graph, Arc::clone(&cancellation), &left_seeds)
     else {
         return (None, true);
     };
     let Some((right_callers, right_dependencies, right_tests)) =
-        graph_neighborhood(graph, right_nodes).await
+        graph_neighborhood(graph, cancellation, &right_seeds)
     else {
         return (None, true);
     };
@@ -710,85 +739,103 @@ async fn graph_relation(
     (None, false)
 }
 
-async fn graph_neighborhood(
-    graph: &TraceDecay,
-    nodes: &[tracedecay_runtime_core::types::Node],
-) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
-    let mut callers = BTreeSet::new();
-    let mut dependencies = BTreeSet::new();
-    for node in nodes.iter().take(32) {
-        callers.extend(
-            graph
-                .get_callers(&node.id, 2)
-                .await
-                .ok()?
-                .into_iter()
-                .map(|(caller, _)| caller.id),
-        );
-        dependencies.extend(
-            graph
-                .get_callees(&node.id, 2)
-                .await
-                .ok()?
-                .into_iter()
-                .map(|(dependency, _)| dependency.id),
-        );
-    }
-    let seeds = nodes
+fn graph_neighborhood(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    seeds: &[SymbolOccurrenceId],
+) -> Option<(
+    BTreeSet<SymbolOccurrenceId>,
+    BTreeSet<SymbolOccurrenceId>,
+    BTreeSet<SymbolOccurrenceId>,
+)> {
+    let impact = graph
+        .impact(
+            seeds,
+            &[RelationEdgeKindV1::Calls],
+            3,
+            100_000,
+            100_000,
+            Arc::clone(&cancellation),
+        )
+        .ok()?;
+    let callers = impact
+        .impacted
         .iter()
-        .take(32)
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    let impacted = graph.get_impact_radius_multi(&seeds, 3).await.ok()?;
-    let impacted_ids = impacted
-        .iter()
-        .map(|node| node.id.clone())
-        .collect::<Vec<_>>();
-    let tests = graph
-        .get_test_annotated_node_ids(&impacted_ids)
-        .await
-        .ok()?
-        .into_iter()
+        .filter(|symbol| symbol.depth <= 2)
+        .map(|symbol| symbol.summary.occurrence.clone())
         .collect();
+    let tests = impact
+        .impacted
+        .iter()
+        .filter(|symbol| {
+            symbol
+                .summary
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
+        })
+        .map(|symbol| symbol.summary.occurrence.clone())
+        .collect();
+    let mut dependencies = BTreeSet::new();
+    let mut frontier = seeds.to_vec();
+    for _ in 0..2 {
+        let edges = graph
+            .callees(
+                &frontier,
+                &[RelationEdgeKindV1::Calls],
+                100_000,
+                Arc::clone(&cancellation),
+            )
+            .ok()?;
+        frontier = edges
+            .into_iter()
+            .flatten()
+            .map(|edge| edge.edge.to_occurrence)
+            .filter(|occurrence| dependencies.insert(occurrence.clone()))
+            .collect();
+        if frontier.is_empty() {
+            break;
+        }
+    }
     Some((callers, dependencies, tests))
 }
 
 fn exact_graph_address(
     worktree_root: &Path,
     path: &str,
-    nodes: &[tracedecay_runtime_core::types::Node],
+    nodes: &[CodeGraphSymbolSummaryV1],
     session_ranges: &[&[SourceSpan]],
 ) -> Option<(SourceSpan, SymbolOccurrenceId)> {
     if session_ranges.len() < 2 {
         return None;
     }
-    let source_path = worktree_root.join(path);
-    let mut resolved_symbol = None::<(&tracedecay_runtime_core::types::Node, SourceSpan)>;
+    let _ = (worktree_root, path);
+    let mut resolved_symbol = None::<(&CodeGraphSymbolSummaryV1, SourceSpan)>;
     for ranges in session_ranges {
         if ranges.is_empty() {
             return None;
         }
-        let mut session_symbol = None::<(&tracedecay_runtime_core::types::Node, SourceSpan)>;
+        let mut session_symbol = None::<(&CodeGraphSymbolSummaryV1, SourceSpan)>;
         for range in *ranges {
             if range.validate().is_err() || range.start_byte == range.end_byte {
                 return None;
             }
-            let candidate = resolve_edit_range_symbol(&source_path, range, nodes)?;
+            let candidate = resolve_edit_range_symbol(range, nodes)?;
             match &session_symbol {
-                Some((current, _)) if current.id != candidate.0.id => return None,
+                Some((current, _)) if current.occurrence != candidate.0.occurrence => return None,
                 None => session_symbol = Some(candidate),
                 _ => {}
             }
         }
         let session_symbol = session_symbol?;
         match &resolved_symbol {
-            Some((current, _)) if current.id != session_symbol.0.id => return None,
+            Some((current, _)) if current.occurrence != session_symbol.0.occurrence => return None,
             None => resolved_symbol = Some(session_symbol),
             _ => {}
         }
     }
     let (candidate, span) = resolved_symbol?;
-    Some((span, SymbolOccurrenceId::new(candidate.id.clone()).ok()?))
+    Some((span, candidate.occurrence.clone()))
 }
 
 const fn exact_warning_class(
@@ -803,15 +850,13 @@ const fn exact_warning_class(
 }
 
 fn resolve_edit_range_symbol<'a>(
-    source_path: &Path,
     edit_range: &SourceSpan,
-    nodes: &'a [tracedecay_runtime_core::types::Node],
-) -> Option<(&'a tracedecay_runtime_core::types::Node, SourceSpan)> {
+    nodes: &'a [CodeGraphSymbolSummaryV1],
+) -> Option<(&'a CodeGraphSymbolSummaryV1, SourceSpan)> {
     let mut candidates = nodes
         .iter()
-        .filter(|node| node.kind.is_callable_kind())
         .filter_map(|node| {
-            let span = source_span_for_lines(source_path, node.start_line, node.end_line)?;
+            let span = node.binding.as_ref()?.source_span?;
             (span.start_byte <= edit_range.start_byte && span.end_byte >= edit_range.end_byte)
                 .then_some((node, span))
         })
@@ -821,7 +866,7 @@ fn resolve_edit_range_symbol<'a>(
             .end_byte
             .saturating_sub(left.1.start_byte)
             .cmp(&right.1.end_byte.saturating_sub(right.1.start_byte))
-            .then_with(|| left.0.id.cmp(&right.0.id))
+            .then_with(|| left.0.occurrence.cmp(&right.0.occurrence))
     });
     let candidate = *candidates.first()?;
     let candidate_size = candidate.1.end_byte.saturating_sub(candidate.1.start_byte);
@@ -834,31 +879,12 @@ fn resolve_edit_range_symbol<'a>(
     Some(candidate)
 }
 
-fn source_span_for_lines(path: &Path, start_line: u32, end_line: u32) -> Option<SourceSpan> {
-    if start_line == 0 || end_line < start_line {
-        return None;
+fn normalized_content_digest(value: &str) -> Option<ContentDigest> {
+    if value.starts_with("sha256:") {
+        ContentDigest::new(value.to_owned()).ok()
+    } else {
+        ContentDigest::new(format!("sha256:{value}")).ok()
     }
-    let source = std::fs::read(path).ok()?;
-    let mut line_starts = vec![0_usize];
-    line_starts.extend(
-        source
-            .iter()
-            .enumerate()
-            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index.saturating_add(1))),
-    );
-    let start_index = usize::try_from(start_line.saturating_sub(1)).ok()?;
-    let end_index = usize::try_from(end_line.saturating_sub(1)).ok()?;
-    let start_byte = *line_starts.get(start_index)?;
-    let end_byte = line_starts
-        .get(end_index.saturating_add(1))
-        .copied()
-        .unwrap_or(source.len());
-    let span = SourceSpan {
-        start_byte: u64::try_from(start_byte).ok()?,
-        end_byte: u64::try_from(end_byte).ok()?,
-    };
-    span.validate().ok()?;
-    Some(span)
 }
 
 const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {
@@ -938,68 +964,21 @@ fn project_relative_path(worktree_root: &Path, value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
-    use tracedecay_runtime_core::types::{NodeKind, Visibility};
+    use tracedecay_code_index::graph_projection::CodeGraphSymbolBindingV1;
+    use tracedecay_domain::{FileOccurrenceId, LanguageDescriptorRevision};
 
-    fn scope() -> FeedbackScopeV1 {
-        FeedbackScopeV1 {
-            project_id: ProjectId::new("project.proximity.graph-gate").unwrap(),
-            repository_id: RepositoryId::new("repository.proximity.graph-gate").unwrap(),
-            worktree_id: WorktreeId::new("worktree.proximity.graph-gate").unwrap(),
-            branch_ref: "refs/heads/main".to_owned(),
-            head_commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
-        }
-    }
-
-    #[test]
-    fn exact_complete_graph_generation_matches_scope_head() {
-        let scope = scope();
-
-        assert!(verify_graph_generation(Some(scope.head_commit_id.as_str()), &scope).is_ok());
-    }
-
-    #[test]
-    fn missing_incomplete_or_mismatched_graph_generation_is_partial_without_evidence() {
-        let scope = scope();
-
-        for last_synced_commit in [
-            None,
-            Some(""),
-            Some("aaaaaaaa"),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        ] {
-            let batch = verify_graph_generation(last_synced_commit, &scope)
-                .expect_err("non-exact graph generation must be rejected");
-            assert!(batch.evidence.is_empty());
-            assert_eq!(batch.coverage, ProximityCoverageV1::Partial);
-        }
-    }
-
-    fn callable(id: &str, name: &str, line: u32) -> tracedecay_runtime_core::types::Node {
-        tracedecay_runtime_core::types::Node {
-            id: id.to_owned(),
-            kind: NodeKind::Function,
-            name: name.to_owned(),
-            qualified_name: format!("crate::{name}"),
-            file_path: "src/lib.rs".to_owned(),
-            start_line: line,
-            attrs_start_line: line,
-            end_line: line,
-            start_column: 0,
-            end_column: 1,
-            signature: Some(format!("fn {name}()")),
-            docstring: None,
-            visibility: Visibility::Private,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: 1,
-            parent_id: None,
+    fn callable(id: &str, span: SourceSpan) -> CodeGraphSymbolSummaryV1 {
+        CodeGraphSymbolSummaryV1 {
+            occurrence: SymbolOccurrenceId::new(id).unwrap(),
+            binding: Some(CodeGraphSymbolBindingV1 {
+                file: FileOccurrenceId::new("file.proximity").unwrap(),
+                logical_path: Some("src/lib.rs".to_owned()),
+                source_span: Some(span),
+                chunk: None,
+                language_descriptor_revision: LanguageDescriptorRevision::new("language.test")
+                    .unwrap(),
+            }),
+            metadata: None,
         }
     }
 
@@ -1013,8 +992,20 @@ mod tests {
         )
         .unwrap();
         let nodes = vec![
-            callable("symbol.alpha", "alpha", 1),
-            callable("symbol.beta", "beta", 2),
+            callable(
+                "symbol.alpha",
+                SourceSpan {
+                    start_byte: 0,
+                    end_byte: 14,
+                },
+            ),
+            callable(
+                "symbol.beta",
+                SourceSpan {
+                    start_byte: 14,
+                    end_byte: 27,
+                },
+            ),
         ];
         let alpha = SourceSpan {
             start_byte: 3,

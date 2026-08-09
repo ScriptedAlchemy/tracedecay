@@ -5,7 +5,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::{RequestAdmission, RequestContext, ResolvedScope};
+use tracedecay_application::{
+    ApplicationOperation, CancellationSignal, Deadline, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope,
+};
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
 };
@@ -67,6 +70,58 @@ pub type CodeGraphReadFuture<'a> =
 
 pub trait CodeGraphProjectionReadPort: Send + Sync {
     fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a>;
+}
+
+#[derive(Clone)]
+pub struct CodeGraphReadAdmissionRequest<'a> {
+    pub operation: &'a ApplicationOperation,
+    pub request_id: RequestId,
+    pub deadline: Deadline,
+    pub cancellation: &'a CancellationSignal,
+    pub observed_at: UtcMicros,
+}
+
+impl<'a> CodeGraphReadAdmissionRequest<'a> {
+    pub fn new(
+        operation: &'a ApplicationOperation,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: &'a CancellationSignal,
+        observed_at: UtcMicros,
+    ) -> Self {
+        Self {
+            operation,
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+        }
+    }
+}
+
+pub type CodeGraphReadAdmissionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RequestContext, CodeGraphReadError>> + Send + 'a>>;
+
+/// Canonical admission boundary shared by every code-graph transport.
+/// Implementations retain exact project/source authorization and build the
+/// request context from the supplied operation and live transport controls.
+pub trait CodeGraphReadAdmissionPort: Send + Sync {
+    fn admit<'a>(
+        &'a self,
+        request: CodeGraphReadAdmissionRequest<'a>,
+    ) -> CodeGraphReadAdmissionFuture<'a>;
+}
+
+impl<T> CodeGraphReadAdmissionPort for Arc<T>
+where
+    T: CodeGraphReadAdmissionPort + ?Sized,
+{
+    fn admit<'a>(
+        &'a self,
+        request: CodeGraphReadAdmissionRequest<'a>,
+    ) -> CodeGraphReadAdmissionFuture<'a> {
+        (**self).admit(request)
+    }
 }
 
 impl<T> CodeGraphProjectionReadPort for Arc<T>
@@ -140,6 +195,20 @@ impl VerifiedCodeGraphRead {
 
 struct RequestGraphCancellation {
     cancelled: bool,
+}
+
+struct LiveApplicationGraphCancellation(CancellationSignal);
+
+impl GraphCancellation for LiveApplicationGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+pub fn application_graph_cancellation(
+    cancellation: &CancellationSignal,
+) -> Arc<dyn GraphCancellation> {
+    Arc::new(LiveApplicationGraphCancellation(cancellation.clone()))
 }
 
 impl GraphCancellation for RequestGraphCancellation {

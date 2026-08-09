@@ -11,8 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+use tracedecay_application::{ApplicationOperation, CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
+use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
 use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::broker::{
@@ -22,8 +25,12 @@ use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
-use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+
+use crate::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
+    CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DashboardDiagnosticsErrorV1 {
@@ -55,6 +62,43 @@ pub fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestD
 }
 
 pub type DashboardDiagnosticsResultV1<T> = std::result::Result<T, DashboardDiagnosticsErrorV1>;
+
+#[derive(Clone)]
+pub struct DashboardDiagnosticsGraphRequestV1 {
+    pub operation: ApplicationOperation,
+    pub request_id: RequestId,
+    pub deadline: Deadline,
+    pub cancellation: CancellationSignal,
+    pub observed_at: tracedecay_domain::UtcMicros,
+}
+
+impl DashboardDiagnosticsGraphRequestV1 {
+    pub fn new(
+        operation: ApplicationOperation,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Self {
+        Self {
+            operation,
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+        }
+    }
+
+    fn admission(&self) -> CodeGraphReadAdmissionRequest<'_> {
+        CodeGraphReadAdmissionRequest::new(
+            &self.operation,
+            self.request_id.clone(),
+            self.deadline.clone(),
+            &self.cancellation,
+            self.observed_at,
+        )
+    }
+}
 
 pub fn diagnostic_broker(
     project_root: PathBuf,
@@ -112,7 +156,8 @@ pub struct DashboardDiagnosticsAuthorityV1 {
 struct DashboardDiagnosticsAuthorityInnerV1 {
     project_root: PathBuf,
     settings_root: PathBuf,
-    database: Arc<Database>,
+    graph_admission: Arc<dyn CodeGraphReadAdmissionPort>,
+    graph_projection: Arc<dyn CodeGraphProjectionReadPort>,
     broker: Arc<Mutex<DiagnosticBroker>>,
     idle_backfill_started: AtomicBool,
 }
@@ -121,29 +166,76 @@ impl DashboardDiagnosticsAuthorityV1 {
     pub fn new(
         project_root: PathBuf,
         settings_root: PathBuf,
-        database: Arc<Database>,
+        graph_admission: Arc<dyn CodeGraphReadAdmissionPort>,
+        graph_projection: Arc<dyn CodeGraphProjectionReadPort>,
         broker: Arc<Mutex<DiagnosticBroker>>,
     ) -> Self {
         Self {
             inner: Arc::new(DashboardDiagnosticsAuthorityInnerV1 {
                 project_root,
                 settings_root,
-                database,
+                graph_admission,
+                graph_projection,
                 broker,
                 idle_backfill_started: AtomicBool::new(false),
             }),
         }
     }
 
-    pub async fn overview(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
-        let snapshot = self.snapshot().await?;
-        self.maybe_spawn_idle_backfill(&snapshot);
+    pub async fn overview(
+        &self,
+        request: DashboardDiagnosticsGraphRequestV1,
+    ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+        let (reader, cancellation) = self.open_graph(&request).await?;
+        let snapshot = self.snapshot_with_graph(&reader, cancellation).await?;
+        self.maybe_spawn_idle_backfill(&snapshot, request);
         Ok(snapshot)
     }
 
-    pub(crate) async fn snapshot(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
-        self.reconcile_project_language_activity().await?;
+    pub(crate) async fn snapshot(
+        &self,
+        request: &DashboardDiagnosticsGraphRequestV1,
+    ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+        let (reader, cancellation) = self.open_graph(request).await?;
+        self.snapshot_with_graph(&reader, cancellation).await
+    }
+
+    async fn snapshot_with_graph(
+        &self,
+        reader: &CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+        self.reconcile_project_language_activity(reader, cancellation)
+            .await?;
         Ok(self.inner.broker.lock().await.snapshot())
+    }
+
+    async fn open_graph(
+        &self,
+        request: &DashboardDiagnosticsGraphRequestV1,
+    ) -> DashboardDiagnosticsResultV1<(CodeGraphInteractiveReader, Arc<dyn GraphCancellation>)>
+    {
+        let context = self
+            .inner
+            .graph_admission
+            .admit(request.admission())
+            .await
+            .map_err(map_code_graph_read_runtime_error)?;
+        let cancellation = application_graph_cancellation(&request.cancellation);
+        let verified = self
+            .inner
+            .graph_projection
+            .open(CodeGraphReadRequest::new(
+                &context,
+                request.observed_at,
+                Arc::clone(&cancellation),
+            ))
+            .await
+            .map_err(map_code_graph_read_runtime_error)?;
+        let reader = verified
+            .reader_with_cancellation(&context, request.observed_at, Arc::clone(&cancellation))
+            .map_err(map_code_graph_read_runtime_error)?;
+        Ok((reader, cancellation))
     }
 
     /// Applies `patch` to the settings the caller last read, or rejects the
@@ -155,6 +247,7 @@ impl DashboardDiagnosticsAuthorityV1 {
     /// be overwritten while both callers were told they had succeeded.
     pub async fn update_settings(
         &self,
+        request: &DashboardDiagnosticsGraphRequestV1,
         expected_revision: &ManifestDigest,
         patch: impl FnOnce(&mut CodeDiagnosticsSettings),
     ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
@@ -177,32 +270,44 @@ impl DashboardDiagnosticsAuthorityV1 {
             broker.update_adapters(adapters);
             broker.update_settings(settings);
         }
-        self.snapshot().await
+        self.snapshot(request).await
     }
 
-    pub async fn refresh_all(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
-        let languages = self.refreshable_languages().await?;
+    pub async fn refresh_all(
+        &self,
+        request: &DashboardDiagnosticsGraphRequestV1,
+    ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+        let (reader, cancellation) = self.open_graph(request).await?;
+        let snapshot = self
+            .snapshot_with_graph(&reader, Arc::clone(&cancellation))
+            .await?;
+        let languages = backfill_languages(&snapshot);
         for language in languages {
-            self.refresh_one_reconciled(&language).await?;
+            self.refresh_one_reconciled(&reader, Arc::clone(&cancellation), &language)
+                .await?;
         }
-        self.snapshot().await
+        self.snapshot_with_graph(&reader, cancellation).await
     }
 
     pub async fn refresh_language(
         &self,
+        request: &DashboardDiagnosticsGraphRequestV1,
         language: &str,
     ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
-        self.reconcile_project_language_activity().await?;
-        self.refresh_one_reconciled(language).await?;
-        self.snapshot().await
+        let (reader, cancellation) = self.open_graph(request).await?;
+        self.reconcile_project_language_activity(&reader, Arc::clone(&cancellation))
+            .await?;
+        self.refresh_one_reconciled(&reader, Arc::clone(&cancellation), language)
+            .await?;
+        self.snapshot_with_graph(&reader, cancellation).await
     }
 
-    async fn refreshable_languages(&self) -> DashboardDiagnosticsResultV1<Vec<String>> {
-        let snapshot = self.snapshot().await?;
-        Ok(backfill_languages(&snapshot))
-    }
-
-    async fn refresh_one_reconciled(&self, language: &str) -> DashboardDiagnosticsResultV1<()> {
+    async fn refresh_one_reconciled(
+        &self,
+        reader: &CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+        language: &str,
+    ) -> DashboardDiagnosticsResultV1<()> {
         let snapshot = self.inner.broker.lock().await.snapshot();
         if !snapshot.settings.language_enabled(language) {
             // Reconcile the reported engine state, then refuse. `refresh_all`
@@ -224,7 +329,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                 language: language.to_owned(),
             });
         };
-        let files = indexed_files(&self.inner.database).await?;
+        let files = indexed_files(reader, Arc::clone(&cancellation))?;
         let documents = documents_for_adapter(&self.inner.project_root, &adapter, files)
             .await
             .map_err(TraceDecayError::from)?;
@@ -255,6 +360,8 @@ impl DashboardDiagnosticsAuthorityV1 {
         match prepared {
             Ok(Some(prepared)) => {
                 let authority = self.clone();
+                let reader = reader.clone();
+                let cancellation = Arc::clone(&cancellation);
                 let task_language = language.to_owned();
                 let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
                 tokio::spawn(async move {
@@ -265,11 +372,20 @@ impl DashboardDiagnosticsAuthorityV1 {
                             .finish_refresh(completed)
                             .map_err(TraceDecayError::from);
                         if refresh_result.is_ok() {
-                            let database = Arc::clone(&authority.inner.database);
+                            let project_root = authority.inner.project_root.clone();
                             broker
                                 .resolve_enclosing_nodes(move |file| {
-                                    let database = Arc::clone(&database);
-                                    async move { node_spans_for_file(&database, &file).await }
+                                    let reader = reader.clone();
+                                    let cancellation = Arc::clone(&cancellation);
+                                    let project_root = project_root.clone();
+                                    async move {
+                                        node_spans_for_file(
+                                            &reader,
+                                            cancellation,
+                                            &project_root,
+                                            &file,
+                                        )
+                                    }
                                 })
                                 .await;
                         }
@@ -312,8 +428,12 @@ impl DashboardDiagnosticsAuthorityV1 {
         Ok(())
     }
 
-    async fn reconcile_project_language_activity(&self) -> DashboardDiagnosticsResultV1<()> {
-        let files = indexed_files(&self.inner.database).await?;
+    async fn reconcile_project_language_activity(
+        &self,
+        reader: &CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> DashboardDiagnosticsResultV1<()> {
+        let files = indexed_files(reader, cancellation)?;
         let adapters = {
             let broker = self.inner.broker.lock().await;
             broker
@@ -333,7 +453,11 @@ impl DashboardDiagnosticsAuthorityV1 {
         Ok(())
     }
 
-    fn maybe_spawn_idle_backfill(&self, snapshot: &DiagnosticsSnapshot) {
+    fn maybe_spawn_idle_backfill(
+        &self,
+        snapshot: &DiagnosticsSnapshot,
+        request: DashboardDiagnosticsGraphRequestV1,
+    ) {
         if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
             return;
         }
@@ -350,7 +474,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(750)).await;
             for language in languages {
-                let _ = authority.refresh_language(&language).await;
+                let _ = authority.refresh_language(&request, &language).await;
                 tokio::task::yield_now().await;
             }
         });
@@ -382,29 +506,62 @@ fn files_with_diagnostics(snapshot: &DiagnosticsSnapshot, language: &str) -> usi
         .len()
 }
 
-async fn node_spans_for_file(database: &Database, file: &str) -> Vec<NodeSpan> {
-    database
-        .get_nodes_by_file(file)
-        .await
-        .unwrap_or_default()
+fn node_spans_for_file(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    project_root: &std::path::Path,
+    file: &str,
+) -> Vec<NodeSpan> {
+    let Ok(source) = std::fs::read(project_root.join(file)) else {
+        return Vec::new();
+    };
+    let Ok(symbols) = reader.symbols_in_logical_file(file, 100_000, cancellation) else {
+        return Vec::new();
+    };
+    symbols
         .into_iter()
-        .map(|node| NodeSpan {
-            start_line: node.start_line,
-            end_line: node.end_line,
-            qualified_name: node.qualified_name,
+        .filter_map(|symbol| {
+            let span = symbol.binding?.source_span?;
+            let start_line = byte_line(&source, span.start_byte)?;
+            let end_line = byte_line(&source, span.end_byte.saturating_sub(1))?;
+            Some(NodeSpan {
+                start_line,
+                end_line,
+                qualified_name: symbol.metadata?.qualified_name,
+            })
         })
         .collect()
 }
 
-async fn indexed_files(database: &Database) -> Result<Vec<String>> {
-    let mut files = database
-        .get_all_files()
-        .await?
+fn indexed_files(
+    reader: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Vec<String>> {
+    let mut files = reader
+        .files(500_000, cancellation)
+        .map_err(|error| {
+            crate::graph::map_code_graph_read_runtime_error(crate::graph::map_projection_error(
+                error,
+            ))
+        })?
         .into_iter()
-        .map(|file| file.path)
+        .map(|file| file.logical_path)
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+fn byte_line(source: &[u8], offset: u64) -> Option<u32> {
+    let offset = usize::try_from(offset).ok()?;
+    (offset <= source.len()).then(|| {
+        u32::try_from(
+            source[..offset]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    })
 }
 
 #[cfg(test)]

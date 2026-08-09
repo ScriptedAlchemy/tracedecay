@@ -48,7 +48,7 @@ use tracedecay_domain::git::{
 };
 use tracedecay_domain::research::time::UtcMicros;
 use tracedecay_domain::research::{
-    ManifestDigest, RefId, RepositoryId, WorktreeId, canonical_sha256,
+    ManifestDigest, RepositoryId, WorktreeId, canonical_sha256,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 

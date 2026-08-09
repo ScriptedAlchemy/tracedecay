@@ -2470,23 +2470,6 @@ pub fn semantic_lane_readiness_for_request<'a>(
     }
 }
 
-/// Inspect the process-local query factory currently held by the cache.
-#[cfg(any(test, feature = "semantic-fastembed"))]
-pub fn current_query_factory(
-    handle: &DaemonSemanticRuntimeHandleV1,
-) -> Option<(
-    SemanticGenerationPointerV1,
-    SemanticEvaluationQueryFactoryV1,
-)> {
-    let pointer = handle.current()?;
-    let factory = handle.query_factory(
-        &pointer.source_generation,
-        &pointer.generation,
-        &pointer.projection_key,
-    )?;
-    Some((pointer, factory))
-}
-
 fn execute_calibrated_semantic_query<'a, L>(
     lane: &'a L,
     readiness: SemanticLaneReadinessV1<'a>,
@@ -3511,10 +3494,6 @@ mod tests {
                 .query_factory(&source, &vector, &projection_key)
                 .is_some(),
             "exact warmed committed generation must enable query_factory"
-        );
-        assert!(
-            current_query_factory(&handle).is_some(),
-            "current_query_factory must surface the exact warmed factory"
         );
         assert!(
             handle

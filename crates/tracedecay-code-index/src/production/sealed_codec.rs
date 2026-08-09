@@ -7,7 +7,7 @@ use super::*;
 ///
 /// Every reader that gates on the sealed format — the publication store, the
 /// worker probe, and code-generation retention — must gate on this one value.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 4;
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

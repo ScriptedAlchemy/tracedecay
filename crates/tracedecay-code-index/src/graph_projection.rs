@@ -12,7 +12,7 @@ use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
-    RepositoryId, SourceFreshness, SymbolOccurrenceId, canonical_sha256,
+    RepositoryId, SourceFreshness, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
@@ -59,7 +59,7 @@ const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
 const CHUNK_SYMBOL_EDGE_KIND: &str = "CodeChunkDescribesSymbol";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
-pub const CODE_GRAPH_PROJECTOR_REVISION_V2: &str = "code-graph-projector.v2";
+pub const CODE_GRAPH_PROJECTOR_REVISION_V3: &str = "code-graph-projector.v3";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -144,6 +144,8 @@ impl From<GraphDbError> for CodeGraphProjectionError {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeGraphSymbolBindingV1 {
     pub file: FileOccurrenceId,
+    pub logical_path: Option<String>,
+    pub source_span: Option<SourceSpan>,
     pub chunk: Option<CodeSearchChunkId>,
     pub language_descriptor_revision: LanguageDescriptorRevision,
 }
@@ -206,7 +208,7 @@ impl CodeGraphProjectionStore {
         let projection = snapshot.projection().clone();
         let expected = code_graph_generation_id(
             &generation,
-            &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?,
+            &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?,
         )?;
         if snapshot.generation() != &expected {
             return Err(CodeGraphProjectionError::GenerationMismatch);
@@ -330,6 +332,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         })
     }
 
+    #[cfg(feature = "test-helpers")]
     pub fn publish_code_graph(
         &self,
         generation: &CodeGenerationId,
@@ -356,7 +359,7 @@ impl InMemoryCodeGraphProjectionBuilder {
             return Err(CodeGraphProjectionError::Cancelled);
         }
         let revision =
-            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?;
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?;
         let manifest = build_code_graph_manifest(
             self.projection.clone(),
             generation,
@@ -380,6 +383,7 @@ impl InMemoryCodeGraphProjectionBuilder {
     /// kinds. [`Self::publish_with_cancellation`] publishes edges and chunks
     /// alone, which leaves every symbol without metadata and therefore
     /// unresolvable by name — the shape integration fixtures need.
+    #[cfg(feature = "test-helpers")]
     pub fn publish_indexed_with_cancellation(
         &self,
         generation: &CodeGenerationId,
@@ -396,7 +400,7 @@ impl InMemoryCodeGraphProjectionBuilder {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
         let revision =
-            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())?;
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?;
         let check = {
             let cancellation = Arc::clone(&cancellation);
             move || {
@@ -426,6 +430,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         Ok(watermark)
     }
 
+    #[cfg(feature = "test-helpers")]
     pub fn verified_store(
         &self,
         generation: &CodeGenerationId,
@@ -450,6 +455,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         )
     }
 
+    #[cfg(feature = "test-helpers")]
     pub fn evidence_reader(
         &self,
         generation: &CodeGenerationId,
