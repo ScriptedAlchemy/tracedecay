@@ -52,8 +52,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BlockedCauseV1, ConflictKindV1, ConflictOutcomeV1, DeliverySurfaceFamilyV1,
     DuplicateEffectOutcomeV1, DuplicateEffortKindV1, DurationBucketV1, GitHubStackCapabilityV1,
-    IntegrationOperationKindV1, IntegrationResultV1, RerunCauseV1, RerunSourceV1,
-    WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1,
+    IntegrationOperationKindV1, IntegrationResultV1, IntervalStateV1, RerunCauseV1, RerunSourceV1,
+    StackDriftKindV1, WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1,
 };
 
 use crate::observability::{MetricCoverageV1, MetricValueV1, ObservabilityHorizonV1};
@@ -70,11 +70,12 @@ pub const EXECUTION_TOPOLOGY_PROJECTOR_REVISION_V1: &str = "execution-topology-p
 /// spelling the domain contract stamps. Only these kinds feed topology
 /// descriptors; the read additionally consumes the cross-cutting telemetry
 /// drop receipt solely for producer-loss coverage.
-pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 10] = [
+pub const EXECUTION_TOPOLOGY_EVENT_KINDS_V1: [&str; 11] = [
     "work.execution_topology.sampled.v1",
     "work.conflict_prediction.observed.v1",
     "work.conflict_outcome.linked.v1",
     "work.integration.transition.observed.v1",
+    "work.stack_drift.observed.v1",
     "work.github_stack_capability.observed.v1",
     "work.duplicate_effort.observed.v1",
     "work.blocked_interval.observed.v1",
@@ -216,6 +217,30 @@ mirrored_enum!(
         From4hTo24h,
         From1dTo7d,
         Over7d,
+    }
+);
+
+mirrored_enum!(
+    /// Exact reason a stack became stale. The enum is bounded and never
+    /// carries a branch, ref, worktree, repository, or provider identity.
+    ExecutionStackDriftKindV1 from StackDriftKindV1 {
+        HeadAdvanced,
+        BaseAdvanced,
+        MergeBaseChanged,
+        DependencyMissing,
+        RefDeleted,
+        WorktreeGenerationChanged,
+        Retargeted,
+        Superseded,
+        Unknown,
+    }
+);
+
+mirrored_enum!(
+    /// Whether the owning drift interval is still open or exactly closed.
+    ExecutionIntervalStateV1 from IntervalStateV1 {
+        Open,
+        Closed,
     }
 );
 
@@ -431,6 +456,8 @@ pub enum ExecutionTopologyDimensionV1 {
     ConflictOutcome(ExecutionConflictOutcomeV1),
     IntegrationKind(ExecutionIntegrationKindV1),
     IntegrationOutcome(ExecutionIntegrationOutcomeV1),
+    StackDriftKind(ExecutionStackDriftKindV1),
+    IntervalState(ExecutionIntervalStateV1),
     BlockedCause(ExecutionBlockedCauseV1),
     RerunSource(ExecutionRerunSourceV1),
     RerunCause(ExecutionRerunCauseV1),

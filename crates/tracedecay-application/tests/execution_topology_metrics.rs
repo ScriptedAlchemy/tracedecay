@@ -1,6 +1,8 @@
 //! Behavioral contract for the execution-topology metrics projection.
 
 use std::collections::BTreeSet;
+#[path = "execution_topology_metrics/stack_drift.rs"]
+mod stack_drift;
 #[path = "execution_topology_metrics/support.rs"]
 mod support;
 use support::{CountingObservations, NeverRollupPort};

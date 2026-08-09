@@ -25,11 +25,11 @@ impl ExecutionTopologyLifecycleRollupV1 {
         let mut aggregate = self.clone();
         apply_carry_to_rollup(&mut aggregate, carry)?;
         project_merge_rollup(&aggregate, context, out);
+        project_stale_stack_rollup(&aggregate, context, out);
         project_blocked_rollup(&aggregate, context, out);
         project_rerun_rollup(&aggregate, context, out);
         project_leak_rollup(&aggregate, context, out);
         project_delivery_rollup(&aggregate, context, out);
-        project_stale_stack_unavailable(context, out);
         Ok(())
     }
 
@@ -77,29 +77,57 @@ impl ExecutionTopologyLifecycleRollupV1 {
     }
 }
 
-fn project_stale_stack_unavailable(
+fn project_stale_stack_rollup(
+    aggregate: &ExecutionTopologyLifecycleRollupV1,
     context: &ProjectionContext,
     out: &mut Vec<ExecutionTopologyMeasurementV1>,
 ) {
-    out.push(measurement(MeasurementInput {
-        metric: "work_stale_stack_age_seconds",
-        unit: "events",
-        denominator: "observed_stack_drifts",
-        evidence_class: MetricEvidenceClassV1::Measurement,
-        dimensions: Vec::new(),
-        coverage: MetricCoverageV1 {
-            eligible: context.complete.then_some(0),
-            observed: 0,
-            completed: 0,
-            censored: 0,
-            unknown: u64::from(!context.complete),
-            excluded: 0,
-            state: context.source_state,
-        },
-        value: None,
-        unavailable: Some(ExecutionMetricUnavailableV1::NoEligibleEvidence),
-        context,
-    }));
+    let eligible = aggregate.stack_drift_eligible;
+    let observed = eligible.saturating_sub(aggregate.stack_drift_unknown);
+    let coverage = MetricCoverageV1 {
+        eligible: context.complete.then_some(eligible),
+        observed,
+        completed: observed,
+        censored: 0,
+        unknown: aggregate.stack_drift_unknown,
+        excluded: 0,
+        state: distribution_state(context.complete, eligible, observed),
+    };
+    let refusal = distribution_refusal(context.complete, eligible, observed);
+    if aggregate.stack_drift_cells.is_empty() {
+        out.push(measurement(MeasurementInput {
+            metric: "work_stale_stack_age_seconds",
+            unit: "events",
+            denominator: "observed_stack_drifts",
+            evidence_class: MetricEvidenceClassV1::Measurement,
+            dimensions: Vec::new(),
+            coverage,
+            value: None,
+            unavailable: Some(refusal.unwrap_or(ExecutionMetricUnavailableV1::NoEligibleEvidence)),
+            context,
+        }));
+        return;
+    }
+    for ((kind, state, bucket), total) in &aggregate.stack_drift_cells {
+        out.push(measurement_with_local_support(
+            MeasurementInput {
+                metric: "work_stale_stack_age_seconds",
+                unit: "events",
+                denominator: "observed_stack_drifts",
+                evidence_class: MetricEvidenceClassV1::Measurement,
+                dimensions: vec![
+                    ExecutionTopologyDimensionV1::StackDriftKind(*kind),
+                    ExecutionTopologyDimensionV1::IntervalState(*state),
+                    ExecutionTopologyDimensionV1::DurationBucket(*bucket),
+                ],
+                coverage: coverage.clone(),
+                value: refusal.is_none().then_some(as_f64(*total)),
+                unavailable: refusal,
+                context,
+            },
+            *total,
+        ));
+    }
 }
 
 fn project_merge_rollup(

@@ -13,10 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BlockedCauseV1, ConflictKindV1, ConflictOutcomeV1, ConflictPredictionV1, CoverageStateV1,
-    DeliverySurfaceFamilyV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1,
+    DeliverySurfaceFamilyV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1, DurationBucketV1,
     GitHubStackCapabilityV1, IntegrationOperationKindV1, IntegrationPhaseV1, IntegrationResultV1,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, RerunCauseV1, RerunSourceV1,
-    WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1, canonical_sha256,
+    IntervalStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, RerunCauseV1, RerunSourceV1,
+    StackDriftKindV1, WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1, canonical_sha256,
 };
 
 use crate::observability::ObservabilityHorizonV1;
@@ -85,6 +85,20 @@ pub(super) struct IntegrationRowV1 {
     pub(super) operation: IntegrationOperationKindV1,
     pub(super) coverage: CoverageStateV1,
     pub(super) event_time_micros: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct StackDriftRowV1 {
+    pub(super) kind: StackDriftKindV1,
+    pub(super) state: IntervalStateV1,
+    pub(super) first_observed_micros: i64,
+    pub(super) terminal_micros: Option<i64>,
+    pub(super) age_bucket: DurationBucketV1,
+    pub(super) coverage: CoverageStateV1,
+    pub(super) event_time_micros: i64,
+    pub(super) observation_time_micros: i64,
+    pub(super) producer_sequence: u64,
+    pub(super) content_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -161,6 +175,7 @@ pub(super) struct ExecutionTopologyEvidenceV1 {
     pub(super) predictions: BTreeMap<String, ConflictPredictionRowV1>,
     pub(super) outcomes: BTreeMap<String, ConflictOutcomeRowV1>,
     pub(super) integrations: Vec<IntegrationRowV1>,
+    pub(super) stack_drifts: BTreeMap<String, StackDriftRowV1>,
     pub(super) duplicates: BTreeMap<String, (u64, Option<DuplicateRowV1>, i64)>,
     pub(super) blocked: Vec<BlockedRowV1>,
     pub(super) reruns: Vec<RerunRowV1>,
@@ -254,6 +269,48 @@ impl ExecutionTopologyEvidenceV1 {
                     event_time_micros,
                 };
                 self.integrations.push(row);
+            }
+            ObservabilityPayloadV1::WorkStackDrift(drift) => {
+                let content_digest = match canonical_sha256(&(
+                    drift.kind,
+                    drift.state,
+                    drift.first_observed_micros,
+                    drift.terminal_micros,
+                    drift.age_bucket,
+                    drift.coverage,
+                )) {
+                    Ok(digest) => digest.as_str().to_owned(),
+                    Err(_) => {
+                        self.invalid_events = self.invalid_events.saturating_add(1);
+                        return;
+                    }
+                };
+                let row = StackDriftRowV1 {
+                    kind: drift.kind,
+                    state: drift.state,
+                    first_observed_micros: drift.first_observed_micros,
+                    terminal_micros: drift.terminal_micros,
+                    age_bucket: drift.age_bucket,
+                    coverage: drift.coverage,
+                    event_time_micros,
+                    observation_time_micros,
+                    producer_sequence: envelope.producer_sequence,
+                    content_digest,
+                };
+                match self.stack_drifts.get(trace_id) {
+                    Some(current) if !same_stack_drift_interval(&row, current) => {
+                        if self
+                            .invalid_correction_keys
+                            .insert((2, trace_id.to_owned(), 0))
+                        {
+                            self.invalid_events = self.invalid_events.saturating_add(1);
+                        }
+                    }
+                    Some(current) if !stack_drift_later(&row, current) => {}
+                    _ => {
+                        self.stack_drifts.insert(trace_id.to_owned(), row);
+                    }
+                }
             }
             ObservabilityPayloadV1::GitHubStackCapability(capability) => {
                 let content_digest = match canonical_sha256(&(
@@ -417,6 +474,32 @@ impl ExecutionTopologyEvidenceV1 {
             }
         }
     }
+}
+
+pub(super) fn stack_drift_later(incoming: &StackDriftRowV1, current: &StackDriftRowV1) -> bool {
+    match (current.state, incoming.state) {
+        (IntervalStateV1::Closed, IntervalStateV1::Open) => return false,
+        (IntervalStateV1::Open, IntervalStateV1::Closed) => return true,
+        _ => {}
+    }
+    (
+        incoming.event_time_micros,
+        incoming.observation_time_micros,
+        incoming.producer_sequence,
+        incoming.content_digest.as_str(),
+    ) > (
+        current.event_time_micros,
+        current.observation_time_micros,
+        current.producer_sequence,
+        current.content_digest.as_str(),
+    )
+}
+
+pub(super) fn same_stack_drift_interval(
+    incoming: &StackDriftRowV1,
+    current: &StackDriftRowV1,
+) -> bool {
+    incoming.kind == current.kind && incoming.first_observed_micros == current.first_observed_micros
 }
 
 #[cfg(test)]

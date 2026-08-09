@@ -24,6 +24,8 @@ use tracedecay_domain::{
     WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+#[path = "execution_topology_rollup/stack_drift.rs"]
+mod stack_drift;
 
 const DAY_MICROS: i64 = 86_400_000_000;
 const SCOPE: &str = "project.execution-topology-rollup";

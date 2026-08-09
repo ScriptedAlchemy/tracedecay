@@ -2,19 +2,21 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CoverageStateV1, IntegrationPhaseV1, IntegrationResultV1, canonical_sha256,
+    CoverageStateV1, DurationBucketV1, IntegrationPhaseV1, IntegrationResultV1,
+    WorkStackDriftObservedV1, canonical_sha256,
 };
 
 use crate::observability::ObservabilityHorizonV1;
 
 use super::super::{
-    ExecutionBlockedCauseV1, ExecutionIntegrationKindV1, ExecutionIntegrationOutcomeV1,
-    ExecutionLeakKindV1, ExecutionLeakOutcomeV1, ExecutionRerunCauseV1, ExecutionRerunSourceV1,
-    ExecutionSurfaceFamilyV1,
+    ExecutionBlockedCauseV1, ExecutionDurationBucketV1, ExecutionIntegrationKindV1,
+    ExecutionIntegrationOutcomeV1, ExecutionIntervalStateV1, ExecutionLeakKindV1,
+    ExecutionLeakOutcomeV1, ExecutionRerunCauseV1, ExecutionRerunSourceV1,
+    ExecutionStackDriftKindV1, ExecutionSurfaceFamilyV1,
 };
 use super::{
     BlockedRowV1, ExecutionTopologyEvidenceV1, ExecutionTopologyRollupStateErrorV1,
-    GitHubStackCapabilityRowV1,
+    GitHubStackCapabilityRowV1, StackDriftRowV1, same_stack_drift_interval, stack_drift_later,
 };
 
 /// Persisted lifecycle sufficient statistics. Event-scale joins never live in
@@ -29,6 +31,17 @@ pub(in crate::execution_topology_metrics) struct ExecutionTopologyLifecycleRollu
     pub(super) merge_totals: BTreeMap<ExecutionIntegrationKindV1, (u64, u64)>,
     pub(super) merge_eligible: u64,
     pub(super) merge_unknown: u64,
+    #[serde(with = "ordered_map_entries")]
+    pub(super) stack_drift_cells: BTreeMap<
+        (
+            ExecutionStackDriftKindV1,
+            ExecutionIntervalStateV1,
+            ExecutionDurationBucketV1,
+        ),
+        u64,
+    >,
+    pub(super) stack_drift_eligible: u64,
+    pub(super) stack_drift_unknown: u64,
     pub(super) blocked_union: Vec<(i64, i64)>,
     #[serde(with = "ordered_map_entries")]
     pub(super) blocked_cause_unions: BTreeMap<ExecutionBlockedCauseV1, Vec<(i64, i64)>>,
@@ -109,6 +122,7 @@ pub(in crate::execution_topology_metrics) struct LifecycleLeakCandidateV1 {
 /// SHA-256 digests, so retained rollups never persist trace or receipt text.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(in crate::execution_topology_metrics) struct ExecutionTopologyLifecycleCarryV1 {
+    pub(super) stack_drifts: BTreeMap<String, StackDriftRowV1>,
     pub(super) blocked: BTreeMap<String, LifecycleBlockedCandidateV1>,
     pub(super) leaks: BTreeMap<String, LifecycleLeakCandidateV1>,
 }
@@ -123,7 +137,11 @@ fn protected_key(domain: &str, value: &str) -> Result<String, ExecutionTopologyR
 }
 
 fn carry_len(carry: &ExecutionTopologyLifecycleCarryV1) -> usize {
-    carry.blocked.len().saturating_add(carry.leaks.len())
+    carry
+        .stack_drifts
+        .len()
+        .saturating_add(carry.blocked.len())
+        .saturating_add(carry.leaks.len())
 }
 
 fn check_carry(
@@ -202,6 +220,12 @@ impl ExecutionTopologyEvidenceV1 {
             totals.1 = totals
                 .1
                 .saturating_add(u64::from(row.result == IntegrationResultV1::Succeeded));
+        }
+        for (trace, row) in &self.stack_drifts {
+            carry.stack_drifts.insert(
+                protected_key("execution-topology.stack-drift", trace)?,
+                row.clone(),
+            );
         }
         for row in &self.reruns {
             aggregate.rerun_eligible = aggregate.rerun_eligible.saturating_add(row.eligible);
@@ -317,6 +341,7 @@ impl ExecutionTopologyLifecycleRollupV1 {
                     totals.1.saturating_add(row.1),
                 )
             });
+        let stack_drift_cells = checked_sum(self.stack_drift_cells.values().copied());
         let rerun_cells = self
             .rerun_cells
             .values()
@@ -355,6 +380,8 @@ impl ExecutionTopologyLifecycleRollupV1 {
             || merge_totals.0 != merge_cells
             || merge_totals.1 > merge_totals.0
             || !merge_dimensions_match(self)
+            || stack_drift_cells.and_then(|observed| observed.checked_add(self.stack_drift_unknown))
+                != Some(self.stack_drift_eligible)
             || blocked_observed_by_cause != self.blocked_observed
             || self
                 .blocked_observed
@@ -429,6 +456,16 @@ impl ExecutionTopologyLifecycleRollupV1 {
         }
         self.merge_eligible = self.merge_eligible.saturating_add(other.merge_eligible);
         self.merge_unknown = self.merge_unknown.saturating_add(other.merge_unknown);
+        for (key, value) in other.stack_drift_cells {
+            let entry = self.stack_drift_cells.entry(key).or_default();
+            *entry = entry.saturating_add(value);
+        }
+        self.stack_drift_eligible = self
+            .stack_drift_eligible
+            .saturating_add(other.stack_drift_eligible);
+        self.stack_drift_unknown = self
+            .stack_drift_unknown
+            .saturating_add(other.stack_drift_unknown);
         merge_segments(&mut self.blocked_union, &other.blocked_union)?;
         for (cause, intervals) in other.blocked_cause_unions {
             merge_segments(
@@ -499,19 +536,25 @@ impl ExecutionTopologyLifecycleCarryV1 {
         &self,
     ) -> Result<(), ExecutionTopologyRollupStateErrorV1> {
         check_carry(self)?;
-        if self.blocked.iter().any(|(key, candidate)| {
-            !protected_key_is_valid(key)
-                || candidate.row.as_ref().is_some_and(|row| {
-                    row.receipt_ref != *key
-                        || row.revision != candidate.revision
-                        || row.event_time_micros != candidate.created_at_micros
-                })
-        }) || self.leaks.iter().any(|(key, candidate)| {
-            !protected_key_is_valid(key)
-                || candidate
-                    .row
-                    .is_some_and(|row| row.event_time_micros != candidate.created_at_micros)
-        }) {
+        if self
+            .stack_drifts
+            .iter()
+            .any(|(key, row)| !protected_key_is_valid(key) || !valid_stack_drift_row(row))
+            || self.blocked.iter().any(|(key, candidate)| {
+                !protected_key_is_valid(key)
+                    || candidate.row.as_ref().is_some_and(|row| {
+                        row.receipt_ref != *key
+                            || row.revision != candidate.revision
+                            || row.event_time_micros != candidate.created_at_micros
+                    })
+            })
+            || self.leaks.iter().any(|(key, candidate)| {
+                !protected_key_is_valid(key)
+                    || candidate
+                        .row
+                        .is_some_and(|row| row.event_time_micros != candidate.created_at_micros)
+            })
+        {
             return Err(ExecutionTopologyRollupStateErrorV1::IncompatibleState);
         }
         Ok(())
@@ -522,7 +565,9 @@ impl ExecutionTopologyLifecycleCarryV1 {
         since_micros: i64,
         until_micros: i64,
     ) -> bool {
-        self.blocked.values().all(|candidate| {
+        self.stack_drifts.values().all(|row| {
+            row.event_time_micros >= since_micros && row.event_time_micros < until_micros
+        }) && self.blocked.values().all(|candidate| {
             candidate.created_at_micros >= since_micros
                 && candidate.created_at_micros < until_micros
         }) && self.leaks.values().all(|candidate| {
@@ -535,6 +580,18 @@ impl ExecutionTopologyLifecycleCarryV1 {
         &mut self,
         other: Self,
     ) -> Result<(), ExecutionTopologyRollupStateErrorV1> {
+        for (key, incoming) in other.stack_drifts {
+            match self.stack_drifts.get_mut(&key) {
+                None => {
+                    self.stack_drifts.insert(key, incoming);
+                }
+                Some(existing) if !same_stack_drift_interval(&incoming, existing) => {
+                    return Err(ExecutionTopologyRollupStateErrorV1::IncompatibleState);
+                }
+                Some(existing) if stack_drift_later(&incoming, existing) => *existing = incoming,
+                Some(_) => {}
+            }
+        }
         for (key, incoming) in other.blocked {
             match self.blocked.get_mut(&key) {
                 None => {
@@ -583,6 +640,50 @@ fn valid_interval_union(intervals: &[(i64, i64)]) -> bool {
     intervals.len() <= MAX_EXECUTION_TOPOLOGY_BLOCKED_UNION_SEGMENTS_V1
         && intervals.iter().all(|(start, end)| end >= start)
         && intervals.windows(2).all(|rows| rows[0].1 < rows[1].0)
+}
+
+fn valid_stack_drift_row(row: &StackDriftRowV1) -> bool {
+    let payload = WorkStackDriftObservedV1 {
+        kind: row.kind,
+        state: row.state,
+        first_observed_micros: row.first_observed_micros,
+        terminal_micros: row.terminal_micros,
+        age_bucket: row.age_bucket,
+        coverage: row.coverage,
+    };
+    let endpoint = row.terminal_micros.unwrap_or(row.event_time_micros);
+    let duration = endpoint
+        .checked_sub(row.first_observed_micros)
+        .and_then(|micros| u64::try_from(micros).ok());
+    let digest = canonical_sha256(&(
+        row.kind,
+        row.state,
+        row.first_observed_micros,
+        row.terminal_micros,
+        row.age_bucket,
+        row.coverage,
+    ));
+    payload.validate().is_ok()
+        && row.observation_time_micros >= row.event_time_micros
+        && row.event_time_micros >= endpoint
+        && duration.is_some_and(|duration| duration_bucket(duration) == row.age_bucket)
+        && digest.is_ok_and(|digest| digest.as_str() == row.content_digest)
+}
+
+const fn duration_bucket(micros: u64) -> DurationBucketV1 {
+    const MINUTE: u64 = 60_000_000;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match micros {
+        value if value < MINUTE => DurationBucketV1::Under1m,
+        value if value < 5 * MINUTE => DurationBucketV1::From1mTo5m,
+        value if value < 15 * MINUTE => DurationBucketV1::From5mTo15m,
+        value if value < HOUR => DurationBucketV1::From15mTo1h,
+        value if value < 4 * HOUR => DurationBucketV1::From1hTo4h,
+        value if value < DAY => DurationBucketV1::From4hTo24h,
+        value if value < 7 * DAY => DurationBucketV1::From1dTo7d,
+        _ => DurationBucketV1::Over7d,
+    }
 }
 
 fn merge_dimensions_match(rollup: &ExecutionTopologyLifecycleRollupV1) -> bool {
@@ -708,6 +809,16 @@ pub(in crate::execution_topology_metrics) fn apply_carry_to_rollup(
     aggregate: &mut ExecutionTopologyLifecycleRollupV1,
     carry: &ExecutionTopologyLifecycleCarryV1,
 ) -> Result<(), ExecutionTopologyRollupStateErrorV1> {
+    for row in carry.stack_drifts.values() {
+        aggregate.stack_drift_eligible = aggregate.stack_drift_eligible.saturating_add(1);
+        if row.coverage != CoverageStateV1::Known {
+            aggregate.stack_drift_unknown = aggregate.stack_drift_unknown.saturating_add(1);
+            continue;
+        }
+        let key = (row.kind.into(), row.state.into(), row.age_bucket.into());
+        let entry = aggregate.stack_drift_cells.entry(key).or_default();
+        *entry = entry.saturating_add(1);
+    }
     for candidate in carry.blocked.values() {
         aggregate.blocked_eligible = aggregate.blocked_eligible.saturating_add(1);
         match &candidate.row {

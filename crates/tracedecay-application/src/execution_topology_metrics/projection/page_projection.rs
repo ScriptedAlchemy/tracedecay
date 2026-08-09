@@ -767,6 +767,7 @@ fn execution_payload_coverage(payload: &ObservabilityPayloadV1) -> Option<Covera
         ObservabilityPayloadV1::WorkConflictPrediction(value) => Some(value.coverage),
         ObservabilityPayloadV1::WorkConflictOutcome(value) => Some(value.coverage),
         ObservabilityPayloadV1::WorkIntegrationTransition(value) => Some(value.coverage),
+        ObservabilityPayloadV1::WorkStackDrift(value) => Some(value.coverage),
         ObservabilityPayloadV1::GitHubStackCapability(value) => Some(value.coverage),
         ObservabilityPayloadV1::WorkDuplicateEffort(value) => Some(value.coverage),
         ObservabilityPayloadV1::WorkBlockedInterval(value) => Some(value.coverage),
