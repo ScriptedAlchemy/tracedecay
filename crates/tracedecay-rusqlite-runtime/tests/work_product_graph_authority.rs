@@ -192,16 +192,11 @@ fn graph(items: Vec<WorkItemV1>) -> WorkProductGraphV1 {
     .unwrap()
 }
 
-type Mutations = WorkProductMutationServiceV1<
-    WorkSqliteStorage,
-    WorkSqliteStorage,
-    WorkSqliteStorage,
-    WorkSqliteStorage,
->;
+type Mutations =
+    WorkProductMutationServiceV1<WorkSqliteStorage, WorkSqliteStorage, WorkSqliteStorage>;
 
 fn mutations(store: &RegisteredWorkStore) -> Mutations {
     WorkProductMutationServiceV1::new(
-        store.storage().clone(),
         store.storage().clone(),
         store.storage().clone(),
         store.storage().clone(),
