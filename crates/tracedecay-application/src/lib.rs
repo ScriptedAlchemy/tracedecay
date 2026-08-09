@@ -31,9 +31,11 @@ pub mod historical_query;
 mod identity;
 pub mod invocation;
 pub mod lsp_context_catalog;
+mod mcp_catalog;
 pub mod memory;
 pub mod multi_root;
 pub mod observability;
+pub mod observatory_surface;
 pub mod policy;
 pub mod remote;
 pub mod result;
@@ -105,8 +107,8 @@ pub use context::{
     RequestContext, RequestId, ResolvedScope,
 };
 pub use context_scout::{
-    context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,
-    context_scout_surface_operation,
+    context_scout_executable_binding_registry, context_scout_surface_catalog_contribution,
+    context_scout_surface_handler_descriptors, context_scout_surface_operation,
 };
 pub use dashboard_graph::{
     DashboardGraphEdgeV1, DashboardGraphKindCountV1, DashboardGraphLanguageCountV1,
@@ -183,12 +185,13 @@ pub use git::{
     NativeIntegrationStackResolutionRequestV1, NativeIntegrationStackSnapshotService,
     NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
     NativeIntegrationStatusRequestV1, NativeIntegrationStatusSurfaceRequest,
-    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
-    NativeWorktreeSurfaceRequest, git_index_catalog_contribution, git_index_effect_class,
-    git_index_handler_descriptors, git_surface_catalog_contribution,
-    git_surface_handler_descriptors, is_canonical_repository_relative_path,
-    native_integration_surface_catalog_contribution,
+    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1, NativeWorktreeService,
+    NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeContractError,
+    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
+    git_surface_catalog_contribution, git_surface_handler_descriptors,
+    is_canonical_repository_relative_path, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
+    native_worktree_executable_binding_registry,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
@@ -204,9 +207,10 @@ pub use invocation::{
     InvocationError, InvocationTarget,
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
+pub use mcp_catalog::mcp_executable_binding_registry;
 pub use memory::{
-    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
-    DerivedMemoryFeedbackHistoryRepairV1, DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1,
+    DerivedMemoryConvergenceReport, DerivedMemoryConvergenceState,
+    DerivedMemoryFeedbackHistoryRepair, DerivedMemoryRepairPort, DerivedMemoryRepairStats,
     converge_derived_memory,
 };
 pub use multi_root::{
@@ -218,6 +222,12 @@ pub use multi_root::{
     RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
+pub use observatory_surface::{
+    OBSERVATORY_READ_OPERATION, ObservatoryReadFuture, ObservatoryReadPortV1,
+    ObservatoryReadRequestV1, ObservatoryReadResultV1, ObservatoryReadServiceV1,
+    observatory_read_catalog_contribution, observatory_read_handler_descriptor,
+    observatory_read_operation, observatory_read_request_schema, observatory_read_result_schema,
+};
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
@@ -281,9 +291,13 @@ pub use settings_preview::{
     validate_project_settings_patch,
 };
 pub use source_edit::{
-    RenameFileEditV1, RenameResult, RenameSymbolBindingV1, RenameTextOnlyMatchV1,
-    SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
-    SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
+    RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
+    RenameImpactV1, RenamePreviewAcceptanceV1, RenamePreviewNodeV1, RenamePreviewResultV1,
+    RenamePreviewSurfaceRequestV1, RenameProtectedValueCategoryV1, RenameProtectedValueV1,
+    RenameResult, RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
+    RenameSymbolSurfaceRequestV1, SourceEditAuthorizationAdmissionV1,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditDiagnosticV1,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
     SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
@@ -322,8 +336,12 @@ pub use work_evidence::{
     WorkEvidenceExpansionSelectorV1, WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1,
     WorkEvidenceOmissionReasonV1, WorkEvidenceOmissionV1, WorkEvidenceRetrievalServiceV1,
     WorkEvidenceRetrievalV1, WorkEvidenceRetrieveRequestV1, WorkEvidenceRootReadErrorV1,
-    WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1, WorkSessionNarrativeFuture,
-    WorkSessionNarrativePortV1, WorkSessionNarrativeRequestV1, WorkSessionNarrativeV1,
+    WorkEvidenceRootReadPortV1, WorkEvidenceSourceV1, WorkTaskSessionContinuationV1,
+    WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,
+    WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1, WorkTaskSessionPortV1,
+    WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
+    WorkTaskSessionReauthorizationErrorV1, WorkTaskSessionReauthorizationPortV1,
+    WorkTaskSessionRequestV1,
 };
 pub use work_execution_history::{
     WorkExecutionHistoryV1, WorkExecutionSpanV1, WorkExecutionTimingCoverageV1,

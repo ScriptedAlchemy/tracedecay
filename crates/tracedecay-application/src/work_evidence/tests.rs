@@ -11,7 +11,8 @@ use tracedecay_domain::{
     UtcMicros, WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkGraphChangeV1,
     WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
     WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1, WorkProductGraphV1,
-    WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorktreeId,
+    WorkProductSourceWatermarkV1, WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRouteDecisionV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -166,11 +167,43 @@ fn rooted_graph() -> (
     )
     .unwrap();
     let graph = graph
+        .apply(WorkGraphChangeV1::EvidenceLinked {
+            task_id: task_id.clone(),
+            evidence: link.clone(),
+        })
+        .unwrap();
+    let proposal = WorkProposalV1::new(
+        id("proposal.work-evidence"),
+        task_id.clone(),
+        graph.version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Heuristic, 1, 1, 1, "bounded").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("execution admission selects the route").unwrap(),
+        "Admit the sealed attempt identity".to_owned(),
+        digest('d'),
+    )
+    .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProposalAccepted {
+            proposal,
+            accepted_at: UtcMicros(101),
+        })
+        .unwrap();
+    let admitted_based_on_version = graph.version();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ExecutionAdmitted {
+            task_id: task_id.clone(),
+            based_on_version: admitted_based_on_version,
+            admitted_at: UtcMicros(102),
+        })
+        .unwrap();
+    let attempt_based_on_version = graph.version();
+    let graph = graph
         .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
             task_id,
-            based_on_version: WorkGraphVersionV1::initial(),
+            based_on_version: attempt_based_on_version,
             identity: attempt.clone(),
-            evidence: link.clone(),
             linked_at: UtcMicros(110),
         })
         .unwrap();
@@ -179,8 +212,8 @@ fn rooted_graph() -> (
 
 fn verified() -> VerifiedWorkGraphVersionV1 {
     VerifiedWorkGraphVersionV1::new(
-        WorkGraphVersionV1::new(2).unwrap(),
-        WorkProductEventSequenceV1::new(2).unwrap(),
+        WorkGraphVersionV1::new(5).unwrap(),
+        WorkProductEventSequenceV1::new(5).unwrap(),
         WorkProductSourceWatermarkV1::new(BTreeMap::<SourceStoreId, u64>::new()).unwrap(),
         digest('c'),
     )
@@ -259,22 +292,57 @@ impl WorkAttemptReceiptReadPortV1 for Receipts {
 
 #[derive(Default)]
 struct Sessions {
-    requests: Mutex<Vec<WorkSessionNarrativeRequestV1>>,
+    requests: Mutex<Vec<WorkTaskSessionRequestV1>>,
 }
 
-impl WorkSessionNarrativePortV1 for Sessions {
-    fn retrieve_session<'a>(
+impl WorkTaskSessionPortV1 for Sessions {
+    fn retrieve_task_session<'a>(
         &'a self,
-        _context: &'a RequestContext,
-        request: WorkSessionNarrativeRequestV1,
-    ) -> WorkSessionNarrativeFuture<'a> {
+        context: &'a RequestContext,
+        request: WorkTaskSessionRequestV1,
+        reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
+    ) -> WorkTaskSessionFuture<'a> {
         self.requests.lock().unwrap().push(request.clone());
         Box::pin(async move {
-            Ok(WorkSessionNarrativeV1 {
+            reauthorization
+                .reauthorize_task_session(context, &request)
+                .map_err(|_| WorkEvidenceHydrationErrorV1::Unavailable)?;
+            Ok(WorkTaskSessionEvidenceV1 {
+                task_id: request.task_id,
+                verified_version: request.verified_version,
+                attempt: request.attempt,
                 source: request.source,
-                anchors: vec![id("anchor.session.message")],
-                compact_narrative: vec!["Provider completed the accepted attempt".to_owned()],
+                participant_epoch: digest('e'),
+                ranked_anchors: vec![WorkTaskSessionRankedAnchorV1 {
+                    anchor_id: id("anchor.session.message"),
+                    final_ordinal: 0,
+                    utility_micros: 900_000,
+                    contributions: vec![WorkTaskSessionRankContributionV1 {
+                        retriever: tracedecay_domain::RetrieverKind::TaskSession,
+                        retriever_revision: id("retriever.task-session.v1"),
+                        source_occurrence: id("occurrence.session.message"),
+                        ordinal_rank: 0,
+                        raw_score_micros: 900_000,
+                        score_domain: id("score.task-session.v1"),
+                        calibration_profile: id("calibration.task-session.v1"),
+                        calibrated_feature_micros: 900_000,
+                        weight_micros: 1_000_000,
+                        weighted_contribution_micros: 900_000,
+                    }],
+                }],
+                hydrated: vec![WorkTaskSessionHydrationV1 {
+                    rank: 0,
+                    anchor_id: id("anchor.session.message"),
+                    state: WorkTaskSessionHydrationStateV1::Available,
+                    content: Some(b"Provider completed the accepted attempt".to_vec()),
+                }],
                 coverage: WorkEvidenceCoverageStateV1::Complete,
+                coverage_counts: WorkTaskSessionCoverageV1 {
+                    visible: 1,
+                    hidden: 0,
+                    unknown: 0,
+                    redacted: 0,
+                },
                 freshness: WorkEvidenceFreshnessV1::Current,
                 redacted: false,
                 continuation: None,
@@ -395,9 +463,14 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert!(result.redacted);
     assert!(result.omissions.is_empty());
     assert!(result.continuations.is_empty());
-    assert_eq!(reads.load(Ordering::SeqCst), 4);
+    assert_eq!(reads.load(Ordering::SeqCst), 5);
     let requests = sessions.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].selection, selection());
+    assert_eq!(requests[0].task_id.as_str(), "task.work-evidence");
+    assert_eq!(requests[0].verified_version, verified());
+    assert_eq!(requests[0].attempt, attempt);
+    assert_eq!(requests[0].accepted_attempts, BTreeSet::from([attempt.clone()]));
     assert_eq!(requests[0].source, provider_session);
     assert_eq!(requests[0].temporal, TemporalModeV1::Forensic);
     assert_eq!(requests[0].continuation, None);
@@ -409,9 +482,19 @@ async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
     request.expansion = Some(WorkEvidenceExpansionSelectorV1::Anchor {
         link_id: id("link.work-evidence.attempt"),
     });
-    request.continuation = Some(WorkEvidenceContinuationV1::Session {
-        attempt: attempt(&id("task.work-evidence")),
-        cursor: OpaqueCursor::new("cursor.not-authority").unwrap(),
+    request.continuation = Some(WorkEvidenceContinuationV1::TaskSession {
+        continuation: WorkTaskSessionContinuationV1 {
+            verified_version: verified(),
+            attempt: attempt(&id("task.work-evidence")),
+            source: ObservationSourceIdentityV1::for_provider(
+                id::<ProviderId>("codex"),
+                id::<SessionId>("session.provider.reported"),
+            )
+            .unwrap(),
+            participant_epoch: digest('e'),
+            temporal_cursor: Some(OpaqueCursor::new("cursor.not-authority").unwrap()),
+            ranking_cursor: None,
+        },
     });
     assert_eq!(
         validate_request(&request),
@@ -489,22 +572,32 @@ fn provider_collision_cannot_satisfy_a_sealed_session_receipt() {
             observed_at: UtcMicros(200),
         }),
     };
-    let narrative = WorkSessionNarrativeV1 {
+    let evidence = WorkTaskSessionEvidenceV1 {
+        task_id: id("task.work-evidence"),
+        verified_version: verified(),
+        attempt: receipt.identity.clone(),
         source: ObservationSourceIdentityV1::for_provider(
             id::<ProviderId>("claude"),
             id::<SessionId>("session.shared-id"),
         )
         .unwrap(),
-        anchors: Vec::new(),
-        compact_narrative: Vec::new(),
+        participant_epoch: digest('e'),
+        ranked_anchors: Vec::new(),
+        hydrated: Vec::new(),
         coverage: WorkEvidenceCoverageStateV1::Complete,
+        coverage_counts: WorkTaskSessionCoverageV1 {
+            visible: 0,
+            hidden: 0,
+            unknown: 0,
+            redacted: 0,
+        },
         freshness: WorkEvidenceFreshnessV1::Current,
         redacted: false,
         continuation: None,
     };
 
     assert_eq!(
-        validate_narrative(&receipt, &narrative),
+        validate_task_session(&request(), &receipt, &evidence),
         Err(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable),
     );
 }

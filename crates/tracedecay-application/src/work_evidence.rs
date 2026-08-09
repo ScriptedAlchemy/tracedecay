@@ -7,6 +7,7 @@
 //! session owner performs the narrative read under its normal temporal
 //! contract.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -14,8 +15,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ObservationSourceIdentityV1, RetrievalAnchorId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId,
-    TemporalModeV1, UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkItemV1,
+    CalibrationProfileId, ComponentRevision, ManifestDigest, ObservationSourceIdentityV1,
+    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, TemporalModeV1, UtcMicros,
+    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkItemV1,
     WorkProductRelationV1, WorkProposalDecisionV1, WorkRelationReplanDecisionV1,
 };
 
@@ -33,7 +36,20 @@ pub const MAX_WORK_ROOTED_EVIDENCE_SOURCES_V1: u32 = 100;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkEvidenceExpansionSelectorV1 {
     Anchor { link_id: TaskEvidenceLinkId },
-    Session { attempt: WorkAttemptIdentityV1 },
+    TaskSession { attempt: WorkAttemptIdentityV1 },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTaskSessionContinuationV1 {
+    pub verified_version: VerifiedWorkGraphVersionV1,
+    pub attempt: WorkAttemptIdentityV1,
+    pub source: ObservationSourceIdentityV1,
+    pub participant_epoch: ManifestDigest,
+    #[schemars(with = "Option<String>")]
+    pub temporal_cursor: Option<OpaqueCursor>,
+    #[schemars(with = "Option<String>")]
+    pub ranking_cursor: Option<OpaqueCursor>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -44,10 +60,8 @@ pub enum WorkEvidenceContinuationV1 {
         #[schemars(with = "String")]
         cursor: OpaqueCursor,
     },
-    Session {
-        attempt: WorkAttemptIdentityV1,
-        #[schemars(with = "String")]
-        cursor: OpaqueCursor,
+    TaskSession {
+        continuation: WorkTaskSessionContinuationV1,
     },
 }
 
@@ -204,26 +218,94 @@ pub struct WorkEvidenceOmissionV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkSessionNarrativeRequestV1 {
+pub struct WorkTaskSessionRequestV1 {
+    pub selection: WorkProductSelectionScopeV1,
+    pub task_id: TaskId,
+    pub verified_version: VerifiedWorkGraphVersionV1,
+    pub accepted_attempts: BTreeSet<WorkAttemptIdentityV1>,
+    pub attempt: WorkAttemptIdentityV1,
     pub source: ObservationSourceIdentityV1,
     pub temporal: TemporalModeV1,
     pub page_size: u32,
-    #[schemars(with = "Option<String>")]
-    pub continuation: Option<OpaqueCursor>,
+    pub continuation: Option<WorkTaskSessionContinuationV1>,
     pub observed_at: UtcMicros,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTaskSessionHydrationStateV1 {
+    Available,
+    RetainedButUnavailable,
+    Redacted,
+    Deleted,
+    RetentionExpired,
+    Unauthorized,
+    Locked,
+    UnverifiableLegacy,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkSessionNarrativeV1 {
+pub struct WorkTaskSessionRankContributionV1 {
+    #[schemars(with = "String")]
+    pub retriever: RetrieverKind,
+    #[schemars(with = "String")]
+    pub retriever_revision: ComponentRevision,
+    #[schemars(with = "String")]
+    pub source_occurrence: SourceOccurrenceId,
+    pub ordinal_rank: u32,
+    pub raw_score_micros: i64,
+    #[schemars(with = "String")]
+    pub score_domain: ScoreDomainId,
+    #[schemars(with = "String")]
+    pub calibration_profile: CalibrationProfileId,
+    pub calibrated_feature_micros: u32,
+    pub weight_micros: u32,
+    pub weighted_contribution_micros: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTaskSessionRankedAnchorV1 {
+    pub anchor_id: RetrievalAnchorId,
+    pub final_ordinal: u32,
+    pub utility_micros: u64,
+    pub contributions: Vec<WorkTaskSessionRankContributionV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTaskSessionHydrationV1 {
+    pub rank: u32,
+    pub anchor_id: RetrievalAnchorId,
+    pub state: WorkTaskSessionHydrationStateV1,
+    pub content: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTaskSessionCoverageV1 {
+    pub visible: u64,
+    pub hidden: u64,
+    pub unknown: u64,
+    pub redacted: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkTaskSessionEvidenceV1 {
+    pub task_id: TaskId,
+    pub verified_version: VerifiedWorkGraphVersionV1,
+    pub attempt: WorkAttemptIdentityV1,
     pub source: ObservationSourceIdentityV1,
-    pub anchors: Vec<RetrievalAnchorId>,
-    pub compact_narrative: Vec<String>,
+    pub participant_epoch: ManifestDigest,
+    pub ranked_anchors: Vec<WorkTaskSessionRankedAnchorV1>,
+    pub hydrated: Vec<WorkTaskSessionHydrationV1>,
     pub coverage: WorkEvidenceCoverageStateV1,
+    pub coverage_counts: WorkTaskSessionCoverageV1,
     pub freshness: WorkEvidenceFreshnessV1,
     pub redacted: bool,
-    #[schemars(with = "Option<String>")]
-    pub continuation: Option<OpaqueCursor>,
+    pub continuation: Option<WorkTaskSessionContinuationV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -264,9 +346,9 @@ pub enum WorkEvidenceHydrationErrorV1 {
     TimedOut,
 }
 
-pub type WorkSessionNarrativeFuture<'a> = Pin<
+pub type WorkTaskSessionFuture<'a> = Pin<
     Box<
-        dyn Future<Output = Result<WorkSessionNarrativeV1, WorkEvidenceHydrationErrorV1>>
+        dyn Future<Output = Result<WorkTaskSessionEvidenceV1, WorkEvidenceHydrationErrorV1>>
             + Send
             + 'a,
     >,
@@ -280,28 +362,50 @@ pub type WorkAnchorHydrationFuture<'a> = Pin<
     >,
 >;
 
-/// Plan 23 adapter. Its request is rooted only in the provider-qualified
-/// session identity; Task identity has already been authorized and never
-/// enters the temporal kernel.
-pub trait WorkSessionNarrativePortV1: Send + Sync {
-    fn retrieve_session<'a>(
+/// Admitted Work-to-Plan-23 TaskSession adapter. Work identity authorizes the
+/// join while provider-qualified session identity scopes the temporal read.
+pub trait WorkTaskSessionPortV1: Send + Sync {
+    fn retrieve_task_session<'a>(
         &'a self,
         context: &'a RequestContext,
-        request: WorkSessionNarrativeRequestV1,
-    ) -> WorkSessionNarrativeFuture<'a>;
+        request: WorkTaskSessionRequestV1,
+        reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
+    ) -> WorkTaskSessionFuture<'a>;
 }
 
-impl<P> WorkSessionNarrativePortV1 for &P
+impl<P> WorkTaskSessionPortV1 for &P
 where
-    P: WorkSessionNarrativePortV1 + ?Sized,
+    P: WorkTaskSessionPortV1 + ?Sized,
 {
-    fn retrieve_session<'a>(
+    fn retrieve_task_session<'a>(
         &'a self,
         context: &'a RequestContext,
-        request: WorkSessionNarrativeRequestV1,
-    ) -> WorkSessionNarrativeFuture<'a> {
-        (**self).retrieve_session(context, request)
+        request: WorkTaskSessionRequestV1,
+        reauthorization: &'a dyn WorkTaskSessionReauthorizationPortV1,
+    ) -> WorkTaskSessionFuture<'a> {
+        (**self).retrieve_task_session(context, request, reauthorization)
     }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum WorkTaskSessionReauthorizationErrorV1 {
+    #[error("the exact task/session binding was denied")]
+    Denied,
+    #[error("the verified Work graph binding is stale")]
+    Stale,
+    #[error("the Work task/session authority is unavailable")]
+    Unavailable,
+}
+
+/// Callback retained by the temporal kernel across compact selection and
+/// rank-final hydration. Each invocation reopens the exact Work authority;
+/// neither the task/session binding nor either cursor grants authority.
+pub trait WorkTaskSessionReauthorizationPortV1: Send + Sync {
+    fn reauthorize_task_session(
+        &self,
+        context: &RequestContext,
+        request: &WorkTaskSessionRequestV1,
+    ) -> Result<(), WorkTaskSessionReauthorizationErrorV1>;
 }
 
 /// Plan 13/owning-store exact expansion adapter for non-session anchors.
@@ -332,9 +436,9 @@ pub enum WorkEvidenceSourceV1 {
     AttemptReceipt {
         receipt: WorkAttemptReceiptV1,
     },
-    SessionNarrative {
+    TaskSession {
         attempt: WorkAttemptIdentityV1,
-        narrative: WorkSessionNarrativeV1,
+        evidence: WorkTaskSessionEvidenceV1,
     },
     Anchor {
         link: TaskEvidenceLinkV1,
@@ -373,7 +477,7 @@ where
     R: WorkEvidenceRootReadPortV1,
     A: WorkProductOwnerAuthorizationPortV1,
     T: WorkAttemptReceiptReadPortV1,
-    S: WorkSessionNarrativePortV1,
+    S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
 {
     pub const fn new(
@@ -429,42 +533,50 @@ where
                             hydrated = hydrated.saturating_add(1);
                             if let Some(source) = provider_session {
                                 self.authorize_root(context, &request)?;
-                                let cursor = session_cursor(&request, &identity);
+                                let continuation = task_session_continuation(&request, &identity);
+                                let accepted_attempts =
+                                    root.item.accepted_attempts().iter().cloned().collect();
                                 match self
                                     .sessions
-                                    .retrieve_session(
+                                    .retrieve_task_session(
                                         context,
-                                        WorkSessionNarrativeRequestV1 {
+                                        WorkTaskSessionRequestV1 {
+                                            selection: request.selection.clone(),
+                                            task_id: request.task_id.clone(),
+                                            verified_version: request.verified_version.clone(),
+                                            accepted_attempts,
+                                            attempt: identity.clone(),
                                             source,
                                             temporal: request.temporal,
                                             page_size: request.page_size,
-                                            continuation: cursor,
+                                            continuation,
                                             observed_at: request.observed_at,
                                         },
+                                        self,
                                     )
                                     .await
                                 {
-                                    Ok(narrative) => {
-                                        validate_narrative(&receipt, &narrative)?;
-                                        source_partial |= narrative.coverage
+                                    Ok(evidence) => {
+                                        validate_task_session(&request, &receipt, &evidence)?;
+                                        source_partial |= evidence.coverage
                                             != WorkEvidenceCoverageStateV1::Complete;
-                                        freshness = merge_freshness(freshness, narrative.freshness);
-                                        redacted |= narrative.redacted;
-                                        if let Some(cursor) = narrative.continuation.clone() {
+                                        freshness = merge_freshness(freshness, evidence.freshness);
+                                        redacted |= evidence.redacted;
+                                        if let Some(continuation) = evidence.continuation.clone() {
                                             continuations.push(
-                                                WorkEvidenceContinuationV1::Session {
-                                                    attempt: identity.clone(),
-                                                    cursor,
+                                                WorkEvidenceContinuationV1::TaskSession {
+                                                    continuation,
                                                 },
                                             );
                                         }
-                                        sources.push(WorkEvidenceSourceV1::SessionNarrative {
+                                        sources.push(WorkEvidenceSourceV1::TaskSession {
                                             attempt: identity,
-                                            narrative,
+                                            evidence,
                                         });
                                     }
-                                    Err(error) => omissions
-                                        .push(hydration_omission("session_narrative", error)),
+                                    Err(error) => {
+                                        omissions.push(hydration_omission("task_session", error))
+                                    }
                                 }
                             } else if receipt.evidence.is_none() {
                                 omissions.push(WorkEvidenceOmissionV1 {
@@ -607,6 +719,67 @@ where
     }
 }
 
+impl<R, A, T, S, H> WorkTaskSessionReauthorizationPortV1
+    for WorkEvidenceRetrievalServiceV1<R, A, T, S, H>
+where
+    R: WorkEvidenceRootReadPortV1,
+    A: WorkProductOwnerAuthorizationPortV1,
+    T: WorkAttemptReceiptReadPortV1,
+    S: WorkTaskSessionPortV1,
+    H: WorkAnchorHydrationPortV1,
+{
+    fn reauthorize_task_session(
+        &self,
+        context: &RequestContext,
+        request: &WorkTaskSessionRequestV1,
+    ) -> Result<(), WorkTaskSessionReauthorizationErrorV1> {
+        let root_request = WorkEvidenceRetrieveRequestV1 {
+            selection: request.selection.clone(),
+            task_id: request.task_id.clone(),
+            verified_version: request.verified_version.clone(),
+            temporal: request.temporal,
+            page_size: request.page_size,
+            expansion: Some(WorkEvidenceExpansionSelectorV1::TaskSession {
+                attempt: request.attempt.clone(),
+            }),
+            continuation: request.continuation.clone().map(|continuation| {
+                WorkEvidenceContinuationV1::TaskSession { continuation }
+            }),
+            observed_at: request.observed_at,
+        };
+        let root = self
+            .authorize_root(context, &root_request)
+            .map_err(task_session_reauthorization_error)?;
+        if root.item.accepted_attempts() != &request.accepted_attempts
+            || !root.item.accepted_attempts().contains(&request.attempt)
+        {
+            return Err(WorkTaskSessionReauthorizationErrorV1::Stale);
+        }
+        let authority = work_authority(context)
+            .map_err(|_| WorkTaskSessionReauthorizationErrorV1::Denied)?;
+        let receipt = self
+            .attempts
+            .attempt_receipt(&authority, &request.attempt)
+            .map_err(|error| match error {
+                WorkAttemptReceiptReadErrorV1::NotFoundOrNotAuthorized => {
+                    WorkTaskSessionReauthorizationErrorV1::Denied
+                }
+                WorkAttemptReceiptReadErrorV1::Unavailable => {
+                    WorkTaskSessionReauthorizationErrorV1::Unavailable
+                }
+            })?;
+        if receipt
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.provider_session.as_ref())
+            != Some(&request.source)
+        {
+            return Err(WorkTaskSessionReauthorizationErrorV1::Stale);
+        }
+        Ok(())
+    }
+}
+
 fn overall_coverage_state(
     omissions: &[WorkEvidenceOmissionV1],
     continuations: &[WorkEvidenceContinuationV1],
@@ -646,7 +819,7 @@ fn select_sources(
                     .ok_or(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized)?;
                 all.push(SelectedSource::Anchor(link));
             }
-            WorkEvidenceExpansionSelectorV1::Session { attempt } => {
+            WorkEvidenceExpansionSelectorV1::TaskSession { attempt } => {
                 if !root.item.accepted_attempts().contains(attempt) {
                     return Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized);
                 }
@@ -698,12 +871,13 @@ fn validate_request(
             }),
         ) => link_id == cursor_link,
         (
-            Some(WorkEvidenceExpansionSelectorV1::Session { attempt }),
-            Some(WorkEvidenceContinuationV1::Session {
-                attempt: cursor_attempt,
-                ..
-            }),
-        ) => attempt == cursor_attempt,
+            Some(WorkEvidenceExpansionSelectorV1::TaskSession { attempt }),
+            Some(WorkEvidenceContinuationV1::TaskSession { continuation }),
+        ) => {
+            attempt == &continuation.attempt
+                && request.task_id == *continuation.attempt.task_id()
+                && request.verified_version == continuation.verified_version
+        }
         _ => false,
     };
     if !continuation_matches {
@@ -766,19 +940,64 @@ fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> 
     }
 }
 
-fn validate_narrative(
+fn validate_task_session(
+    request: &WorkEvidenceRetrieveRequestV1,
     receipt: &WorkAttemptReceiptV1,
-    narrative: &WorkSessionNarrativeV1,
+    evidence: &WorkTaskSessionEvidenceV1,
 ) -> Result<(), WorkProductApplicationErrorV1> {
     if receipt
         .evidence
         .as_ref()
         .and_then(|evidence| evidence.provider_session.as_ref())
-        != Some(&narrative.source)
+        != Some(&evidence.source)
+        || evidence.task_id != request.task_id
+        || evidence.verified_version != request.verified_version
+        || evidence.attempt != receipt.identity
+        || evidence
+            .ranked_anchors
+            .windows(2)
+            .any(|pair| pair[0].final_ordinal >= pair[1].final_ordinal)
+        || evidence.hydrated.iter().any(|hydrated| {
+            !evidence
+                .ranked_anchors
+                .iter()
+                .any(|ranked| ranked.anchor_id == hydrated.anchor_id)
+        })
+        || evidence.continuation.as_ref().is_some_and(|continuation| {
+            continuation.verified_version != evidence.verified_version
+                || continuation.attempt != evidence.attempt
+                || continuation.source != evidence.source
+                || continuation.participant_epoch != evidence.participant_epoch
+        })
     {
         return Err(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable);
     }
     Ok(())
+}
+
+fn task_session_reauthorization_error(
+    error: WorkProductApplicationErrorV1,
+) -> WorkTaskSessionReauthorizationErrorV1 {
+    match error {
+        WorkProductApplicationErrorV1::NotAuthorized
+        | WorkProductApplicationErrorV1::NotFoundOrNotAuthorized => {
+            WorkTaskSessionReauthorizationErrorV1::Denied
+        }
+        WorkProductApplicationErrorV1::VersionConflict => {
+            WorkTaskSessionReauthorizationErrorV1::Stale
+        }
+        WorkProductApplicationErrorV1::InvalidRequest
+        | WorkProductApplicationErrorV1::RevisionConflict
+        | WorkProductApplicationErrorV1::IdempotencyConflict
+        | WorkProductApplicationErrorV1::EventAuthorityUnavailable
+        | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+        | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
+        | WorkProductApplicationErrorV1::ProposalAuthorityUnavailable
+        | WorkProductApplicationErrorV1::Cancelled
+        | WorkProductApplicationErrorV1::TimedOut => {
+            WorkTaskSessionReauthorizationErrorV1::Unavailable
+        }
+    }
 }
 
 fn validate_anchor(
@@ -796,13 +1015,15 @@ fn validate_anchor(
     Ok(())
 }
 
-fn session_cursor(
+fn task_session_continuation(
     request: &WorkEvidenceRetrieveRequestV1,
     identity: &WorkAttemptIdentityV1,
-) -> Option<OpaqueCursor> {
+) -> Option<WorkTaskSessionContinuationV1> {
     match &request.continuation {
-        Some(WorkEvidenceContinuationV1::Session { attempt, cursor }) if attempt == identity => {
-            Some(cursor.clone())
+        Some(WorkEvidenceContinuationV1::TaskSession { continuation })
+            if &continuation.attempt == identity =>
+        {
+            Some(continuation.clone())
         }
         _ => None,
     }
