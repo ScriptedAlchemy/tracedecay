@@ -23,9 +23,15 @@ use super::invocation::{
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
+mod observability;
 mod request_snapshot;
 mod shutdown;
+
+pub(crate) use observability::RegisteredObservabilityProducerV1;
 use shutdown::ShutdownState;
+
+#[cfg(test)]
+mod observability_tests;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
