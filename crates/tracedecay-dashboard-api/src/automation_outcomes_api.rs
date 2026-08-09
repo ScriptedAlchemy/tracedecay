@@ -1,6 +1,6 @@
-//! Read-only dashboard endpoint for post-approval automation outcomes:
-//! adoption of approved managed skills and recall trajectory of applied fact
-//! proposals.
+//! Read-only dashboard endpoint for automatic curation outcomes: adoption of
+//! activated managed skills and recall trajectory of automatically applied
+//! facts.
 
 use axum::extract::State;
 use axum::http::StatusCode;

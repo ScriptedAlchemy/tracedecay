@@ -574,10 +574,10 @@ Related: tracedecay dashboard (visual curation), tracedecay tool fact_store
 
 pub(crate) const AUTOMATION_LONG_ABOUT: &str = "\
 Configures and drives the self-improvement automation loop (memory curator, \
-session reflector, skill writer): sidecar config, autonomous validated runs, run \
-history with durable artifacts, managed-skill lifecycle, and fact-proposal \
-review. Read-only MCP twins: tracedecay_skill_list, tracedecay_skill_view, \
-tracedecay_automation_run_artifact_view.";
+session reflector, skill writer): daemon-owned configuration, autonomous \
+validation/repair/application, run history with durable artifacts, managed-skill \
+deployment receipts, and curation outcomes. Read-only MCP twins: \
+tracedecay_skill_list, tracedecay_skill_view, tracedecay_automation_run_artifact_view.";
 
 pub(crate) const AUTOMATION_AFTER_HELP: &str = "\
 Examples:
@@ -587,11 +587,11 @@ Examples:
   tracedecay automation runs list --json         Run history
   tracedecay automation runs artifact run-123 codex_handoff --json
   tracedecay automation skills list              Managed skills
-  tracedecay automation skills approve my-skill  Lifecycle changes
-  tracedecay automation facts list               Pending fact proposals
+  tracedecay automation skills create --help     Direct lifecycle changes
+  tracedecay automation facts list               Fact application records
 
 Related: tracedecay install --agent codex --automation (enable at install),
-tracedecay dashboard (review UI), tracedecay memory curate.";
+tracedecay dashboard (automation outcomes), tracedecay memory curate.";
 
 pub(crate) const STORAGE_LONG_ABOUT: &str = "\
 Profile-storage maintenance: read-only per-store size and retention reporting, \

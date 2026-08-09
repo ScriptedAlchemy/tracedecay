@@ -327,50 +327,6 @@ pub enum AutomationSkillsAction {
     Archive { id: String },
     /// Restore an archived skill to active state.
     Restore { id: String },
-    /// Export active managed skills into a host plugin overlay or prompt index.
-    Install {
-        /// Host target to install for.
-        #[arg(long, value_enum)]
-        target: AutomationSkillsInstallTarget,
-        /// Plugin root for cursor/codex, or prompt/index file for prompt targets.
-        #[arg(long, value_name = "PATH")]
-        output: String,
-        /// For Codex, write a complete shareable plugin bundle instead of only a managed-skill overlay.
-        #[arg(long)]
-        plugin_artifact: bool,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum AutomationSkillsInstallTarget {
-    Cursor,
-    Codex,
-    Claude,
-    Agents,
-    OpenCode,
-    Kimi,
-    Kiro,
-    Hermes,
-}
-
-impl From<AutomationSkillsInstallTarget>
-    for tracedecay::automation::skill_targets::SkillInstallTarget
-{
-    fn from(value: AutomationSkillsInstallTarget) -> Self {
-        match value {
-            AutomationSkillsInstallTarget::Cursor => Self::Cursor,
-            AutomationSkillsInstallTarget::Codex => Self::Codex,
-            AutomationSkillsInstallTarget::Claude => Self::Claude,
-            AutomationSkillsInstallTarget::Agents => Self::Agents,
-            AutomationSkillsInstallTarget::OpenCode => Self::OpenCode,
-            AutomationSkillsInstallTarget::Kimi => Self::Kimi,
-            AutomationSkillsInstallTarget::Kiro => Self::Kiro,
-            AutomationSkillsInstallTarget::Hermes => Self::Hermes,
-        }
-    }
 }
 
 #[derive(Subcommand)]

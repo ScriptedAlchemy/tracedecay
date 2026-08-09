@@ -34,7 +34,7 @@ use crate::application::settings_control::{
 };
 use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_agent_hosts::automation::config as automation_config;
+use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 
 pub use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
@@ -141,7 +141,8 @@ struct UserSettingsPayloadV1 {
 struct AutomationSettingsPayloadV1 {
     config_endpoint: String,
     availability: SettingsAvailabilityV1,
-    source_coverage: AutomationSourceCoverageV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configuration_revision_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,13 +158,6 @@ struct SettingsAvailabilityV1 {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_authority: Option<String>,
-}
-
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-struct AutomationSourceCoverageV1 {
-    global: String,
-    project: String,
-    effective: String,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
@@ -398,12 +392,7 @@ async fn settings_envelope(
         .read()
         .await
         .map_err(|_| configuration_authority_unavailable_error())?;
-    let automation = automation_settings_payload(
-        &user.automation,
-        automation_config::load_project_config(&state.dashboard_root)
-            .await
-            .map_err(|err| err.to_string()),
-    );
+    let automation = automation_settings_payload(&project_configuration);
     let payload = SettingsPayloadV1 {
         project: ProjectSettingsPayloadV1 {
             config_path: legacy_config_path.display().to_string(),
@@ -483,41 +472,9 @@ fn user_settings_payload(user: &UserSettingsSnapshotV1) -> UserSettingsPayloadV1
 }
 
 fn automation_settings_payload(
-    global: &automation_config::AutomationConfig,
-    project: Result<Option<automation_config::AutomationConfigPatch>, String>,
+    project_configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> AutomationSettingsPayloadV1 {
-    let (project, project_coverage) = match project {
-        Ok(project) => {
-            let coverage = if project.is_some() {
-                "available"
-            } else {
-                "absent"
-            };
-            (project, coverage)
-        }
-        Err(err) => {
-            return AutomationSettingsPayloadV1 {
-                config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
-                availability: SettingsAvailabilityV1 {
-                    available: false,
-                    reason: Some(format!(
-                        "project automation configuration could not be read: {err}"
-                    )),
-                    required_authority: Some("project automation configuration".to_owned()),
-                },
-                source_coverage: AutomationSourceCoverageV1 {
-                    global: "available".to_owned(),
-                    project: "error".to_owned(),
-                    effective: "unavailable".to_owned(),
-                },
-                enabled: None,
-                backend: None,
-                host_mode: None,
-            };
-        }
-    };
-
-    match automation_config::effective_config(global, project.as_ref()) {
+    match from_configuration_snapshot(&project_configuration.snapshot) {
         Ok(automation) => AutomationSettingsPayloadV1 {
             config_endpoint: AUTOMATION_CONFIG_ENDPOINT.to_owned(),
             availability: SettingsAvailabilityV1 {
@@ -525,11 +482,7 @@ fn automation_settings_payload(
                 reason: None,
                 required_authority: None,
             },
-            source_coverage: AutomationSourceCoverageV1 {
-                global: "available".to_owned(),
-                project: project_coverage.to_owned(),
-                effective: "complete".to_owned(),
-            },
+            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
             enabled: Some(automation.enabled),
             backend: Some(automation.backend.as_str().to_owned()),
             host_mode: Some(automation.host_mode.as_str().to_owned()),
@@ -539,15 +492,11 @@ fn automation_settings_payload(
             availability: SettingsAvailabilityV1 {
                 available: false,
                 reason: Some(format!(
-                    "effective automation configuration could not be resolved: {err}"
+                    "pinned automation configuration could not be resolved: {err}"
                 )),
-                required_authority: Some("effective automation configuration".to_owned()),
+                required_authority: Some("pinned automation configuration".to_owned()),
             },
-            source_coverage: AutomationSourceCoverageV1 {
-                global: "available".to_owned(),
-                project: project_coverage.to_owned(),
-                effective: "error".to_owned(),
-            },
+            configuration_revision_id: Some(project_configuration.revision_id.as_str().to_owned()),
             enabled: None,
             backend: None,
             host_mode: None,
@@ -701,46 +650,5 @@ mod tests {
             user_route["required"],
             json!(["expected_revision_id", "idempotency_key"])
         );
-    }
-
-    #[test]
-    fn automation_settings_payload_preserves_project_authority_failure() {
-        let payload = automation_settings_payload(
-            &automation_config::AutomationConfig::default(),
-            Err("project config unreadable".to_owned()),
-        );
-        let payload = serde_json::to_value(payload).expect("serialize automation settings");
-
-        assert_eq!(payload["availability"]["available"], false);
-        assert_eq!(
-            payload["availability"]["required_authority"],
-            "project automation configuration"
-        );
-        assert_eq!(payload["source_coverage"]["global"], "available");
-        assert_eq!(payload["source_coverage"]["project"], "error");
-        assert_eq!(payload["source_coverage"]["effective"], "unavailable");
-        assert!(payload.get("enabled").is_none());
-        assert!(payload.get("backend").is_none());
-        assert!(payload.get("host_mode").is_none());
-    }
-
-    #[test]
-    fn automation_settings_payload_preserves_effective_resolution_failure() {
-        let global = automation_config::AutomationConfig {
-            timeout_secs: 0,
-            ..automation_config::AutomationConfig::default()
-        };
-        let payload = automation_settings_payload(&global, Ok(None));
-        let payload = serde_json::to_value(payload).expect("serialize automation settings");
-
-        assert_eq!(payload["availability"]["available"], false);
-        assert_eq!(
-            payload["availability"]["required_authority"],
-            "effective automation configuration"
-        );
-        assert_eq!(payload["source_coverage"]["global"], "available");
-        assert_eq!(payload["source_coverage"]["project"], "absent");
-        assert_eq!(payload["source_coverage"]["effective"], "error");
-        assert!(payload.get("enabled").is_none());
     }
 }

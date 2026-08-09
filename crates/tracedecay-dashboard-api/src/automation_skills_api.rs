@@ -8,20 +8,20 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail, internal_error};
-use tracedecay_agent_hosts::agents::{
-    ManagedSkillExportReport, export_managed_skills_to_agent_hosts, home_dir,
-};
 use tracedecay_agent_hosts::automation::managed_skills::{
-    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, approve_managed_skill,
-    create_managed_skill_draft, discard_pending_managed_skill_update, list_managed_skills,
-    load_managed_skill, managed_skill_dir, managed_skill_root, set_managed_skill_pinned,
-    set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, apply_managed_skill_update,
+    archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
+    load_managed_skill, managed_skill_dir, managed_skill_root, restore_managed_skill,
+    set_managed_skill_pinned,
 };
 use tracedecay_agent_hosts::automation::skill_usage::{
     SkillUsageAction, ingest_project_analytics_events, record_skill_usage,
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
     summarize_skill_usage_for,
+};
+use tracedecay_agent_hosts::automation::skill_writer::{
+    ManagedSkillDeploymentReceipt, deploy_managed_skills_to_project,
 };
 use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -30,7 +30,7 @@ type ApiResult = std::result::Result<Json<Value>, JsonError>;
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 
 #[derive(Debug, Deserialize)]
-pub struct ManagedSkillDraftRequest {
+pub struct ManagedSkillCreateRequest {
     id: String,
     title: String,
     summary: String,
@@ -50,8 +50,7 @@ pub struct ManagedSkillDraftRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ManagedSkillUpdateRequest {
-    #[serde(default)]
-    base_checksum: Option<String>,
+    base_checksum: String,
     #[serde(flatten)]
     update: ManagedSkillUpdate,
 }
@@ -104,14 +103,14 @@ pub async fn view(State(state): State<DashboardState>, Path(id): Path<String>) -
     skill_payload(&profile_root, skill).await
 }
 
-pub async fn draft(
-    State(_state): State<DashboardState>,
-    Json(request): Json<ManagedSkillDraftRequest>,
+pub async fn create(
+    State(state): State<DashboardState>,
+    Json(request): Json<ManagedSkillCreateRequest>,
 ) -> ApiResult {
     let profile_root = profile_root_or_error()?;
     reject_existing_managed_skill(&profile_root, &request.id).await?;
     let pinned = request.pinned;
-    let skill = create_managed_skill_draft(&profile_root, request.into_draft())
+    let skill = create_managed_skill(&profile_root, request.into_managed_skill())
         .await
         .map_err(|err| bad_request_or_internal(&err))?;
     let skill = if let Some(pinned) = pinned {
@@ -121,7 +120,8 @@ pub async fn draft(
     } else {
         skill
     };
-    skill_payload(&profile_root, skill).await
+    let deployment = deploy_skills_to_project(&profile_root, &state.project_root).await?;
+    skill_payload_with_deployment(&profile_root, skill, Some(deployment)).await
 }
 
 async fn reject_existing_managed_skill(
@@ -144,82 +144,48 @@ async fn reject_existing_managed_skill(
 }
 
 pub async fn update(
-    State(_state): State<DashboardState>,
+    State(state): State<DashboardState>,
     Path(id): Path<String>,
     Json(request): Json<ManagedSkillUpdateRequest>,
 ) -> ApiResult {
     let profile_root = profile_root_or_error()?;
-    let current = load_managed_skill(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    let skill = (if current.metadata.state == ManagedSkillState::PendingApproval
-        && current.pending_update.is_none()
-    {
-        update_managed_skill(&profile_root, &id, request.update).await
-    } else {
-        let base_checksum = request.base_checksum.as_deref().ok_or_else(|| {
-            bad_request(&format!(
-                "base_checksum is required to stage managed skill update for '{id}'"
-            ))
-        })?;
-        match stage_managed_skill_update(&profile_root, &id, base_checksum, request.update).await {
-            Ok(_) => load_managed_skill(&profile_root, &id).await,
-            Err(err) => Err(err),
-        }
-    })
-    .map_err(|err| not_found_bad_request_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
-}
-
-pub async fn approve(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    let profile_root = profile_root_or_error()?;
-    let skill = approve_managed_skill(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    let exports = export_skills_to_agent_hosts(&profile_root, &state.project_root).await;
-    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
-}
-
-pub async fn discard_update(
-    State(_state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    let profile_root = profile_root_or_error()?;
-    let skill = discard_pending_managed_skill_update(&profile_root, &id)
-        .await
-        .map_err(|err| not_found_or_internal(&err))?;
-    skill_payload(&profile_root, skill).await
+    let skill =
+        apply_managed_skill_update(&profile_root, &id, &request.base_checksum, request.update)
+            .await
+            .map_err(|err| not_found_bad_request_or_internal(&err))?;
+    let deployment = deploy_skills_to_project(&profile_root, &state.project_root).await?;
+    skill_payload_with_deployment(&profile_root, skill, Some(deployment)).await
 }
 
 pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::Disabled).await
+    let profile_root = profile_root_or_error()?;
+    let skill = disable_managed_skill(&profile_root, &id)
+        .await
+        .map_err(|err| not_found_or_internal(&err))?;
+    let deployment = deploy_skills_to_project(&profile_root, &state.project_root).await?;
+    skill_payload_with_deployment(&profile_root, skill, Some(deployment)).await
 }
 
 pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::Archived).await
+    let profile_root = profile_root_or_error()?;
+    let skill = archive_managed_skill(&profile_root, &id)
+        .await
+        .map_err(|err| not_found_or_internal(&err))?;
+    let deployment = deploy_skills_to_project(&profile_root, &state.project_root).await?;
+    skill_payload_with_deployment(&profile_root, skill, Some(deployment)).await
 }
 
 pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
-    set_state(&state, &id, ManagedSkillState::PendingApproval).await
-}
-
-async fn set_state(
-    dashboard_state: &DashboardState,
-    id: &str,
-    state: ManagedSkillState,
-) -> ApiResult {
     let profile_root = profile_root_or_error()?;
-    let skill = set_managed_skill_state(&profile_root, id, state)
+    let skill = restore_managed_skill(&profile_root, &id)
         .await
         .map_err(|err| not_found_or_internal(&err))?;
-    // Disable/archive must retract the skill from every export destination
-    // (and restore must refresh them) just like approve deploys it.
-    let exports = export_skills_to_agent_hosts(&profile_root, &dashboard_state.project_root).await;
-    skill_payload_with_exports(&profile_root, skill, Some(exports)).await
+    let deployment = deploy_skills_to_project(&profile_root, &state.project_root).await?;
+    skill_payload_with_deployment(&profile_root, skill, Some(deployment)).await
 }
 
-impl ManagedSkillDraftRequest {
-    fn into_draft(self) -> ManagedSkillDraft {
+impl ManagedSkillCreateRequest {
+    fn into_managed_skill(self) -> ManagedSkillDraft {
         ManagedSkillDraft {
             id: self.id,
             title: self.title,
@@ -229,7 +195,7 @@ impl ManagedSkillDraftRequest {
             body_markdown: self.body_markdown,
             support_files: self.support_files,
             provenance: self.provenance.unwrap_or(ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
+                source: ManagedSkillSource::User,
                 actor: "dashboard".to_string(),
                 run_id: None,
             }),
@@ -237,47 +203,31 @@ impl ManagedSkillDraftRequest {
     }
 }
 
-/// Re-exports active managed skills to every detected agent host, off the
-/// async runtime (the exports are synchronous fs I/O). Never fails: export
-/// problems are reported per agent inside the returned reports so the
-/// lifecycle action that triggered the export still succeeds.
-async fn export_skills_to_agent_hosts(
+/// Runs the canonical project-scoped deployment after a deliberate operator
+/// lifecycle override. Deployment failures remain in the receipt with an
+/// explicit retry requirement; a join failure is an adapter failure, not a
+/// fabricated deployment result.
+async fn deploy_skills_to_project(
     profile_root: &std::path::Path,
     project_root: &std::path::Path,
-) -> Vec<ManagedSkillExportReport> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
+) -> std::result::Result<ManagedSkillDeploymentReceipt, JsonError> {
     let profile_root = profile_root.to_path_buf();
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let reports = export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root);
-        // Materialize active managed skills as host-loadable SKILL.md files into
-        // every detected `.claude`/`.codex` skills directory (project + global).
-        tracedecay_agent_hosts::automation::skill_materialization::reconcile_after_activation(
-            &profile_root,
-            &project_root,
-        );
-        reports
+        deploy_managed_skills_to_project(&profile_root, &project_root)
     })
     .await
-    .unwrap_or_else(|err| {
-        vec![ManagedSkillExportReport {
-            agent: "export-task".to_string(),
-            exports: Vec::new(),
-            error: Some(format!("managed skill export task failed: {err}")),
-        }]
-    })
+    .map_err(|error| internal_error(&error))
 }
 
 async fn skill_payload(profile_root: &std::path::Path, skill: ManagedSkill) -> ApiResult {
-    skill_payload_with_exports(profile_root, skill, None).await
+    skill_payload_with_deployment(profile_root, skill, None).await
 }
 
-async fn skill_payload_with_exports(
+async fn skill_payload_with_deployment(
     profile_root: &std::path::Path,
     skill: ManagedSkill,
-    exports: Option<Vec<ManagedSkillExportReport>>,
+    deployment: Option<ManagedSkillDeploymentReceipt>,
 ) -> ApiResult {
     let skill_dir = managed_skill_dir(profile_root, &skill.metadata.id)
         .map_err(|err| bad_request_or_internal(&err))?;
@@ -304,9 +254,9 @@ async fn skill_payload_with_exports(
         "stale_recommendation": stale_recommendation,
         "improvement_recommendation": improvement_recommendation,
     });
-    if let Some(exports) = exports {
-        payload["skill_exports"] =
-            serde_json::to_value(exports).map_err(|err| internal_error(&err))?;
+    if let Some(deployment) = deployment {
+        payload["deployment"] =
+            serde_json::to_value(deployment).map_err(|error| internal_error(&error))?;
     }
     Ok(Json(payload))
 }
@@ -388,6 +338,5 @@ fn is_bad_request(message: &str) -> bool {
         || message.contains("failed to parse")
         || message.contains("base_checksum")
         || message.contains("stale")
-        || message.contains("pending update")
         || message.contains("does not change")
 }

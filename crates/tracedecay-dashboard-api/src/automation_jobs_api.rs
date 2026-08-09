@@ -15,11 +15,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
+use super::automation_config_api::effective_automation_config;
 use super::util::{JsonError, http_detail, internal_error};
 use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-use tracedecay_agent_hosts::automation::config::{
-    AutomationConfig, effective_config, load_project_config,
-};
+use tracedecay_agent_hosts::automation::config::AutomationConfig;
 use tracedecay_agent_hosts::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, find_job, job_task_key, load_jobs,
     run_user_job_with_backend, save_jobs, validate_job, validate_job_id,
@@ -261,7 +260,7 @@ pub async fn run(
     AxumPath(job_id): AxumPath<String>,
 ) -> std::result::Result<(StatusCode, Json<Value>), JsonError> {
     let job = load_job_or_404(&state, &job_id).await?;
-    let config = load_effective_config(&state).await?;
+    let config = load_effective_config(&state)?;
     let run_id = format!("dashboard_user_job_{}_{}", job.id, micros_now());
     let payload = json!({
         "run_id": run_id,
@@ -308,14 +307,12 @@ async fn load_job_or_404(
     }
 }
 
-async fn load_effective_config(
+fn load_effective_config(
     state: &DashboardState,
 ) -> std::result::Result<AutomationConfig, JsonError> {
-    let global = crate::user_config::UserConfig::load().automation;
-    let project = load_project_config(&state.dashboard_root)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    effective_config(&global, project.as_ref()).map_err(|err| internal_error(&err))
+    effective_automation_config(state)
+        .map(|(_, config)| config)
+        .map_err(|error| internal_error(&error))
 }
 
 fn micros_now() -> u128 {

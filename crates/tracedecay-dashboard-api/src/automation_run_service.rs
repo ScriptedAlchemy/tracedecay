@@ -639,21 +639,17 @@ async fn dashboard_automation_run_context(
     state: &DashboardState,
 ) -> Result<DashboardAutomationRunContext, String> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::config::{
-        AutomationBackend, effective_config, load_project_config,
-    };
+    use tracedecay_agent_hosts::automation::config::AutomationBackend;
     let cg = state
         .project_graph
         .as_ref()
         .map(Arc::clone)
         .ok_or_else(|| "retained dashboard project graph is unavailable".to_string())?;
-    let global = crate::user_config::UserConfig::load().automation;
-    let project = load_project_config(&state.dashboard_root)
-        .await
-        .map_err(|e| e.to_string())?;
-    let config = effective_config(&global, project.as_ref()).map_err(|e| e.to_string())?;
-    if config.enabled && config.backend == AutomationBackend::ExternalCommand {
-        return Err("automation backend external_command is not implemented yet".to_string());
+    let config = super::automation_config_api::effective_automation_config(state)
+        .map(|(_, config)| config)
+        .map_err(|error| error.to_string())?;
+    if config.enabled && config.backend == AutomationBackend::Disabled {
+        return Err("automation backend is disabled".to_string());
     }
     let backend = CodexAppServerBackend::from_automation_config(&config);
     Ok(DashboardAutomationRunContext {

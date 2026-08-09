@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::future::Future;
 
 use super::DashboardState;
+use super::automation_config_api::effective_automation_config;
 use super::automation_run_service::{
     self, MemoryCuratorRunRequest, SessionReflectionRunRequest, SkillWritingRunRequest,
 };
@@ -15,9 +16,7 @@ use super::util::http_detail;
 use tracedecay_agent_hosts::automation::backend::{
     AgentTaskKind, agent_task_contract, classify_agent_task_error_message, prompt_version, task_key,
 };
-use tracedecay_agent_hosts::automation::config::{
-    AutomationConfig, effective_config, load_project_config,
-};
+use tracedecay_agent_hosts::automation::config::AutomationConfig;
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
@@ -497,7 +496,7 @@ async fn dashboard_job_skip_reason(
 ) -> Result<Option<&'static str>, String> {
     use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 
-    let config = load_effective_dashboard_config(state).await?;
+    let config = load_effective_dashboard_config(state)?;
     if !config.enabled {
         return Ok(Some("automation_disabled"));
     }
@@ -683,7 +682,7 @@ async fn append_dashboard_job_record(
     let payload = super::automation_run_service::execute_dashboard_automation_write(
         state,
         move |state| async move {
-            let config = load_effective_dashboard_config(&state).await?;
+            let config = load_effective_dashboard_config(&state)?;
             let record = dashboard_job_record(&run_id, task, status, error, &config);
             append_run_record(&state.dashboard_root, &record)
                 .await
@@ -695,14 +694,10 @@ async fn append_dashboard_job_record(
     serde_json::from_value(payload).map_err(|err| err.to_string())
 }
 
-async fn load_effective_dashboard_config(
-    state: &DashboardState,
-) -> Result<AutomationConfig, String> {
-    let global = crate::user_config::UserConfig::load().automation;
-    let project = load_project_config(&state.dashboard_root)
-        .await
-        .map_err(|err| err.to_string())?;
-    effective_config(&global, project.as_ref()).map_err(|err| err.to_string())
+fn load_effective_dashboard_config(state: &DashboardState) -> Result<AutomationConfig, String> {
+    effective_automation_config(state)
+        .map(|(_, config)| config)
+        .map_err(|error| error.to_string())
 }
 
 fn automation_job_payload(run_id: &str, ledger_record: &AutomationRunLedgerRecord) -> Value {

@@ -1,9 +1,8 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
-    AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
-    Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    PackageHookAction, ProfileStorageAction, ScoopPackageHookAction, SessionsAction,
-    SessionsRefreshAction,
+    AutomationRunsAction, AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction,
+    FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction, PackageHookAction,
+    ProfileStorageAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -1036,10 +1035,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
         "120",
         "--scheduler-tick-secs",
         "30",
-        "--auto-apply-memory-ops",
-        "false",
-        "--auto-enable-skills",
-        "false",
         "--export-memory-digest",
         "false",
         "--memory-curator",
@@ -1086,8 +1081,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
                         host_mode,
                         timeout_secs,
                         scheduler_tick_secs,
-                        auto_apply_memory_ops,
-                        auto_enable_skills,
                         export_memory_digest,
                         memory_curator,
                         memory_curator_schedule,
@@ -1119,8 +1112,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert_eq!(host_mode.as_deref(), Some("delegated-host"));
     assert_eq!(timeout_secs, Some(120));
     assert_eq!(scheduler_tick_secs, Some(30));
-    assert_eq!(auto_apply_memory_ops, Some(false));
-    assert_eq!(auto_enable_skills, Some(false));
     assert_eq!(export_memory_digest, Some(false));
     assert_eq!(memory_curator, Some(true));
     assert_eq!(memory_curator_schedule.as_deref(), Some("manual"));
@@ -1141,6 +1132,34 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert!(skill_writer_min_idle_secs.is_none());
     assert!(skill_writer_stale_lock_secs.is_none());
     assert!(path.is_none());
+}
+
+#[test]
+fn automation_config_rejects_retired_curation_policy_flags() {
+    for (flag, value) in [
+        ("--memory-apply-policy", "validate_then_apply"),
+        ("--skill-activation-policy", "validate_then_activate"),
+        ("--auto-apply-memory-ops", "true"),
+        ("--auto-enable-skills", "true"),
+    ] {
+        let error = Cli::try_parse_from(["tracedecay", "automation", "config", "set", flag, value])
+            .expect_err("curation policy flags must stay removed");
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "flag: {flag}");
+    }
+}
+
+#[test]
+fn automation_install_rejects_removed_auto_apply_flag() {
+    let error = Cli::try_parse_from([
+        "tracedecay",
+        "install",
+        "--agent",
+        "codex",
+        "--automation",
+        "--auto-apply",
+    ])
+    .expect_err("install-time approval bypass must stay removed");
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -1175,6 +1194,15 @@ fn automation_run_memory_curation_parses_manual_flags() {
             && (min_confidence - 0.7).abs() < f64::EPSILON
             && path.as_deref() == Some("/tmp/project")
     ));
+}
+
+#[test]
+fn automation_facts_rejects_removed_mutation_commands() {
+    for action in ["apply", "reject"] {
+        let error = Cli::try_parse_from(["tracedecay", "automation", "facts", action, "fact-7"])
+            .expect_err("automation fact mutation commands must stay removed");
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
 }
 
 #[test]
@@ -1390,11 +1418,11 @@ fn automation_runs_commands_parse_history_flags() {
 
 #[test]
 fn automation_skills_commands_parse_lifecycle_flags() {
-    let draft = Cli::try_parse_from([
+    let create = Cli::try_parse_from([
         "tracedecay",
         "automation",
         "skills",
-        "draft",
+        "create",
         "--id",
         "repo-hygiene",
         "--title",
@@ -1407,14 +1435,14 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         "Run focused tests.",
         "--pinned",
     ])
-    .expect("automation skills draft should parse");
+    .expect("automation skills create should parse");
     assert!(matches!(
-        draft.command,
+        create.command,
         Some(Commands::Automation {
             action:
                 AutomationAction::Skills {
                     action:
-                        AutomationSkillsAction::Draft {
+                        AutomationSkillsAction::Create {
                             id,
                             title,
                             summary,
@@ -1468,108 +1496,12 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         "approve",
         "repo-hygiene",
     ])
-    .expect("automation skills approve should parse");
-    assert!(matches!(
-        approve.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Skills {
-                    action: AutomationSkillsAction::Approve { id }
-                }
-        }) if id == "repo-hygiene"
-    ));
+    .expect_err("automation skills approve must stay removed");
+    assert_eq!(approve.kind(), ErrorKind::InvalidSubcommand);
 
-    let install = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "skills",
-        "install",
-        "--target",
-        "cursor",
-        "--output",
-        "/tmp/plugin",
-        "--json",
-    ])
-    .expect("automation skills install should parse");
-    assert!(matches!(
-        install.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Skills {
-                    action:
-                        AutomationSkillsAction::Install {
-                            target,
-                            output,
-                            plugin_artifact,
-                            json,
-                        }
-                }
-        }) if target == AutomationSkillsInstallTarget::Cursor
-            && output == "/tmp/plugin"
-            && !plugin_artifact
-            && json
-    ));
-
-    let opencode_install = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "skills",
-        "install",
-        "--target",
-        "opencode",
-        "--output",
-        "/tmp/AGENTS.md",
-    ])
-    .expect("automation skills install should accept opencode alias");
-    assert!(matches!(
-        opencode_install.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Skills {
-                    action:
-                        AutomationSkillsAction::Install {
-                            target,
-                            output,
-                            plugin_artifact,
-                            json,
-                        }
-                }
-        }) if target == AutomationSkillsInstallTarget::OpenCode
-            && output == "/tmp/AGENTS.md"
-            && !plugin_artifact
-            && !json
-    ));
-
-    let codex_artifact = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "skills",
-        "install",
-        "--target",
-        "codex",
-        "--output",
-        "/tmp/codex-plugin",
-        "--plugin-artifact",
-    ])
-    .expect("automation skills install codex artifact should parse");
-    assert!(matches!(
-        codex_artifact.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Skills {
-                    action:
-                        AutomationSkillsAction::Install {
-                            target,
-                            output,
-                            plugin_artifact,
-                            json,
-                        }
-                }
-        }) if target == AutomationSkillsInstallTarget::Codex
-            && output == "/tmp/codex-plugin"
-            && plugin_artifact
-            && !json
-    ));
+    let install = Cli::try_parse_from(["tracedecay", "automation", "skills", "install"])
+        .expect_err("managed skills deploy automatically; manual install must stay removed");
+    assert_eq!(install.kind(), ErrorKind::InvalidSubcommand);
 }
 
 #[test]

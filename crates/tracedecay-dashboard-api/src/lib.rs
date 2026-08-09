@@ -142,9 +142,7 @@ use tracedecay_api::WorkOperation;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::backend;
-use tracedecay_agent_hosts::automation::config::{
-    self as automation_config, AutomationBackend, AutomationHostMode,
-};
+use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
@@ -1217,36 +1215,16 @@ fn project_api_router() -> Router<DashboardState> {
             get(memory_api::fact_proposals),
         )
         .route(
-            "/api/plugins/holographic/fact-proposals/{proposal_id}/apply",
-            post(memory_api::fact_proposal_apply),
-        )
-        .route(
-            "/api/plugins/holographic/fact-proposals/{proposal_id}/reject",
-            post(memory_api::fact_proposal_reject),
-        )
-        .route(
             "/api/plugins/holographic/curation/config",
             get(automation_config_api::get_config).patch(automation_config_api::patch_config),
         )
         .route(
             "/api/automation/skills",
-            get(automation_skills_api::list).post(automation_skills_api::draft),
-        )
-        .route(
-            "/api/automation/skills/draft",
-            post(automation_skills_api::draft),
+            get(automation_skills_api::list).post(automation_skills_api::create),
         )
         .route(
             "/api/automation/skills/{id}",
             get(automation_skills_api::view).patch(automation_skills_api::update),
-        )
-        .route(
-            "/api/automation/skills/{id}/approve",
-            post(automation_skills_api::approve),
-        )
-        .route(
-            "/api/automation/skills/{id}/discard-update",
-            post(automation_skills_api::discard_update),
         )
         .route(
             "/api/automation/skills/{id}/disable",
@@ -1267,14 +1245,6 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/automation/fact-proposals/{id}",
             get(automation_fact_proposals_api::view),
-        )
-        .route(
-            "/api/automation/fact-proposals/{id}/apply",
-            post(automation_fact_proposals_api::apply),
-        )
-        .route(
-            "/api/automation/fact-proposals/{id}/reject",
-            post(automation_fact_proposals_api::reject),
         )
         .route(
             "/api/automation/run/memory-curator",
@@ -1648,26 +1618,41 @@ async fn forward_project_request(
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let has_lcm = state.lcm_read_authority.is_some();
-    let global_automation = crate::user_config::UserConfig::load().automation;
-    let project_automation = automation_config::load_project_config(&state.dashboard_root)
-        .await
-        .ok()
-        .flatten();
-    let automation =
-        automation_config::effective_config(&global_automation, project_automation.as_ref())
-            .unwrap_or(global_automation);
-    let automation_backend = automation.backend;
-    let automation_host_mode = automation.host_mode;
-    let backend_availability = backend::backend_availability(&automation);
-    let automation_backend_supported =
-        matches!(automation_backend, AutomationBackend::CodexAppServer);
-    let automation_configured = automation.enabled && automation_backend_supported;
-    let automation_mode = if !automation_configured {
-        "disabled"
-    } else if automation_host_mode == AutomationHostMode::DelegatedHost {
-        "delegated_host"
-    } else {
-        "standalone_backend"
+    let automation = automation_config_api::effective_automation_config(&state);
+    let (automation_configured, automation_mode, automation_payload) = match automation {
+        Ok((configuration_revision_id, config)) => {
+            let backend_supported = matches!(config.backend, AutomationBackend::CodexAppServer);
+            let configured = config.enabled && backend_supported;
+            let mode = if !configured {
+                "disabled"
+            } else if config.host_mode == AutomationHostMode::DelegatedHost {
+                "delegated_host"
+            } else {
+                "standalone_backend"
+            };
+            (
+                configured,
+                mode,
+                json!({
+                    "available": true,
+                    "configuration_revision_id": configuration_revision_id,
+                    "enabled": config.enabled,
+                    "mode": mode,
+                    "backend": config.backend,
+                    "host_mode": config.host_mode,
+                    "availability": backend::backend_availability(&config),
+                }),
+            )
+        }
+        Err(error) => (
+            false,
+            "unavailable",
+            json!({
+                "available": false,
+                "reason": error.to_string(),
+                "required_authority": "pinned automation configuration",
+            }),
+        ),
     };
     let standalone_automation = automation_mode == "standalone_backend";
     // Multi-root reads are served by the daemon, never by the dashboard's own
@@ -1719,13 +1704,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "settings": true,
             "multi_root": false,
         },
-        "automation": {
-            "enabled": automation.enabled,
-            "mode": automation_mode,
-            "backend": automation_backend,
-            "host_mode": automation_host_mode,
-            "availability": backend_availability,
-        },
+        "automation": automation_payload,
         "dashboards": ["tracedecay"],
     }))
 }

@@ -50,9 +50,7 @@ pub(crate) async fn handle_automation_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        facts::{
-            fact_apply_rpc_args, fact_list_rpc_args, fact_reject_rpc_args, fact_view_rpc_args,
-        },
+        facts::{fact_list_rpc_args, fact_view_rpc_args},
         runs::*,
     };
     use crate::cli::AutomationRunAction;
@@ -61,28 +59,16 @@ mod tests {
     #[test]
     fn automation_rpc_requests_preserve_fact_and_manual_run_arguments() {
         assert_eq!(
-            fact_apply_rpc_args("fact-7"),
-            serde_json::json!({ "action": "fact_apply", "id": "fact-7" })
-        );
-        assert_eq!(
-            fact_list_rpc_args(Some("pending_approval"), 50),
+            fact_list_rpc_args(Some("applying"), 50),
             serde_json::json!({
                 "action": "fact_list",
-                "state": "pending_approval",
+                "state": "applying",
                 "limit": 50,
             })
         );
         assert_eq!(
             fact_view_rpc_args("fact-7"),
             serde_json::json!({ "action": "fact_view", "id": "fact-7" })
-        );
-        assert_eq!(
-            fact_reject_rpc_args("fact-7", Some("not durable")),
-            serde_json::json!({
-                "action": "fact_reject",
-                "id": "fact-7",
-                "reason": "not durable",
-            })
         );
 
         let (path, request) = automation_run_rpc_request(AutomationRunAction::MemoryCuration {
