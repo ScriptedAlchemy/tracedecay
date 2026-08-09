@@ -1,6 +1,5 @@
 //! Shared row helpers, storage-error plumbing, and owner-key handling.
 
-use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::privacy::sanitize_provider_metadata_text;
@@ -11,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_domain::{
     FactCategoryV1, FactOwnerV1, PayloadAccessState, SourceStoreId, UtcMicros,
 };
-use tracedecay_store::{FactProposalStoreError, FactStoreError, FactStoreResult};
+use tracedecay_store::{FactStoreError, FactStoreResult};
 
 pub(super) const COMMIT_OPERATION: &str = "commit canonical memory fact";
 
@@ -128,16 +127,6 @@ pub(super) fn storage_message(
     message: impl Into<String>,
 ) -> FactStoreError {
     storage_error(operation, std::io::Error::other(message.into()))
-}
-
-pub(super) fn authority_storage_error(
-    operation: &'static str,
-    source: impl Error + Send + Sync + 'static,
-) -> FactProposalStoreError {
-    FactProposalStoreError::Storage {
-        operation,
-        source: Box::new(source),
-    }
 }
 
 pub(super) fn identity_collision<T>(kind: &'static str, id: &str) -> FactStoreResult<T> {

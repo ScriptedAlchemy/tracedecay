@@ -1,4 +1,4 @@
-//! Typed compatibility use cases and projection conversions.
+//! Typed project-memory use cases and persisted fact-id projections.
 
 use sha2::{Digest, Sha256};
 
@@ -7,17 +7,16 @@ use tracedecay_domain::{
     ProvenanceId,
 };
 use tracedecay_store::{
+    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
     ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactFeedbackCommandV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
-    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalEvidenceV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRelationV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRelationV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
@@ -34,34 +33,34 @@ use tracedecay_runtime_core::memory::types::{
 
 use super::MemoryApplication;
 use super::context::{MemoryOperationContext, validate_operation_component};
-use super::error::{MemoryApplicationError, MemoryCompatibilityScope};
-use super::sanitize::{SanitizedAddFactRequestV1, sanitize_add_fact_request};
+use super::error::{MemoryApplicationError, PersistedFactIdScope};
+use super::sanitize::{SanitizedAddFactRequest, sanitize_add_fact_request};
 
-/// Converts a live automation proposal without manufacturing a legacy numeric
+/// Converts an automation item without manufacturing a legacy numeric
 /// identity. The deterministic operation identity makes repeated processing of
-/// the same run/proposal idempotent at the authority boundary.
-pub fn automation_fact_proposal_add_command(
+/// the same run/apply identity idempotent at the authority boundary.
+pub fn automatic_fact_add_command(
     owner: FactOwnerV1,
     request: AddFactRequest,
     run_id: &str,
-    proposal_id: &str,
+    apply_id: &str,
     actor: Option<ActorId>,
 ) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
     owner.validate()?;
-    validate_operation_component(run_id, "automation proposal run identity")?;
-    validate_operation_component(proposal_id, "automation proposal identity")?;
-    let context = MemoryOperationContext::from_trusted_request_id(
+    validate_operation_component(run_id, "automatic fact run identity")?;
+    validate_operation_component(apply_id, "automatic fact apply identity")?;
+    let context = MemoryOperationContext::from_request_id(
         &owner,
-        "automation-fact-proposal",
-        &format!("{run_id}:{proposal_id}"),
+        "automatic-fact",
+        &format!("{run_id}:{apply_id}"),
         actor,
     )?;
     let Some(request) = sanitize_add_fact_request(request)? else {
-        return Err(MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "automation proposal rejected by memory privacy sanitizer",
+        return Err(MemoryApplicationError::InvalidInput {
+            invariant: "automatic fact declined by memory privacy sanitizer",
         });
     };
-    with_automation_run_id(compatibility_add_command(owner, request, &context)?, run_id)
+    with_automation_run_id(fact_add_command(owner, request, &context)?, run_id)
 }
 
 /// Binds the trusted run identity to command metadata after the payload has
@@ -70,20 +69,20 @@ pub fn with_automation_run_id(
     command: ProjectMemoryFactAddCommandV1,
     run_id: &str,
 ) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
-    validate_operation_component(run_id, "automation proposal run identity")?;
+    validate_operation_component(run_id, "automatic fact run identity")?;
     command
         .with_automation_run_id(run_id.to_owned())
         .map_err(MemoryApplicationError::Store)
 }
 
-pub(super) fn compatibility_add_command(
+pub(super) fn fact_add_command(
     owner: FactOwnerV1,
-    request: SanitizedAddFactRequestV1,
+    request: SanitizedAddFactRequest,
     context: &MemoryOperationContext,
 ) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
     let (request, sanitization_receipt) = request.into_parts();
     let trust = Confidence::new(request.trust.unwrap_or(DEFAULT_TRUST)).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
+        MemoryApplicationError::InvalidInput {
             invariant: "trust must be between 0.0 and 1.0",
         }
     })?;
@@ -114,9 +113,7 @@ pub(super) const fn fact_category(category: MemoryCategory) -> FactCategoryV1 {
     }
 }
 
-pub(super) const fn compatibility_relation(
-    relation: FactRelationKind,
-) -> ProjectMemoryFactRelationV1 {
+pub(super) const fn memory_relation(relation: FactRelationKind) -> ProjectMemoryFactRelationV1 {
     match relation {
         FactRelationKind::Supports => ProjectMemoryFactRelationV1::Supports,
         FactRelationKind::Contradicts => ProjectMemoryFactRelationV1::Contradicts,
@@ -136,14 +133,15 @@ const fn memory_category(category: FactCategoryV1) -> MemoryCategory {
     }
 }
 
-pub(super) fn compatibility_confidence(
+pub(super) fn memory_confidence(
     value: Option<f64>,
 ) -> Result<Option<Confidence>, MemoryApplicationError> {
-    value.map(Confidence::new).transpose().map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
+    value
+        .map(Confidence::new)
+        .transpose()
+        .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "confidence (trust/min_trust) must be between 0.0 and 1.0",
-        }
-    })
+        })
 }
 
 pub(super) fn legacy_i64(
@@ -151,7 +149,7 @@ pub(super) fn legacy_i64(
     invariant: &'static str,
 ) -> Result<i64, MemoryApplicationError> {
     i64::try_from(value)
-        .map_err(|_| MemoryApplicationError::IncompatibleLegacyProjection { invariant })
+        .map_err(|_| MemoryApplicationError::UnrepresentablePersistedFact { invariant })
 }
 
 pub(super) fn legacy_usize(
@@ -159,13 +157,13 @@ pub(super) fn legacy_usize(
     invariant: &'static str,
 ) -> Result<usize, MemoryApplicationError> {
     usize::try_from(value)
-        .map_err(|_| MemoryApplicationError::IncompatibleLegacyProjection { invariant })
+        .map_err(|_| MemoryApplicationError::UnrepresentablePersistedFact { invariant })
 }
 
-/// Projects one authoritative compatibility snapshot into the legacy status
+/// Projects one authoritative snapshot into the persisted numeric status
 /// shape. Keep this pure so callers cannot accidentally split status and
 /// feedback-history repair across separate reads.
-pub(super) fn project_memory_status_v1(
+pub(super) fn project_memory_status(
     status: &ProjectMemoryMemoryStatusV1,
 ) -> Result<MemoryStatus, MemoryApplicationError> {
     let funnel = status.feedback_funnel();
@@ -240,7 +238,7 @@ pub(super) fn project_memory_status_v1(
 }
 
 pub(super) fn project_memory_fact_record(
-    scope: &MemoryCompatibilityScope,
+    scope: &PersistedFactIdScope,
     fact: &tracedecay_store::ProjectMemoryFactV1,
 ) -> Result<FactRecord, MemoryApplicationError> {
     if fact.owner() != scope.owner() {
@@ -249,18 +247,18 @@ pub(super) fn project_memory_fact_record(
         });
     }
     let mapping = fact.mapping().legacy_mapping().ok_or(
-        MemoryApplicationError::IncompatibleLegacyProjection {
+        MemoryApplicationError::UnrepresentablePersistedFact {
             invariant: "legacy numeric fact mapping",
         },
     )?;
     if mapping.owner() != scope.owner() || mapping.source_store_id() != scope.source_store_id() {
-        return Err(MemoryApplicationError::IncompatibleLegacyProjection {
+        return Err(MemoryApplicationError::UnrepresentablePersistedFact {
             invariant: "legacy fact mapping source",
         });
     }
     let payload = fact
         .payload()
-        .ok_or(MemoryApplicationError::IncompatibleLegacyProjection {
+        .ok_or(MemoryApplicationError::UnrepresentablePersistedFact {
             invariant: "available legacy fact payload",
         })?;
     let telemetry = fact.telemetry();
@@ -286,22 +284,22 @@ pub(super) fn project_memory_fact_record(
 }
 
 pub(super) fn project_memory_projection_record(
-    scope: &MemoryCompatibilityScope,
+    scope: &PersistedFactIdScope,
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactRecord, MemoryApplicationError> {
     match projection {
         ProjectMemoryFactProjectionV1::Available(fact) => project_memory_fact_record(scope, fact),
         ProjectMemoryFactProjectionV1::Unavailable(_) => {
-            Err(MemoryApplicationError::IncompatibleLegacyProjection {
+            Err(MemoryApplicationError::UnrepresentablePersistedFact {
                 invariant: "available legacy fact projection",
             })
         }
     }
 }
 
-/// Typed compatibility use cases. Transport adapters translate legacy inputs
-/// before this boundary; only the authority owns the corresponding mutation
-/// transaction and compatibility projection.
+/// Typed project-memory use cases. Transport adapters translate persisted
+/// numeric inputs before this boundary; only the authority owns the
+/// corresponding mutation transaction and projection.
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn list_project_memory_facts(
         &self,
@@ -381,7 +379,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 .any(|contradiction| contradiction.existing().owner() != &self.owner)
         {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility contradiction bounds and owner",
+                invariant: "project-memory contradiction bounds and owner",
             });
         }
         Ok(page)
@@ -406,7 +404,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// content is never forwarded to the authority: only its canonical SHA-256
     /// locator digest crosses this boundary. Legacy mappings remain part of an
     /// available projection, so callers can preserve the historical numeric id.
-    pub async fn find_exact_fact_v1_by_content(
+    pub async fn find_exact_fact_by_content(
         &self,
         content: &str,
     ) -> Result<Option<ProjectMemoryFactProjectionV1>, MemoryApplicationError> {
@@ -417,7 +415,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             "sha256:{}",
             hex::encode(Sha256::digest(content.as_bytes()))
         ))
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
+        .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "exact fact content digest",
         })?;
         let result =
@@ -430,7 +428,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             && projection.owner() != &self.owner
         {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "exact compatibility fact owner",
+                invariant: "exact project-memory fact owner",
             });
         }
         Ok(result)
@@ -447,14 +445,14 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let history = self.authority.project_memory_fact_history(query).await?;
         if history.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility history owner",
+                invariant: "project-memory history owner",
             });
         }
         if let Some(fact_id) = target.canonical_fact_id()
             && history.fact_id() != fact_id
         {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility history canonical identity",
+                invariant: "project-memory history canonical identity",
             });
         }
         validate_lineage(
@@ -481,7 +479,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .await?;
         if history.owner() != &self.owner || history.events().len() > limit {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility feedback history owner and bounds",
+                invariant: "project-memory feedback history owner and bounds",
             });
         }
         Ok(history)
@@ -497,7 +495,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .await?;
         if status.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility memory status owner",
+                invariant: "project-memory status owner",
             });
         }
         Ok(status)
@@ -584,7 +582,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .any(|projection| projection.owner() != &self.owner)
         {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility retrieval projection owner",
+                invariant: "project-memory retrieval projection owner",
             });
         }
         if targets
@@ -597,146 +595,83 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             })
         {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility retrieval canonical target",
+                invariant: "project-memory retrieval canonical target",
             });
         }
         Ok(projections)
     }
 
-    pub async fn submit_project_memory_fact_proposal(
+    pub async fn apply_project_memory_automatic_fact(
         &self,
-        proposal_id: ProvenanceId,
+        apply_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
-        submitter: Option<ActorId>,
-        evidence: ProjectMemoryFactProposalEvidenceV1,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, MemoryApplicationError> {
+        evidence: ProjectMemoryAutomaticFactEvidenceV1,
+    ) -> Result<ProjectMemoryAutomaticFactApplyResultV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
-        let proposal = self
+        let result = self
             .authority
-            .submit_project_memory_fact_proposal(proposal_id.clone(), request, submitter, evidence)
+            .apply_project_memory_automatic_fact(apply_id.clone(), request, evidence)
             .await?;
-        validate_project_memory_proposal(&self.owner, &proposal_id, &proposal)?;
-        Ok(proposal)
-    }
-
-    pub async fn get_project_memory_fact_proposal(
-        &self,
-        proposal_id: ProvenanceId,
-    ) -> Result<Option<ProjectMemoryFactProposalRecordV1>, MemoryApplicationError> {
-        let proposal = self
-            .authority
-            .get_project_memory_fact_proposal(self.owner.clone(), proposal_id.clone())
-            .await?;
-        if let Some(proposal) = &proposal {
-            validate_project_memory_proposal(&self.owner, &proposal_id, proposal)?;
+        validate_project_memory_automatic_fact_receipt(&self.owner, &apply_id, result.receipt())?;
+        let valid_disposition = matches!(
+            (result.receipt().state(), result.disposition()),
+            (
+                ProjectMemoryAutomaticFactStateV1::Applied,
+                ProjectMemoryAutomaticFactApplyDispositionV1::Applied
+                    | ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied,
+            ) | (
+                ProjectMemoryAutomaticFactStateV1::Quarantined,
+                ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
+            )
+        );
+        if !valid_disposition {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "automatic fact receipt disposition",
+            });
         }
-        Ok(proposal)
+        Ok(result)
     }
 
-    pub async fn list_project_memory_fact_proposals(
+    pub async fn get_project_memory_automatic_fact_receipt(
         &self,
-        state: Option<ProjectMemoryFactProposalStateV1>,
-        after_proposal_id: Option<ProvenanceId>,
+        apply_id: ProvenanceId,
+    ) -> Result<Option<ProjectMemoryAutomaticFactReceiptV1>, MemoryApplicationError> {
+        let receipt = self
+            .authority
+            .get_project_memory_automatic_fact_receipt(self.owner.clone(), apply_id.clone())
+            .await?;
+        if let Some(receipt) = &receipt {
+            validate_project_memory_automatic_fact_receipt(&self.owner, &apply_id, receipt)?;
+        }
+        Ok(receipt)
+    }
+
+    pub async fn list_project_memory_automatic_fact_receipts(
+        &self,
+        state: Option<ProjectMemoryAutomaticFactStateV1>,
+        after_apply_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> Result<ProjectMemoryFactProposalPageV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryAutomaticFactReceiptPageV1, MemoryApplicationError> {
         let page = self
             .authority
-            .list_project_memory_fact_proposals(
+            .list_project_memory_automatic_fact_receipts(
                 self.owner.clone(),
                 state,
-                after_proposal_id.clone(),
+                after_apply_id.clone(),
                 limit,
             )
             .await?;
-        validate_project_memory_proposal_page(
+        validate_project_memory_automatic_fact_receipt_page(
             &self.owner,
-            after_proposal_id.as_ref(),
+            after_apply_id.as_ref(),
             limit,
             &page,
         )?;
         Ok(page)
     }
-
-    pub async fn count_pending_project_memory_fact_proposals(
-        &self,
-    ) -> Result<u64, MemoryApplicationError> {
-        Ok(self
-            .authority
-            .count_pending_project_memory_fact_proposals(self.owner.clone())
-            .await?)
-    }
-
-    pub async fn reject_project_memory_fact_proposal(
-        &self,
-        proposal_id: ProvenanceId,
-        expected_revision: ProjectMemoryFactProposalRevisionV1,
-        reviewer: ActorId,
-        reason: String,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, MemoryApplicationError> {
-        let proposal = self
-            .authority
-            .reject_project_memory_fact_proposal(
-                self.owner.clone(),
-                proposal_id.clone(),
-                expected_revision,
-                reviewer,
-                reason,
-            )
-            .await?;
-        validate_project_memory_proposal(&self.owner, &proposal_id, &proposal)?;
-        if proposal.revision() <= expected_revision {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility proposal rejection revision",
-            });
-        }
-        Ok(proposal)
-    }
-
-    pub async fn promote_project_memory_fact_proposal(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, MemoryApplicationError> {
-        Ok(self
-            .promote_project_memory_fact_proposal_with_disposition(request)
-            .await?
-            .proposal()
-            .clone())
-    }
-
-    /// Atomic promotion result for automation callers. The disposition comes
-    /// from the authority transaction/replay receipt, never a pre-read.
-    pub async fn promote_project_memory_fact_proposal_with_disposition(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalPromotionResultV1, MemoryApplicationError> {
-        self.ensure_owner(request.owner())?;
-        let proposal_id = request.proposal_id().clone();
-        let expected_revision = request.expected_revision();
-        let result = self
-            .authority
-            .promote_project_memory_fact_proposal_with_disposition(request)
-            .await?;
-        let proposal = result.proposal();
-        validate_project_memory_proposal(&self.owner, &proposal_id, proposal)?;
-        let revision_is_valid = match result.disposition() {
-            ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted
-            | ProjectMemoryFactProposalPromotionDispositionV1::Quarantined => {
-                proposal.revision() > expected_revision
-            }
-            ProjectMemoryFactProposalPromotionDispositionV1::AlreadyPromoted => {
-                proposal.revision() >= expected_revision
-            }
-        };
-        if !revision_is_valid {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility proposal promotion revision",
-            });
-        }
-        Ok(result)
-    }
 }
 
-pub(super) fn compatibility_projection_targets(
+pub(super) fn projection_targets(
     projections: &[ProjectMemoryFactProjectionV1],
 ) -> Vec<ProjectMemoryFactTargetV1> {
     projections
@@ -775,7 +710,7 @@ fn validate_project_memory_page(
         || cursor_is_invalid
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility list bounds, owner, cursor, and ordering",
+            invariant: "project-memory list bounds, owner, cursor, and ordering",
         });
     }
     Ok(())
@@ -815,7 +750,7 @@ fn validate_project_memory_search_page(
         || cursor_is_invalid
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility search bounds, owner, cursor, and ordering",
+            invariant: "project-memory search bounds, owner, cursor, and ordering",
         });
     }
     Ok(())
@@ -867,13 +802,13 @@ fn validate_project_memory_projection(
 ) -> Result<(), MemoryApplicationError> {
     if projection.owner() != owner {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility projection owner",
+            invariant: "project-memory projection owner",
         });
     }
     if let Some(fact_id) = target.canonical_fact_id() {
         if projection.fact_id() != fact_id {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility projection canonical identity",
+                invariant: "project-memory projection canonical identity",
             });
         }
     } else if let (Some(query), ProjectMemoryFactProjectionV1::Available(fact)) =
@@ -886,7 +821,7 @@ fn validate_project_memory_projection(
                 || mapping.legacy_fact_id() != query.legacy_fact_id()
         }) {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility projection legacy mapping",
+                invariant: "persisted fact-id projection mapping",
             });
         }
     }
@@ -916,7 +851,7 @@ fn validate_project_memory_inspection(
             .any(|pair| pair[0].anchor_id() >= pair[1].anchor_id())
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility inspection owner and identity",
+            invariant: "project-memory inspection owner and identity",
         });
     }
     match target {
@@ -924,7 +859,7 @@ fn validate_project_memory_inspection(
             if inspection.fact().fact_id() != target.fact_id() =>
         {
             Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "compatibility inspection canonical identity",
+                invariant: "project-memory inspection canonical identity",
             })
         }
         ProjectMemoryFactTargetV1::Legacy(query) => {
@@ -935,7 +870,7 @@ fn validate_project_memory_inspection(
                     || mapping.legacy_fact_id() != query.legacy_fact_id()
             }) {
                 return Err(MemoryApplicationError::InvalidAuthorityResult {
-                    invariant: "compatibility inspection legacy mapping",
+                    invariant: "persisted fact-id inspection mapping",
                 });
             }
             Ok(())
@@ -956,57 +891,54 @@ fn validate_project_memory_add_outcome(
             .is_some_and(|fact_id| fact_id.owner() != owner)
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility add outcome owner",
+            invariant: "project-memory add outcome owner",
         });
     }
     Ok(())
 }
 
-fn validate_project_memory_proposal(
+fn validate_project_memory_automatic_fact_receipt(
     owner: &FactOwnerV1,
-    proposal_id: &ProvenanceId,
-    proposal: &ProjectMemoryFactProposalRecordV1,
+    apply_id: &ProvenanceId,
+    receipt: &ProjectMemoryAutomaticFactReceiptV1,
 ) -> Result<(), MemoryApplicationError> {
-    if proposal.owner() != owner
-        || proposal.proposal_id() != proposal_id
-        || proposal.request().owner() != owner
+    if receipt.owner() != owner
+        || receipt.apply_id() != apply_id
+        || receipt.request().owner() != owner
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility proposal owner and identity",
+            invariant: "automatic fact receipt owner and identity",
         });
     }
     Ok(())
 }
 
-fn validate_project_memory_proposal_page(
+fn validate_project_memory_automatic_fact_receipt_page(
     owner: &FactOwnerV1,
-    after_proposal_id: Option<&ProvenanceId>,
+    after_apply_id: Option<&ProvenanceId>,
     limit: usize,
-    page: &ProjectMemoryFactProposalPageV1,
+    page: &ProjectMemoryAutomaticFactReceiptPageV1,
 ) -> Result<(), MemoryApplicationError> {
-    let proposals = page.proposals();
-    let cursor_is_invalid = page.next_after_proposal_id().is_some_and(|cursor| {
+    let receipts = page.receipts();
+    let cursor_is_invalid = page.next_after_apply_id().is_some_and(|cursor| {
         cursor.validate().is_err()
-            || after_proposal_id.is_some_and(|after| cursor <= after)
-            || proposals
+            || after_apply_id.is_some_and(|after| cursor <= after)
+            || receipts
                 .last()
-                .is_none_or(|proposal| cursor <= proposal.proposal_id())
+                .is_none_or(|receipt| cursor <= receipt.apply_id())
     });
     if page.owner() != owner
-        || proposals.len() > limit
-        || proposals.iter().any(|proposal| proposal.owner() != owner)
-        || after_proposal_id.is_some_and(|after| {
-            proposals
-                .iter()
-                .any(|proposal| proposal.proposal_id() <= after)
-        })
-        || proposals
+        || receipts.len() > limit
+        || receipts.iter().any(|receipt| receipt.owner() != owner)
+        || after_apply_id
+            .is_some_and(|after| receipts.iter().any(|receipt| receipt.apply_id() <= after))
+        || receipts
             .windows(2)
-            .any(|pair| pair[0].proposal_id() >= pair[1].proposal_id())
+            .any(|pair| pair[0].apply_id() >= pair[1].apply_id())
         || cursor_is_invalid
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "compatibility proposal page bounds, owner, cursor, and ordering",
+            invariant: "automatic fact receipt page bounds, owner, cursor, and ordering",
         });
     }
     Ok(())

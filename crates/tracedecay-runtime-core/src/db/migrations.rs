@@ -41,7 +41,7 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// canonical `memory_v2_*` tables; derived vectors are re-created from that
 /// content. A current-stamped store containing a retired projection fails
 /// closed before interpretation.
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
@@ -202,6 +202,9 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
                        'memory_v2_legacy_map', 'memory_v2_legacy_quarantine',
                        'memory_v2_backfill_progress',
                        'memory_v2_legacy_proposal_map',
+                       'memory_v2_proposals',
+                       'memory_v2_proposal_transitions',
+                       'memory_v2_proposal_current',
                        'memory_v2_legacy_feedback_event_map',
                        'memory_v2_feedback_history_repair_progress',
                        'memory_v2_compatibility_operation_receipts',
@@ -236,58 +239,6 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
             message: format!("failed to decode retired SQLite projection object name: {error}"),
             operation: "ensure_schema_current".to_owned(),
         })
-}
-
-async fn noncanonical_project_memory_proposal_state(
-    conn: &impl QueryExecutor,
-) -> Result<Option<(String, String)>> {
-    let mut rows = conn
-        .query(
-            "SELECT surface, state
-             FROM (
-                 SELECT 'memory_v2_proposal_current.state' AS surface, state
-                 FROM memory_v2_proposal_current
-                 UNION ALL
-                 SELECT 'memory_v2_proposal_transitions.current_state', current_state
-                 FROM memory_v2_proposal_transitions
-                 UNION ALL
-                 SELECT 'memory_v2_proposal_transitions.previous_state', previous_state
-                 FROM memory_v2_proposal_transitions
-                 WHERE previous_state IS NOT NULL
-             )
-             WHERE state NOT IN ('applying', 'applied', 'rejected', 'quarantined')
-             ORDER BY surface, state
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to inspect project-memory proposal states: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to read project-memory proposal state probe: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?
-    else {
-        return Ok(None);
-    };
-    let surface = row
-        .get::<String>(0)
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to decode project-memory proposal state surface: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?;
-    let state = row
-        .get::<String>(1)
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to decode project-memory proposal state: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?;
-    Ok(Some((surface, state)))
 }
 
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
@@ -330,16 +281,6 @@ pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) ->
         ));
     }
     final_shape::require_exact_final_shape(conn).await?;
-    if let Some((surface, state)) = noncanonical_project_memory_proposal_state(conn).await? {
-        return Err(TraceDecayError::reset_required(
-            "SQLite store",
-            format!(
-                "database schema v{current} contains removed project-memory proposal state \
-                 '{state}' in {surface}; remove the store directory and let this binary create \
-                 the exact automatic-curation shape"
-            ),
-        ));
-    }
     Ok(())
 }
 

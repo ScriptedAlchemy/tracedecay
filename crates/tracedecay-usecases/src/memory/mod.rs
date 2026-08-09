@@ -13,22 +13,18 @@ mod converge;
 mod dashboard;
 mod error;
 mod graph;
+mod legacy_fact_ids;
 mod project_memory;
 mod sanitize;
-mod v1;
 
 #[cfg(test)]
 mod tests;
 
-pub use anchors::{
-    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
-};
+pub use anchors::{EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchor};
 pub use context::MemoryOperationContext;
-pub use error::{
-    MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
-};
-pub use project_memory::{automation_fact_proposal_add_command, with_automation_run_id};
-pub use v1::{V1FactTrustHistoryV1, V1MemoryStatusWithRepairV1, V1UpdateFactOutcome};
+pub use error::{MemoryApplicationError, PERSISTED_FACT_ID_SOURCE_STORE, PersistedFactIdScope};
+pub use legacy_fact_ids::{FactTrustHistory, MemoryStatusWithRepair, UpdateFactOutcome};
+pub use project_memory::{automatic_fact_add_command, with_automation_run_id};
 
 #[cfg(test)]
 use tracedecay_domain::{
@@ -39,7 +35,9 @@ use tracedecay_runtime_core::memory::types::{FeedbackAction, FeedbackRequest};
 #[cfg(test)]
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
-    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
+    FactStore, FactStoreError, FactWriteBatch, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
@@ -52,16 +50,13 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryMemoryRepairCommandV1,
     ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing
@@ -84,30 +79,30 @@ pub fn memory_application_for_db(
     MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
 }
 
-/// Owner-bound application service. Paths, connections, legacy integer IDs,
-/// and transport payloads never enter this boundary.
+/// Owner-bound application service. Paths, connections, and transport payloads
+/// never enter this boundary.
 pub struct MemoryApplication<A> {
     owner: FactOwnerV1,
-    compatibility_scope: MemoryCompatibilityScope,
+    persisted_fact_id_scope: PersistedFactIdScope,
     authority: A,
 }
 
 impl<A> MemoryApplication<A> {
     pub fn new(owner: FactOwnerV1, authority: A) -> Result<Self, MemoryApplicationError> {
-        Self::new_with_compatibility_scope(MemoryCompatibilityScope::runtime(owner)?, authority)
+        Self::new_with_persisted_fact_id_scope(PersistedFactIdScope::runtime(owner)?, authority)
     }
 
-    /// Explicit construction path for a migrated V1 source with a typed,
+    /// Explicit construction path for a migrated persisted source with a typed,
     /// immutable source-store identity. Callers never derive this from a path
     /// or transport field.
-    pub fn new_with_compatibility_scope(
-        compatibility_scope: MemoryCompatibilityScope,
+    pub fn new_with_persisted_fact_id_scope(
+        persisted_fact_id_scope: PersistedFactIdScope,
         authority: A,
     ) -> Result<Self, MemoryApplicationError> {
-        compatibility_scope.owner().validate()?;
+        persisted_fact_id_scope.owner().validate()?;
         Ok(Self {
-            owner: compatibility_scope.owner().clone(),
-            compatibility_scope,
+            owner: persisted_fact_id_scope.owner().clone(),
+            persisted_fact_id_scope,
             authority,
         })
     }
@@ -116,22 +111,24 @@ impl<A> MemoryApplication<A> {
         &self.owner
     }
 
-    pub fn compatibility_scope(&self) -> &MemoryCompatibilityScope {
-        &self.compatibility_scope
+    pub fn persisted_fact_id_scope(&self) -> &PersistedFactIdScope {
+        &self.persisted_fact_id_scope
     }
 
-    fn legacy_compatibility_target(
+    /// Decodes a shipped numeric fact identity into the canonical target used by
+    /// the SQLite fact authority.
+    fn persisted_fact_id_target(
         &self,
-        legacy_fact_id: i64,
+        persisted_fact_id: i64,
     ) -> Result<ProjectMemoryFactTargetV1, MemoryApplicationError> {
         LegacyFactQuery::new(
             self.owner.clone(),
-            self.compatibility_scope.source_store_id().clone(),
-            legacy_fact_id,
+            self.persisted_fact_id_scope.source_store_id().clone(),
+            persisted_fact_id,
         )
         .map(ProjectMemoryFactTargetV1::Legacy)
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy numeric fact target",
+        .map_err(|_| MemoryApplicationError::InvalidInput {
+            invariant: "persisted numeric fact target",
         })
     }
 

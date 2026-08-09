@@ -5,12 +5,14 @@ use std::sync::Arc;
 use crate::db::Database;
 
 use tracedecay_domain::{
-    ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
+    FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactStore, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
@@ -23,29 +25,26 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalEvidenceV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
-    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchPageV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryGraphPageV1,
-    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryResult,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
+    ProjectMemoryFactTargetV1, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, ProjectMemoryResult, RetrievalAnchorQuery, StoredFactV1,
 };
 
+use automatic_facts::{
+    get_project_memory_automatic_fact_receipt_tx, list_project_memory_automatic_fact_receipts_tx,
+};
 use crud::{
-    PROMOTE_OPERATION, add_project_memory_fact_tx, fact_response_metadata_tx,
+    add_project_memory_fact_tx, apply_project_memory_automatic_fact_tx, fact_response_metadata_tx,
     find_project_memory_fact_by_content_digest_tx, get_project_memory_fact_tx,
     get_retrieval_anchor_tx, inspect_project_memory_fact_tx, list_project_memory_facts_tx,
     project_memory_fact_feedback_history_tx, project_memory_fact_history_tx,
-    promote_fact_proposal_tx, promote_project_memory_fact_proposal_tx,
-    promote_project_memory_fact_proposal_with_disposition_tx, query_current_facts_tx,
-    query_fact_as_of_response_tx, query_fact_as_of_tx, query_fact_current_response_tx,
-    query_fact_current_tx, query_fact_lineage_response_tx, query_fact_lineage_tx,
-    record_project_memory_fact_feedback_tx, remove_project_memory_fact_tx,
+    query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
+    query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
+    query_fact_lineage_tx, record_project_memory_fact_feedback_tx, remove_project_memory_fact_tx,
     update_project_memory_fact_tx,
 };
 use curation::{apply_project_memory_fact_curation_tx, merge_project_memory_facts_tx};
@@ -54,13 +53,8 @@ use dashboard::{
     dashboard_project_memory_overview_tx, dashboard_project_memory_vector_points_tx,
 };
 use envelope::finish_read_snapshot;
-use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
+use primitives::{QUERY_OPERATION, storage_error};
 use projection::resolve_legacy_fact_tx;
-use proposals::{
-    count_pending_project_memory_fact_proposals_tx, get_project_memory_fact_proposal_tx,
-    list_project_memory_fact_proposals_tx, reject_project_memory_fact_proposal_tx,
-    submit_project_memory_fact_proposal_tx,
-};
 use repair::repair_project_memory_tx;
 use search::{
     find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
@@ -69,6 +63,7 @@ use search::{
 };
 use status::project_memory_status_tx;
 
+mod automatic_facts;
 mod crud;
 mod curation;
 mod dashboard;
@@ -76,7 +71,6 @@ mod envelope;
 mod graph;
 mod primitives;
 mod projection;
-mod proposals;
 mod repair;
 mod runtime;
 mod scoring;
@@ -311,45 +305,6 @@ impl FactStore for DatabaseFactStore<'_> {
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = get_retrieval_anchor_tx(&snapshot, &query).await;
         finish_read_snapshot(snapshot, result).await
-    }
-}
-
-impl FactProposalStore for DatabaseFactStore<'_> {
-    async fn promote_fact_proposal(
-        &self,
-        promotion: PromoteFactProposal,
-    ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError> {
-        let transaction = self
-            .db
-            .begin_memory_write_transaction(PROMOTE_OPERATION)
-            .await
-            .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
-        let outcome = match promote_fact_proposal_tx(&transaction, &promotion).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return match transaction.rollback().await {
-                    Ok(()) => Err(error),
-                    Err(rollback) => Err(authority_storage_error(
-                        PROMOTE_OPERATION,
-                        std::io::Error::other(format!(
-                            "{error}; transaction rollback also failed: {rollback}"
-                        )),
-                    )),
-                };
-            }
-        };
-        if outcome.wrote {
-            transaction
-                .commit()
-                .await
-                .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
-        } else {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| authority_storage_error(PROMOTE_OPERATION, error))?;
-        }
-        Ok(outcome.outcome)
     }
 }
 
@@ -610,119 +565,51 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn submit_project_memory_fact_proposal(
+    async fn apply_project_memory_automatic_fact(
         &self,
-        proposal_id: ProvenanceId,
+        apply_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
-        submitter: Option<ActorId>,
-        evidence: ProjectMemoryFactProposalEvidenceV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
+        evidence: ProjectMemoryAutomaticFactEvidenceV1,
+    ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
         self.project_memory_write(move |transaction| {
             Box::pin(async move {
-                submit_project_memory_fact_proposal_tx(
-                    transaction,
-                    proposal_id,
-                    &request,
-                    submitter.as_ref(),
-                    &evidence,
-                )
-                .await
+                apply_project_memory_automatic_fact_tx(transaction, apply_id, &request, &evidence)
+                    .await
             })
         })
         .await
     }
 
-    async fn get_project_memory_fact_proposal(
+    async fn get_project_memory_automatic_fact_receipt(
         &self,
         owner: FactOwnerV1,
-        proposal_id: ProvenanceId,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryFactProposalRecordV1>> {
+        apply_id: ProvenanceId,
+    ) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
         self.project_memory_read(move |transaction| {
             Box::pin(async move {
-                get_project_memory_fact_proposal_tx(transaction, &owner, &proposal_id).await
+                get_project_memory_automatic_fact_receipt_tx(transaction, &owner, &apply_id).await
             })
         })
         .await
     }
 
-    async fn list_project_memory_fact_proposals(
+    async fn list_project_memory_automatic_fact_receipts(
         &self,
         owner: FactOwnerV1,
-        state: Option<ProjectMemoryFactProposalStateV1>,
-        after_proposal_id: Option<ProvenanceId>,
+        state: Option<ProjectMemoryAutomaticFactStateV1>,
+        after_apply_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> ProjectMemoryResult<ProjectMemoryFactProposalPageV1> {
+    ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1> {
         self.project_memory_read(move |transaction| {
             Box::pin(async move {
-                list_project_memory_fact_proposals_tx(
+                list_project_memory_automatic_fact_receipts_tx(
                     transaction,
                     &owner,
                     state,
-                    after_proposal_id.as_ref(),
+                    after_apply_id.as_ref(),
                     limit,
                 )
                 .await
-            })
-        })
-        .await
-    }
-
-    async fn count_pending_project_memory_fact_proposals(
-        &self,
-        owner: FactOwnerV1,
-    ) -> ProjectMemoryResult<u64> {
-        self.project_memory_read(move |transaction| {
-            Box::pin(async move {
-                count_pending_project_memory_fact_proposals_tx(transaction, &owner).await
-            })
-        })
-        .await
-    }
-
-    async fn reject_project_memory_fact_proposal(
-        &self,
-        owner: FactOwnerV1,
-        proposal_id: ProvenanceId,
-        expected_revision: ProjectMemoryFactProposalRevisionV1,
-        reviewer: ActorId,
-        reason: String,
-    ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
-        self.project_memory_write(move |transaction| {
-            Box::pin(async move {
-                reject_project_memory_fact_proposal_tx(
-                    transaction,
-                    &owner,
-                    &proposal_id,
-                    expected_revision,
-                    &reviewer,
-                    &reason,
-                )
-                .await
-            })
-        })
-        .await
-    }
-
-    async fn promote_project_memory_fact_proposal(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
-        self.project_memory_write(move |transaction| {
-            Box::pin(
-                async move { promote_project_memory_fact_proposal_tx(transaction, &request).await },
-            )
-        })
-        .await
-    }
-
-    async fn promote_project_memory_fact_proposal_with_disposition(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1> {
-        self.project_memory_write(move |transaction| {
-            Box::pin(async move {
-                promote_project_memory_fact_proposal_with_disposition_tx(transaction, &request)
-                    .await
             })
         })
         .await
@@ -834,14 +721,6 @@ impl FactStore for ProjectFactStore<'_> {
     }
 }
 
-impl FactProposalStore for ProjectFactStore<'_> {
-    delegate_fact_store_methods! {
-        fn promote_fact_proposal(
-            promotion: PromoteFactProposal,
-        ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError>;
-    }
-}
-
 impl ProjectMemoryFactStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
         fn list_project_memory_facts(
@@ -916,38 +795,21 @@ impl ProjectMemoryFactStore for ProjectFactStore<'_> {
         fn record_project_memory_fact_retrieval(
             request: ProjectMemoryFactRetrievalCommandV1,
         ) -> ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>>;
-        fn submit_project_memory_fact_proposal(
-            proposal_id: ProvenanceId,
+        fn apply_project_memory_automatic_fact(
+            apply_id: ProvenanceId,
             request: ProjectMemoryFactAddCommandV1,
-            submitter: Option<ActorId>,
-            evidence: ProjectMemoryFactProposalEvidenceV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>;
-        fn get_project_memory_fact_proposal(
+            evidence: ProjectMemoryAutomaticFactEvidenceV1,
+        ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1>;
+        fn get_project_memory_automatic_fact_receipt(
             owner: FactOwnerV1,
-            proposal_id: ProvenanceId,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryFactProposalRecordV1>>;
-        fn list_project_memory_fact_proposals(
+            apply_id: ProvenanceId,
+        ) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>>;
+        fn list_project_memory_automatic_fact_receipts(
             owner: FactOwnerV1,
-            state: Option<ProjectMemoryFactProposalStateV1>,
-            after_proposal_id: Option<ProvenanceId>,
+            state: Option<ProjectMemoryAutomaticFactStateV1>,
+            after_apply_id: Option<ProvenanceId>,
             limit: usize,
-        ) -> ProjectMemoryResult<ProjectMemoryFactProposalPageV1>;
-        fn count_pending_project_memory_fact_proposals(
-            owner: FactOwnerV1,
-        ) -> ProjectMemoryResult<u64>;
-        fn reject_project_memory_fact_proposal(
-            owner: FactOwnerV1,
-            proposal_id: ProvenanceId,
-            expected_revision: ProjectMemoryFactProposalRevisionV1,
-            reviewer: ActorId,
-            reason: String,
-        ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>;
-        fn promote_project_memory_fact_proposal(
-            request: ProjectMemoryFactProposalPromotionV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>;
-        fn promote_project_memory_fact_proposal_with_disposition(
-            request: ProjectMemoryFactProposalPromotionV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1>;
+        ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1>;
     }
 }
 

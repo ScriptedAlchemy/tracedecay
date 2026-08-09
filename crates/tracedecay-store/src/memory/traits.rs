@@ -1,33 +1,32 @@
 use std::future::Future;
 use tracedecay_domain::{
-    ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
+    FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 
 use super::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStoreError,
-    FactStoreResult, FactWriteBatch, LegacyFactQuery, ProjectMemoryDashboardFactDetailQueryV1,
-    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddCommandV1,
-    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContentDigestQueryV1,
-    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackHistoryQueryV1,
-    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
-    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalEvidenceV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
-    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchPageV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryResult,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
+    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, ProjectMemoryResult, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Authoritative persistence boundary for append-only facts and evidence.
@@ -88,16 +87,8 @@ pub trait FactStore: Send + Sync {
     ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecordV2>>> + Send;
 }
 
-/// Owner-bound compound authority for atomically promoting one proposal.
-pub trait FactProposalStore: FactStore {
-    fn promote_fact_proposal(
-        &self,
-        promotion: PromoteFactProposal,
-    ) -> impl Future<Output = Result<PromoteFactProposalOutcome, FactProposalStoreError>> + Send;
-}
-
 /// Single typed authority boundary for the V1 compatibility surface.
-pub trait ProjectMemoryFactStore: FactProposalStore {
+pub trait ProjectMemoryFactStore: FactStore {
     fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
@@ -236,53 +227,27 @@ pub trait ProjectMemoryFactStore: FactProposalStore {
         request: ProjectMemoryFactRetrievalCommandV1,
     ) -> impl Future<Output = ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>>> + Send;
 
-    fn submit_project_memory_fact_proposal(
+    /// Applies one validated automation fact and records only its terminal
+    /// outcome in the same transaction as the fact write.
+    fn apply_project_memory_automatic_fact(
         &self,
-        proposal_id: ProvenanceId,
+        apply_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
-        submitter: Option<ActorId>,
-        evidence: ProjectMemoryFactProposalEvidenceV1,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>> + Send;
+        evidence: ProjectMemoryAutomaticFactEvidenceV1,
+    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1>> + Send;
 
-    fn get_project_memory_fact_proposal(
+    fn get_project_memory_automatic_fact_receipt(
         &self,
         owner: FactOwnerV1,
-        proposal_id: ProvenanceId,
-    ) -> impl Future<Output = ProjectMemoryResult<Option<ProjectMemoryFactProposalRecordV1>>> + Send;
+        apply_id: ProvenanceId,
+    ) -> impl Future<Output = ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>>> + Send;
 
     #[allow(clippy::too_many_arguments)]
-    fn list_project_memory_fact_proposals(
+    fn list_project_memory_automatic_fact_receipts(
         &self,
         owner: FactOwnerV1,
-        state: Option<ProjectMemoryFactProposalStateV1>,
-        after_proposal_id: Option<ProvenanceId>,
+        state: Option<ProjectMemoryAutomaticFactStateV1>,
+        after_apply_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalPageV1>> + Send;
-
-    fn count_pending_project_memory_fact_proposals(
-        &self,
-        owner: FactOwnerV1,
-    ) -> impl Future<Output = ProjectMemoryResult<u64>> + Send;
-
-    #[allow(clippy::too_many_arguments)]
-    fn reject_project_memory_fact_proposal(
-        &self,
-        owner: FactOwnerV1,
-        proposal_id: ProvenanceId,
-        expected_revision: ProjectMemoryFactProposalRevisionV1,
-        reviewer: ActorId,
-        reason: String,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>> + Send;
-
-    fn promote_project_memory_fact_proposal(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalRecordV1>> + Send;
-
-    /// Atomic promotion result for callers that must distinguish a new decision
-    /// from an idempotent replay without a racy pre-read.
-    fn promote_project_memory_fact_proposal_with_disposition(
-        &self,
-        request: ProjectMemoryFactProposalPromotionV1,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1>> + Send;
+    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1>> + Send;
 }

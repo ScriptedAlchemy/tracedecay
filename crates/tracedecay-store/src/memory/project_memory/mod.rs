@@ -13,11 +13,17 @@ use super::{
     ProjectMemoryFactTelemetryV1, StoredFactV1, validate_owned_fact_id,
 };
 
+mod automatic_facts;
 mod curation;
 pub(super) mod dashboard;
-mod proposal;
 mod search;
 
+pub use automatic_facts::{
+    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1,
+};
 pub use curation::{
     ProjectMemoryFactAddAliasV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationBatchV1,
@@ -41,13 +47,6 @@ pub use dashboard::{
     ProjectMemoryDashboardOplogDetailsV1, ProjectMemoryDashboardOplogEntryV1,
     ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
     ProjectMemoryDashboardVectorPointsQueryV1,
-};
-pub use proposal::{
-    FactProposalPromotionStateV1, ProjectMemoryFactProposalEvidenceV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use search::{
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,

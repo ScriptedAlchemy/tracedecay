@@ -1,5 +1,12 @@
-//! Compatibility fact feedback recording, history, inspection, and proposal promotion dispatch.
+//! Compatibility fact feedback, history, inspection, and automatic fact apply dispatch.
 
+use super::super::automatic_facts::{
+    project_memory_automatic_fact_request_digest,
+    project_memory_existing_automatic_fact_receipt_tx,
+    project_memory_lookup_automatic_fact_operation_tx,
+    project_memory_record_automatic_fact_operation_tx,
+    project_memory_record_automatic_fact_receipt_tx,
+};
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_digest,
     project_memory_lookup_operation_receipt_tx, project_memory_receipt_u64,
@@ -14,10 +21,6 @@ use super::super::projection::{
     load_project_memory_projection_tx, project_memory_fact_status_tx,
     project_memory_projection_metadata_tx, project_memory_required_mapping_tx,
     resolve_project_memory_target_tx,
-};
-use super::super::proposals::{
-    project_memory_advance_proposal_tx, project_memory_proposal_action_id,
-    project_memory_proposal_record_tx, project_memory_replay_proposal_tx,
 };
 use super::super::scoring::project_memory_millionths;
 use super::{
@@ -34,19 +37,20 @@ use crate::privacy::sanitize_provider_metadata_text;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecordV2, UtcMicros,
+    FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult,
-    FactWriteBatch, ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
-    ProjectMemoryFactFeedbackDetailsAvailabilityV1, ProjectMemoryFactFeedbackHistoryEntryV1,
-    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
-    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryResult, PromoteFactProposalOutcome,
-    StoredFactV1,
+    FactWriteBatch, ProjectMemoryAutomaticFactApplyDispositionV1,
+    ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEffectV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactFeedbackActionV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackDetailsAvailabilityV1,
+    ProjectMemoryFactFeedbackHistoryEntryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryResult, StoredFactV1,
 };
 fn project_memory_receipt_i32(receipt: &Value, field: &'static str) -> FactStoreResult<i32> {
     receipt
@@ -613,145 +617,91 @@ pub(super) struct CommitAttempt {
     pub(super) wrote: bool,
 }
 
-pub(in crate::store::memory) struct PromotionAttempt {
-    pub(in crate::store::memory) outcome: PromoteFactProposalOutcome,
-    pub(in crate::store::memory) wrote: bool,
-}
-
-pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_tx(
+pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
     transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactProposalPromotionV1,
-) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
-    let result =
-        promote_project_memory_fact_proposal_with_disposition_tx(transaction, request).await?;
-    Ok(result.proposal().clone())
-}
-
-pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_with_disposition_tx(
-    transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactProposalPromotionV1,
-) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1> {
-    let material = json!({
-        "proposal_id": request.proposal_id().as_str(),
-        "expected_revision": request.expected_revision().get(),
-        "reviewer": request.reviewer().map(ActorId::as_str),
-    });
-    let request_digest = project_memory_digest(material.clone())?;
-    let operation_id = project_memory_proposal_action_id("proposal-promote", material)?;
-    if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
+    apply_id: ProvenanceId,
+    request: &ProjectMemoryFactAddCommandV1,
+    evidence: &ProjectMemoryAutomaticFactEvidenceV1,
+) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
+    let request_digest = project_memory_automatic_fact_request_digest(request)?;
+    if let Some(receipt) =
+        project_memory_lookup_automatic_fact_operation_tx(transaction, request, &request_digest)
+            .await?
+    {
+        let disposition = match receipt.state() {
+            tracedecay_store::ProjectMemoryAutomaticFactStateV1::Applied => {
+                ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied
+            }
+            tracedecay_store::ProjectMemoryAutomaticFactStateV1::Quarantined => {
+                ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined
+            }
+        };
+        return automatic_fact_apply_result(receipt, disposition);
+    }
+    if let Some(receipt) = project_memory_existing_automatic_fact_receipt_tx(
         transaction,
         request.owner(),
-        &operation_id,
-        "proposal_promote",
+        &apply_id,
         &request_digest,
     )
     .await?
     {
-        let proposal =
-            project_memory_replay_proposal_tx(transaction, request.owner(), &receipt).await?;
-        let disposition = match proposal.state() {
-            ProjectMemoryFactProposalStateV1::Applied => {
-                ProjectMemoryFactProposalPromotionDispositionV1::AlreadyPromoted
+        let disposition = match receipt.state() {
+            tracedecay_store::ProjectMemoryAutomaticFactStateV1::Applied => {
+                ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied
             }
-            ProjectMemoryFactProposalStateV1::Quarantined => {
-                ProjectMemoryFactProposalPromotionDispositionV1::Quarantined
-            }
-            _ => {
-                return Err(storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility promotion receipt does not resolve to a terminal proposal",
-                )
-                .into());
+            tracedecay_store::ProjectMemoryAutomaticFactStateV1::Quarantined => {
+                ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined
             }
         };
-        return ProjectMemoryFactProposalPromotionResultV1::new(proposal, disposition)
-            .map_err(Into::into);
-    }
-    let proposal =
-        project_memory_proposal_record_tx(transaction, request.owner(), request.proposal_id())
-            .await?
-            .ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility proposal is missing",
-                )
-            })?;
-    if proposal.state() != ProjectMemoryFactProposalStateV1::PendingApproval
-        || proposal.revision() != request.expected_revision()
-    {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility proposal revision or state changed before promotion",
-        )
-        .into());
+        return automatic_fact_apply_result(receipt, disposition);
     }
     let now = project_memory_now()?;
-    let payload_metadata = compatibility_payload_metadata(proposal.request().metadata());
+    let payload_metadata = compatibility_payload_metadata(request.metadata());
     let sanitized = compatibility_sanitize_payload(
-        proposal.request().content(),
-        proposal.request().category(),
-        proposal.request().tags(),
-        proposal.request().entities(),
+        request.content(),
+        request.category(),
+        request.tags(),
+        request.entities(),
         &payload_metadata,
     )?;
     let Some(sanitized) = sanitized else {
-        let reason = "content rejected by privacy sanitizer";
-        project_memory_advance_proposal_tx(
+        let effect = ProjectMemoryAutomaticFactEffectV1::Quarantined {
+            reason: "content declined by privacy sanitizer".to_owned(),
+        };
+        project_memory_record_automatic_fact_receipt_tx(
             transaction,
-            request.owner(),
-            request.proposal_id(),
-            ProjectMemoryFactProposalStateV1::PendingApproval,
-            request.expected_revision(),
-            ProjectMemoryFactProposalStateV1::Quarantined,
-            request.reviewer(),
-            Some(reason),
+            &apply_id,
+            request,
             &request_digest,
-            None,
-            None,
-            None,
+            evidence,
+            &effect,
             now,
         )
         .await?;
-        let receipt = json!({
-            "proposal_id": request.proposal_id().as_str(),
-            "state": "quarantined",
-            "revision": request.expected_revision().get().saturating_add(1),
-        });
-        project_memory_record_operation_receipt_tx(
-            transaction,
-            request.owner(),
-            &operation_id,
-            "proposal_promote",
-            &request_digest,
-            None,
-            None,
-            &receipt,
+        let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
+            apply_id,
+            request.owner().clone(),
+            effect.state(),
+            request.clone(),
+            evidence.clone(),
+            effect,
             now,
-        )
-        .await?;
-        let quarantined = project_memory_replay_proposal_tx(
-            transaction,
-            request.owner(),
-            &ProjectMemoryOperationReceiptV1 {
-                fact_id: None,
-                event_id: None,
-                receipt,
-            },
-        )
-        .await?;
-        return ProjectMemoryFactProposalPromotionResultV1::new(
-            quarantined,
-            ProjectMemoryFactProposalPromotionDispositionV1::Quarantined,
-        )
-        .map_err(Into::into);
+        )?;
+        project_memory_record_automatic_fact_operation_tx(transaction, &receipt, &request_digest)
+            .await?;
+        return automatic_fact_apply_result(
+            receipt,
+            ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
+        );
     };
-    let source = project_memory_source_label(proposal.request().source())?;
+    let source = project_memory_source_label(request.source())?;
     let (fact_id, assertion_id, event_id) = match compatibility_mirror_insert_tx(
         transaction,
         request.owner(),
         &sanitized.payload,
         &source,
-        proposal.request().default_trust(),
+        request.default_trust(),
         now,
     )
     .await?
@@ -781,15 +731,15 @@ pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_with_
                 mapping.clone(),
                 sanitized.payload,
                 sanitized.access,
-                proposal.request().default_trust(),
-                proposal.request().actor().cloned(),
+                request.default_trust(),
+                request.actor().cloned(),
                 now,
             )?;
             let (receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
             let assertion_id = receipt.active_assertion_id().cloned().ok_or_else(|| {
                 storage_message(
                     PROJECT_MEMORY_WRITE_OPERATION,
-                    "promoted compatibility fact has no active assertion",
+                    "applied compatibility fact has no active assertion",
                 )
             })?;
             (
@@ -799,52 +749,46 @@ pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_with_
             )
         }
     };
-    project_memory_advance_proposal_tx(
-        transaction,
-        request.owner(),
-        request.proposal_id(),
-        ProjectMemoryFactProposalStateV1::PendingApproval,
-        request.expected_revision(),
-        ProjectMemoryFactProposalStateV1::Applied,
-        request.reviewer(),
+    let mapping = ProjectMemoryFactMappingV1::new(
+        ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?,
         None,
+    )?;
+    let effect = ProjectMemoryAutomaticFactEffectV1::Applied {
+        fact_id,
+        mapping,
+        assertion_id,
+        event_id,
+    };
+    project_memory_record_automatic_fact_receipt_tx(
+        transaction,
+        &apply_id,
+        request,
         &request_digest,
-        Some(&fact_id),
-        Some(&assertion_id),
-        Some(&event_id),
+        evidence,
+        &effect,
         now,
     )
     .await?;
-    let receipt = json!({
-        "proposal_id": request.proposal_id().as_str(),
-        "state": "applied",
-        "revision": request.expected_revision().get().saturating_add(1),
-    });
-    project_memory_record_operation_receipt_tx(
-        transaction,
-        request.owner(),
-        &operation_id,
-        "proposal_promote",
-        &request_digest,
-        Some(&fact_id),
-        Some(&event_id),
-        &receipt,
+    let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
+        apply_id,
+        request.owner().clone(),
+        effect.state(),
+        request.clone(),
+        evidence.clone(),
+        effect,
         now,
+    )?;
+    project_memory_record_automatic_fact_operation_tx(transaction, &receipt, &request_digest)
+        .await?;
+    automatic_fact_apply_result(
+        receipt,
+        ProjectMemoryAutomaticFactApplyDispositionV1::Applied,
     )
-    .await?;
-    let promoted = project_memory_replay_proposal_tx(
-        transaction,
-        request.owner(),
-        &ProjectMemoryOperationReceiptV1 {
-            fact_id: Some(fact_id),
-            event_id: Some(event_id),
-            receipt,
-        },
-    )
-    .await?;
-    ProjectMemoryFactProposalPromotionResultV1::new(
-        promoted,
-        ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted,
-    )
-    .map_err(Into::into)
+}
+
+fn automatic_fact_apply_result(
+    receipt: ProjectMemoryAutomaticFactReceiptV1,
+    disposition: ProjectMemoryAutomaticFactApplyDispositionV1,
+) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
+    ProjectMemoryAutomaticFactApplyResultV1::new(receipt, disposition).map_err(Into::into)
 }

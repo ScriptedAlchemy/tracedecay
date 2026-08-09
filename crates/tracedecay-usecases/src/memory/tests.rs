@@ -11,8 +11,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
-    FactLineageCursor, FactLineageResponseV1, FactProposalPromotionStateV1, FactQueryCoverageV1,
-    FactStoreResult, ProjectMemoryFactProposalEvidenceV1,
+    FactLineageCursor, FactLineageResponseV1, FactQueryCoverageV1, FactStoreResult,
 };
 
 use super::*;
@@ -22,8 +21,6 @@ use tracedecay_runtime_core::memory::types::{AddFactRequest, MemoryCategory};
 struct FakeAuthority {
     committed: Mutex<Vec<FactWriteBatch>>,
     next_commit_outcome: Mutex<Option<FactCommitOutcome>>,
-    promotions: Mutex<Vec<PromoteFactProposal>>,
-    promotion_conflict: Mutex<Option<Option<FactProposalPromotionStateV1>>>,
     current_queries: Mutex<Vec<CurrentFactsQuery>>,
     current_results: Mutex<Vec<StoredFactV1>>,
     current_fact_queries: Mutex<Vec<FactCurrentQuery>>,
@@ -37,7 +34,7 @@ struct FakeAuthority {
     anchor_queries: Mutex<Vec<RetrievalAnchorId>>,
     feedback_history: Mutex<Option<ProjectMemoryFactFeedbackHistoryV1>>,
     feedback_requests: Mutex<Vec<ProjectMemoryFactFeedbackCommandV1>>,
-    compatibility_calls: Mutex<Vec<&'static str>>,
+    authority_calls: Mutex<Vec<&'static str>>,
 }
 
 #[derive(Default)]
@@ -50,7 +47,7 @@ impl EvidenceAnchorResolver for UnavailableEvidenceResolver {
         &self,
         owner: FactOwnerV1,
         anchor_id: RetrievalAnchorId,
-    ) -> Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError> {
+    ) -> Result<ResolvedEvidenceAnchor, EvidenceAnchorResolutionError> {
         self.requests
             .lock()
             .unwrap()
@@ -60,7 +57,7 @@ impl EvidenceAnchorResolver for UnavailableEvidenceResolver {
 }
 
 struct StaticEvidenceResolver {
-    record: ResolvedEvidenceAnchorV1,
+    record: ResolvedEvidenceAnchor,
 }
 
 impl EvidenceAnchorResolver for StaticEvidenceResolver {
@@ -68,7 +65,7 @@ impl EvidenceAnchorResolver for StaticEvidenceResolver {
         &self,
         _owner: FactOwnerV1,
         _anchor_id: RetrievalAnchorId,
-    ) -> Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError> {
+    ) -> Result<ResolvedEvidenceAnchor, EvidenceAnchorResolutionError> {
         Ok(self.record.clone())
     }
 }
@@ -171,36 +168,12 @@ impl FactStore for FakeAuthority {
     }
 }
 
-impl FactProposalStore for FakeAuthority {
-    async fn promote_fact_proposal(
-        &self,
-        promotion: PromoteFactProposal,
-    ) -> Result<PromoteFactProposalOutcome, FactProposalStoreError> {
-        if let Some(actual) = self.promotion_conflict.lock().unwrap().take() {
-            return Err(FactProposalStoreError::ProposalStateConflict {
-                proposal_id: promotion.proposal_id().clone(),
-                expected: promotion.expected_state(),
-                actual,
-            });
-        }
-        let outcome = committed_outcome(promotion.batch());
-        let result = PromoteFactProposalOutcome::new(
-            promotion.proposal_id().clone(),
-            promotion.expected_state(),
-            outcome,
-        )
-        .map_err(FactStoreError::from)?;
-        self.promotions.lock().unwrap().push(promotion);
-        Ok(result)
-    }
-}
-
 impl ProjectMemoryFactStore for FakeAuthority {
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
     ) -> Result<ProjectMemoryFactPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("list");
+        self.authority_calls.lock().unwrap().push("list");
         Ok(ProjectMemoryFactPageV1::new(
             query.owner().clone(),
             vec![],
@@ -212,7 +185,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactSearchQuery,
     ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("search");
+        self.authority_calls.lock().unwrap().push("search");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
@@ -224,7 +197,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactSearchQuery,
     ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("probe");
+        self.authority_calls.lock().unwrap().push("probe");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
@@ -236,7 +209,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactSearchQuery,
     ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("related");
+        self.authority_calls.lock().unwrap().push("related");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
@@ -248,7 +221,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactSearchQuery,
     ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("reason");
+        self.authority_calls.lock().unwrap().push("reason");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
@@ -260,10 +233,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
     ) -> Result<ProjectMemoryFactContradictionPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("contradictions");
+        self.authority_calls.lock().unwrap().push("contradictions");
         Ok(ProjectMemoryFactContradictionPageV1::new(
             query.owner().clone(),
             vec![],
@@ -274,7 +244,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _target: ProjectMemoryFactTargetV1,
     ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("get");
+        self.authority_calls.lock().unwrap().push("get");
         Ok(None)
     }
 
@@ -282,9 +252,9 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
     ) -> Result<ProjectMemoryFactHistoryV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("history");
+        self.authority_calls.lock().unwrap().push("history");
         let Some(fact_id) = query.target().canonical_fact_id() else {
-            return Err(compatibility_fixture_error());
+            return Err(authority_fixture_error());
         };
         Ok(ProjectMemoryFactHistoryV1::new(
             query.target().owner().clone(),
@@ -298,7 +268,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         owner: FactOwnerV1,
     ) -> Result<ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("status");
+        self.authority_calls.lock().unwrap().push("status");
         project_memory_status(owner)
     }
 
@@ -306,7 +276,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _target: ProjectMemoryFactTargetV1,
     ) -> Result<Option<ProjectMemoryFactInspectionV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("inspect");
+        self.authority_calls.lock().unwrap().push("inspect");
         Ok(None)
     }
 
@@ -314,7 +284,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _request: ProjectMemoryFactAddCommandV1,
     ) -> Result<ProjectMemoryFactAddOutcomeV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("add");
+        self.authority_calls.lock().unwrap().push("add");
         Ok(ProjectMemoryFactAddOutcomeV1::new(
             None,
             tracedecay_store::ProjectMemoryFactAddDispositionV1::RejectedSecretLike,
@@ -328,32 +298,32 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _request: ProjectMemoryFactUpdateCommandV1,
     ) -> Result<ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("update");
-        Err(compatibility_fixture_error())
+        self.authority_calls.lock().unwrap().push("update");
+        Err(authority_fixture_error())
     }
 
     async fn remove_project_memory_fact(
         &self,
         _request: ProjectMemoryFactRemoveCommandV1,
     ) -> Result<ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("remove");
-        Err(compatibility_fixture_error())
+        self.authority_calls.lock().unwrap().push("remove");
+        Err(authority_fixture_error())
     }
 
     async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
     ) -> Result<ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("feedback");
+        self.authority_calls.lock().unwrap().push("feedback");
         self.feedback_requests.lock().unwrap().push(request);
-        Err(compatibility_fixture_error())
+        Err(authority_fixture_error())
     }
 
     async fn project_memory_fact_feedback_history(
         &self,
         _query: ProjectMemoryFactFeedbackHistoryQueryV1,
     ) -> Result<ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        self.authority_calls
             .lock()
             .unwrap()
             .push("feedback-history");
@@ -361,17 +331,14 @@ impl ProjectMemoryFactStore for FakeAuthority {
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(compatibility_fixture_error)
+            .ok_or_else(authority_fixture_error)
     }
 
     async fn find_project_memory_fact_by_content_digest(
         &self,
         _query: ProjectMemoryFactContentDigestQueryV1,
     ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("exact-content");
+        self.authority_calls.lock().unwrap().push("exact-content");
         Ok(None)
     }
 
@@ -379,23 +346,23 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _request: ProjectMemoryFactCurationBatchV1,
     ) -> Result<ProjectMemoryFactCurationReceiptV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("curation");
-        Err(compatibility_fixture_error())
+        self.authority_calls.lock().unwrap().push("curation");
+        Err(authority_fixture_error())
     }
 
     async fn merge_project_memory_facts(
         &self,
         _request: ProjectMemoryFactMergeCommandV1,
     ) -> Result<ProjectMemoryFactMergeOutcomeV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("merge");
-        Err(compatibility_fixture_error())
+        self.authority_calls.lock().unwrap().push("merge");
+        Err(authority_fixture_error())
     }
 
     async fn repair_project_memory(
         &self,
         _request: ProjectMemoryMemoryRepairCommandV1,
     ) -> Result<ProjectMemoryMemoryRepairStatsV1, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("repair");
+        self.authority_calls.lock().unwrap().push("repair");
         Ok(ProjectMemoryMemoryRepairStatsV1::default())
     }
 
@@ -403,18 +370,18 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _query: ProjectMemoryDashboardMemoryOverviewQueryV1,
     ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        self.authority_calls
             .lock()
             .unwrap()
             .push("dashboard-overview");
-        Err(compatibility_fixture_error())
+        Err(authority_fixture_error())
     }
 
     async fn dashboard_project_memory_fact_detail(
         &self,
         _query: ProjectMemoryDashboardFactDetailQueryV1,
     ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        self.authority_calls
             .lock()
             .unwrap()
             .push("dashboard-detail");
@@ -425,7 +392,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _query: ProjectMemoryDashboardVectorPointsQueryV1,
     ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        self.authority_calls
             .lock()
             .unwrap()
             .push("dashboard-vectors");
@@ -436,10 +403,7 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _query: ProjectMemoryDashboardOplogQueryV1,
     ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-oplog");
+        self.authority_calls.lock().unwrap().push("dashboard-oplog");
         Ok(vec![])
     }
 
@@ -447,102 +411,53 @@ impl ProjectMemoryFactStore for FakeAuthority {
         &self,
         _request: ProjectMemoryFactRetrievalCommandV1,
     ) -> Result<Vec<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls.lock().unwrap().push("retrieval");
+        self.authority_calls.lock().unwrap().push("retrieval");
         Ok(vec![])
     }
 
-    async fn submit_project_memory_fact_proposal(
+    async fn apply_project_memory_automatic_fact(
         &self,
-        _proposal_id: ProvenanceId,
+        _apply_id: ProvenanceId,
         _request: ProjectMemoryFactAddCommandV1,
-        _submitter: Option<ActorId>,
-        _evidence: ProjectMemoryFactProposalEvidenceV1,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        _evidence: ProjectMemoryAutomaticFactEvidenceV1,
+    ) -> Result<ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryStoreError> {
+        self.authority_calls
             .lock()
             .unwrap()
-            .push("proposal-submit");
-        Err(compatibility_fixture_error())
+            .push("automatic-fact-apply");
+        Err(authority_fixture_error())
     }
 
-    async fn get_project_memory_fact_proposal(
+    async fn get_project_memory_automatic_fact_receipt(
         &self,
         _owner: FactOwnerV1,
-        _proposal_id: ProvenanceId,
-    ) -> Result<Option<ProjectMemoryFactProposalRecordV1>, ProjectMemoryStoreError> {
-        self.compatibility_calls
+        _apply_id: ProvenanceId,
+    ) -> Result<Option<ProjectMemoryAutomaticFactReceiptV1>, ProjectMemoryStoreError> {
+        self.authority_calls
             .lock()
             .unwrap()
-            .push("proposal-get");
+            .push("automatic-fact-get");
         Ok(None)
     }
 
-    async fn list_project_memory_fact_proposals(
+    async fn list_project_memory_automatic_fact_receipts(
         &self,
         _owner: FactOwnerV1,
-        _state: Option<ProjectMemoryFactProposalStateV1>,
-        _after_proposal_id: Option<ProvenanceId>,
+        _state: Option<ProjectMemoryAutomaticFactStateV1>,
+        _after_apply_id: Option<ProvenanceId>,
         _limit: usize,
-    ) -> Result<ProjectMemoryFactProposalPageV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
+    ) -> Result<ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryStoreError> {
+        self.authority_calls
             .lock()
             .unwrap()
-            .push("proposal-list");
-        Err(compatibility_fixture_error())
-    }
-
-    async fn count_pending_project_memory_fact_proposals(
-        &self,
-        _owner: FactOwnerV1,
-    ) -> Result<u64, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-count-pending");
-        Ok(0)
-    }
-
-    async fn reject_project_memory_fact_proposal(
-        &self,
-        _owner: FactOwnerV1,
-        _proposal_id: ProvenanceId,
-        _expected_revision: ProjectMemoryFactProposalRevisionV1,
-        _reviewer: ActorId,
-        _reason: String,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-reject");
-        Err(compatibility_fixture_error())
-    }
-
-    async fn promote_project_memory_fact_proposal(
-        &self,
-        _request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalRecordV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-promote");
-        Err(compatibility_fixture_error())
-    }
-
-    async fn promote_project_memory_fact_proposal_with_disposition(
-        &self,
-        _request: ProjectMemoryFactProposalPromotionV1,
-    ) -> Result<ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-promote-disposition");
-        Err(compatibility_fixture_error())
+            .push("automatic-fact-list");
+        Err(authority_fixture_error())
     }
 }
 
-fn compatibility_fixture_error() -> ProjectMemoryStoreError {
+fn authority_fixture_error() -> ProjectMemoryStoreError {
     ProjectMemoryStoreError::Store(FactStoreError::Contract(DomainError::NonCanonical {
-        field: "fake compatibility authority",
+        field: "fake project-memory authority",
     }))
 }
 
@@ -765,7 +680,7 @@ async fn evidence_resolution_rejects_a_cross_owner_daemon_reply() {
     let record = profile_anchor();
     let anchor_id = record.anchor_id().clone();
     let resolver = StaticEvidenceResolver {
-        record: ResolvedEvidenceAnchorV1::new(record).unwrap(),
+        record: ResolvedEvidenceAnchor::new(record).unwrap(),
     };
 
     let error = application
@@ -818,16 +733,16 @@ async fn query_owner_mismatch_is_rejected_before_authority_access() {
 }
 
 #[tokio::test]
-async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
+async fn reads_use_finite_owner_bound_authority_methods() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let fact_id = fact_id(owner(), "operation.compatibility.read");
+    let fact_id = fact_id(owner(), "operation.project-memory.read");
     let target = ProjectMemoryFactTargetV1::Canonical(
         tracedecay_store::ProjectMemoryFactIdV1::new(owner(), fact_id).unwrap(),
     );
     let search = ProjectMemoryFactSearchQuery::new(
         owner(),
         tracedecay_store::ProjectMemoryFactSearchKindV1::Search,
-        Some("compatibility fixture".to_owned()),
+        Some("project-memory fixture".to_owned()),
         None,
         10,
     )
@@ -882,7 +797,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     assert_eq!(
         application
             .authority
-            .compatibility_calls
+            .authority_calls
             .lock()
             .unwrap()
             .as_slice(),
@@ -891,7 +806,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
 }
 
 #[tokio::test]
-async fn compatibility_read_owner_mismatch_never_reaches_authority() {
+async fn read_owner_mismatch_never_reaches_authority() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let error = application
         .list_project_memory_facts(
@@ -907,61 +822,11 @@ async fn compatibility_read_owner_mismatch_never_reaches_authority() {
     assert!(
         application
             .authority
-            .compatibility_calls
+            .authority_calls
             .lock()
             .unwrap()
             .is_empty()
     );
-}
-
-#[tokio::test]
-async fn proposal_cas_and_batch_commit_are_one_authority_operation() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let promotion = PromoteFactProposal::new(
-        id("proposal.memory.1"),
-        owner(),
-        FactProposalPromotionStateV1::PendingApproval,
-        Some(id("actor.reviewer")),
-        batch(owner(), "operation.proposal.promote"),
-    )
-    .unwrap();
-
-    let outcome = application.promote_fact_proposal(promotion).await.unwrap();
-
-    assert!(matches!(outcome.commit(), FactCommitOutcome::Committed(_)));
-    assert_eq!(application.authority.promotions.lock().unwrap().len(), 1);
-    assert!(application.authority.committed.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn proposal_cas_conflict_is_typed_and_does_not_commit_a_batch() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    *application.authority.promotion_conflict.lock().unwrap() =
-        Some(Some(FactProposalPromotionStateV1::Applying));
-    let promotion = PromoteFactProposal::new(
-        id("proposal.memory.conflict"),
-        owner(),
-        FactProposalPromotionStateV1::PendingApproval,
-        Some(id("actor.reviewer")),
-        batch(owner(), "operation.proposal.conflict"),
-    )
-    .unwrap();
-
-    let error = application
-        .promote_fact_proposal(promotion)
-        .await
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        MemoryApplicationError::Authority(FactProposalStoreError::ProposalStateConflict {
-            expected: FactProposalPromotionStateV1::PendingApproval,
-            actual: Some(FactProposalPromotionStateV1::Applying),
-            ..
-        })
-    ));
-    assert!(application.authority.promotions.lock().unwrap().is_empty());
-    assert!(application.authority.committed.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1146,18 +1011,14 @@ async fn legacy_resolution_cannot_cross_owner_boundary() {
 }
 
 #[tokio::test]
-async fn v1_feedback_defaults_an_omitted_source_to_mcp() {
+async fn feedback_defaults_an_omitted_source_to_mcp() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let context = MemoryOperationContext::from_trusted_request_id(
-        &owner(),
-        "feedback",
-        "fixture-feedback-mcp",
-        None,
-    )
-    .unwrap();
+    let context =
+        MemoryOperationContext::from_request_id(&owner(), "feedback", "fixture-feedback-mcp", None)
+            .unwrap();
 
     let _ = application
-        .record_fact_feedback_v1(
+        .record_fact_feedback(
             FeedbackRequest {
                 fact_id: 1,
                 action: FeedbackAction::Helpful,
@@ -1174,7 +1035,7 @@ async fn v1_feedback_defaults_an_omitted_source_to_mcp() {
 }
 
 #[tokio::test]
-async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
+async fn trust_history_never_claims_incomplete_repair_is_complete() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     *application.authority.feedback_history.lock().unwrap() = Some(
         ProjectMemoryFactFeedbackHistoryV1::new_with_repair_progress(
@@ -1190,7 +1051,7 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
     );
 
     let typed = application
-        .fact_trust_history_with_progress_v1(1, 10)
+        .fact_trust_history_with_progress(1, 10)
         .await
         .unwrap();
     assert!(typed.entries.is_empty());
@@ -1202,7 +1063,7 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
         }
     ));
 
-    let error = application.fact_trust_history_v1(1, 10).await.unwrap_err();
+    let error = application.fact_trust_history(1, 10).await.unwrap_err();
     assert!(matches!(
         error,
         MemoryApplicationError::FeedbackHistoryUnavailable {
@@ -1212,7 +1073,7 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
     assert_eq!(
         application
             .authority
-            .compatibility_calls
+            .authority_calls
             .lock()
             .unwrap()
             .as_slice(),
@@ -1228,11 +1089,11 @@ fn automation_run_identity_is_typed_not_fact_payload_metadata() {
         "fixture": "retained",
     });
 
-    let command = automation_fact_proposal_add_command(
+    let command = automatic_fact_add_command(
         owner(),
         request,
         "run_01J4A7P5MQ1X9DX2P9BQNQW75T",
-        "proposal-typed-run-id",
+        "automatic-fact-typed-run-id",
         None,
     )
     .unwrap();
@@ -1260,11 +1121,11 @@ fn fact_add_preserves_the_authoritative_sanitizer_receipt() {
         .unwrap()
         .into_parts();
 
-    let command = automation_fact_proposal_add_command(
+    let command = automatic_fact_add_command(
         owner(),
         request,
         "run_01J4A7P5MQ1X9DX2P9BQNQW75T",
-        "proposal-receipt-provenance",
+        "automatic-fact-receipt-provenance",
         None,
     )
     .unwrap();

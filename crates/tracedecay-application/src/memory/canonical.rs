@@ -5,8 +5,8 @@ use std::future::Future;
 
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, FactEventId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros,
+    DomainError, FactEventId, FactId, FactLineageEventV1, FactOwnerV1, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, UtcMicros,
 };
 
 #[derive(Debug, Error)]
@@ -31,7 +31,7 @@ pub enum MemoryUseCaseError<E: Debug> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommitFactDispositionV1 {
+pub enum MemoryCommitFactDisposition {
     Committed,
     IdempotentReplay,
     Conflict,
@@ -39,13 +39,13 @@ pub enum CommitFactDispositionV1 {
 }
 
 #[derive(Clone, Debug)]
-pub struct CommitFactCommandV1<C> {
+pub struct MemoryCommitFactCommand<C> {
     owner: FactOwnerV1,
     fact_id: FactId,
     command: C,
 }
 
-impl<C> CommitFactCommandV1<C> {
+impl<C> MemoryCommitFactCommand<C> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, command: C) -> Self {
         Self {
             owner,
@@ -56,17 +56,17 @@ impl<C> CommitFactCommandV1<C> {
 }
 
 #[derive(Clone, Debug)]
-pub struct CommitFactPortResultV1<T> {
+pub struct MemoryCommitFactPortResult<T> {
     output: T,
-    disposition: CommitFactDispositionV1,
+    disposition: MemoryCommitFactDisposition,
     receipt_owner: Option<FactOwnerV1>,
     receipt_fact_id: Option<FactId>,
 }
 
-impl<T> CommitFactPortResultV1<T> {
+impl<T> MemoryCommitFactPortResult<T> {
     pub fn new(
         output: T,
-        disposition: CommitFactDispositionV1,
+        disposition: MemoryCommitFactDisposition,
         receipt_owner: Option<FactOwnerV1>,
         receipt_fact_id: Option<FactId>,
     ) -> Self {
@@ -87,17 +87,17 @@ pub trait CommitFactPort {
     fn commit_fact(
         &self,
         command: Self::Command,
-    ) -> impl Future<Output = Result<CommitFactPortResultV1<Self::Output>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MemoryCommitFactPortResult<Self::Output>, Self::Error>> + Send;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemoryFactSnapshotV1 {
+pub struct MemoryFactSnapshot {
     owner: FactOwnerV1,
     fact_id: FactId,
     projected_as_of: UtcMicros,
 }
 
-impl MemoryFactSnapshotV1 {
+impl MemoryFactSnapshot {
     pub const fn new(owner: FactOwnerV1, fact_id: FactId, projected_as_of: UtcMicros) -> Self {
         Self {
             owner,
@@ -108,14 +108,14 @@ impl MemoryFactSnapshotV1 {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct MemoryReadCoverageV1 {
+pub struct MemoryReadCoverage {
     visible: u64,
     hidden: u64,
     unknown: u64,
     redacted: u64,
 }
 
-impl MemoryReadCoverageV1 {
+impl MemoryReadCoverage {
     pub const fn new(visible: u64, hidden: u64, unknown: u64, redacted: u64) -> Self {
         Self {
             visible,
@@ -147,24 +147,24 @@ impl MemoryReadCoverageV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MemoryContradictionStateV1 {
+pub enum MemoryContradictionState {
     Unknown,
     NotObserved,
     Present { contradicted_by: Vec<FactId> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemoryReadResultV1<T> {
+pub struct MemoryReadResult<T> {
     payload: T,
-    coverage: MemoryReadCoverageV1,
-    contradiction: MemoryContradictionStateV1,
+    coverage: MemoryReadCoverage,
+    contradiction: MemoryContradictionState,
 }
 
-impl<T> MemoryReadResultV1<T> {
+impl<T> MemoryReadResult<T> {
     pub const fn new(
         payload: T,
-        coverage: MemoryReadCoverageV1,
-        contradiction: MemoryContradictionStateV1,
+        coverage: MemoryReadCoverage,
+        contradiction: MemoryContradictionState,
     ) -> Self {
         Self {
             payload,
@@ -177,11 +177,11 @@ impl<T> MemoryReadResultV1<T> {
         &self.payload
     }
 
-    pub const fn coverage(&self) -> MemoryReadCoverageV1 {
+    pub const fn coverage(&self) -> MemoryReadCoverage {
         self.coverage
     }
 
-    pub const fn contradiction(&self) -> &MemoryContradictionStateV1 {
+    pub const fn contradiction(&self) -> &MemoryContradictionState {
         &self.contradiction
     }
 
@@ -191,14 +191,14 @@ impl<T> MemoryReadResultV1<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct CurrentFactsQueryV1<Q> {
+pub struct MemoryCurrentFactsQuery<Q> {
     owner: FactOwnerV1,
     after_fact_id: Option<FactId>,
     limit: usize,
     query: Q,
 }
 
-impl<Q> CurrentFactsQueryV1<Q> {
+impl<Q> MemoryCurrentFactsQuery<Q> {
     pub fn new(owner: FactOwnerV1, after_fact_id: Option<FactId>, limit: usize, query: Q) -> Self {
         Self {
             owner,
@@ -210,13 +210,13 @@ impl<Q> CurrentFactsQueryV1<Q> {
 }
 
 #[derive(Clone, Debug)]
-pub struct CurrentFactsPortResultV1<T> {
+pub struct MemoryCurrentFactsPortResult<T> {
     output: T,
-    snapshots: Vec<MemoryFactSnapshotV1>,
+    snapshots: Vec<MemoryFactSnapshot>,
 }
 
-impl<T> CurrentFactsPortResultV1<T> {
-    pub fn new(output: T, snapshots: Vec<MemoryFactSnapshotV1>) -> Self {
+impl<T> MemoryCurrentFactsPortResult<T> {
+    pub fn new(output: T, snapshots: Vec<MemoryFactSnapshot>) -> Self {
         Self { output, snapshots }
     }
 }
@@ -229,18 +229,18 @@ pub trait CurrentFactsPort {
     fn query_current_facts(
         &self,
         query: Self::Query,
-    ) -> impl Future<Output = Result<CurrentFactsPortResultV1<Self::Output>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MemoryCurrentFactsPortResult<Self::Output>, Self::Error>> + Send;
 }
 
 #[derive(Clone, Debug)]
-pub struct FactAsOfQueryV1<Q> {
+pub struct MemoryFactAsOfQuery<Q> {
     owner: FactOwnerV1,
     fact_id: FactId,
     as_of: UtcMicros,
     query: Q,
 }
 
-impl<Q> FactAsOfQueryV1<Q> {
+impl<Q> MemoryFactAsOfQuery<Q> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, as_of: UtcMicros, query: Q) -> Self {
         Self {
             owner,
@@ -252,13 +252,13 @@ impl<Q> FactAsOfQueryV1<Q> {
 }
 
 #[derive(Clone, Debug)]
-pub struct OptionalFactPortResultV1<T> {
+pub struct MemoryOptionalFactPortResult<T> {
     output: T,
-    snapshot: Option<MemoryFactSnapshotV1>,
+    snapshot: Option<MemoryFactSnapshot>,
 }
 
-impl<T> OptionalFactPortResultV1<T> {
-    pub fn new(output: T, snapshot: Option<MemoryFactSnapshotV1>) -> Self {
+impl<T> MemoryOptionalFactPortResult<T> {
+    pub fn new(output: T, snapshot: Option<MemoryFactSnapshot>) -> Self {
         Self { output, snapshot }
     }
 }
@@ -271,17 +271,17 @@ pub trait FactAsOfPort {
     fn query_fact_as_of(
         &self,
         query: Self::Query,
-    ) -> impl Future<Output = Result<OptionalFactPortResultV1<Self::Output>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MemoryOptionalFactPortResult<Self::Output>, Self::Error>> + Send;
 }
 
 #[derive(Clone, Debug)]
-pub struct FactCurrentQueryV1<Q> {
+pub struct MemoryFactCurrentQuery<Q> {
     owner: FactOwnerV1,
     fact_id: FactId,
     query: Q,
 }
 
-impl<Q> FactCurrentQueryV1<Q> {
+impl<Q> MemoryFactCurrentQuery<Q> {
     pub fn new(owner: FactOwnerV1, fact_id: FactId, query: Q) -> Self {
         Self {
             owner,
@@ -299,16 +299,16 @@ pub trait FactCurrentPort {
     fn query_fact_current(
         &self,
         query: Self::Query,
-    ) -> impl Future<Output = Result<OptionalFactPortResultV1<Self::Output>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MemoryOptionalFactPortResult<Self::Output>, Self::Error>> + Send;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FactLineageCursorV1 {
+pub struct MemoryFactLineageCursor {
     occurred_at: UtcMicros,
     event_id: FactEventId,
 }
 
-impl FactLineageCursorV1 {
+impl MemoryFactLineageCursor {
     pub const fn new(occurred_at: UtcMicros, event_id: FactEventId) -> Self {
         Self {
             occurred_at,
@@ -318,19 +318,19 @@ impl FactLineageCursorV1 {
 }
 
 #[derive(Clone, Debug)]
-pub struct FactLineageQueryV1<Q> {
+pub struct MemoryFactLineageQuery<Q> {
     owner: FactOwnerV1,
     fact_id: FactId,
-    after: Option<FactLineageCursorV1>,
+    after: Option<MemoryFactLineageCursor>,
     limit: usize,
     query: Q,
 }
 
-impl<Q> FactLineageQueryV1<Q> {
+impl<Q> MemoryFactLineageQuery<Q> {
     pub fn new(
         owner: FactOwnerV1,
         fact_id: FactId,
-        after: Option<FactLineageCursorV1>,
+        after: Option<MemoryFactLineageCursor>,
         limit: usize,
         query: Q,
     ) -> Self {
@@ -352,28 +352,28 @@ pub trait FactLineagePort {
     fn query_fact_lineage(
         &self,
         query: Self::Query,
-    ) -> impl Future<Output = Result<FactLineagePortResultV1<Self::Output>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<MemoryFactLineagePortResult<Self::Output>, Self::Error>> + Send;
 }
 
 #[derive(Clone, Debug)]
-pub struct FactLineagePortResultV1<T> {
+pub struct MemoryFactLineagePortResult<T> {
     output: T,
     events: Vec<FactLineageEventV1>,
 }
 
-impl<T> FactLineagePortResultV1<T> {
+impl<T> MemoryFactLineagePortResult<T> {
     pub fn new(output: T, events: Vec<FactLineageEventV1>) -> Self {
         Self { output, events }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct LegacyFactQueryV1<Q> {
+pub struct MemoryLegacyFactQuery<Q> {
     owner: FactOwnerV1,
     query: Q,
 }
 
-impl<Q> LegacyFactQueryV1<Q> {
+impl<Q> MemoryLegacyFactQuery<Q> {
     pub fn new(owner: FactOwnerV1, query: Q) -> Self {
         Self { owner, query }
     }
@@ -390,13 +390,13 @@ pub trait LegacyFactPort {
 }
 
 #[derive(Clone, Debug)]
-pub struct RetrievalAnchorQueryV1<Q> {
+pub struct MemoryRetrievalAnchorQuery<Q> {
     owner: FactOwnerV1,
     anchor_id: RetrievalAnchorId,
     query: Q,
 }
 
-impl<Q> RetrievalAnchorQueryV1<Q> {
+impl<Q> MemoryRetrievalAnchorQuery<Q> {
     pub fn new(owner: FactOwnerV1, anchor_id: RetrievalAnchorId, query: Q) -> Self {
         Self {
             owner,
@@ -414,77 +414,6 @@ pub trait RetrievalAnchorPort {
         &self,
         query: Self::Query,
     ) -> impl Future<Output = Result<Option<RetrievalAnchorRecordV2>, Self::Error>> + Send;
-}
-
-#[derive(Clone, Debug)]
-pub struct PromoteFactProposalCommandV1<C, S> {
-    owner: FactOwnerV1,
-    proposal_id: ProvenanceId,
-    expected_state: S,
-    fact_id: FactId,
-    command: C,
-}
-
-impl<C, S> PromoteFactProposalCommandV1<C, S> {
-    pub fn new(
-        owner: FactOwnerV1,
-        proposal_id: ProvenanceId,
-        expected_state: S,
-        fact_id: FactId,
-        command: C,
-    ) -> Self {
-        Self {
-            owner,
-            proposal_id,
-            expected_state,
-            fact_id,
-            command,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PromoteFactProposalPortResultV1<T, S> {
-    output: T,
-    proposal_id: ProvenanceId,
-    previous_state: S,
-    commit_disposition: CommitFactDispositionV1,
-    receipt_owner: Option<FactOwnerV1>,
-    receipt_fact_id: Option<FactId>,
-}
-
-impl<T, S> PromoteFactProposalPortResultV1<T, S> {
-    pub fn new(
-        output: T,
-        proposal_id: ProvenanceId,
-        previous_state: S,
-        commit_disposition: CommitFactDispositionV1,
-        receipt_owner: Option<FactOwnerV1>,
-        receipt_fact_id: Option<FactId>,
-    ) -> Self {
-        Self {
-            output,
-            proposal_id,
-            previous_state,
-            commit_disposition,
-            receipt_owner,
-            receipt_fact_id,
-        }
-    }
-}
-
-pub trait PromoteFactProposalPort {
-    type Command;
-    type Error: Debug;
-    type Output;
-    type State: Eq;
-
-    fn promote_fact_proposal(
-        &self,
-        command: Self::Command,
-    ) -> impl Future<
-        Output = Result<PromoteFactProposalPortResultV1<Self::Output, Self::State>, Self::Error>,
-    > + Send;
 }
 
 pub struct MemoryApplication<P> {
@@ -520,9 +449,9 @@ impl<P> MemoryApplication<P> {
 impl<P: CommitFactPort> MemoryApplication<P> {
     pub async fn commit_fact(
         &self,
-        command: CommitFactCommandV1<P::Command>,
+        command: MemoryCommitFactCommand<P::Command>,
     ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let CommitFactCommandV1 {
+        let MemoryCommitFactCommand {
             owner,
             fact_id,
             command,
@@ -541,9 +470,9 @@ impl<P: CommitFactPort> MemoryApplication<P> {
 impl<P: CurrentFactsPort> MemoryApplication<P> {
     pub async fn query_current_facts(
         &self,
-        query: CurrentFactsQueryV1<P::Query>,
+        query: MemoryCurrentFactsQuery<P::Query>,
     ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let CurrentFactsQueryV1 {
+        let MemoryCurrentFactsQuery {
             owner,
             after_fact_id,
             limit,
@@ -583,9 +512,9 @@ impl<P: CurrentFactsPort> MemoryApplication<P> {
 impl<P: FactAsOfPort> MemoryApplication<P> {
     pub async fn query_fact_as_of(
         &self,
-        query: FactAsOfQueryV1<P::Query>,
+        query: MemoryFactAsOfQuery<P::Query>,
     ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let FactAsOfQueryV1 {
+        let MemoryFactAsOfQuery {
             owner,
             fact_id,
             as_of,
@@ -614,9 +543,9 @@ impl<P: FactAsOfPort> MemoryApplication<P> {
 impl<P: FactCurrentPort> MemoryApplication<P> {
     pub async fn query_fact_current(
         &self,
-        query: FactCurrentQueryV1<P::Query>,
+        query: MemoryFactCurrentQuery<P::Query>,
     ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let FactCurrentQueryV1 {
+        let MemoryFactCurrentQuery {
             owner,
             fact_id,
             query,
@@ -644,9 +573,9 @@ impl<P: FactCurrentPort> MemoryApplication<P> {
 impl<P: FactLineagePort> MemoryApplication<P> {
     pub async fn query_fact_lineage(
         &self,
-        query: FactLineageQueryV1<P::Query>,
+        query: MemoryFactLineageQuery<P::Query>,
     ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let FactLineageQueryV1 {
+        let MemoryFactLineageQuery {
             owner,
             fact_id,
             after,
@@ -686,9 +615,9 @@ impl<P: FactLineagePort> MemoryApplication<P> {
 impl<P: LegacyFactPort> MemoryApplication<P> {
     pub async fn resolve_legacy_fact(
         &self,
-        query: LegacyFactQueryV1<P::Query>,
+        query: MemoryLegacyFactQuery<P::Query>,
     ) -> Result<Option<FactId>, MemoryUseCaseError<P::Error>> {
-        let LegacyFactQueryV1 { owner, query } = query;
+        let MemoryLegacyFactQuery { owner, query } = query;
         self.ensure_owner(&owner)?;
         let fact_id = self
             .port
@@ -711,9 +640,9 @@ impl<P: LegacyFactPort> MemoryApplication<P> {
 impl<P: RetrievalAnchorPort> MemoryApplication<P> {
     pub async fn get_retrieval_anchor(
         &self,
-        query: RetrievalAnchorQueryV1<P::Query>,
+        query: MemoryRetrievalAnchorQuery<P::Query>,
     ) -> Result<Option<RetrievalAnchorRecordV2>, MemoryUseCaseError<P::Error>> {
-        let RetrievalAnchorQueryV1 {
+        let MemoryRetrievalAnchorQuery {
             owner,
             anchor_id,
             query,
@@ -736,45 +665,10 @@ impl<P: RetrievalAnchorPort> MemoryApplication<P> {
     }
 }
 
-impl<P: PromoteFactProposalPort> MemoryApplication<P> {
-    pub async fn promote_fact_proposal(
-        &self,
-        command: PromoteFactProposalCommandV1<P::Command, P::State>,
-    ) -> Result<P::Output, MemoryUseCaseError<P::Error>> {
-        let PromoteFactProposalCommandV1 {
-            owner,
-            proposal_id,
-            expected_state,
-            fact_id,
-            command,
-        } = command;
-        self.ensure_owner(&owner)?;
-        let result = self
-            .port
-            .promote_fact_proposal(command)
-            .await
-            .map_err(MemoryUseCaseError::Authority)?;
-        if result.proposal_id != proposal_id || result.previous_state != expected_state {
-            return Err(MemoryApplicationInvariantError::InvalidAuthorityResult {
-                invariant: "proposal CAS identity",
-            }
-            .into());
-        }
-        validate_commit_proof(
-            &owner,
-            &fact_id,
-            result.commit_disposition,
-            result.receipt_owner.as_ref(),
-            result.receipt_fact_id.as_ref(),
-        )?;
-        Ok(result.output)
-    }
-}
-
 fn validate_commit_result<T>(
     owner: &FactOwnerV1,
     fact_id: &FactId,
-    result: &CommitFactPortResultV1<T>,
+    result: &MemoryCommitFactPortResult<T>,
 ) -> Result<(), MemoryApplicationInvariantError> {
     validate_commit_proof(
         owner,
@@ -788,16 +682,18 @@ fn validate_commit_result<T>(
 fn validate_commit_proof(
     owner: &FactOwnerV1,
     fact_id: &FactId,
-    disposition: CommitFactDispositionV1,
+    disposition: MemoryCommitFactDisposition,
     receipt_owner: Option<&FactOwnerV1>,
     receipt_fact_id: Option<&FactId>,
 ) -> Result<(), MemoryApplicationInvariantError> {
     let valid = match disposition {
-        CommitFactDispositionV1::Committed | CommitFactDispositionV1::IdempotentReplay => {
+        MemoryCommitFactDisposition::Committed | MemoryCommitFactDisposition::IdempotentReplay => {
             receipt_owner == Some(owner) && receipt_fact_id == Some(fact_id)
         }
-        CommitFactDispositionV1::Conflict => receipt_owner.is_none() && receipt_fact_id.is_none(),
-        CommitFactDispositionV1::Unrecognized => {
+        MemoryCommitFactDisposition::Conflict => {
+            receipt_owner.is_none() && receipt_fact_id.is_none()
+        }
+        MemoryCommitFactDisposition::Unrecognized => {
             return Err(MemoryApplicationInvariantError::InvalidAuthorityResult {
                 invariant: "recognized fact commit outcome",
             });

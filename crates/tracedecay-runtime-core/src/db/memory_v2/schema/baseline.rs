@@ -3,8 +3,10 @@
 use crate::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
+use super::automatic_facts::{
+    install_automatic_fact_receipt_integrity_triggers, install_current_projection_indexes,
+};
 use super::final_authority::install_final_memory_support;
-use super::proposals::{install_current_projection_indexes, install_proposal_integrity_triggers};
 
 pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_facts (
             fact_id TEXT NOT NULL,
@@ -168,8 +170,8 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id)
         );
 
-        CREATE TABLE IF NOT EXISTS memory_v2_proposals (
-            proposal_id TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS memory_v2_automatic_fact_receipts (
+            apply_id TEXT NOT NULL,
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
             project_id TEXT NOT NULL,
             owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
@@ -177,71 +179,36 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
             request_digest TEXT NOT NULL,
             request_json TEXT NOT NULL CHECK(json_valid(request_json)),
             evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)),
-            submitted_at INTEGER NOT NULL,
-            PRIMARY KEY(proposal_id, owner_kind, project_id),
+            state TEXT NOT NULL CHECK(state IN ('applied', 'quarantined')),
+            quarantine_reason TEXT,
+            applied_fact_id TEXT,
+            applied_assertion_id TEXT,
+            applied_event_id TEXT,
+            recorded_at INTEGER NOT NULL,
+            PRIMARY KEY(apply_id, owner_kind, project_id),
             UNIQUE(owner_kind, project_id, idempotency_key),
             UNIQUE(owner_kind, project_id, request_digest),
             CHECK(
                 (owner_kind = 'profile' AND project_id = '') OR
                 (owner_kind = 'project' AND project_id <> '')
-            )
-        );
-        CREATE TABLE IF NOT EXISTS memory_v2_proposal_transitions (
-            transition_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            transition_id TEXT NOT NULL,
-            proposal_id TEXT NOT NULL,
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            previous_state TEXT,
-            current_state TEXT NOT NULL CHECK(current_state IN (
-                'applying', 'applied', 'rejected', 'quarantined'
-            )),
-            reviewer_json TEXT CHECK(reviewer_json IS NULL OR json_valid(reviewer_json)),
-            validation_json TEXT CHECK(validation_json IS NULL OR json_valid(validation_json)),
-            promoted_fact_id TEXT,
-            promoted_assertion_id TEXT,
-            promoted_event_id TEXT,
-            transition_json TEXT NOT NULL CHECK(json_valid(transition_json)),
-            occurred_at INTEGER NOT NULL,
-            UNIQUE(transition_id, proposal_id, owner_kind, project_id),
-            FOREIGN KEY(proposal_id, owner_kind, project_id)
-                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id),
-            FOREIGN KEY(promoted_fact_id, owner_kind, project_id)
+            ),
+            FOREIGN KEY(applied_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),
-            FOREIGN KEY(promoted_assertion_id, promoted_fact_id, owner_kind, project_id)
+            FOREIGN KEY(applied_assertion_id, applied_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_assertions(assertion_id, fact_id, owner_kind, project_id),
-            FOREIGN KEY(promoted_event_id, promoted_fact_id, owner_kind, project_id)
+            FOREIGN KEY(applied_event_id, applied_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id),
-            CHECK(previous_state IS NULL OR previous_state IN (
-                'applying', 'applied', 'rejected', 'quarantined'
-            )),
             CHECK(
-                (current_state = 'applied'
-                    AND promoted_fact_id IS NOT NULL
-                    AND promoted_event_id IS NOT NULL) OR
-                (current_state <> 'applied'
-                    AND promoted_fact_id IS NULL
-                    AND promoted_assertion_id IS NULL
-                    AND promoted_event_id IS NULL)
+                (state = 'applied'
+                    AND quarantine_reason IS NULL
+                    AND applied_fact_id IS NOT NULL
+                    AND applied_event_id IS NOT NULL) OR
+                (state = 'quarantined'
+                    AND quarantine_reason IS NOT NULL
+                    AND applied_fact_id IS NULL
+                    AND applied_assertion_id IS NULL
+                    AND applied_event_id IS NULL)
             )
-        );
-        CREATE TABLE IF NOT EXISTS memory_v2_proposal_current (
-            proposal_id TEXT NOT NULL,
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            state TEXT NOT NULL CHECK(state IN (
-                'applying', 'applied', 'rejected', 'quarantined'
-            )),
-            revision INTEGER NOT NULL CHECK(revision >= 1),
-            last_transition_id TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY(proposal_id, owner_kind, project_id),
-            FOREIGN KEY(proposal_id, owner_kind, project_id)
-                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id),
-            FOREIGN KEY(last_transition_id, proposal_id, owner_kind, project_id)
-                REFERENCES memory_v2_proposal_transitions(
-                    transition_id, proposal_id, owner_kind, project_id
-                )
         );
         CREATE INDEX IF NOT EXISTS idx_memory_v2_assertions_fact
             ON memory_v2_assertions(fact_id, owner_kind, project_id, asserted_at);
@@ -255,9 +222,9 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
             ON memory_v2_current_facts(owner_kind, project_id, fact_id);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_evidence_anchor
             ON memory_v2_evidence(anchor_id, owner_json);
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_proposal_list
-            ON memory_v2_proposal_current(
-                owner_kind, project_id, state, updated_at, proposal_id
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_automatic_fact_receipt_list
+            ON memory_v2_automatic_fact_receipts(
+                owner_kind, project_id, state, recorded_at, apply_id
             );
 
         CREATE TRIGGER IF NOT EXISTS memory_v2_facts_no_update
@@ -308,21 +275,13 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
         BEFORE DELETE ON memory_v2_lineage_events BEGIN
             SELECT RAISE(ABORT, 'memory_v2 lineage events are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_proposals_no_update
-        BEFORE UPDATE ON memory_v2_proposals BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 proposals are immutable');
+        CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_no_update
+        BEFORE UPDATE ON memory_v2_automatic_fact_receipts BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 automatic fact receipts are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_proposals_no_delete
-        BEFORE DELETE ON memory_v2_proposals BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 proposals are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_no_update
-        BEFORE UPDATE ON memory_v2_proposal_transitions BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_no_delete
-        BEFORE DELETE ON memory_v2_proposal_transitions BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
+        CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_no_delete
+        BEFORE DELETE ON memory_v2_automatic_fact_receipts BEGIN
+            SELECT RAISE(ABORT, 'memory_v2 automatic fact receipts are immutable');
         END;";
 
 /// Installs the only accepted project-memory persisted shape.
@@ -423,7 +382,7 @@ pub(in crate::db) async fn create_schema(
     .await
     .map_err(|error| db_error(operation, error))?;
     install_final_memory_support(conn, operation).await?;
-    install_proposal_integrity_triggers(conn, operation).await?;
+    install_automatic_fact_receipt_integrity_triggers(conn, operation).await?;
     install_current_projection_indexes(conn, operation).await?;
     Ok(())
 }

@@ -522,10 +522,10 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
 }
 
 #[test]
-fn proposal_record_projects_typed_automation_run_id() {
+fn automatic_fact_receipt_preserves_typed_automation_run_id() {
     let owner = FactOwnerV1::Profile;
     let material = serde_json::json!({
-        "content": "durable proposal",
+        "content": "durable automatic fact",
         "category": "decision",
         "tags": [],
         "entities": [],
@@ -533,8 +533,8 @@ fn proposal_record_projects_typed_automation_run_id() {
     });
     let request = ProjectMemoryFactAddCommandV1::new(
         owner.clone(),
-        id("operation.automation-proposal"),
-        "durable proposal".to_owned(),
+        id("operation.automatic-fact"),
+        "durable automatic fact".to_owned(),
         FactCategoryV1::Decision,
         None,
         vec![],
@@ -547,23 +547,55 @@ fn proposal_record_projects_typed_automation_run_id() {
     .unwrap()
     .with_automation_run_id("run.fixture.1".to_owned())
     .unwrap();
-    let record = ProjectMemoryFactProposalRecordV1::new(
-        id("proposal.automation.fixture"),
+    let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
+        id("automatic-fact.automation.fixture"),
         owner,
-        ProjectMemoryFactProposalRevisionV1::new(1).unwrap(),
-        ProjectMemoryFactProposalStateV1::PendingApproval,
+        ProjectMemoryAutomaticFactStateV1::Quarantined,
         request,
-        None,
-        None,
-        ProjectMemoryFactProposalEvidenceV1::default(),
-        None,
-        None,
-        UtcMicros(1),
+        ProjectMemoryAutomaticFactEvidenceV1::default(),
+        ProjectMemoryAutomaticFactEffectV1::Quarantined {
+            reason: "privacy sanitizer declined the automatic apply".to_owned(),
+        },
         UtcMicros(1),
     )
     .unwrap();
 
-    assert_eq!(record.automation_run_id(), Some("run.fixture.1"));
+    assert_eq!(receipt.automation_run_id(), Some("run.fixture.1"));
+    assert_eq!(receipt.request().actor(), None);
+}
+
+#[test]
+fn automatic_fact_state_wire_contract_is_terminal_only() {
+    for (state, expected) in [
+        (ProjectMemoryAutomaticFactStateV1::Applied, "applied"),
+        (
+            ProjectMemoryAutomaticFactStateV1::Quarantined,
+            "quarantined",
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), json!(expected));
+        assert_eq!(
+            serde_json::from_value::<ProjectMemoryAutomaticFactStateV1>(json!(expected)).unwrap(),
+            state
+        );
+    }
+    for retired in ["pending", "pending_approval", "applying", "rejected"] {
+        assert!(
+            serde_json::from_value::<ProjectMemoryAutomaticFactStateV1>(json!(retired)).is_err(),
+            "retired state {retired:?} must not deserialize"
+        );
+    }
+}
+
+#[test]
+fn automatic_fact_evidence_rejects_unknown_persisted_fields() {
+    assert!(
+        serde_json::from_value::<ProjectMemoryAutomaticFactEvidenceV1>(json!({
+            "evidence_hash": "evidence.fixture",
+            "unexpected": true,
+        }))
+        .is_err()
+    );
 }
 
 #[test]

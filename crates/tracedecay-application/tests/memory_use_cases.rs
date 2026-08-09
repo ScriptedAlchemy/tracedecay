@@ -3,11 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use tracedecay_application::memory::{
-    CommitFactCommandV1, CommitFactDispositionV1, CommitFactPort, CommitFactPortResultV1,
-    CurrentFactsPort, CurrentFactsPortResultV1, CurrentFactsQueryV1, MemoryApplication,
-    MemoryApplicationInvariantError, MemoryContradictionStateV1, MemoryFactSnapshotV1,
-    MemoryReadCoverageV1, MemoryReadResultV1, MemoryUseCaseError, PromoteFactProposalCommandV1,
-    PromoteFactProposalPort, PromoteFactProposalPortResultV1,
+    CommitFactPort, CurrentFactsPort, MemoryApplication, MemoryApplicationInvariantError,
+    MemoryCommitFactCommand, MemoryCommitFactDisposition, MemoryCommitFactPortResult,
+    MemoryContradictionState, MemoryCurrentFactsPortResult, MemoryCurrentFactsQuery,
+    MemoryFactSnapshot, MemoryReadCoverage, MemoryReadResult, MemoryUseCaseError,
 };
 use tracedecay_domain::{
     DomainError, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProjectId,
@@ -47,11 +46,11 @@ impl CommitFactPort for CommitPort {
     async fn commit_fact(
         &self,
         command: Self::Command,
-    ) -> Result<CommitFactPortResultV1<Self::Output>, Self::Error> {
+    ) -> Result<MemoryCommitFactPortResult<Self::Output>, Self::Error> {
         self.calls.lock().unwrap().push(command);
-        Ok(CommitFactPortResultV1::new(
+        Ok(MemoryCommitFactPortResult::new(
             "committed",
-            CommitFactDispositionV1::Committed,
+            MemoryCommitFactDisposition::Committed,
             Some(self.result_owner.clone()),
             Some(self.result_fact_id.clone()),
         ))
@@ -74,7 +73,7 @@ fn project_wide_commit_is_owner_bound_and_returns_the_port_output() {
     .unwrap();
 
     let output =
-        block_on(application.commit_fact(CommitFactCommandV1::new(owner, fact_id, "write")))
+        block_on(application.commit_fact(MemoryCommitFactCommand::new(owner, fact_id, "write")))
             .unwrap();
 
     assert_eq!(output, "committed");
@@ -96,7 +95,7 @@ fn owner_mismatch_is_rejected_before_the_commit_port_runs() {
     )
     .unwrap();
 
-    let error = block_on(application.commit_fact(CommitFactCommandV1::new(
+    let error = block_on(application.commit_fact(MemoryCommitFactCommand::new(
         FactOwnerV1::Profile,
         fact_id,
         "write",
@@ -125,7 +124,7 @@ fn commit_rejects_cross_owner_authority_receipts() {
     .unwrap();
 
     let error =
-        block_on(application.commit_fact(CommitFactCommandV1::new(owner, fact_id, "write")))
+        block_on(application.commit_fact(MemoryCommitFactCommand::new(owner, fact_id, "write")))
             .unwrap_err();
 
     assert!(matches!(
@@ -137,7 +136,7 @@ fn commit_rejects_cross_owner_authority_receipts() {
 }
 
 struct CurrentFactsPortFixture {
-    snapshots: Vec<MemoryFactSnapshotV1>,
+    snapshots: Vec<MemoryFactSnapshot>,
 }
 
 impl CurrentFactsPort for CurrentFactsPortFixture {
@@ -148,8 +147,8 @@ impl CurrentFactsPort for CurrentFactsPortFixture {
     async fn query_current_facts(
         &self,
         _query: Self::Query,
-    ) -> Result<CurrentFactsPortResultV1<Self::Output>, Self::Error> {
-        Ok(CurrentFactsPortResultV1::new(
+    ) -> Result<MemoryCurrentFactsPortResult<Self::Output>, Self::Error> {
+        Ok(MemoryCurrentFactsPortResult::new(
             "facts",
             self.snapshots.clone(),
         ))
@@ -169,15 +168,15 @@ fn current_fact_pages_must_remain_owner_bound_ordered_and_bounded() {
         owner.clone(),
         CurrentFactsPortFixture {
             snapshots: vec![
-                MemoryFactSnapshotV1::new(owner.clone(), second.clone(), UtcMicros(2)),
-                MemoryFactSnapshotV1::new(owner.clone(), first, UtcMicros(1)),
+                MemoryFactSnapshot::new(owner.clone(), second.clone(), UtcMicros(2)),
+                MemoryFactSnapshot::new(owner.clone(), first, UtcMicros(1)),
             ],
         },
     )
     .unwrap();
 
     let error =
-        block_on(application.query_current_facts(CurrentFactsQueryV1::new(owner, None, 2, ())))
+        block_on(application.query_current_facts(MemoryCurrentFactsQuery::new(owner, None, 2, ())))
             .unwrap_err();
 
     assert!(matches!(
@@ -199,7 +198,7 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
     let [first, second] = fact_ids;
     let cases = [
         (
-            vec![MemoryFactSnapshotV1::new(
+            vec![MemoryFactSnapshot::new(
                 FactOwnerV1::Profile,
                 second.clone(),
                 UtcMicros(2),
@@ -208,7 +207,7 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
             1,
         ),
         (
-            vec![MemoryFactSnapshotV1::new(
+            vec![MemoryFactSnapshot::new(
                 owner.clone(),
                 first.clone(),
                 UtcMicros(1),
@@ -218,8 +217,8 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
         ),
         (
             vec![
-                MemoryFactSnapshotV1::new(owner.clone(), first.clone(), UtcMicros(1)),
-                MemoryFactSnapshotV1::new(owner.clone(), second, UtcMicros(2)),
+                MemoryFactSnapshot::new(owner.clone(), first.clone(), UtcMicros(1)),
+                MemoryFactSnapshot::new(owner.clone(), second, UtcMicros(2)),
             ],
             None,
             1,
@@ -229,12 +228,14 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
     for (snapshots, after, limit) in cases {
         let application =
             MemoryApplication::new(owner.clone(), CurrentFactsPortFixture { snapshots }).unwrap();
-        let error = block_on(application.query_current_facts(CurrentFactsQueryV1::new(
-            owner.clone(),
-            after,
-            limit,
-            (),
-        )))
+        let error = block_on(
+            application.query_current_facts(MemoryCurrentFactsQuery::new(
+                owner.clone(),
+                after,
+                limit,
+                (),
+            )),
+        )
         .unwrap_err();
         assert!(matches!(
             error,
@@ -247,117 +248,17 @@ fn current_fact_pages_reject_cross_owner_cursor_and_limit_violations() {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProposalState {
-    Pending,
-    Applied,
-}
-
-struct ProposalPortFixture {
-    owner: FactOwnerV1,
-    fact_id: FactId,
-    proposal_id: ProvenanceId,
-    previous_state: ProposalState,
-    disposition: CommitFactDispositionV1,
-}
-
-impl PromoteFactProposalPort for ProposalPortFixture {
-    type Command = &'static str;
-    type Error = DomainError;
-    type Output = ProposalState;
-    type State = ProposalState;
-
-    async fn promote_fact_proposal(
-        &self,
-        _command: Self::Command,
-    ) -> Result<PromoteFactProposalPortResultV1<Self::Output, Self::State>, Self::Error> {
-        Ok(PromoteFactProposalPortResultV1::new(
-            ProposalState::Applied,
-            self.proposal_id.clone(),
-            self.previous_state,
-            self.disposition,
-            Some(self.owner.clone()),
-            Some(self.fact_id.clone()),
-        ))
-    }
-}
-
-#[test]
-fn proposal_progress_and_committed_fact_identity_survive_the_port_boundary() {
-    let owner = project_owner();
-    let fact_id = fact_id(owner.clone(), "operation.memory.proposal");
-    let application = MemoryApplication::new(
-        owner.clone(),
-        ProposalPortFixture {
-            owner: owner.clone(),
-            fact_id: fact_id.clone(),
-            proposal_id: ProvenanceId::new("proposal.memory").unwrap(),
-            previous_state: ProposalState::Pending,
-            disposition: CommitFactDispositionV1::Committed,
-        },
-    )
-    .unwrap();
-
-    let output = block_on(
-        application.promote_fact_proposal(PromoteFactProposalCommandV1::new(
-            owner,
-            ProvenanceId::new("proposal.memory").unwrap(),
-            ProposalState::Pending,
-            fact_id,
-            "promote",
-        )),
-    )
-    .unwrap();
-
-    assert_eq!(output, ProposalState::Applied);
-}
-
-#[test]
-fn proposal_previous_state_mismatch_is_rejected_as_a_cas_identity_violation() {
-    let owner = project_owner();
-    let fact_id = fact_id(owner.clone(), "operation.memory.proposal-mismatch");
-    let application = MemoryApplication::new(
-        owner.clone(),
-        ProposalPortFixture {
-            owner: owner.clone(),
-            fact_id: fact_id.clone(),
-            proposal_id: ProvenanceId::new("proposal.memory").unwrap(),
-            previous_state: ProposalState::Applied,
-            disposition: CommitFactDispositionV1::Committed,
-        },
-    )
-    .unwrap();
-
-    let error = block_on(
-        application.promote_fact_proposal(PromoteFactProposalCommandV1::new(
-            owner,
-            ProvenanceId::new("proposal.memory").unwrap(),
-            ProposalState::Pending,
-            fact_id,
-            "promote",
-        )),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        MemoryUseCaseError::Invariant(MemoryApplicationInvariantError::InvalidAuthorityResult {
-            invariant: "proposal CAS identity"
-        })
-    ));
-}
-
 #[test]
 fn empty_payload_with_unknown_coverage_remains_truthfully_incomplete() {
-    let result = MemoryReadResultV1::new(
+    let result = MemoryReadResult::new(
         Vec::<FactId>::new(),
-        MemoryReadCoverageV1::new(0, 0, 1, 0),
-        MemoryContradictionStateV1::Unknown,
+        MemoryReadCoverage::new(0, 0, 1, 0),
+        MemoryContradictionState::Unknown,
     );
 
     assert!(result.payload().is_empty());
     assert!(!result.coverage().is_complete());
-    assert_eq!(result.contradiction(), &MemoryContradictionStateV1::Unknown);
+    assert_eq!(result.contradiction(), &MemoryContradictionState::Unknown);
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

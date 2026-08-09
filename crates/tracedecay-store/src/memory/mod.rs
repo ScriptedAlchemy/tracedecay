@@ -12,17 +12,17 @@ mod telemetry;
 mod traits;
 mod write;
 
-pub use error::{
-    FactProposalStoreError, FactStoreError, FactStoreResult, ProjectMemoryResult,
-    ProjectMemoryStoreError,
-};
+pub use error::{FactStoreError, FactStoreResult, ProjectMemoryResult, ProjectMemoryStoreError};
 pub use graph::{
     MAX_PROJECT_MEMORY_GRAPH_RELATIONS, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphRelationKindV1, ProjectMemoryGraphRelationV1, ProjectMemoryGraphStore,
     ProjectMemoryGraphTargetV1,
 };
 pub use project_memory::{
-    FactProposalPromotionStateV1, ProjectMemoryDashboardEntityV1,
+    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
+    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryDashboardEntityV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardFactEntityLinkV1, ProjectMemoryDashboardFactSummaryV1,
     ProjectMemoryDashboardGrowthPointV1, ProjectMemoryDashboardHrrCoverageV1,
@@ -41,10 +41,6 @@ pub use project_memory::{
     ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactProposalEvidenceV1, ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
     ProjectMemoryFactRelationV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRepairVectorV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
@@ -53,7 +49,7 @@ pub use project_memory::{
     ProjectMemoryFactTargetV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryRelationProvenanceV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    ProjectMemoryRelationProvenanceV1,
 };
 pub use queries::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
@@ -70,7 +66,7 @@ pub use telemetry::{
     ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
     ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1,
 };
-pub use traits::{FactProposalStore, FactStore, ProjectMemoryFactStore};
+pub use traits::{FactStore, ProjectMemoryFactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};
 
 #[cfg(test)]

@@ -11,8 +11,7 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
             operation_id TEXT NOT NULL CHECK(length(operation_id) > 0),
             operation_kind TEXT NOT NULL CHECK(operation_kind IN (
                 'add', 'update', 'remove', 'feedback', 'retrieval',
-                'curation', 'merge', 'repair', 'proposal_submit',
-                'proposal_reject', 'proposal_promote', 'proposal_import'
+                'curation', 'merge', 'repair', 'automatic_fact_apply'
             )),
             request_digest TEXT NOT NULL CHECK(length(request_digest) > 0),
             fact_id TEXT,

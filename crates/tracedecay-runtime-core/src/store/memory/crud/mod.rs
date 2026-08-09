@@ -1,8 +1,6 @@
-//! Compatibility fact CRUD, canonical commit path, mirror writes, feedback, and proposal promotion.
+//! Compatibility fact CRUD, canonical commit path, mirror writes, feedback, and automatic fact application.
 //!
 //! Re-exports below preserve every `crud::*` path used outside this module.
-
-pub(super) const PROMOTE_OPERATION: &str = "promote canonical memory proposal";
 
 pub(super) const DEFAULT_TRUST: f64 = 0.5;
 
