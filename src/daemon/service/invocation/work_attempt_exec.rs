@@ -69,6 +69,7 @@ use tracedecay_sessions::runtime::codex_app_server::{
 };
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, record_terminal_attempt_product_views,
+    record_work_operation_resource,
 };
 
 use crate::config::work_executable_binding::{
@@ -78,6 +79,10 @@ use crate::config::work_executable_binding::{
 use super::types::RegisteredWorkRuntime;
 use super::work::work_background_context;
 use super::{Arc, ManifestDigest, RequestContext, current_micros};
+
+mod operation_resource;
+
+use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_observation};
 
 #[cfg(test)]
 mod tests;
@@ -158,8 +163,13 @@ pub(super) fn spawn_attempt_execution(
     };
     let admitted_environment =
         admitted_provider_environment(attempt.execution().execution_snapshot());
+    let scheduled = std::time::Instant::now();
     tokio::spawn(async move {
         let identity = attempt.identity().clone();
+        let timing = AttemptAdmissionTimingV1 {
+            scheduled,
+            admitted: std::time::Instant::now(),
+        };
         run_attempt(
             registered,
             Arc::clone(&registry),
@@ -168,6 +178,7 @@ pub(super) fn spawn_attempt_execution(
             admitted_environment,
             cancel,
             observability_producer,
+            timing,
         )
         .await;
         registry.release(&identity);
@@ -182,6 +193,7 @@ async fn run_attempt(
     admitted_environment: BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
     observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
+    timing: AttemptAdmissionTimingV1,
 ) {
     let Ok(context) = work_background_context(&registered, attempt.identity()) else {
         tracing::warn!(
@@ -215,6 +227,7 @@ async fn run_attempt(
                     &admitted_environment,
                     cancel,
                     observability_producer.as_deref(),
+                    timing,
                 )
                 .await;
             }
@@ -227,6 +240,7 @@ async fn run_attempt(
                     &admitted_environment,
                     cancel,
                     observability_producer.as_deref(),
+                    timing,
                 )
                 .await;
             }
@@ -484,6 +498,7 @@ async fn execute_provider_with_environment<S>(
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
+    timing: AttemptAdmissionTimingV1,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
 {
@@ -541,6 +556,7 @@ async fn execute_provider_with_environment<S>(
             return;
         }
     };
+    let started = std::time::Instant::now();
 
     if let Some(mut stdin) = child.stdin.take() {
         let instructions = envelope.instructions().as_bytes().to_vec();
@@ -584,6 +600,7 @@ async fn execute_provider_with_environment<S>(
     let stdout = stream_summary(stdout_task.await.ok().flatten());
     let stderr = stream_summary(stderr_task.await.ok().flatten());
     let outcome = overflow_outcome(outcome, &stdout, &stderr);
+    let terminal = std::time::Instant::now();
     let evidence = WorkAttemptEvidenceRecordV1 {
         identity: identity.clone(),
         requested_route: running.requested_route().clone(),
@@ -598,6 +615,12 @@ async fn execute_provider_with_environment<S>(
     match attempts.settle(context, &identity, &evidence) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+            if let Some(observation) =
+                work_operation_resource_observation(&settled, timing, started, terminal)
+            {
+                let _ =
+                    record_work_operation_resource(observability_producer, &settled, observation);
+            }
         }
         Err(problem) => {
             tracing::warn!(
@@ -639,6 +662,7 @@ async fn execute_app_server<S>(
     admitted_environment: &BTreeMap<String, std::ffi::OsString>,
     cancel: Arc<Notify>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
+    timing: AttemptAdmissionTimingV1,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
 {
@@ -660,6 +684,7 @@ async fn execute_app_server<S>(
             return;
         }
     };
+    let started = std::time::Instant::now();
 
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
@@ -769,6 +794,7 @@ async fn execute_app_server<S>(
         (retained, total)
     }));
     let outcome = overflow_outcome(outcome, &stdout, &None);
+    let terminal = std::time::Instant::now();
     let evidence = WorkAttemptEvidenceRecordV1 {
         identity: identity.clone(),
         requested_route: running.requested_route().clone(),
@@ -785,6 +811,12 @@ async fn execute_app_server<S>(
     match attempts.settle(context, &identity, &evidence) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
+            if let Some(observation) =
+                work_operation_resource_observation(&settled, timing, started, terminal)
+            {
+                let _ =
+                    record_work_operation_resource(observability_producer, &settled, observation);
+            }
         }
         Err(problem) => {
             tracing::warn!(

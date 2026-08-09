@@ -483,6 +483,10 @@ impl Fixture {
     }
 
     fn state(&self) -> WorkAttemptStateV1 {
+        self.current_attempt().state()
+    }
+
+    fn current_attempt(&self) -> WorkAttemptV1 {
         self.attempts
             .status(
                 &self.context,
@@ -493,7 +497,6 @@ impl Fixture {
                 },
             )
             .unwrap()
-            .state()
     }
 
     fn sealed_evidence(&self) -> WorkAttemptEvidenceRecordV1 {
@@ -770,6 +773,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        AttemptAdmissionTimingV1::for_test(),
     )
     .await;
 
@@ -785,6 +789,39 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     );
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+    let scheduled = std::time::Instant::now();
+    let admitted = scheduled + std::time::Duration::from_micros(5);
+    let started = scheduled + std::time::Duration::from_micros(10);
+    let terminal = scheduled + std::time::Duration::from_micros(40);
+    let resource = work_operation_resource_observation(
+        &fixture.current_attempt(),
+        AttemptAdmissionTimingV1 {
+            scheduled,
+            admitted,
+        },
+        started,
+        terminal,
+    )
+    .expect("settled provider timing");
+    assert_eq!(resource.scheduled_latency_micros, 5);
+    assert_eq!(resource.service_latency_micros, 30);
+    assert_eq!(
+        resource.activation_outcome,
+        Some(OperationActivationOutcomeV1::Committed)
+    );
+    assert_eq!(
+        resource
+            .stage_timings
+            .iter()
+            .map(|timing| (timing.stage, timing.elapsed_micros))
+            .collect::<Vec<_>>(),
+        vec![
+            (OperationStageV1::Scheduled, 0),
+            (OperationStageV1::Admitted, 5),
+            (OperationStageV1::Started, 10),
+            (OperationStageV1::Terminal, 40),
+        ]
+    );
     let evidence = fixture.sealed_evidence();
     assert_eq!(
         evidence.outcome,
@@ -868,6 +905,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        AttemptAdmissionTimingV1::for_test(),
     )
     .await;
     let observed = std::fs::read_to_string(&environment_marker).unwrap();
@@ -939,6 +977,7 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        AttemptAdmissionTimingV1::for_test(),
     )
     .await;
 
@@ -1106,6 +1145,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
             &admitted_environment,
             Arc::clone(&cancel),
             None,
+            AttemptAdmissionTimingV1::for_test(),
         ) => {}
         _ = driver => unreachable!("the driver loops until execution settles"),
     }
@@ -1290,6 +1330,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        AttemptAdmissionTimingV1::for_test(),
     )
     .await;
 
@@ -1563,6 +1604,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         &admitted_environment,
         Arc::new(Notify::new()),
         None,
+        AttemptAdmissionTimingV1::for_test(),
     )
     .await;
 

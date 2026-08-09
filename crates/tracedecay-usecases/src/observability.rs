@@ -19,6 +19,7 @@ mod retrieval_emit;
 mod store;
 mod work_blocked_interval_emit;
 mod work_duplicate_emit;
+mod work_operation_resource_emit;
 mod work_owner_observation_recovery;
 mod work_retry_leak_emit;
 mod workflow_emit;
@@ -75,6 +76,7 @@ pub use work_blocked_interval_emit::{
     record_work_blocked_interval_observation, work_blocked_interval_observation_envelope,
 };
 pub use work_duplicate_emit::record_work_duplicate_observation;
+pub use work_operation_resource_emit::record_work_operation_resource;
 pub use work_owner_observation_recovery::{
     WorkOwnerObservationRecoverySummaryV1, WorkOwnerObservationRecoveryV1,
 };
