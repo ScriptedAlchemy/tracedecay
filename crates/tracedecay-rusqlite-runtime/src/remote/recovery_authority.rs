@@ -49,6 +49,7 @@ pub enum RemoteRecoveryPhysicalEffectErrorV1 {
     ForwardRecoveryRequired,
     Cancelled,
     TimedOut,
+    StaleAuthority,
     Unavailable,
     Corruption,
 }
@@ -920,6 +921,9 @@ fn map_physical_error(
         }
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled => RemoteRecoveryOperationErrorV1::Cancelled,
         RemoteRecoveryPhysicalEffectErrorV1::TimedOut => RemoteRecoveryOperationErrorV1::TimedOut,
+        RemoteRecoveryPhysicalEffectErrorV1::StaleAuthority => {
+            RemoteRecoveryOperationErrorV1::StaleAuthority
+        }
         RemoteRecoveryPhysicalEffectErrorV1::Unavailable => {
             RemoteRecoveryOperationErrorV1::Unavailable
         }
