@@ -297,10 +297,10 @@ typed_operation!(
     CodeCallees,
     code_callees,
     "operation.application.code_callees",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_callees"
+    OperationTransport::Http {
+        route: "/application/code/code_callees"
     },
-    "binding.mcp.code_callees.v1",
+    "binding.http.code_callees.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -335,10 +335,10 @@ typed_operation!(
     CodeCallers,
     code_callers,
     "operation.application.code_callers",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_callers"
+    OperationTransport::Http {
+        route: "/application/code/code_callers"
     },
-    "binding.mcp.code_callers.v1",
+    "binding.http.code_callers.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -373,10 +373,10 @@ typed_operation!(
     CodeDeclaration,
     code_declaration,
     "operation.application.code_declaration",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_declaration"
+    OperationTransport::Http {
+        route: "/application/code/code_declaration"
     },
-    "binding.mcp.code_declaration.v1",
+    "binding.http.code_declaration.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -411,10 +411,10 @@ typed_operation!(
     CodeDefinition,
     code_definition,
     "operation.application.code_definition",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_definition"
+    OperationTransport::Http {
+        route: "/application/code/code_definition"
     },
-    "binding.mcp.code_definition.v1",
+    "binding.http.code_definition.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -449,10 +449,10 @@ typed_operation!(
     CodeExactOccurrence,
     code_exact_occurrence,
     "operation.application.code_exact_occurrence",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_exact_occurrence"
+    OperationTransport::Http {
+        route: "/application/code/code_exact_occurrence"
     },
-    "binding.mcp.code_exact_occurrence.v1",
+    "binding.http.code_exact_occurrence.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -487,10 +487,10 @@ typed_operation!(
     CodeFacets,
     code_facets,
     "operation.application.code_facets",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_facets"
+    OperationTransport::Http {
+        route: "/application/code/code_facets"
     },
-    "binding.mcp.code_facets.v1",
+    "binding.http.code_facets.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -525,10 +525,10 @@ typed_operation!(
     CodeImplementations,
     code_implementations,
     "operation.application.code_implementations",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_implementations"
+    OperationTransport::Http {
+        route: "/application/code/code_implementations"
     },
-    "binding.mcp.code_implementations.v1",
+    "binding.http.code_implementations.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -563,10 +563,10 @@ typed_operation!(
     CodePhraseSearch,
     code_phrase_search,
     "operation.application.code_phrase_search",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_phrase_search"
+    OperationTransport::Http {
+        route: "/application/code/code_phrase_search"
     },
-    "binding.mcp.code_phrase_search.v1",
+    "binding.http.code_phrase_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -601,10 +601,10 @@ typed_operation!(
     CodeReferences,
     code_references,
     "operation.application.code_references",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_references"
+    OperationTransport::Http {
+        route: "/application/code/code_references"
     },
-    "binding.mcp.code_references.v1",
+    "binding.http.code_references.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -639,10 +639,10 @@ typed_operation!(
     CodeSignatureSearch,
     code_signature_search,
     "operation.application.code_signature_search",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_signature_search"
+    OperationTransport::Http {
+        route: "/application/code/code_signature_search"
     },
-    "binding.mcp.code_signature_search.v1",
+    "binding.http.code_signature_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -677,10 +677,10 @@ typed_operation!(
     CodeSymbolSearch,
     code_symbol_search,
     "operation.application.code_symbol_search",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_symbol_search"
+    OperationTransport::Http {
+        route: "/application/code/code_symbol_search"
     },
-    "binding.mcp.code_symbol_search.v1",
+    "binding.http.code_symbol_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -715,10 +715,10 @@ typed_operation!(
     CodeTimeline,
     code_timeline,
     "operation.application.code_timeline",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_timeline"
+    OperationTransport::Http {
+        route: "/application/code/code_timeline"
     },
-    "binding.mcp.code_timeline.v1",
+    "binding.http.code_timeline.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -753,10 +753,10 @@ typed_operation!(
     CodeTypeDefinition,
     code_type_definition,
     "operation.application.code_type_definition",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_type_definition"
+    OperationTransport::Http {
+        route: "/application/code/code_type_definition"
     },
-    "binding.mcp.code_type_definition.v1",
+    "binding.http.code_type_definition.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -791,10 +791,10 @@ typed_operation!(
     CodeTypeHierarchy,
     code_type_hierarchy,
     "operation.application.code_type_hierarchy",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_code_type_hierarchy"
+    OperationTransport::Http {
+        route: "/application/code/code_type_hierarchy"
     },
-    "binding.mcp.code_type_hierarchy.v1",
+    "binding.http.code_type_hierarchy.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2594,6 +2594,41 @@ typed_operation!(
     1
 );
 
+pub mod application_github_stack_signal_expand {
+    pub type Request = tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
+    pub type Result = tracedecay_application::git::GitHubStackSignalExpandSurfaceResultV1;
+}
+typed_operation!(
+    ApplicationGithubStackSignalExpand,
+    application_github_stack_signal_expand,
+    "operation.application.github_stack_signal_expand",
+    OperationTransport::Http {
+        route: "/application/github-stack/signal-expand"
+    },
+    "binding.http.github_stack_signal_expand.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.application.github-stack.signal-expand.result",
+    1
+);
+
 pub mod health_delta {
     pub type Request = tracedecay_application::retrieval::HealthDeltaRequest;
     pub type Result = tracedecay_application::retrieval::HealthDeltaResult;
@@ -3206,6 +3241,42 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.native-integration.status.result",
+    1
+);
+
+pub mod observatory_read {
+    pub type Request = tracedecay_application::observatory_surface::ObservatoryReadRequestV1;
+    pub type Result = tracedecay_application::observatory_surface::ObservatoryReadResultV1;
+}
+typed_operation!(
+    ObservatoryRead,
+    observatory_read,
+    "operation.application.observatory_read",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_observatory_read"
+    },
+    "binding.mcp.observatory_read.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    15000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.observatory-read.result",
     1
 );
 
@@ -4172,18 +4243,18 @@ typed_operation!(
     1
 );
 
-pub mod worktree_cleanup_confirm {
+pub mod application_worktree_cleanup_confirm {
     pub type Request = tracedecay_application::git::WorktreeCleanupConfirmRequestV1;
     pub type Result = tracedecay_application::git::NativeIntegrationSurfaceResultV1;
 }
 typed_operation!(
-    WorktreeCleanupConfirm,
-    worktree_cleanup_confirm,
+    ApplicationWorktreeCleanupConfirm,
+    application_worktree_cleanup_confirm,
     "operation.application.worktree_cleanup_confirm",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_worktree_cleanup_confirm"
+    OperationTransport::Http {
+        route: "/application/native-integration/worktree_cleanup_confirm"
     },
-    "binding.mcp.worktree_cleanup_confirm.v1",
+    "binding.http.worktree_cleanup_confirm.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
     true,
@@ -4207,18 +4278,18 @@ typed_operation!(
     1
 );
 
-pub mod worktree_cleanup_inspect {
+pub mod application_worktree_cleanup_inspect {
     pub type Request = tracedecay_application::git::WorktreeCleanupInspectRequestV1;
     pub type Result = tracedecay_application::git::NativeIntegrationSurfaceResultV1;
 }
 typed_operation!(
-    WorktreeCleanupInspect,
-    worktree_cleanup_inspect,
+    ApplicationWorktreeCleanupInspect,
+    application_worktree_cleanup_inspect,
     "operation.application.worktree_cleanup_inspect",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_worktree_cleanup_inspect"
+    OperationTransport::Http {
+        route: "/application/native-integration/worktree_cleanup_inspect"
     },
-    "binding.mcp.worktree_cleanup_inspect.v1",
+    "binding.http.worktree_cleanup_inspect.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4242,18 +4313,18 @@ typed_operation!(
     1
 );
 
-pub mod worktree_cleanup_reconcile {
+pub mod application_worktree_cleanup_reconcile {
     pub type Request = tracedecay_application::git::WorktreeCleanupReconcileRequestV1;
     pub type Result = tracedecay_application::git::NativeIntegrationSurfaceResultV1;
 }
 typed_operation!(
-    WorktreeCleanupReconcile,
-    worktree_cleanup_reconcile,
+    ApplicationWorktreeCleanupReconcile,
+    application_worktree_cleanup_reconcile,
     "operation.application.worktree_cleanup_reconcile",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_worktree_cleanup_reconcile"
+    OperationTransport::Http {
+        route: "/application/native-integration/worktree_cleanup_reconcile"
     },
-    "binding.mcp.worktree_cleanup_reconcile.v1",
+    "binding.http.worktree_cleanup_reconcile.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4277,18 +4348,18 @@ typed_operation!(
     1
 );
 
-pub mod worktree_cleanup_remove {
+pub mod application_worktree_cleanup_remove {
     pub type Request = tracedecay_application::git::WorktreeCleanupRemoveRequestV1;
     pub type Result = tracedecay_application::git::NativeIntegrationSurfaceResultV1;
 }
 typed_operation!(
-    WorktreeCleanupRemove,
-    worktree_cleanup_remove,
+    ApplicationWorktreeCleanupRemove,
+    application_worktree_cleanup_remove,
     "operation.application.worktree_cleanup_remove",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_worktree_cleanup_remove"
+    OperationTransport::Http {
+        route: "/application/native-integration/worktree_cleanup_remove"
     },
-    "binding.mcp.worktree_cleanup_remove.v1",
+    "binding.http.worktree_cleanup_remove.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
     true,
@@ -4314,18 +4385,18 @@ typed_operation!(
     1
 );
 
-pub mod worktree_inventory {
+pub mod application_worktree_inventory {
     pub type Request = tracedecay_application::git::WorktreeInventoryRequestV1;
     pub type Result = tracedecay_application::git::NativeIntegrationSurfaceResultV1;
 }
 typed_operation!(
-    WorktreeInventory,
-    worktree_inventory,
+    ApplicationWorktreeInventory,
+    application_worktree_inventory,
     "operation.application.worktree_inventory",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_worktree_inventory"
+    OperationTransport::Http {
+        route: "/application/native-integration/worktree_inventory"
     },
-    "binding.mcp.worktree_inventory.v1",
+    "binding.http.worktree_inventory.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4843,6 +4914,41 @@ typed_operation!(
     1
 );
 
+pub mod work_compare_proposal {
+    pub type Request = tracedecay_application::WorkProposalComparisonRequestV1;
+    pub type Result = tracedecay_application::WorkProposalComparisonV1;
+}
+typed_operation!(
+    WorkCompareProposal,
+    work_compare_proposal,
+    "operation.work.compare_proposal",
+    OperationTransport::Http {
+        route: "/application/work/compare-proposal"
+    },
+    "binding.http.work.compare_proposal",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.compare_proposal.result",
+    1
+);
+
 pub mod work_create {
     pub type Request = tracedecay_application::CreateWorkTaskRequestV1;
     pub type Result = tracedecay_application::WorkProductMutationReceiptV1;
@@ -4912,6 +5018,76 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.delta.result",
+    1
+);
+
+pub mod work_execution_history {
+    pub type Request = tracedecay_application::WorkAttemptListRequestV1;
+    pub type Result = tracedecay_application::WorkExecutionHistoryV1;
+}
+typed_operation!(
+    WorkExecutionHistory,
+    work_execution_history,
+    "operation.work.execution_history",
+    OperationTransport::Http {
+        route: "/application/work/execution-history"
+    },
+    "binding.http.work.execution_history",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.execution_history.result",
+    1
+);
+
+pub mod work_experience {
+    pub type Request = tracedecay_application::WorkExperienceRequestV1;
+    pub type Result = tracedecay_application::WorkExperienceV1;
+}
+typed_operation!(
+    WorkExperience,
+    work_experience,
+    "operation.work.experience",
+    OperationTransport::Http {
+        route: "/application/work/experience"
+    },
+    "binding.http.work.experience",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.experience.result",
     1
 );
 
@@ -5017,216 +5193,6 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.list_attempts.result",
-    1
-);
-
-pub mod work_execution_history {
-    pub type Request = tracedecay_application::WorkAttemptListRequestV1;
-    pub type Result = tracedecay_application::WorkExecutionHistoryV1;
-}
-typed_operation!(
-    WorkExecutionHistory,
-    work_execution_history,
-    "operation.work.execution_history",
-    OperationTransport::Http {
-        route: "/application/work/execution-history"
-    },
-    "binding.http.work.execution_history",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.execution_history.result",
-    1
-);
-
-pub mod work_retrieve_evidence {
-    pub type Request = tracedecay_application::WorkEvidenceRetrieveRequestV1;
-    pub type Result = tracedecay_application::WorkEvidenceRetrievalV1;
-}
-typed_operation!(
-    WorkRetrieveEvidence,
-    work_retrieve_evidence,
-    "operation.work.retrieve_evidence",
-    OperationTransport::Http {
-        route: "/application/work/retrieve-evidence"
-    },
-    "binding.http.work.retrieve_evidence",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.retrieve_evidence.result",
-    1
-);
-
-pub mod work_experience {
-    pub type Request = tracedecay_application::WorkExperienceRequestV1;
-    pub type Result = tracedecay_application::WorkExperienceV1;
-}
-typed_operation!(
-    WorkExperience,
-    work_experience,
-    "operation.work.experience",
-    OperationTransport::Http {
-        route: "/application/work/experience"
-    },
-    "binding.http.work.experience",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.experience.result",
-    1
-);
-
-pub mod work_compare_proposal {
-    pub type Request = tracedecay_application::WorkProposalComparisonRequestV1;
-    pub type Result = tracedecay_application::WorkProposalComparisonV1;
-}
-typed_operation!(
-    WorkCompareProposal,
-    work_compare_proposal,
-    "operation.work.compare_proposal",
-    OperationTransport::Http {
-        route: "/application/work/compare-proposal"
-    },
-    "binding.http.work.compare_proposal",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.compare_proposal.result",
-    1
-);
-
-pub mod work_prepare_duplicate_adjudication {
-    pub type Request = tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1;
-    pub type Result = tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
-}
-typed_operation!(
-    WorkPrepareDuplicateAdjudication,
-    work_prepare_duplicate_adjudication,
-    "operation.work.prepare_duplicate_adjudication",
-    OperationTransport::Http {
-        route: "/application/work/prepare-duplicate-adjudication"
-    },
-    "binding.http.work.prepare_duplicate_adjudication",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.prepare_duplicate_adjudication.result",
-    1
-);
-
-pub mod work_prepare_graph_mutation {
-    pub type Request = tracedecay_application::PrepareWorkProductMutationRequestV1;
-    pub type Result = tracedecay_application::WorkProductMutationRequestV1;
-}
-typed_operation!(
-    WorkPrepareGraphMutation,
-    work_prepare_graph_mutation,
-    "operation.work.prepare_graph_mutation",
-    OperationTransport::Http {
-        route: "/application/work/prepare-graph-mutation"
-    },
-    "binding.http.work.prepare_graph_mutation",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.prepare_graph_mutation.result",
     1
 );
 
@@ -5371,6 +5337,76 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.placement_status.result",
+    1
+);
+
+pub mod work_prepare_duplicate_adjudication {
+    pub type Request = tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1;
+    pub type Result = tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
+}
+typed_operation!(
+    WorkPrepareDuplicateAdjudication,
+    work_prepare_duplicate_adjudication,
+    "operation.work.prepare_duplicate_adjudication",
+    OperationTransport::Http {
+        route: "/application/work/prepare-duplicate-adjudication"
+    },
+    "binding.http.work.prepare_duplicate_adjudication",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.prepare_duplicate_adjudication.result",
+    1
+);
+
+pub mod work_prepare_graph_mutation {
+    pub type Request = tracedecay_application::PrepareWorkProductMutationRequestV1;
+    pub type Result = tracedecay_application::WorkProductMutationRequestV1;
+}
+typed_operation!(
+    WorkPrepareGraphMutation,
+    work_prepare_graph_mutation,
+    "operation.work.prepare_graph_mutation",
+    OperationTransport::Http {
+        route: "/application/work/prepare-graph-mutation"
+    },
+    "binding.http.work.prepare_graph_mutation",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.prepare_graph_mutation.result",
     1
 );
 
@@ -5519,6 +5555,41 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.resume_run.result",
+    1
+);
+
+pub mod work_retrieve_evidence {
+    pub type Request = tracedecay_application::WorkEvidenceRetrieveRequestV1;
+    pub type Result = tracedecay_application::WorkEvidenceRetrievalV1;
+}
+typed_operation!(
+    WorkRetrieveEvidence,
+    work_retrieve_evidence,
+    "operation.work.retrieve_evidence",
+    OperationTransport::Http {
+        route: "/application/work/retrieve-evidence"
+    },
+    "binding.http.work.retrieve_evidence",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.retrieve_evidence.result",
     1
 );
 

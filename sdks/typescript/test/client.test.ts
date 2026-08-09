@@ -258,7 +258,7 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed Workflow methods from canonical bindings", () => {
+  it("publishes typed methods from the canonical operation union", () => {
     expectTypeOf<
       Parameters<
         ReturnType<typeof createClient>["operations"]["workflow_get_definition"]
@@ -277,16 +277,10 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(new Set(OPERATIONS.map((operation) => operation.operation)).size).toBe(
       OPERATIONS.length,
     );
-    // Operations without a canonical SDK binding stay absent. Asserting the
-    // whole deferred set — rather than one named operation — keeps this
-    // invariant true as families gain schemas and leave the deferred list.
-    const bound = new Set(Object.keys(client.operations));
-    for (const unavailable of UNAVAILABLE_OPERATIONS) {
-      expect(bound.has(unavailable.operation)).toBe(false);
-      expect(
-        bound.has(unavailable.operation.replace(/^application_/, "")),
-      ).toBe(false);
-    }
+    expect(Object.keys(client.operations).sort()).toEqual(
+      OPERATIONS.map((operation) => operation.operation).sort(),
+    );
+    expect(UNAVAILABLE_OPERATIONS).toEqual([]);
   });
 
   it("preserves remote base paths and origin policy", async () => {
@@ -351,9 +345,6 @@ describe("TraceDecayClient generated operation bindings", () => {
 
   it("publishes all mounted Workflow routes as executable operations", () => {
     const available: string[] = OPERATIONS.map((operation) => operation.operation);
-    const unavailable = (
-      UNAVAILABLE_OPERATIONS as readonly { readonly operation: string }[]
-    ).map((operation) => operation.operation);
     expect(available.length).toBeGreaterThan(0);
     expect(new Set(available).size).toBe(available.length);
     expect(new Set(OPERATIONS.map((operation) => operation.operationId)).size).toBe(
@@ -362,7 +353,6 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(new Set(OPERATIONS.map((operation) => operation.bindingId)).size).toBe(
       available.length,
     );
-    expect(unavailable.some((operation) => available.includes(operation))).toBe(false);
     expect(available).toEqual(
       expect.arrayContaining([
         "workflow_definition_history",
@@ -382,11 +372,8 @@ describe("TraceDecayClient generated operation bindings", () => {
         token: "sdk-secret",
       }).operations,
     ).toBe(true);
-    // Handoff and multi-root are mounted HTTP families, so the generator must
-    // publish them like Work and Workflow. Multi-root was quarantined here
-    // while its public surface was torn out; the multi-root HTTP owner landed
-    // on 2026-08-07 and its production router test answers on all three
-    // routes, so the quarantine no longer describes the daemon.
+    // Handoff and multi-root are mounted HTTP families and belong in the same
+    // canonical operation union as Work and Workflow.
     const mountedFamilies = [
       "handoff_open_investigation_handoff",
       "handoff_open_task_handoff",
@@ -401,7 +388,6 @@ describe("TraceDecayClient generated operation bindings", () => {
     }).operations;
     for (const operation of mountedFamilies) {
       expect(available).toContain(operation);
-      expect(unavailable).not.toContain(operation);
       expect(operation in clientOperations).toBe(true);
     }
   });
@@ -464,11 +450,6 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
 
     expect(configuration.map((operation) => operation.operation)).toEqual(expected);
-    expect(
-      UNAVAILABLE_OPERATIONS.some((operation) =>
-        operation.operation.startsWith("application_configuration_"),
-      ),
-    ).toBe(false);
     for (const operation of configuration) {
       expect(operation.transport).toEqual({
         kind: "http",
