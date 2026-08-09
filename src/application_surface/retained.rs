@@ -129,7 +129,7 @@ async fn invoke_operation(
     .await
 }
 
-fn decode_request(
+pub(super) fn decode_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,
 ) -> Option<RetainedSurfaceRequestV1> {
@@ -208,6 +208,82 @@ fn decode_session_refresh(
         .ok()
         .map(|request| SessionRefreshRequestV1::with_action(action, request))
         .map(RetainedSurfaceRequestV1::SessionRefresh)
+}
+
+pub(crate) fn result_value(
+    result: tracedecay_application::ApplicationResult<RetainedSurfaceResultV1>,
+) -> Result<
+    tracedecay_application::ApplicationResult<serde_json::Value>,
+    ApplicationSurfaceAdapterError,
+> {
+    match result {
+        Ok(envelope) => Ok(Ok(tracedecay_application::ApplicationEnvelope {
+            contract: envelope.contract,
+            request_id: envelope.request_id,
+            scope: envelope.scope,
+            outcome: outcome_value(envelope.outcome)?,
+        })),
+        Err(problem) => Ok(Err(problem)),
+    }
+}
+
+pub(super) fn outcome_value(
+    outcome: tracedecay_application::ApplicationOutcome<RetainedSurfaceResultV1>,
+) -> Result<
+    tracedecay_application::ApplicationOutcome<serde_json::Value>,
+    ApplicationSurfaceAdapterError,
+> {
+    use tracedecay_application::ApplicationOutcome;
+
+    fn payload(
+        payload: Option<RetainedSurfaceResultV1>,
+    ) -> Result<Option<serde_json::Value>, ApplicationSurfaceAdapterError> {
+        payload
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    }
+
+    Ok(match outcome {
+        ApplicationOutcome::Evidence(packet) => {
+            ApplicationOutcome::Evidence(tracedecay_application::EvidencePacket {
+                temporal: packet.temporal,
+                authority: packet.authority,
+                evidence_authorities: packet.evidence_authorities,
+                coverage: packet.coverage,
+                omissions: packet.omissions,
+                scores: packet.scores,
+                contributions: packet.contributions,
+                page: packet.page,
+                execution: packet.execution,
+                payload: payload(packet.payload)?,
+            })
+        }
+        ApplicationOutcome::Preview(preview) => {
+            ApplicationOutcome::Preview(tracedecay_application::PreviewResult {
+                preview_id: preview.preview_id,
+                preview_digest: preview.preview_digest,
+                effect_class: preview.effect_class,
+                authority: preview.authority,
+                expected_state: preview.expected_state,
+                execution: preview.execution,
+                payload: payload(preview.payload)?,
+            })
+        }
+        ApplicationOutcome::Effect(effect) => {
+            ApplicationOutcome::Effect(tracedecay_application::EffectResult {
+                effect_id: effect.effect_id,
+                effect_class: effect.effect_class,
+                idempotency_key: effect.idempotency_key,
+                authority: effect.authority,
+                expected_state: effect.expected_state,
+                execution: effect.execution,
+                reconciliation: effect.reconciliation,
+                receipt: effect.receipt,
+                payload: payload(effect.payload)?,
+            })
+        }
+    })
 }
 
 #[cfg(test)]

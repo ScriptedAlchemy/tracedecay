@@ -10,9 +10,9 @@ use tracedecay_sessions::{
 };
 
 use crate::errors::{Result, TraceDecayError};
-use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::workflow_index::MAX_WORKFLOW_LIMIT;
 use crate::tracedecay::TraceDecay;
+use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::workflow_index::MAX_WORKFLOW_LIMIT;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
@@ -358,7 +358,9 @@ fn append_run_bullet(md: &mut Md, run: &Value) {
         if !detail.is_empty() {
             detail.push_str(" · ");
         }
-        detail.push_str(&crate::sessions::shared::one_line_truncated(summary, 160));
+        detail.push_str(&tracedecay_sessions::runtime::shared::one_line_truncated(
+            summary, 160,
+        ));
     }
     if !detail.is_empty() {
         md.line(&format!("  {detail}"));
@@ -397,7 +399,9 @@ fn render_run_detail_md(md: &mut Md, value: &Value) {
     let summary = render::field_str(run, "result_summary");
     if !summary.is_empty() {
         md.blank()
-            .line(&crate::sessions::shared::one_line_truncated(summary, 600));
+            .line(&tracedecay_sessions::runtime::shared::one_line_truncated(
+                summary, 600,
+            ));
     }
     // Phases (from phase_json), then agents.
     if let Some(phases) = run

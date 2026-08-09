@@ -24,8 +24,8 @@ use crate::application::host_admission::{
 use crate::config::PinnedUserDataDir;
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::mcp::transport::JsonRpcRequest;
-use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 pub(super) const MESSAGE_SEARCH_PROJECT_ID: &str = "project.message-search-cutover";
 

@@ -607,11 +607,13 @@ async fn active_replay_tool_calls_apply_ingest_protection_and_externalize_media_
 
     let payload_ref = externalized_ref_from_placeholder(protected_args);
     let expanded = db
-        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-tool-calls-protection".into(),
-            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
-            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+                payload_ref,
+            },
+            content_slice: Some(tracedecay_sessions::runtime::lcm::LcmContentSlice {
                 offset: 0,
                 limit: media_payload.chars().count(),
             }),
@@ -681,11 +683,13 @@ async fn nested_media_placeholder_remains_inside_structured_active_content() {
 
     let payload_ref = externalized_ref_from_placeholder(&raw.content);
     let expanded = db
-        .lcm_expand(tracedecay::sessions::lcm::LcmExpandRequest {
+        .lcm_expand(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
             provider: "cursor".into(),
             session_id: "session-media".into(),
-            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload { payload_ref },
-            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
+                payload_ref,
+            },
+            content_slice: Some(tracedecay_sessions::runtime::lcm::LcmContentSlice {
                 offset: 0,
                 limit: media_payload.chars().count(),
             }),

@@ -617,44 +617,12 @@ pub async fn ensure_registered_schema_for_admission(
             })?;
         tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
             &transaction,
-            if is_fresh {
-                tracedecay_sessions::runtime::git_correlation::GitCorrelationSchemaInstall::ProvenFresh
-            } else {
-                tracedecay_sessions::runtime::git_correlation::GitCorrelationSchemaInstall::Existing
-            },
         )
         .await
-        .map_err(|error| match error {
-            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::ProfileResetRequired {
-                found_version,
-                required_version,
-            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
-                component: "Git correlation",
-                found_version,
-                required_version,
-            },
-            error => global_db_operation_error("initialize git correlation schema", error),
-        })?;
-        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(
-            &transaction,
-            if is_fresh {
-                tracedecay_sessions::runtime::workflow_index::WorkflowIndexSchemaInstall::ProvenFresh
-            } else {
-                tracedecay_sessions::runtime::workflow_index::WorkflowIndexSchemaInstall::Existing
-            },
-        )
-        .await
-        .map_err(|error| match error {
-            tracedecay_sessions::runtime::workflow_index::WorkflowIndexError::ProfileResetRequired {
-                found_version,
-                required_version,
-            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
-                component: "Workflow index",
-                found_version,
-                required_version,
-            },
-            error => global_db_operation_error("initialize workflow index schema", error),
-        })?;
+        .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
+        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
         tracedecay_runtime_core::errors::Result::Ok(())
     }
     .await;
@@ -707,41 +675,6 @@ pub async fn converge_registered_schema(
     // guarded writes may proceed while these idempotent repairs advance.
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
-    let privacy = tracedecay_sessions::runtime::lcm::converge_privacy_remediation(conn)
-        .await
-        .map_err(|error| global_db_operation_error("converge LCM privacy remediation", error))?;
-    if matches!(
-        privacy.phase,
-        tracedecay_sessions::runtime::lcm::LcmPrivacyRemediationPhaseV1::ResetRequired
-    ) {
-        let reason = privacy.failure_code.ok_or_else(|| {
-            global_db_operation_message(
-                "converge LCM privacy remediation",
-                "reset-required privacy state has no failure code",
-            )
-        })?;
-        return Err(
-            tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                "LCM privacy remediation",
-                reason,
-            ),
-        );
-    }
-    if matches!(
-        privacy.phase,
-        tracedecay_sessions::runtime::lcm::LcmPrivacyRemediationPhaseV1::Failed
-    ) {
-        let reason = privacy.failure_code.ok_or_else(|| {
-            global_db_operation_message(
-                "converge LCM privacy remediation",
-                "failed privacy state has no failure code",
-            )
-        })?;
-        return Err(global_db_operation_message(
-            "converge LCM privacy remediation",
-            reason,
-        ));
-    }
     ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
 }
 

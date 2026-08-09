@@ -12,7 +12,7 @@ import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
-import { AnyObject } from '../../data/query/legacy.ts';
+import { AnyObject } from '../../data/query/payload.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   assertNever,

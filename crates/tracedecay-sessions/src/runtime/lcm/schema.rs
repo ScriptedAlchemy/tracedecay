@@ -1,5 +1,5 @@
 #[cfg(test)]
-use crate::compatibility::projected_content_hash;
+use crate::retrieval_content::projected_content_hash;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};

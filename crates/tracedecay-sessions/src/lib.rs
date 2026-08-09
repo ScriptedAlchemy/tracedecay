@@ -6,7 +6,6 @@
 
 pub mod admission;
 mod authorization;
-pub mod compatibility;
 pub mod host_ports;
 mod ingest;
 pub mod lcm;
@@ -14,6 +13,7 @@ pub mod observation;
 mod orchestration;
 mod provider;
 pub mod repository_provenance;
+pub mod retrieval_content;
 pub mod runtime;
 mod workflow;
 

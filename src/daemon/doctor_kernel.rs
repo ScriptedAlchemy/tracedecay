@@ -905,7 +905,7 @@ pub async fn collect_retention_backlog_findings(
     let Ok(snapshot) = profile_sessions.read_snapshot().await else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(records) = crate::sessions::lcm::retention::read_session_retention_backlog(
+    let Ok(records) = tracedecay_sessions::runtime::lcm::retention::read_session_retention_backlog(
         &snapshot,
         store,
         &retention.session_lcm,

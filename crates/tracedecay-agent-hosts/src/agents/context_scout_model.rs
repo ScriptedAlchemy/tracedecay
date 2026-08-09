@@ -30,7 +30,6 @@ pub fn context_scout_backend_from_automation_config(
     match config.backend {
         AutomationBackend::Disabled => ContextScoutModelBackendV1::Disabled,
         AutomationBackend::CodexAppServer => ContextScoutModelBackendV1::CodexAppServer,
-        AutomationBackend::ExternalCommand => ContextScoutModelBackendV1::Unsupported,
     }
 }
 
@@ -270,7 +269,7 @@ mod tests {
 
     use super::*;
     use crate::automation::backend::AgentTaskResponse;
-    use crate::ports::context::{CancellationToken, MonotonicDeadline};
+    use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
     #[derive(Clone)]
     struct RecordingBackend {
@@ -355,30 +354,31 @@ mod tests {
     }
 
     #[test]
-    fn backend_mapping_fails_closed_for_disabled_and_unsupported_routes() {
+    fn backend_mapping_uses_only_the_final_automation_backends() {
         assert_eq!(
             context_scout_model_assistant_from_project_config(None).backend(),
             ContextScoutModelBackendV1::Disabled
         );
         assert_eq!(
             context_scout_backend_from_automation_config(&AutomationConfig::default()),
+            ContextScoutModelBackendV1::CodexAppServer
+        );
+        assert_eq!(
+            context_scout_backend_from_automation_config(&AutomationConfig {
+                enabled: false,
+                backend: AutomationBackend::CodexAppServer,
+                ..AutomationConfig::default()
+            }),
             ContextScoutModelBackendV1::Disabled
         );
         assert_eq!(
             context_scout_backend_from_automation_config(&AutomationConfig {
                 enabled: true,
-                backend: AutomationBackend::ExternalCommand,
+                backend: AutomationBackend::Disabled,
+                model_id: None,
                 ..AutomationConfig::default()
             }),
-            ContextScoutModelBackendV1::Unsupported
-        );
-        assert_eq!(
-            context_scout_backend_from_automation_config(&AutomationConfig {
-                enabled: true,
-                backend: AutomationBackend::CodexAppServer,
-                ..AutomationConfig::default()
-            }),
-            ContextScoutModelBackendV1::CodexAppServer
+            ContextScoutModelBackendV1::Disabled
         );
     }
 

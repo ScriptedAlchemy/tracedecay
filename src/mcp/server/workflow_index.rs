@@ -15,9 +15,11 @@ use tracedecay_sessions::{
 };
 
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::git_correlation::{GitCorrelationError, GitScopeFilter};
-use crate::sessions::workflow_index::{RegisteredWorkflowIndexSnapshot, WorkflowIndexError};
 use crate::store::GlobalDbWorkflowStore;
+use tracedecay_sessions::runtime::git_correlation::{GitCorrelationError, GitScopeFilter};
+use tracedecay_sessions::runtime::workflow_index::{
+    RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
+};
 
 /// Keeps the workflow index's own error text, so a read failure still reads the
 /// same way after the boundary moved.

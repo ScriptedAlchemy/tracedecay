@@ -21,7 +21,7 @@ use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::ParseOffset;
-use tracedecay::sessions::SessionRecord;
+use tracedecay_sessions::runtime::SessionRecord;
 
 struct Fixture {
     _tmp: TempDir,
@@ -110,7 +110,7 @@ impl SavingsSeed<'_> {
 
     async fn upsert_session_message(
         &self,
-        message: &tracedecay::sessions::SessionMessageRecord,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
     ) -> bool {
         self.0
             .upsert_session_message_for_test(HostAdmissionScope::Project, message)
@@ -121,7 +121,7 @@ impl SavingsSeed<'_> {
     async fn upsert_transcript_batch(
         &self,
         session: &SessionRecord,
-        messages: &[tracedecay::sessions::SessionMessageRecord],
+        messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
         source: &str,
         offset: ParseOffset,
     ) -> bool {

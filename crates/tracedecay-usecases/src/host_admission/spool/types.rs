@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::super::{HostAdmissionOutcome, HostAdmissionStatus};
-use super::SpoolOverflowDisposition;
+use super::{SpoolOverflowDisposition, frames::FORMAT_VERSION};
+
+const HOST_ADMISSION_SPOOL_AUTHORITY: &str = "host-admission spool";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +68,11 @@ impl SpoolError {
                 | SpoolOverflowDisposition::MaxBytesPerSource
                 | SpoolOverflowDisposition::MaxRecordsPerSource,
             ) => HostAdmissionOutcome::spool_overflow(),
-            Self::UnsupportedVersion(_) => HostAdmissionOutcome::spool_unsupported_version(),
+            Self::UnsupportedVersion(_) => HostAdmissionOutcome::new(
+                HostAdmissionStatus::Unavailable,
+                false,
+                Some("spool_reset_required"),
+            ),
             Self::Corrupted { .. } | Self::MetadataCorrupted => {
                 HostAdmissionOutcome::spool_corrupted()
             }
@@ -84,6 +91,23 @@ impl SpoolError {
                 Some("spool_io_failed"),
             ),
         }
+    }
+
+    pub(crate) fn to_open_error(&self) -> TraceDecayError {
+        if let Self::UnsupportedVersion(version) = self {
+            return TraceDecayError::reset_required(
+                HOST_ADMISSION_SPOOL_AUTHORITY,
+                format!(
+                    "persisted version {version} is incompatible with required version {FORMAT_VERSION}; remove and recreate the host-admission spool"
+                ),
+            );
+        }
+        let outcome = self.to_outcome();
+        TraceDecayError::hook_runtime(
+            outcome.reason_code.unwrap_or("spool_unavailable"),
+            outcome.retryable,
+            "host-admission spool open failed",
+        )
     }
 }
 

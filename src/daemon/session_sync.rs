@@ -847,14 +847,16 @@ fn completed_profile_sweep_covers(
 
 fn source_coverage(
     store_scope: &str,
-    coverage: crate::sessions::IngestPassCoverage,
+    coverage: tracedecay_sessions::runtime::IngestPassCoverage,
 ) -> SessionSyncSourceCoverageV1 {
     let coverage = match coverage {
-        crate::sessions::IngestPassCoverage::Complete => SessionSyncCoverageV1::Complete,
-        crate::sessions::IngestPassCoverage::Partial { deferred_units } => {
+        tracedecay_sessions::runtime::IngestPassCoverage::Complete => {
+            SessionSyncCoverageV1::Complete
+        }
+        tracedecay_sessions::runtime::IngestPassCoverage::Partial { deferred_units } => {
             SessionSyncCoverageV1::Partial { deferred_units }
         }
-        crate::sessions::IngestPassCoverage::Backpressured {
+        tracedecay_sessions::runtime::IngestPassCoverage::Backpressured {
             admitted_units,
             rejected_units,
         } => SessionSyncCoverageV1::Backpressured {

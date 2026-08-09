@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 use tracedecay_application::{
-    CancellationSignal, Deadline, EffectId, IdempotencyKey, RequestId, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditRequest,
+    CancellationSignal, Deadline, EffectId, IdempotencyKey, RenameSymbolSurfaceRequestV1,
+    RequestId, SourceEditKind, SourceEditReconciliationDispositionV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -37,6 +37,25 @@ fn required_array<'a>(args: &'a Value, name: &str) -> Result<&'a [Value]> {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or_else(|| missing_required_param(name))
+}
+
+/// Decodes the exact public request shape at the transport boundary. Keeping
+/// this conversion here prevents MCP handlers from independently accepting a
+/// looser shape than the application-owned wire model. `format` selects the
+/// MCP response rendering and is therefore removed before application input
+/// validation; every operation field remains subject to the DTO's strict
+/// shape.
+pub(super) fn deserialize_source_edit_surface<T>(args: &Value) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut input = args.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("format");
+    }
+    serde_json::from_value(input).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid source edit request: {error}"),
+    })
 }
 
 /// Reads the shared `dry_run` edit flag (default `false`): when set, an edit
@@ -491,27 +510,24 @@ pub(super) async fn handle_rename_symbol(
     args: Value,
     invocation: SourceEditInvocationContext,
 ) -> Result<ToolResult> {
+    let request: RenameSymbolSurfaceRequestV1 = deserialize_source_edit_surface(&args)?;
     let binding = tracedecay_application::RenameSymbolBindingV1 {
-        node_id: required_str(&args, "node_id")?.to_owned(),
-        qualified_name: required_str(&args, "qualified_name")?.to_owned(),
-        kind: required_str(&args, "kind")?.to_owned(),
-        file: required_str(&args, "file")?.to_owned(),
-        old_name: required_str(&args, "old_name")?.to_owned(),
+        node_id: request.node_id,
+        qualified_name: request.qualified_name,
+        kind: request.kind,
+        file: request.file,
+        old_name: request.old_name,
+        accepted_preview: request.accepted_preview,
     };
-    let new_name = required_str(&args, "new_name")?;
-    // The bound plan and expected_state digest are the product; applying is
-    // opt-in, exactly like move_symbol.
-    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
-    let verify = verify_arg(&args);
 
     source_edit_tool_result(
         cg,
         &args,
         SourceEditRequest::RenameSymbol {
             binding,
-            new_name: new_name.to_owned(),
-            dry_run,
-            verify,
+            new_name: request.new_name,
+            dry_run: request.dry_run,
+            verify: request.verify,
         },
         invocation,
     )
@@ -883,9 +899,10 @@ mod tests {
             &seen[7].edit,
             SourceEditRequest::RenameSymbol {
                 dry_run: true,
-                verify: false,
+                verify: true,
+                binding,
                 ..
-            }
+            } if binding.accepted_preview.is_none()
         ));
         for invocation in seen.iter() {
             assert_eq!(

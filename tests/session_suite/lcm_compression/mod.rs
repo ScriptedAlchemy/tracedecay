@@ -3,18 +3,18 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::sessions::lcm::compression_decision::{
+use tracedecay_sessions::runtime::lcm::compression_decision::{
     AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
     compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
     preflight_decision,
 };
-use tracedecay::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmCompressionRequest, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
     LcmLoadSessionRequest, LcmMaintenanceDebt, LcmPreflightRequest, LcmRawMessage, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummarizerMode,
     LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common::{self, LcmTestRuntime, open_lcm_db};
 
@@ -189,7 +189,7 @@ async fn ingest_active_messages(
     provider: &str,
     session_id: &str,
     messages: Vec<Value>,
-) -> tracedecay::sessions::lcm::LcmCompressionResponse {
+) -> tracedecay_sessions::runtime::lcm::LcmCompressionResponse {
     let message_count = messages.len();
     let mut request = compress_request(provider, session_id, LcmSummarizerMode::Noop);
     request.messages = messages;

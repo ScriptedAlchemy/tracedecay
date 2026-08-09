@@ -1,6 +1,6 @@
-import { useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router';
-import { cn } from '../../ui/cn.ts';
+import { useCallback, useRef } from "react";
+import { useSearchParams } from "react-router";
+import { cn } from "../../ui/cn.ts";
 
 /**
  * The camera over the Knowledge workspace.
@@ -9,7 +9,8 @@ import { cn } from '../../ui/cn.ts';
  * has always been — search, list, fact inspector. The other three read the
  * holographic-memory routes the daemon has been mounting unconsumed:
  * `geometry` is the phase projection and the pairwise similarity it implies,
- * `curation` is what the curator has done and is configured to do, and `oplog`
+ * `curation` is the daemon's automatic curation outcomes and enable/disable
+ * control, and `oplog`
  * is the store's own append-only record of what changed.
  *
  * They are camera positions rather than separate pages for the same reason
@@ -25,29 +26,29 @@ import { cn } from '../../ui/cn.ts';
  * has not landed states that rather than blocking the switch.
  */
 
-export type KnowledgeViewKind = 'facts' | 'geometry' | 'curation' | 'oplog';
+export type KnowledgeViewKind = "facts" | "geometry" | "curation" | "oplog";
 
 export const KNOWLEDGE_VIEWS: readonly KnowledgeViewKind[] = [
-  'facts',
-  'geometry',
-  'curation',
-  'oplog',
+  "facts",
+  "geometry",
+  "curation",
+  "oplog",
 ];
 
 /** The query parameter that positions the camera, so a view survives a reload
  * and can be linked to. */
-export const KNOWLEDGE_VIEW_PARAM = 'view';
+export const KNOWLEDGE_VIEW_PARAM = "view";
 
 export function knowledgeViewLabel(kind: KnowledgeViewKind): string {
   switch (kind) {
-    case 'facts':
-      return 'Facts';
-    case 'geometry':
-      return 'Geometry';
-    case 'curation':
-      return 'Curation';
-    case 'oplog':
-      return 'Oplog';
+    case "facts":
+      return "Facts";
+    case "geometry":
+      return "Geometry";
+    case "curation":
+      return "Curation";
+    case "oplog":
+      return "Oplog";
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -59,14 +60,14 @@ export function knowledgeViewLabel(kind: KnowledgeViewKind): string {
  * when it moves. */
 export function knowledgeViewNote(kind: KnowledgeViewKind): string {
   switch (kind) {
-    case 'facts':
-      return 'facts ranked by trust, with the feedback audit behind each one';
-    case 'geometry':
-      return 'the phase projection and the pairwise similarity computed from it';
-    case 'curation':
-      return 'what the curator has done, what its backend runs recorded, and what it is configured to do';
-    case 'oplog':
-      return 'the store’s append-only record of memory operations';
+    case "facts":
+      return "facts ranked by trust, with the feedback audit behind each one";
+    case "geometry":
+      return "the phase projection and the pairwise similarity computed from it";
+    case "curation":
+      return "automatic curation outcomes, run receipts, and the daemon enable/disable control";
+    case "oplog":
+      return "the store’s append-only record of memory operations";
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -76,25 +77,28 @@ export function knowledgeViewNote(kind: KnowledgeViewKind): string {
 
 function asView(value: string | null): KnowledgeViewKind {
   switch (value) {
-    case 'geometry':
-    case 'curation':
-    case 'oplog':
+    case "geometry":
+    case "curation":
+    case "oplog":
       return value;
     // An unreadable or absent parameter opens the facts explorer: the one view
     // whose every reading is contracted rather than computed, so it cannot
     // mislead a reader who did not choose it.
     default:
-      return 'facts';
+      return "facts";
   }
 }
 
-export function useKnowledgeView(): [KnowledgeViewKind, (kind: KnowledgeViewKind) => void] {
+export function useKnowledgeView(): [
+  KnowledgeViewKind,
+  (kind: KnowledgeViewKind) => void,
+] {
   const [params, setParams] = useSearchParams();
   const active = asView(params.get(KNOWLEDGE_VIEW_PARAM));
   const select = useCallback(
     (kind: KnowledgeViewKind) => {
       const next = new URLSearchParams(params);
-      if (kind === 'facts') next.delete(KNOWLEDGE_VIEW_PARAM);
+      if (kind === "facts") next.delete(KNOWLEDGE_VIEW_PARAM);
       else next.set(KNOWLEDGE_VIEW_PARAM, kind);
       setParams(next, { replace: true });
     },
@@ -114,7 +118,7 @@ export function knowledgeTabId(kind: KnowledgeViewKind): string {
  * naming an element that was never drawn is an invalid reference, which is what
  * the accessibility gate reads it as.
  */
-export const KNOWLEDGE_PANEL_ID = 'knowledge-view-panel';
+export const KNOWLEDGE_PANEL_ID = "knowledge-view-panel";
 
 export function KnowledgeViewSwitcher({
   active,
@@ -166,21 +170,21 @@ export function KnowledgeViewSwitcher({
             onClick={() => onSelect(kind)}
             onKeyDown={(event) => {
               switch (event.key) {
-                case 'ArrowRight':
-                case 'ArrowDown':
+                case "ArrowRight":
+                case "ArrowDown":
                   event.preventDefault();
                   move(position, 1);
                   break;
-                case 'ArrowLeft':
-                case 'ArrowUp':
+                case "ArrowLeft":
+                case "ArrowUp":
                   event.preventDefault();
                   move(position, -1);
                   break;
-                case 'Home':
+                case "Home":
                   event.preventDefault();
                   jump(0);
                   break;
-                case 'End':
+                case "End":
                   event.preventDefault();
                   jump(KNOWLEDGE_VIEWS.length - 1);
                   break;
@@ -192,18 +196,21 @@ export function KnowledgeViewSwitcher({
               // 44px explicitly, not `min-h-11`: this app's root font size is
               // 14px, so a spacing-11 minimum computes to 38.5px and lands
               // under the target size the accessibility gate measures.
-              'flex min-h-[44px] items-center gap-2 border px-3 text-2xs',
-              'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+              "flex min-h-[44px] items-center gap-2 border px-3 text-2xs",
+              "focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent",
               selected
-                ? 'border-edge-strong bg-surface-3 text-text-primary'
-                : 'border-transparent text-text-secondary hover:bg-surface-2',
+                ? "border-edge-strong bg-surface-3 text-text-primary"
+                : "border-transparent text-text-secondary hover:bg-surface-2",
             )}
           >
             {/* The active view is marked as well as tinted: a camera position
-              * must be readable without colour. */}
+             * must be readable without colour. */}
             <span
               aria-hidden
-              className={cn('h-3 w-px shrink-0', selected ? 'bg-accent' : 'bg-edge-strong')}
+              className={cn(
+                "h-3 w-px shrink-0",
+                selected ? "bg-accent" : "bg-edge-strong",
+              )}
             />
             {knowledgeViewLabel(kind)}
           </button>

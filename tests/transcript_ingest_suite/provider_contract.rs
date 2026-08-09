@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use tracedecay::sessions::SessionProvider;
 use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_sessions::runtime::SessionProvider;
 
 #[test]
 fn provider_capture_and_direct_host_admission_remain_distinct() {

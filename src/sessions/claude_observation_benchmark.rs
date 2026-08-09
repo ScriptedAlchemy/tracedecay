@@ -21,7 +21,7 @@ const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;
 const CONCURRENCY: usize = 1;
-const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
+const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
 const EVIDENCE_RUNNER: &str = "scripts/run-claude-observation-benchmark.sh";
 const WORKLOAD_IMPLEMENTATION: &str = "src/sessions/claude_observation_benchmark.rs";
 const WORKLOAD_MANIFEST_PATH: &str = "benchmarks/claude-observation/workload-v1.json";

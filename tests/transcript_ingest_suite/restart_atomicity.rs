@@ -4,20 +4,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::sessions::claude::ClaudeSource;
-use tracedecay::sessions::cline_like::ClineLikeSource;
-use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::{
-    ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
-    try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
-};
-use tracedecay::sessions::source::{TranscriptIngestError, TranscriptSource};
-use tracedecay::sessions::{SessionMessageSearchResult, SessionProvider};
 use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
     ProviderId, SessionId,
 };
+use tracedecay_sessions::runtime::claude::ClaudeSource;
+use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::cursor::{
+    ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
+    try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
+};
+use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
+use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::claude::write_claude_transcript;
@@ -83,7 +83,7 @@ impl ProjectSessionTestRuntime {
         &self,
         provider: &str,
         session_id: &str,
-    ) -> Option<tracedecay::sessions::SessionRecord> {
+    ) -> Option<tracedecay_sessions::runtime::SessionRecord> {
         self.runtime
             .project_session_for_test(provider, session_id)
             .await
@@ -94,7 +94,7 @@ impl ProjectSessionTestRuntime {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay::sessions::SessionMessageRecord> {
+    ) -> Option<tracedecay_sessions::runtime::SessionMessageRecord> {
         self.runtime
             .project_session_message_for_test(provider, message_id)
             .await
@@ -118,7 +118,7 @@ impl ProjectSessionTestRuntime {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
         self.runtime
             .project_lcm_raw_message_for_test(provider, message_id)
             .await
@@ -189,8 +189,8 @@ pub(super) async fn try_ingest_source(
     source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: Option<u64>,
-) -> tracedecay::sessions::source::TranscriptIngestResult<
-    tracedecay::sessions::shared::TranscriptIngestStats,
+) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
+    tracedecay_sessions::runtime::shared::TranscriptIngestStats,
 > {
     runtime
         .runtime
@@ -202,7 +202,7 @@ async fn ingest_cursor_transcript_event(
     event_json: &str,
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
-) -> tracedecay::sessions::cursor::CursorTranscriptIngestStats {
+) -> tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats {
     ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
         .await
 }
@@ -211,8 +211,8 @@ async fn try_ingest_cursor_transcript_event(
     event_json: &str,
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
-) -> tracedecay::sessions::source::TranscriptIngestResult<
-    tracedecay::sessions::cursor::CursorTranscriptIngestStats,
+) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
+    tracedecay_sessions::runtime::cursor::CursorTranscriptIngestStats,
 > {
     try_ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
         .await
@@ -222,7 +222,7 @@ pub(super) async fn ingest_global_sources_for_provider(
     runtime: &ProjectSessionTestRuntime,
     project_root: &Path,
     provider: Option<SessionProvider>,
-) -> tracedecay::sessions::shared::TranscriptIngestStats {
+) -> tracedecay_sessions::runtime::shared::TranscriptIngestStats {
     runtime
         .runtime
         .ingest_project_provider_for_test(project_root, provider)

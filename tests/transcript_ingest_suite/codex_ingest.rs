@@ -5,9 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay::sessions::SessionProvider;
-use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::source::{StoredCursor, TranscriptSource};
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
 
 use crate::codex::{write_codex_rollout, write_jsonl};
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};

@@ -12,7 +12,7 @@ use crate::application::hint_outcomes::{
 };
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
-use crate::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use super::{
     HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, correlate_hint_outcomes, resolve,

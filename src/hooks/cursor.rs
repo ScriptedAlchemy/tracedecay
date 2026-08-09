@@ -27,7 +27,7 @@ const CURSOR_HOT_INGEST_MAX_BYTES: u64 = 256 * 1024;
 /// Largest transcript tail a low-priority Cursor catch-up hook will read.
 /// Oversized backlogs stay queued instead of blocking hook execution.
 pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 =
-    crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+    tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 /// Hard wall-clock budget for the `beforeSubmitPrompt` tail ingest. Well under
 /// Cursor's 5s hook timeout; on expiry we fail open and let heavier hooks catch up.
 const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);

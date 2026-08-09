@@ -1797,7 +1797,8 @@ impl ConcreteFeedbackLspSource {
             Err(FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized) => {
                 return ContextExpansionOutcome::Denied;
             }
-            Err(FeedbackReadOwnerErrorV1::Unavailable) => {
+            Err(FeedbackReadOwnerErrorV1::Unavailable)
+            | Err(FeedbackReadOwnerErrorV1::Contract(_)) => {
                 return ContextExpansionOutcome::Ready(context_expansion_envelope(
                     record,
                     ContextCoverage::Partial,

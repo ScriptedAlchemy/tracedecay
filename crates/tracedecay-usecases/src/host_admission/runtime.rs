@@ -7,9 +7,12 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use tracedecay_runtime_core::errors::TraceDecayError;
+
 use super::{
     FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler, HostAdmissionOutcome,
-    HostAdmissionSpool, SpoolBounds, SpoolIntegrity, SpoolOpenReport, SpoolRecord, TerminalReason,
+    HostAdmissionSpool, SpoolBounds, SpoolError, SpoolIntegrity, SpoolOpenReport, SpoolRecord,
+    TerminalReason,
 };
 
 #[cfg(test)]
@@ -37,14 +40,14 @@ pub struct HostAdmissionRuntime {
 impl HostAdmissionRuntime {
     pub fn open_for_database(
         database_path: &Path,
-    ) -> Result<(Self, SpoolOpenReport), HostAdmissionOutcome> {
+    ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
         let parent = database_path
             .parent()
-            .ok_or_else(HostAdmissionOutcome::spool_corrupted)?;
+            .ok_or_else(|| SpoolError::MetadataCorrupted.to_open_error())?;
         let name = database_path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(HostAdmissionOutcome::spool_corrupted)?;
+            .ok_or_else(|| SpoolError::MetadataCorrupted.to_open_error())?;
         Self::open(
             parent.join(format!(".{name}.host-admission")),
             SpoolBounds::default(),
@@ -54,7 +57,7 @@ impl HostAdmissionRuntime {
     pub fn open(
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
-    ) -> Result<(Self, SpoolOpenReport), HostAdmissionOutcome> {
+    ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
         Self::open_with_replay_limit(dir, bounds, DEFAULT_MAX_REPLAY_RECORDS_PER_PASS)
     }
 
@@ -62,14 +65,14 @@ impl HostAdmissionRuntime {
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
         max_replay_records_per_pass: usize,
-    ) -> Result<(Self, SpoolOpenReport), HostAdmissionOutcome> {
+    ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
         if max_replay_records_per_pass == 0 {
-            return Err(HostAdmissionOutcome::spool_corrupted());
+            return Err(SpoolError::MetadataCorrupted.to_open_error());
         }
         let (spool, report) =
-            HostAdmissionSpool::open(dir, bounds).map_err(|error| error.to_outcome())?;
+            HostAdmissionSpool::open(dir, bounds).map_err(|error| error.to_open_error())?;
         if !matches!(report.integrity, SpoolIntegrity::Healthy) {
-            return Err(HostAdmissionOutcome::spool_corrupted());
+            return Err(SpoolError::MetadataCorrupted.to_open_error());
         }
         let mut runtime = Self {
             spool,
@@ -80,7 +83,7 @@ impl HostAdmissionRuntime {
             #[cfg(test)]
             max_replay_records_per_pass,
         };
-        runtime.schedule_missing()?;
+        runtime.schedule_missing().map_err(open_outcome_error)?;
         Ok((runtime, report))
     }
 
@@ -351,6 +354,14 @@ impl HostAdmissionRuntime {
     }
 }
 
+fn open_outcome_error(outcome: HostAdmissionOutcome) -> TraceDecayError {
+    TraceDecayError::hook_runtime(
+        outcome.reason_code.unwrap_or("spool_unavailable"),
+        outcome.retryable,
+        "host-admission spool open failed",
+    )
+}
+
 fn runtime_schedule_bounds(bounds: SpoolBounds) -> FairScheduleBounds {
     FairScheduleBounds::with_byte_bounds(
         bounds.max_records,
@@ -376,6 +387,15 @@ mod tests {
 
     fn open(temp: &TempDir) -> HostAdmissionRuntime {
         HostAdmissionRuntime::open(temp.path(), bounds()).unwrap().0
+    }
+
+    fn assert_reset_required(error: &TraceDecayError) {
+        let (authority, reason) = error
+            .reset_required_context()
+            .expect("future spool shape must require typed reset");
+        assert_eq!(authority, "host-admission spool");
+        assert!(reason.contains("version 2"));
+        assert!(error.hook_runtime_context().is_none());
     }
 
     #[test]
@@ -605,25 +625,81 @@ mod tests {
         let mut bytes = fs::read(&records_path).unwrap();
         bytes[first.file_offset as usize + first.framed_len - 1] ^= 1;
         fs::write(records_path, bytes).unwrap();
+        let error = HostAdmissionRuntime::open(temp.path(), bounded).unwrap_err();
         assert_eq!(
-            HostAdmissionRuntime::open(temp.path(), bounded).unwrap_err(),
-            HostAdmissionOutcome::spool_corrupted(),
+            error.hook_runtime_context(),
+            Some(("spool_corrupted", false, "host-admission spool open failed"))
         );
+        assert!(error.reset_required_context().is_none());
     }
 
     #[test]
-    fn unsupported_spool_version_stays_distinct_at_runtime_boundary() {
+    fn future_metadata_version_requires_typed_reset_without_replay_or_mutation() {
         let temp = TempDir::new().unwrap();
-        fs::write(
-            temp.path().join("meta.json"),
-            br#"{"version":2,"committed_through":0,"next_seq":1,"integrity":"healthy"}"#,
-        )
-        .unwrap();
+        let mut runtime = open(&temp);
+        runtime.admit("claude", b"retained").unwrap();
+        drop(runtime);
 
-        assert_eq!(
-            HostAdmissionRuntime::open(temp.path(), bounds()).unwrap_err(),
-            HostAdmissionOutcome::spool_unsupported_version()
-        );
+        let meta_path = temp.path().join("meta.json");
+        let records_path = temp.path().join("records.bin");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+        meta["version"] = serde_json::Value::from(2);
+        let future_meta = serde_json::to_vec(&meta).unwrap();
+        fs::write(&meta_path, &future_meta).unwrap();
+        let records_before = fs::read(&records_path).unwrap();
+
+        let error = HostAdmissionRuntime::open(temp.path(), bounds()).unwrap_err();
+        assert_reset_required(&error);
+        assert_eq!(fs::read(&meta_path).unwrap(), future_meta);
+        assert_eq!(fs::read(&records_path).unwrap(), records_before);
+    }
+
+    #[test]
+    fn future_frame_version_requires_typed_reset_without_replay_or_truncation() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = open(&temp);
+        runtime.admit("claude", b"retained").unwrap();
+        drop(runtime);
+
+        let meta_path = temp.path().join("meta.json");
+        let records_path = temp.path().join("records.bin");
+        let meta_before = fs::read(&meta_path).unwrap();
+        let mut future_records = fs::read(&records_path).unwrap();
+        future_records[4..6].copy_from_slice(&2u16.to_le_bytes());
+        fs::write(&records_path, &future_records).unwrap();
+
+        let error = HostAdmissionRuntime::open(temp.path(), bounds()).unwrap_err();
+        assert_reset_required(&error);
+        assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
+        assert_eq!(fs::read(&records_path).unwrap(), future_records);
+    }
+
+    #[test]
+    fn future_quarantine_tail_version_requires_reset_without_truncation() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = open(&temp);
+        let admitted = runtime.admit("claude", b"terminal").unwrap();
+        assert_eq!(runtime.lease_next().unwrap().seq, admitted.seq);
+        runtime
+            .quarantine(admitted.seq, TerminalReason::MalformedPayload)
+            .unwrap();
+        drop(runtime);
+
+        let meta_path = temp.path().join("meta.json");
+        let records_path = temp.path().join("records.bin");
+        let quarantine_path = temp.path().join("quarantine.bin");
+        let meta_before = fs::read(&meta_path).unwrap();
+        let records_before = fs::read(&records_path).unwrap();
+        let mut future_quarantine = fs::read(&quarantine_path).unwrap();
+        future_quarantine[4..6].copy_from_slice(&2u16.to_le_bytes());
+        fs::write(&quarantine_path, &future_quarantine).unwrap();
+
+        let error = HostAdmissionRuntime::open(temp.path(), bounds()).unwrap_err();
+        assert_reset_required(&error);
+        assert_eq!(fs::read(&meta_path).unwrap(), meta_before);
+        assert_eq!(fs::read(&records_path).unwrap(), records_before);
+        assert_eq!(fs::read(&quarantine_path).unwrap(), future_quarantine);
     }
 
     #[test]

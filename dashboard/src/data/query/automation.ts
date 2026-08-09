@@ -15,26 +15,31 @@
  * a control state asserted rather than measured. A failed control leaves the
  * last real reading on screen and reports the failure beside it.
  */
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { z } from 'zod';
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 
-import { fetchLegacyWrite, type LegacyWriteResult } from './legacy.ts';
-import { legacyQueryKey, useLegacy } from './useLegacy.ts';
+import { fetchPayloadWrite, type PayloadWriteResult } from "./payload.ts";
+import { payloadQueryKey, usePayload } from "./usePayload.ts";
 import {
   scopeKey,
   scopeWritable,
   scopedUrl,
   useScope,
   type ScopeWritability,
-} from '../scope/store.ts';
+} from "../scope/store.ts";
 import {
   AutomationSchedulerStatusV1Schema,
   type AutomationSchedulerStatusV1,
-} from '../../contracts/generated.ts';
+} from "../../contracts/generated.ts";
 
-export const automationSchedulerKey = ['automation', 'scheduler'] as const;
+// Re-export the generated validator for the query-layer tests and consumers.
+// The generated contract remains the sole schema authority; this is only a
+// module boundary convenience, not a second copy of the wire contract.
+export { AutomationSchedulerStatusV1Schema };
 
-export const schedulerStatusUrl = '/api/automation/scheduler/status';
+export const automationSchedulerKey = ["automation", "scheduler"] as const;
+
+export const schedulerStatusUrl = "/api/automation/scheduler/status";
 
 /**
  * Pause or resume the scheduler, returning the reading the server took after
@@ -47,8 +52,10 @@ export const schedulerStatusUrl = '/api/automation/scheduler/status';
  */
 export function setSchedulerPaused(
   url: string,
-): Promise<LegacyWriteResult<AutomationSchedulerStatusV1>> {
-  return fetchLegacyWrite(url, AutomationSchedulerStatusV1Schema, { method: 'POST' });
+): Promise<PayloadWriteResult<AutomationSchedulerStatusV1>> {
+  return fetchPayloadWrite(url, AutomationSchedulerStatusV1Schema, {
+    method: "POST",
+  });
 }
 
 /**
@@ -61,8 +68,8 @@ export function setSchedulerPaused(
  * imply the scheduler was asked and refused.
  */
 export type SchedulerControlResult =
-  | LegacyWriteResult<AutomationSchedulerStatusV1>
-  | { outcome: 'not_dispatched'; writability: ScopeWritability };
+  | PayloadWriteResult<AutomationSchedulerStatusV1>
+  | { outcome: "not_dispatched"; writability: ScopeWritability };
 
 /**
  * The scope a control attempt was issued under, captured when it was issued.
@@ -102,13 +109,22 @@ export function useSchedulerControl() {
   // The status read's own key, from the authority that builds it, not a second
   // construction of it. `scopeKey(scope)` was the second construction and it
   // disagreed with the read under the all-projects default — see
-  // {@link legacyQueryKey}.
-  const statusKey = legacyQueryKey(scope, automationSchedulerKey, schedulerStatusUrl);
+  // {@link payloadQueryKey}.
+  const statusKey = payloadQueryKey(
+    scope,
+    automationSchedulerKey,
+    schedulerStatusUrl,
+  );
   // The control's own reading of the scope authority, so what disables the
   // button and what would refuse a dispatch are one value rather than two
   // that can drift.
   const writability = scopeWritable(scope);
-  const mutation = useMutation<SchedulerControlResult, Error, boolean, SchedulerDispatch>({
+  const mutation = useMutation<
+    SchedulerControlResult,
+    Error,
+    boolean,
+    SchedulerDispatch
+  >({
     // Distinguishes concurrent dispatches by the scope each was sent under, so
     // two projects' controls are two mutations rather than one shared entry.
     mutationKey: [...automationSchedulerKey, scopeKey(scope)],
@@ -121,11 +137,14 @@ export function useSchedulerControl() {
       // disable was bypassed — and dispatching anyway would trade a stated
       // reason for a 405 that this layer cannot tell apart from a route that
       // has gone away.
-      if (writability.state !== 'writable') {
-        return { outcome: 'not_dispatched', writability };
+      if (writability.state !== "writable") {
+        return { outcome: "not_dispatched", writability };
       }
       return setSchedulerPaused(
-        scopedUrl(scope, `/api/automation/scheduler/${paused ? 'pause' : 'resume'}`),
+        scopedUrl(
+          scope,
+          `/api/automation/scheduler/${paused ? "pause" : "resume"}`,
+        ),
       );
     },
     onSuccess: (result, _paused, dispatch) => {
@@ -139,13 +158,13 @@ export function useSchedulerControl() {
       // Only a genuine reading may replace the cached one. A transport failure
       // or an unparseable body is reported by the caller from this same result
       // and must leave the last real reading in place.
-      if (result.outcome === 'ok') {
+      if (result.outcome === "ok") {
         client.setQueryData(target, result);
         return;
       }
       // A write that never went out cannot have changed the server's reading,
       // so there is nothing to re-read.
-      if (result.outcome === 'not_dispatched') return;
+      if (result.outcome === "not_dispatched") return;
       void client.invalidateQueries({ queryKey: target });
     },
   });
@@ -159,8 +178,8 @@ export function useSchedulerControl() {
  *
  * Every field below is required because the route makes it unconditional:
  * `automation_jobs_api::list` answers `{jobs, count}`, `automation_skills_api::
- * list` answers `{…, count, skills, …}`, and `automation_fact_proposals_api::
- * list` answers `{proposals, count, limit, error}` — each built by a `json!`
+ * list` answers `{…, count, skills, …}`, and the automatic-fact-receipts
+ * list answers `{receipts, count, limit, error}` — each built by a `json!`
  * literal with no conditional key.
  *
  * That requiredness is load-bearing rather than pedantic. These schemas used to
@@ -169,8 +188,8 @@ export function useSchedulerControl() {
  * rendered "no managed skills". A store the daemon could not read, a renamed
  * field, a proxy's substituted body — all of them parsed clean and printed as a
  * queue that had been checked and found empty. Required fields route those
- * bodies to `unsupported_schema` in `fetchLegacy` instead, which is what
- * `LegacyBoundary` renders as a state rather than as content.
+ * bodies to `unsupported_schema` in `fetchPayload` instead, which is what
+ * `PayloadBoundary` renders as a state rather than as content.
  *
  * They live here, beside the fetchers, rather than on the page that draws them:
  * a wire contract is what the daemon sends, and a surface that owned its own
@@ -198,13 +217,19 @@ const JobsPayloadSchema = z
  * rather than through the chain of `?? skill['name'] ?? index` fallbacks this
  * card used to carry — every one of which described a payload no route sends,
  * and the last of which printed an array index as if it were a skill. */
+const ManagedSkillStateSchema = z.enum(["active", "disabled", "archived"]);
+
 const SkillsPayloadSchema = z
   .object({
     skills: z.array(
       z
         .object({
           metadata: z
-            .object({ id: z.string(), title: z.string(), state: z.string() })
+            .object({
+              id: z.string(),
+              title: z.string(),
+              state: ManagedSkillStateSchema,
+            })
             .passthrough(),
         })
         .passthrough(),
@@ -213,78 +238,114 @@ const SkillsPayloadSchema = z
   })
   .passthrough();
 
-/** `FactProposalRecord` (fact_proposals.rs). `add_fact_request` is the one
- * optional member — it carries `skip_serializing_if = "Option::is_none"`, so a
- * record without one omits the key and genuinely has no fact text to show. */
-const FactProposalsPayloadSchema = z
+/** Automatic fact receipts are terminal daemon-owned outcomes. A receipt may
+ * retain proposal and validation evidence, but this dashboard never sends an
+ * approval or apply request. */
+const AutomaticFactStateSchema = z.enum(["applied", "quarantined"]);
+const AutomaticFactReceiptSchema = z
   .object({
-    proposals: z.array(
-      z
-        .object({
-          proposal_id: z.string(),
-          state: z.string(),
-          add_fact_request: z.object({ content: z.string() }).passthrough().optional(),
-        })
-        .passthrough(),
-    ),
+    schema_version: z.number(),
+    apply_id: z.string(),
+    run_id: z.string(),
+    evidence_hash: z.string().optional(),
+    state: AutomaticFactStateSchema,
+    add_fact_request: z.object({ content: z.string() }).passthrough(),
+    item: z.unknown().optional(),
+    validation: z.unknown().optional(),
+    quarantine_reason: z.string().optional(),
+    applied_canonical_fact_id: z.string().optional(),
+    applied_fact_id: z.number().nullable().optional(),
+    recorded_at: z.number(),
+  })
+  .passthrough();
+
+const AutomaticFactReceiptsPayloadSchema = z
+  .object({
+    receipts: z.array(AutomaticFactReceiptSchema),
     count: z.number(),
     limit: z.number(),
     error: z.string(),
   })
   .passthrough();
 
-export type JobRow = z.infer<typeof JobsPayloadSchema>['jobs'][number];
-export type SkillRow = z.infer<typeof SkillsPayloadSchema>['skills'][number];
-export type ProposalRow = z.infer<typeof FactProposalsPayloadSchema>['proposals'][number];
+export type JobRow = z.infer<typeof JobsPayloadSchema>["jobs"][number];
+export type SkillRow = z.infer<typeof SkillsPayloadSchema>["skills"][number];
+export type ManagedSkillState = z.infer<typeof ManagedSkillStateSchema>;
+export type AutomaticFactReceipt = z.infer<typeof AutomaticFactReceiptSchema>;
+export type AutomaticFactReceiptsPayload = z.infer<
+  typeof AutomaticFactReceiptsPayloadSchema
+>;
 
 export function useAutomationJobs() {
-  return useLegacy(['automation', 'jobs'], '/api/automation/jobs', JobsPayloadSchema);
-}
-
-export function useAutomationSkills() {
-  return useLegacy(['automation', 'skills'], '/api/automation/skills', SkillsPayloadSchema);
-}
-
-/**
- * Fact proposals, from the automation namespace — deliberately, not from the
- * memory one.
- *
- * The daemon mounts this family twice. `automation_fact_proposals_api` serves
- * `/api/automation/fact-proposals` and `memory_api` serves
- * `/api/plugins/holographic/fact-proposals`, and they are aliases over one
- * authority: both list through `automation::fact_proposals::
- * list_fact_proposals`, both apply through `apply_fact_proposal_with_result`
- * (refreshing the memory digest on a newly promoted fact), both reject through
- * `reject_fact_proposal`, and both build the identical
- * `{proposals, count, limit, error}` list body from the same `json!` literal.
- * There is no payload, filter, or authority difference to choose between.
- *
- * The one behavioural difference is reviewer attribution on the writes: the
- * memory namespace accepts an explicit `reviewer` in the request body, while
- * this one records `"dashboard"`. That settles the choice rather than
- * complicating it. This dashboard has no reviewer identity to supply — nothing
- * in the shell authenticates a person — so sending a reviewer would mean
- * inventing one, and a fixed, honest `"dashboard"` attribution is the true
- * record of who applied the proposal.
- *
- * So the namespace stays, and the memory-side alias stays unconsumed on
- * purpose. Two surfaces applying the same proposal through two routes would be
- * two apply paths over one ledger, and the Knowledge workspace links to this
- * queue rather than duplicating it.
- */
-export function useAutomationProposals() {
-  return useLegacy(
-    ['automation', 'fact-proposals'],
-    '/api/automation/fact-proposals',
-    FactProposalsPayloadSchema,
+  return usePayload(
+    ["automation", "jobs"],
+    "/api/automation/jobs",
+    JobsPayloadSchema,
   );
 }
 
+export function useAutomationSkills() {
+  return usePayload(
+    ["automation", "skills"],
+    "/api/automation/skills",
+    SkillsPayloadSchema,
+  );
+}
+
+/** The terminal automatic fact receipt list. */
+export function useAutomationFactReceipts() {
+  return usePayload(
+    ["automation", "automatic-fact-receipts"],
+    "/api/automation/automatic-fact-receipts",
+    AutomaticFactReceiptsPayloadSchema,
+  );
+}
+
+/** A deployment receipt may accompany a skill activation. The arrays are
+ * deliberately open because each host materializer owns its item shape. */
+const SkillDeploymentSchema = z
+  .object({
+    status: z.enum(["complete", "partial_failure", "unavailable"]),
+    exports: z.array(z.unknown()),
+    materialization_scopes: z.array(
+      z
+        .object({
+          scope: z.string(),
+          materialized: z.array(z.unknown()),
+          removed: z.array(z.unknown()),
+          errors: z.array(z.string()),
+        })
+        .passthrough(),
+    ),
+    errors: z.array(z.string()),
+    reason: z.string().optional(),
+    retry_required: z.boolean(),
+  })
+  .passthrough();
+
+export type ManagedSkillDeploymentReceipt = z.infer<
+  typeof SkillDeploymentSchema
+>;
+
+/** Optional automatic-policy receipts are read as open values: the daemon may
+ * add a new receipt without invalidating an otherwise readable run row. */
+const RunReceiptFields = {
+  activation_policy: z.string().optional(),
+  created_skills: z.array(z.unknown()).optional(),
+  updated_skills: z.array(z.unknown()).optional(),
+  applied_consolidations: z.array(z.unknown()).optional(),
+  rejected_skills: z.array(z.unknown()).optional(),
+  validation_repairs: z.array(z.unknown()).optional(),
+  receipts: z.array(z.unknown()).optional(),
+  llm_apply: z.unknown().optional(),
+  deployment: SkillDeploymentSchema.optional(),
+  curation_policy: z.unknown().optional(),
+};
+
 /** `automation_run_api::run_list` (`/api/automation/runs`): the newest ledger
- * records, projected by `run_history_row`. Every key below is unconditional in
- * that `json!` literal; `model` and `error` are `Option` fields serialized as
- * `null` when absent, so they are `nullable()` rather than `optional()` — a
- * body missing the key did not come from this handler. */
+ * records, projected by `run_history_row`. Every payload key below is
+ * unconditional; `model` and `error` are nullable because the writer emits
+ * null when absent. */
 const RunsPayloadSchema = z
   .object({
     runs: z.array(
@@ -304,6 +365,7 @@ const RunsPayloadSchema = z
           started_at: z.string(),
           completed_at: z.string(),
           artifact_kinds: z.array(z.string()),
+          ...RunReceiptFields,
         })
         .passthrough(),
     ),
@@ -345,20 +407,91 @@ const RunArtifactsPayloadSchema = z
   })
   .passthrough();
 
-export type RunRow = z.infer<typeof RunsPayloadSchema>['runs'][number];
+export type RunRow = z.infer<typeof RunsPayloadSchema>["runs"][number];
 export type RunArtifactsPayload = z.infer<typeof RunArtifactsPayloadSchema>;
-export type RunArtifactRow = RunArtifactsPayload['artifacts'][number];
+export type RunArtifactRow = RunArtifactsPayload["artifacts"][number];
+
+const SkillOutcomeVerdictSchema = z.enum(["adopted", "ignored", "too_early"]);
+const FactOutcomeVerdictSchema = z.enum([
+  "recalled_and_helpful",
+  "recalled",
+  "never_recalled",
+  "deleted",
+]);
+
+const SkillOutcomeSchema = z
+  .object({
+    skill_id: z.string(),
+    title: z.string().nullable().optional(),
+    activated_at: z.number(),
+    days_since_activation: z.number(),
+    views_since_activation: z.number(),
+    uses_since_activation: z.number(),
+    verdict: SkillOutcomeVerdictSchema,
+  })
+  .passthrough();
+
+const FactOutcomeSchema = z
+  .object({
+    proposal_id: z.string(),
+    run_id: z.string(),
+    fact_id: z.string(),
+    applied_at: z.number(),
+    days_since_applied: z.number(),
+    retrieval_count: z.number(),
+    access_count: z.number(),
+    helpful_count: z.number(),
+    unhelpful_count: z.number(),
+    last_recalled_at: z.number().nullable().optional(),
+    still_exists: z.boolean(),
+    verdict: FactOutcomeVerdictSchema,
+  })
+  .passthrough();
+
+/** Read-only adoption and recall outcomes produced by the daemon. */
+export const AutomationOutcomesPayloadSchema = z
+  .object({
+    generated_at: z.number(),
+    skills: z.array(SkillOutcomeSchema),
+    facts: z.array(FactOutcomeSchema),
+    snapshot: z
+      .object({
+        available: z.boolean(),
+        skills_refreshed_at: z.number().nullable(),
+        facts_refreshed_at: z.number().nullable(),
+      })
+      .passthrough(),
+    error: z.string(),
+  })
+  .passthrough();
+export type AutomationOutcomesPayload = z.infer<
+  typeof AutomationOutcomesPayloadSchema
+>;
+export type SkillOutcome = AutomationOutcomesPayload["skills"][number];
+export type FactOutcome = AutomationOutcomesPayload["facts"][number];
 
 export function useAutomationRuns() {
-  return useLegacy(['automation', 'runs'], '/api/automation/runs', RunsPayloadSchema);
+  return usePayload(
+    ["automation", "runs"],
+    "/api/automation/runs",
+    RunsPayloadSchema,
+  );
+}
+
+export function useAutomationOutcomes() {
+  return usePayload(
+    ["automation", "outcomes"],
+    "/api/automation/outcomes",
+    AutomationOutcomesPayloadSchema,
+  );
 }
 
 /** The artifact list for one run, fetched only once its disclosure opens:
  * most visits read the history without opening any run, and fifty eager
  * artifact reads per page view would be fifty ledger scans nobody looks at. */
 export function useAutomationRunArtifacts(runId: string, enabled: boolean) {
-  return useLegacy(
-    ['automation', 'run-artifacts', runId],
+  return usePayload(
+    ["automation", "run-artifacts", runId],
     `/api/automation/runs/${encodeURIComponent(runId)}/artifacts`,
     RunArtifactsPayloadSchema,
     { enabled },
@@ -395,20 +528,20 @@ export function tallied<Row>(
 }
 
 /**
- * The same check for the proposal list, which additionally has a cap.
+ * The same check for the automatic receipt list, which additionally has a cap.
  *
- * `automation_fact_proposals_api::list` runs its query under
+ * `automation_automatic_fact_receipts_api::list` runs its query under
  * `coerce_limit(params.limit, 50, 200)`, and this page sends no `limit`, so it
  * reads the default page of 50. A response holding exactly its own limit is
  * therefore a page, not a total — the same distinction the Agents workspace
  * draws around its analytics cap.
  */
-export function talliedProposals(
-  rows: readonly ProposalRow[],
+export function talliedFactReceipts(
+  rows: readonly AutomaticFactReceipt[],
   count: number,
   limit: number,
-): ListReading<ProposalRow> {
-  const coherent = tallied(rows, count, 'fact proposals');
+): ListReading<AutomaticFactReceipt> {
+  const coherent = tallied(rows, count, "fact application outcomes");
   if (!coherent.complete) return coherent;
   if (count < limit) return coherent;
   if (count > limit) {
@@ -418,12 +551,12 @@ export function talliedProposals(
     return {
       complete: false,
       rows,
-      reason: `the daemon sent ${count} proposals under a request cap of ${limit}, so this body is not this route's answer`,
+      reason: `the daemon sent ${count} fact application outcomes under a request cap of ${limit}, so this body is not this route's answer`,
     };
   }
   return {
     complete: false,
     rows,
-    reason: `this is the first ${limit} proposals, the request cap, so there may be more`,
+    reason: `this is the first ${limit} fact application outcomes, the request cap, so there may be more`,
   };
 }

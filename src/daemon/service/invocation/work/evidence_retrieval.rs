@@ -31,11 +31,7 @@ pub(super) async fn retrieve(
             tracedecay_application::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
         )
     })?;
-    let evidence_retrieval = registered.evidence_retrieval.clone().ok_or_else(|| {
-        work_product_problem(
-            tracedecay_application::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
-        )
-    })?;
+    let evidence_retrieval = registered.evidence_retrieval.clone();
     WorkEvidenceRetrievalServiceV1::new(
         storage.clone(),
         storage.clone(),

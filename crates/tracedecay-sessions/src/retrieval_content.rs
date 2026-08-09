@@ -1,3 +1,5 @@
+//! Canonical text projection, identity, and retrieval-noise rules.
+
 use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};

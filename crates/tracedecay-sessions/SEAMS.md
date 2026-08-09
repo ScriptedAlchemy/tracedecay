@@ -24,7 +24,7 @@ seams that `cargo check` does not compile.
 | `crate::application::host_admission::HostAdmissionFacade` | Inverted behind the dyn-safe `crate::admission::HostAdmission` port. |
 | `crate::application::observation` | Moved down into `crate::observation`. |
 | `crate::repository_provenance` | Moved down into `crate::repository_provenance`. |
-| `crate::application::session::compatibility` | Moved down into `crate::compatibility`. |
+| `crate::application::session` retrieval-content helpers | Moved down into `crate::retrieval_content`. |
 | `crate::application::session::lcm::contracts` | Repointed at `crate::lcm::contracts` (root already re-exported from here). |
 | `crate::store::TranscriptIngestStore` | Moved down into `crate::runtime::store_port`. |
 | `crate::store::GlobalDbGitCorrelationStore` | Inverted behind `runtime::git_correlation::GitCorrelationSessionStore`. |
@@ -72,7 +72,7 @@ the root deletes its copies and re-exports:
 | --- | --- |
 | `src/application/observation.rs` | Delete; `pub use tracedecay_sessions::observation::*;` (keep `observation_test.rs` against the re-export). |
 | `src/repository_provenance.rs` | Delete; `pub use tracedecay_sessions::repository_provenance::*;`. |
-| `src/application/session/compatibility.rs` | Delete; `pub use tracedecay_sessions::compatibility::*;`. |
+| `src/application/session/compatibility.rs` | Deleted; callers import the exact helpers from `tracedecay_sessions::retrieval_content`. |
 | `src/application/host_admission/disposition.rs` | Delete; re-export `tracedecay_sessions::admission::{HostAdmissionStatus, HostAdmissionTelemetryDisposition, HostAdmissionDispositionClass, is_bounded_reason_code}`. |
 | `src/application/host_admission/wire.rs` | Delete; re-export `tracedecay_sessions::admission::wire::*`. |
 | `src/application/host_admission/spool/bounds.rs` | Keep `SpoolBounds`; take the `DEFAULT_MAX_*` consts from `tracedecay_sessions::admission::bounds`. |

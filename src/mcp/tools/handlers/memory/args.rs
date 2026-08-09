@@ -114,7 +114,7 @@ pub(super) async fn update_trust(
         return Ok(None);
     };
     let existing = memory
-        .get_fact_v1(fact_id)
+        .get_fact(fact_id)
         .await
         .map_err(memory_application_error)?
         .ok_or_else(|| config_error(format!("fact {fact_id} not found")))?;

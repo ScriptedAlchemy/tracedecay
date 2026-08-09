@@ -532,8 +532,8 @@ pub(crate) async fn resolve_cli_project_root(
 
 pub(crate) fn parse_lcm_scope_arg(
     value: &str,
-) -> tracedecay::errors::Result<tracedecay::sessions::lcm::LcmScope> {
-    use tracedecay::sessions::lcm::LcmScope;
+) -> tracedecay::errors::Result<tracedecay_sessions::runtime::lcm::LcmScope> {
+    use tracedecay_sessions::runtime::lcm::LcmScope;
     match value.trim().replace('-', "_").as_str() {
         "all" => Ok(LcmScope::All),
         "session" => Ok(LcmScope::Session),
@@ -983,7 +983,6 @@ async fn dispatch_agent_command(
             local,
             no_dashboard,
             automation,
-            auto_apply,
         } => {
             if host_bundle.component.is_some() {
                 if local || automation || no_dashboard {
@@ -1003,7 +1002,7 @@ async fn dispatch_agent_command(
                     agent,
                     local,
                     no_dashboard,
-                    automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
+                    automation.then_some(agent_cmd::CodexAutomationInstall),
                 )
                 .await?;
             }

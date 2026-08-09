@@ -1,4 +1,9 @@
-//! Legacy V1 memory API shims over the typed compatibility use cases.
+//! Canonical fact operations for the shipped numeric fact-id transport.
+//!
+//! Numeric fact identifiers remain a persisted/wire boundary from the previous
+//! SQLite schema.  This module decodes those identifiers once into canonical
+//! fact targets and performs every read or write through `ProjectMemoryFactStore`;
+//! it owns no mirror, bank, repair loop, or fallback store.
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
@@ -23,44 +28,40 @@ use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
 use super::project_memory::{
-    compatibility_add_command, compatibility_confidence, compatibility_projection_targets,
-    fact_category, legacy_i64, project_memory_fact_record, project_memory_projection_record,
-    project_memory_status_v1,
+    fact_add_command, fact_category, legacy_i64, memory_confidence, project_memory_fact_record,
+    project_memory_projection_record, project_memory_status, projection_targets,
 };
 use super::sanitize::{
     prepare_tainted_update_fact_request, sanitize_add_fact_request, sanitize_optional_memory_text,
 };
 
-/// V1 update preserves the existing rejected-secret response without issuing a
-/// fact-authority write.
+/// A rejected update is returned without issuing a fact-authority write.
 #[derive(Clone, Debug, PartialEq)]
-pub enum V1UpdateFactOutcome {
+pub enum UpdateFactOutcome {
     Updated(Box<FactRecord>),
     RejectedSecretLike { reason: String },
 }
 
-/// Finite V1 trust-history projection with explicit repair availability. The
-/// entries retain the historical wire shape; callers can distinguish partial,
+/// Finite trust-history projection with explicit availability. The entries
+/// retain the shipped numeric-id wire shape; callers can distinguish partial,
 /// unknown, and complete history without inventing missing sources or events.
 #[derive(Clone, Debug, PartialEq)]
-pub struct V1FactTrustHistoryV1 {
+pub struct FactTrustHistory {
     pub entries: Vec<TrustHistoryEntry>,
     pub repair_progress: ProjectMemoryFeedbackRepairProgressV1,
 }
 
-/// Legacy status fields and feedback-history repair state from one authority
-/// snapshot. Consumers must use this instead of issuing two status reads.
+/// Status and feedback-history availability from one authority snapshot.
 #[derive(Clone, Debug, PartialEq)]
-pub struct V1MemoryStatusWithRepairV1 {
+pub struct MemoryStatusWithRepair {
     pub status: MemoryStatus,
     pub feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
 }
 
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
-    /// V1-facing add route. The application owns conversion, sanitation, and
-    /// portable operation construction; transports pass only the V1 request
-    /// and trusted operation context.
-    pub async fn add_fact_v1(
+    /// Adds a fact through the canonical authority after sanitation and
+    /// trusted operation construction.
+    pub async fn add_fact(
         &self,
         request: AddFactRequest,
         context: MemoryOperationContext,
@@ -69,21 +70,17 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             return Ok(rejected_secret_add_outcome());
         };
         let outcome = self
-            .add_project_memory_fact(compatibility_add_command(
-                self.owner.clone(),
-                request,
-                &context,
-            )?)
+            .add_project_memory_fact(fact_add_command(self.owner.clone(), request, &context)?)
             .await?;
-        self.project_add_fact_outcome_v1(outcome).await
+        self.project_add_fact_outcome(outcome).await
     }
 
-    pub async fn search_facts_v1(
+    pub async fn search_facts(
         &self,
         request: SearchFactsRequest,
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Search,
             Some(request.query.clone()),
             request,
@@ -95,11 +92,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Background/context retrieval variant. It deliberately does not create
     /// a retrieval event or mutate recall/access counters.
-    pub async fn search_facts_untracked_v1(
+    pub async fn search_facts_untracked(
         &self,
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Search,
             Some(request.query.clone()),
             request,
@@ -109,12 +106,12 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn probe_facts_v1(
+    pub async fn probe_facts(
         &self,
         request: SearchFactsRequest,
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Probe,
             Some(request.query.clone()),
             request,
@@ -124,11 +121,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn probe_facts_untracked_v1(
+    pub async fn probe_facts_untracked(
         &self,
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Probe,
             Some(request.query.clone()),
             request,
@@ -138,12 +135,12 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn related_facts_v1(
+    pub async fn related_facts(
         &self,
         request: SearchFactsRequest,
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Related {
                 entity: request.query.clone(),
             },
@@ -155,11 +152,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn related_facts_untracked_v1(
+    pub async fn related_facts_untracked(
         &self,
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Related {
                 entity: request.query.clone(),
             },
@@ -171,7 +168,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn reason_facts_v1(
+    pub async fn reason_facts(
         &self,
         mut entities: Vec<String>,
         category: Option<MemoryCategory>,
@@ -181,7 +178,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         entities.sort_unstable();
         entities.dedup();
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Reason { entities },
             None,
             SearchFactsRequest {
@@ -197,7 +194,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn reason_facts_untracked_v1(
+    pub async fn reason_facts_untracked(
         &self,
         mut entities: Vec<String>,
         category: Option<MemoryCategory>,
@@ -206,7 +203,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         entities.sort_unstable();
         entities.dedup();
-        self.search_v1(
+        self.search(
             ProjectMemoryFactSearchKindV1::Reason { entities },
             None,
             SearchFactsRequest {
@@ -222,17 +219,16 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .await
     }
 
-    pub async fn contradict_facts_v1(
+    pub async fn contradict_facts(
         &self,
         category: Option<MemoryCategory>,
         threshold: f64,
         limit: usize,
     ) -> Result<Vec<ContradictionResult>, MemoryApplicationError> {
-        let threshold = Confidence::new(threshold).map_err(|_| {
-            MemoryApplicationError::InvalidCompatibilityInput {
+        let threshold =
+            Confidence::new(threshold).map_err(|_| MemoryApplicationError::InvalidInput {
                 invariant: "legacy contradiction threshold",
-            }
-        })?;
+            })?;
         let page = self
             .find_project_memory_contradictions(ProjectMemoryFactContradictionQueryV1::new(
                 self.owner.clone(),
@@ -246,7 +242,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .map(|item| {
                 Ok(ContradictionResult {
                     existing_fact: project_memory_fact_record(
-                        &self.compatibility_scope,
+                        &self.persisted_fact_id_scope,
                         item.existing(),
                     )?,
                     new_content: item.new_content().to_owned(),
@@ -257,28 +253,28 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .collect()
     }
 
-    pub async fn list_facts_v1(
+    pub async fn list_facts(
         &self,
         category: Option<MemoryCategory>,
         min_trust: Option<f64>,
         limit: usize,
         context: MemoryOperationContext,
     ) -> Result<Vec<FactRecord>, MemoryApplicationError> {
-        self.list_facts_v1_inner(category, min_trust, limit, Some(context))
+        self.list_facts_inner(category, min_trust, limit, Some(context))
             .await
     }
 
-    pub async fn list_facts_untracked_v1(
+    pub async fn list_facts_untracked(
         &self,
         category: Option<MemoryCategory>,
         min_trust: Option<f64>,
         limit: usize,
     ) -> Result<Vec<FactRecord>, MemoryApplicationError> {
-        self.list_facts_v1_inner(category, min_trust, limit, None)
+        self.list_facts_inner(category, min_trust, limit, None)
             .await
     }
 
-    async fn list_facts_v1_inner(
+    async fn list_facts_inner(
         &self,
         category: Option<MemoryCategory>,
         min_trust: Option<f64>,
@@ -289,62 +285,63 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .list_project_memory_facts(ProjectMemoryFactListQueryV1::new(
                 self.owner.clone(),
                 category.map(fact_category),
-                compatibility_confidence(min_trust)?,
+                memory_confidence(min_trust)?,
                 None,
                 limit,
             )?)
             .await?;
-        let targets = compatibility_projection_targets(page.facts());
+        let targets = projection_targets(page.facts());
         // Unavailable projections (deleted, redacted, expired) read as absent
-        // under the V1 contract — mirroring get_fact_v1 — so one tombstone
+        // under the persisted numeric-id contract — mirroring get_fact — so one tombstone
         // never makes the whole listing fail.
         let records = page
             .facts()
             .iter()
             .filter(|fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
-            .map(|fact| project_memory_projection_record(&self.compatibility_scope, fact))
+            .map(|fact| project_memory_projection_record(&self.persisted_fact_id_scope, fact))
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(context) = context.as_ref() {
-            self.record_v1_retrieval(targets, context, false).await?;
+            self.record_retrieval(targets, context, false).await?;
         }
         Ok(records)
     }
 
-    pub async fn get_fact_v1(
+    pub async fn get_fact(
         &self,
         fact_id: i64,
     ) -> Result<Option<FactRecord>, MemoryApplicationError> {
-        let target = self.legacy_compatibility_target(fact_id)?;
+        let target = self.persisted_fact_id_target(fact_id)?;
         match self.get_project_memory_fact(target).await? {
             // A removed or otherwise unavailable fact reads as absent under
-            // the V1 contract; only reachable payloads project to records.
+            // the persisted numeric-id contract; only reachable payloads project to records.
             None | Some(ProjectMemoryFactProjectionV1::Unavailable(_)) => Ok(None),
             Some(projection) => {
-                project_memory_projection_record(&self.compatibility_scope, &projection).map(Some)
+                project_memory_projection_record(&self.persisted_fact_id_scope, &projection)
+                    .map(Some)
             }
         }
     }
 
-    pub async fn update_fact_v1(
+    pub async fn update_fact(
         &self,
         request: UpdateFactRequest,
         context: MemoryOperationContext,
-    ) -> Result<V1UpdateFactOutcome, MemoryApplicationError> {
+    ) -> Result<UpdateFactOutcome, MemoryApplicationError> {
         if let Some(content) = request.content.as_deref()
             && let Some(reason) = detect_secret_like(content.trim())
         {
-            return Ok(V1UpdateFactOutcome::RejectedSecretLike {
+            return Ok(UpdateFactOutcome::RejectedSecretLike {
                 reason: format!(
                     "rejected_secret_like: content matched secret-likeness rule: {reason}"
                 ),
             });
         }
         let Some(request) = prepare_tainted_update_fact_request(request)? else {
-            return Ok(V1UpdateFactOutcome::RejectedSecretLike {
+            return Ok(UpdateFactOutcome::RejectedSecretLike {
                 reason: "rejected_secret_like: content or structured payload was rejected by the privacy sanitizer".to_owned(),
             });
         };
-        let target = self.legacy_compatibility_target(request.fact_id)?;
+        let target = self.persisted_fact_id_target(request.fact_id)?;
         let patch = ProjectMemoryFactUpdatePatchV1::new(
             request.content,
             request.category.map(fact_category),
@@ -352,7 +349,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             request.tags,
             request.entities,
             request.metadata,
-            compatibility_confidence(request.trust)?,
+            memory_confidence(request.trust)?,
         )?;
         let outcome = self
             .update_project_memory_fact(ProjectMemoryFactUpdateCommandV1::new(
@@ -363,17 +360,17 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 context.actor().cloned(),
             )?)
             .await?;
-        Ok(V1UpdateFactOutcome::Updated(Box::new(
-            project_memory_projection_record(&self.compatibility_scope, outcome.fact())?,
+        Ok(UpdateFactOutcome::Updated(Box::new(
+            project_memory_projection_record(&self.persisted_fact_id_scope, outcome.fact())?,
         )))
     }
 
-    pub async fn remove_fact_v1(
+    pub async fn remove_fact(
         &self,
         fact_id: i64,
         context: MemoryOperationContext,
     ) -> Result<bool, MemoryApplicationError> {
-        let target = self.legacy_compatibility_target(fact_id)?;
+        let target = self.persisted_fact_id_target(fact_id)?;
         // Removing a fact that was never stored (or was concurrently removed
         // just before this call) is an idempotent no-op, mirroring the legacy
         // MemoryStore contract. The authority resolves that disposition
@@ -395,7 +392,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(outcome.removed())
     }
 
-    pub async fn record_fact_feedback_v1(
+    pub async fn record_fact_feedback(
         &self,
         request: FeedbackRequest,
         context: MemoryOperationContext,
@@ -406,16 +403,16 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .clone()
             .filter(|source| !source.trim().is_empty());
         let Some(source) = sanitize_optional_memory_text(source_input) else {
-            return Err(MemoryApplicationError::InvalidCompatibilityInput {
+            return Err(MemoryApplicationError::InvalidInput {
                 invariant: "legacy feedback source rejected by privacy sanitizer",
             });
         };
-        // V1 feedback historically attributed omitted/blank transport sources
+        // The shipped feedback transport historically attributed omitted/blank sources
         // to MCP. Preserve that ordinary behavior without inventing a source for
         // redacted or unknown history rows returned by the authority.
         let source = source.unwrap_or_else(|| "mcp".to_owned());
         let Some(note) = sanitize_optional_memory_text(request.note.clone()) else {
-            return Err(MemoryApplicationError::InvalidCompatibilityInput {
+            return Err(MemoryApplicationError::InvalidInput {
                 invariant: "legacy feedback note rejected by privacy sanitizer",
             });
         };
@@ -425,7 +422,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         };
         let outcome = self
             .record_project_memory_fact_feedback(ProjectMemoryFactFeedbackCommandV1::new(
-                self.legacy_compatibility_target(request.fact_id)?,
+                self.persisted_fact_id_target(request.fact_id)?,
                 context.operation_id().clone(),
                 None,
                 action,
@@ -435,11 +432,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             )?)
             .await?;
         let event_id = outcome.legacy_feedback_event_id().ok_or(
-            MemoryApplicationError::IncompatibleLegacyProjection {
+            MemoryApplicationError::UnrepresentablePersistedFact {
                 invariant: "legacy feedback event identity",
             },
         )?;
-        let fact = project_memory_projection_record(&self.compatibility_scope, outcome.fact())?;
+        let fact = project_memory_projection_record(&self.persisted_fact_id_scope, outcome.fact())?;
         Ok(tracedecay_runtime_core::memory::types::FeedbackResult {
             event_id,
             fact_id: fact.fact_id,
@@ -452,13 +449,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         })
     }
 
-    pub async fn fact_trust_history_v1(
+    pub async fn fact_trust_history(
         &self,
         fact_id: i64,
         limit: usize,
     ) -> Result<Vec<TrustHistoryEntry>, MemoryApplicationError> {
         let history = self
-            .fact_trust_history_with_progress_v1(fact_id, limit)
+            .fact_trust_history_with_progress(fact_id, limit)
             .await?;
         if !history.repair_progress.is_complete() {
             return Err(MemoryApplicationError::FeedbackHistoryUnavailable {
@@ -468,16 +465,16 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(history.entries)
     }
 
-    /// V1 trust-history entries plus explicit repair state. This is the only
-    /// V1-compatible read for consumers that can represent partial history.
-    pub async fn fact_trust_history_with_progress_v1(
+    /// Trust-history entries plus explicit availability for callers that can
+    /// represent partial history.
+    pub async fn fact_trust_history_with_progress(
         &self,
         fact_id: i64,
         limit: usize,
-    ) -> Result<V1FactTrustHistoryV1, MemoryApplicationError> {
+    ) -> Result<FactTrustHistory, MemoryApplicationError> {
         let history = self
             .get_project_memory_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
-                self.legacy_compatibility_target(fact_id)?,
+                self.persisted_fact_id_target(fact_id)?,
                 None,
                 limit,
             )?)
@@ -505,14 +502,14 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 })
             })
             .collect();
-        Ok(V1FactTrustHistoryV1 {
+        Ok(FactTrustHistory {
             entries,
             repair_progress: history.repair_progress(),
         })
     }
 
-    pub async fn memory_status_v1(&self) -> Result<MemoryStatus, MemoryApplicationError> {
-        Ok(self.memory_status_with_repair_v1().await?.status)
+    pub async fn memory_status(&self) -> Result<MemoryStatus, MemoryApplicationError> {
+        Ok(self.memory_status_with_repair().await?.status)
     }
 
     /// One authority status read projected both into legacy fields and the
@@ -521,25 +518,25 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// This is a pure read: it reports the live backlog (missing vectors,
     /// projection and feedback repair state) and never triggers a repair pass
     /// as a side effect. Repair remains owned by the daemon's bounded memory-
-    /// repair scheduler and the explicit [`Self::dashboard_repair_v1`] entry
+    /// repair scheduler and the explicit [`Self::dashboard_repair`] entry
     /// point; a status read must not race or duplicate that work. The legacy
-    /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are
+    /// `MemoryStatus`/`MemoryStatusWithRepair` field shapes are
     /// unchanged, but `repair` counters are always zero here: they describe
     /// repairs performed by the reporting request, and a pure read performs
     /// none — explicit repair entry points return their own batch stats.
-    pub async fn memory_status_with_repair_v1(
+    pub async fn memory_status_with_repair(
         &self,
-    ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
+    ) -> Result<MemoryStatusWithRepair, MemoryApplicationError> {
         let status = self.project_memory_status().await?;
         let feedback_history_repair = status.feedback_history_repair();
-        let projected = project_memory_status_v1(&status)?;
-        Ok(V1MemoryStatusWithRepairV1 {
+        let projected = project_memory_status(&status)?;
+        Ok(MemoryStatusWithRepair {
             status: projected,
             feedback_history_repair,
         })
     }
 
-    async fn search_v1(
+    async fn search(
         &self,
         kind: ProjectMemoryFactSearchKindV1,
         query: Option<String>,
@@ -549,7 +546,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         let filter = ProjectMemoryFactSearchFilterV1::new(
             request.category.map(fact_category),
-            compatibility_confidence(request.min_trust)?,
+            memory_confidence(request.min_trust)?,
             None,
         )?;
         let query = ProjectMemoryFactSearchQuery::with_filter(
@@ -587,7 +584,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .map(|hit| {
                 let scores = hit.scores();
                 Ok(FactSearchResult {
-                    fact: project_memory_fact_record(&self.compatibility_scope, hit.fact())?,
+                    fact: project_memory_fact_record(&self.persisted_fact_id_scope, hit.fact())?,
                     score: f64::from(scores.score_millionths()) / 1_000_000.0,
                     fts_score: f64::from(scores.fts_score_millionths()) / 1_000_000.0,
                     jaccard_score: f64::from(scores.jaccard_score_millionths()) / 1_000_000.0,
@@ -602,7 +599,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             })
             .collect::<Result<Vec<_>, MemoryApplicationError>>()?;
         if let Some(context) = context.as_ref() {
-            self.record_v1_retrieval(targets, context, recall).await?;
+            self.record_retrieval(targets, context, recall).await?;
         }
         if !request.include_why {
             for result in &mut results {
@@ -612,7 +609,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(results)
     }
 
-    async fn record_v1_retrieval(
+    async fn record_retrieval(
         &self,
         targets: Vec<ProjectMemoryFactTargetV1>,
         context: &MemoryOperationContext,
@@ -631,24 +628,24 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(())
     }
 
-    async fn project_add_fact_outcome_v1(
+    async fn project_add_fact_outcome(
         &self,
         outcome: ProjectMemoryFactAddOutcomeV1,
     ) -> Result<AddFactOutcome, MemoryApplicationError> {
         let fact = outcome
             .fact()
-            .map(|fact| project_memory_projection_record(&self.compatibility_scope, fact))
+            .map(|fact| project_memory_projection_record(&self.persisted_fact_id_scope, fact))
             .transpose()?;
         let closest_fact_id = match outcome.closest_fact_id() {
             Some(id) => {
                 let projection = self
                     .get_project_memory_fact(ProjectMemoryFactTargetV1::Canonical(id.clone()))
                     .await?
-                    .ok_or(MemoryApplicationError::IncompatibleLegacyProjection {
+                    .ok_or(MemoryApplicationError::UnrepresentablePersistedFact {
                         invariant: "closest legacy fact mapping",
                     })?;
                 Some(
-                    project_memory_projection_record(&self.compatibility_scope, &projection)?
+                    project_memory_projection_record(&self.persisted_fact_id_scope, &projection)?
                         .fact_id,
                 )
             }

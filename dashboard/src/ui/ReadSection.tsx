@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import type { DashboardEnvelopeV1 } from '../contracts/generated.ts';
 import type { EnvelopeResult } from '../data/query/envelope.ts';
-import type { LegacyResult } from '../data/query/legacy.ts';
+import type { PayloadResult } from '../data/query/payload.ts';
 import { Corners } from './instrument.tsx';
 import { StateChip, type DomainStateKind } from './StateChip';
 
@@ -9,7 +9,7 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * One read, resolved: either a value to render or a domain state that says why
  * there is none.
  *
- * Every wire ladder in this dashboard — the legacy JSON routes, the
+ * Every wire ladder in this dashboard — the bare-payload JSON routes, the
  * `DashboardEnvelopeV1` routes, the structure reads, the Work envelope — is a
  * different union at the transport edge and the same question at the render
  * edge: *may the body run, and if not, what does the reader get told?* Each
@@ -34,7 +34,7 @@ export type ReadState<T> =
       /**
        * The decoded body a *source-level* refusal still carried.
        *
-       * Only the legacy ladder produces one, and only for `unavailable`: the
+       * Only the payload ladder produces one, and only for `unavailable`: the
        * canonical routes answer 404/503 with a typed payload whose `status`
        * discriminates the condition. Surfaces that can word that condition
        * better than a generic chip read it from here; the rest ignore it and
@@ -44,15 +44,15 @@ export type ReadState<T> =
     };
 
 /**
- * The states a legacy read can be blocked in — the six failure outcomes plus
+ * The states a payload read can be blocked in — the six failure outcomes plus
  * the two the ladder itself contributes.
  *
  * Narrower than `DomainStateKind` on purpose. A surface that words these in its
  * own terms — the Automations scheduler queues do — can then switch over them
  * exhaustively and fail to build when the set grows, which is the guarantee the
- * per-surface `LegacyResult` switches used to hold individually.
+ * per-surface `PayloadResult` switches used to hold individually.
  */
-export type LegacyBlockedState =
+export type PayloadBlockedState =
   | 'loading'
   | 'unknown'
   | 'offline'
@@ -62,26 +62,26 @@ export type LegacyBlockedState =
   | 'unsupported_schema'
   | 'unavailable';
 
-/** A legacy read resolved, with its blocked states narrowed. Assignable to
+/** A payload read resolved, with its blocked states narrowed. Assignable to
  * `ReadState<T>` wherever only the taxonomy matters. */
-export type LegacyReadState<T> =
+export type PayloadReadState<T> =
   | { kind: 'ready'; value: T }
   | {
       kind: 'blocked';
-      state: LegacyBlockedState;
+      state: PayloadBlockedState;
       detail?: string | undefined;
       payload?: T | undefined;
     };
 
-/** The domain state a non-ok legacy read renders as.
+/** The domain state a non-ok payload read renders as.
  *
- * Exhaustive over the failure outcomes, so a new one added to `LegacyResult`
+ * Exhaustive over the failure outcomes, so a new one added to `PayloadResult`
  * fails to build here rather than falling into whichever arm a chain of
  * ternaries happened to end on — which is how 401 and 403 spent their whole
  * life rendering as a generic error whose only discriminator was status text. */
-function legacyFailureState(
-  result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>,
-): LegacyBlockedState {
+function payloadFailureState(
+  result: Exclude<PayloadResult<unknown>, { outcome: 'ok' }>,
+): PayloadBlockedState {
   switch (result.outcome) {
     case 'offline':
       return 'offline';
@@ -103,16 +103,16 @@ function legacyFailureState(
 }
 
 /**
- * The legacy ladder, resolved.
+ * The payload ladder, resolved.
  *
  * `unavailable` is the state that most needs its detail. Its chip word is the
  * same for a registry that is missing and one that failed to open, and the
  * payload's `status`/`error` is the only thing that tells them apart.
  */
-export function legacyReadState<T>(
+export function payloadReadState<T>(
   pending: boolean,
-  result: LegacyResult<T> | undefined,
-): LegacyReadState<T> {
+  result: PayloadResult<T> | undefined,
+): PayloadReadState<T> {
   if (pending) return { kind: 'blocked', state: 'loading' };
   if (!result) return { kind: 'blocked', state: 'unknown' };
   if (result.outcome === 'ok') return { kind: 'ready', value: result.data };
@@ -126,7 +126,7 @@ export function legacyReadState<T>(
   }
   return {
     kind: 'blocked',
-    state: legacyFailureState(result),
+    state: payloadFailureState(result),
     detail: result.outcome === 'error' ? result.detail : undefined,
   };
 }
@@ -218,8 +218,8 @@ export function ReadSection<T>({
   );
 }
 
-/** Renders truthful states around a legacy fetch; children render only on ok. */
-export function LegacyBoundary<T>({
+/** Renders truthful states around a payload fetch; children render only on ok. */
+export function PayloadBoundary<T>({
   title,
   pending,
   result,
@@ -228,7 +228,7 @@ export function LegacyBoundary<T>({
 }: {
   title: string;
   pending: boolean;
-  result: LegacyResult<T> | undefined;
+  result: PayloadResult<T> | undefined;
   /**
    * Hand an `unavailable` body to the child instead of rendering the generic
    * state for it.
@@ -244,7 +244,7 @@ export function LegacyBoundary<T>({
   statusInBody?: boolean;
   children: (data: T) => ReactNode;
 }) {
-  const read = legacyReadState(pending, result);
+  const read = payloadReadState(pending, result);
   // The opt-in, expressed as a promotion of the resolved state rather than as a
   // second arm through the boundary: a refusal that carried a body becomes a
   // read the child may render, and everything downstream stays one shape.

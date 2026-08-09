@@ -5,7 +5,7 @@ use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSessionBoundaryRequest,
     LcmSessionBoundaryResponse, LcmSummarizerMode,
 };
@@ -201,11 +201,13 @@ fn summary_unavailable(
 mod tests {
     use super::*;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
-    use crate::sessions::lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
-    use crate::sessions::{SessionMessageRecord, SessionRecord};
     use serde_json::Value;
     use tracedecay_domain::SessionId;
     use tracedecay_runtime_core::db::engine::params;
+    use tracedecay_sessions::runtime::lcm::{
+        LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode,
+    };
+    use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {
@@ -445,7 +447,7 @@ mod tests {
         let harness = RegisteredGlobalDbHarness::open("lcm-preflight-read-only").await;
         let db = Arc::clone(&harness.registered);
         let response = db
-            .lcm_preflight(crate::sessions::lcm::LcmPreflightRequest {
+            .lcm_preflight(tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
                 provider: "cursor".to_string(),
                 session_id: "missing-session".to_string(),
                 messages: Vec::new(),

@@ -1,106 +1,26 @@
 use std::collections::BTreeSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use serde_json::Value;
-use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationOperation, RetainedSurfaceOperation,
+    APPLICATION_DEFAULT_PROFILE_ID, RetainedSurfaceOperation,
     retained_surface_application_operation,
 };
-use tracedecay_tool_catalog::{BindingSurface, ProfileId, SurfaceOperationName};
+use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
+use crate::application_surface::{
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, normalize_application_tool_args,
+    parse_application_surface_request,
+};
 use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
-use super::ToolCallRegistryOptions;
-use super::ToolResult;
-use super::dispatch_groups::execute_project_retained_application_tool;
-use super::handle_user_lcm_tool_with_authorities;
-use super::session;
-
-#[derive(Debug)]
-pub(super) struct CatalogBoundRetainedMcpRequest {
-    pub(super) operation: RetainedSurfaceOperation,
-    pub(super) arguments: Value,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum RetainedMcpExecutionContext<'call, 'authority> {
-    Profile {
-        tool_name: &'call str,
-        options: &'call ToolCallRegistryOptions<'authority>,
-    },
-    Project {
-        cg: &'call TraceDecay,
-        scope_prefix: Option<&'call str>,
-        active_project_session_db: Option<&'call Arc<RegisteredGlobalDb>>,
-        active_lcm_context: session::LcmHandlerContext<'call>,
-        options: &'call ToolCallRegistryOptions<'authority>,
-    },
-}
+use super::{ToolCallRegistryOptions, ToolResult, application_surface};
 
 static RETAINED_MCP_COMPOSITION: OnceLock<
     std::result::Result<ApplicationCatalogComposition<()>, String>,
 > = OnceLock::new();
-
-struct RetainedMcpCatalogDispatcher<'call, 'authority> {
-    context: RetainedMcpExecutionContext<'call, 'authority>,
-}
-
-type RetainedMcpInvocationFuture<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>>;
-
-impl<'call> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
-    for RetainedMcpCatalogDispatcher<'call, '_>
-{
-    type Output = RetainedMcpInvocationFuture<'call>;
-
-    fn invoke(
-        &self,
-        operation: &ApplicationOperation,
-        request: CatalogBoundRetainedMcpRequest,
-    ) -> Self::Output {
-        let expected = match retained_surface_application_operation(request.operation)
-            .map_err(retained_catalog_error)
-        {
-            Ok(expected) => expected,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
-        if operation != &expected {
-            let error = retained_catalog_error(
-                "resolved retained MCP handler does not own the requested operation",
-            );
-            return Box::pin(async move { Err(error) });
-        }
-        let context = self.context;
-        Box::pin(async move {
-            match context {
-                RetainedMcpExecutionContext::Profile { tool_name, options } => {
-                    execute_profile_retained_application_tool(request, tool_name, options).await
-                }
-                RetainedMcpExecutionContext::Project {
-                    cg,
-                    scope_prefix,
-                    active_project_session_db,
-                    active_lcm_context,
-                    options,
-                } => {
-                    execute_project_retained_application_tool(
-                        request,
-                        cg,
-                        scope_prefix,
-                        active_project_session_db,
-                        active_lcm_context,
-                        options,
-                    )
-                    .await
-                }
-            }
-        })
-    }
-}
 
 fn retained_catalog_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
@@ -115,11 +35,7 @@ pub(super) fn retained_mcp_composition() -> Result<&'static ApplicationCatalogCo
         .map_err(retained_catalog_error)
 }
 
-pub(super) async fn invoke_retained_mcp_request(
-    context: RetainedMcpExecutionContext<'_, '_>,
-    operation: RetainedSurfaceOperation,
-    arguments: Value,
-) -> Result<ToolResult> {
+fn retained_mcp_binding(operation: RetainedSurfaceOperation) -> Result<BindingId> {
     let composition = retained_mcp_composition()?;
     let profile_id =
         ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(retained_catalog_error)?;
@@ -144,59 +60,162 @@ pub(super) async fn invoke_retained_mcp_request(
             "retained MCP binding resolves a different application operation",
         ));
     }
-    let dispatcher = RetainedMcpCatalogDispatcher { context };
-    let handler = composition
-        .bind_handler(capability.use_case_id(), &dispatcher)
-        .ok_or_else(|| retained_catalog_error("retained MCP handler is not registered"))?;
-    handler
-        .invoke(CatalogBoundRetainedMcpRequest {
-            operation,
-            arguments,
-        })
-        .await
+    Ok(capability.binding_id().clone())
+}
+
+pub(crate) fn retained_mcp_operation(
+    tool_name: &str,
+    arguments: &Value,
+) -> Option<RetainedSurfaceOperation> {
+    match tool_name {
+        "tracedecay_fact_store" => match arguments.get("action").and_then(Value::as_str) {
+            Some("add") => Some(RetainedSurfaceOperation::FactStoreAdd),
+            Some("search") => Some(RetainedSurfaceOperation::FactStoreSearch),
+            Some("probe") => Some(RetainedSurfaceOperation::FactStoreProbe),
+            Some("related") => Some(RetainedSurfaceOperation::FactStoreRelated),
+            Some("reason") => Some(RetainedSurfaceOperation::FactStoreReason),
+            Some("contradict") => Some(RetainedSurfaceOperation::FactStoreContradict),
+            Some("get") => Some(RetainedSurfaceOperation::FactStoreGet),
+            Some("update") => Some(RetainedSurfaceOperation::FactStoreUpdate),
+            Some("remove") => Some(RetainedSurfaceOperation::FactStoreRemove),
+            Some("list") => Some(RetainedSurfaceOperation::FactStoreList),
+            _ => None,
+        },
+        "tracedecay_session_refresh" => match arguments.get("action").and_then(Value::as_str) {
+            Some("status") => Some(RetainedSurfaceOperation::SessionRefreshStatus),
+            Some("start" | "join" | "resume" | "begin") => {
+                Some(RetainedSurfaceOperation::SessionRefreshBegin)
+            }
+            Some("cancel") => Some(RetainedSurfaceOperation::SessionRefreshCancel),
+            _ => None,
+        },
+        _ => RetainedSurfaceOperation::from_name(tool_name),
+    }
 }
 
 pub(super) async fn dispatch_profile_retained_application_tool(
     operation: RetainedSurfaceOperation,
     tool_name: &str,
+    cg: &TraceDecay,
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    invoke_retained_mcp_request(
-        RetainedMcpExecutionContext::Profile {
-            tool_name,
-            options: &options,
-        },
+    let admission = options
+        .session_authorities
+        .profile_retained_admission
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "profile_retained_admission_unavailable",
+                true,
+                "profile retained admission is unavailable for this authenticated connection",
+            )
+        })?;
+    execute_profile_retained_mcp_tool(
         operation,
+        tool_name,
         args,
+        cg.store_runtime_registry().as_ref(),
+        admission,
+        options.session_authorities.profile_lcm,
+        options.application_request_id,
+        options.application_deadline,
+        options.application_cancellation,
+        Some(cg.project_root()),
     )
     .await
 }
 
-pub(super) async fn execute_profile_retained_application_tool(
-    request: CatalogBoundRetainedMcpRequest,
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_profile_retained_mcp_tool(
+    operation: RetainedSurfaceOperation,
     tool_name: &str,
-    options: &ToolCallRegistryOptions<'_>,
+    mut args: Value,
+    runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    admission: &crate::daemon::retained_owner::ProfileRetainedAdmissionV1,
+    lcm_authority: Option<&dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+    protocol_request_id: Option<tracedecay_application::RequestId>,
+    protocol_deadline: Option<tracedecay_application::Deadline>,
+    protocol_cancellation: Option<tracedecay_application::CancellationSignal>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
-    match request.operation {
-        RetainedSurfaceOperation::MessageSearch
-        | RetainedSurfaceOperation::LcmStatus
-        | RetainedSurfaceOperation::LcmDoctor
-        | RetainedSurfaceOperation::LcmLoadSession
-        | RetainedSurfaceOperation::LcmGrep
-        | RetainedSurfaceOperation::LcmDescribe
-        | RetainedSurfaceOperation::LcmExpand
-        | RetainedSurfaceOperation::LcmExpandQuery => {
-            handle_user_lcm_tool_with_authorities(
-                tool_name,
-                request.arguments,
-                options.session_authorities.profile_lcm,
-                options.session_authorities.profile_retrieval,
-            )
-            .await
+    let canonical_tool_name = format!("tracedecay_{}", operation.as_str());
+    let surface_operation = ApplicationSurfaceOperation::from_tool_name(&canonical_tool_name)
+        .filter(|operation| {
+            operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained
+        })
+        .ok_or_else(|| retained_catalog_error("retained MCP operation is not mounted"))?;
+    if let Some(arguments) = args.as_object_mut() {
+        if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
+            arguments.remove("storage_scope");
         }
-        _ => Err(TraceDecayError::Config {
-            message: format!("storage_scope=user is not supported for `{tool_name}`"),
-        }),
+        if matches!(
+            tool_name,
+            "tracedecay_fact_store" | "tracedecay_session_refresh"
+        ) {
+            arguments.remove("action");
+        }
     }
+    let normalized = normalize_application_tool_args(tool_name, args).map_err(|error| {
+        TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })?;
+    let requested_format = normalized.requested_format;
+    let typed_request =
+        match parse_application_surface_request(surface_operation, normalized.request).map_err(
+            |error| TraceDecayError::Config {
+                message: error.to_string(),
+            },
+        )? {
+            ApplicationSurfaceRequest::Retained(request) => request,
+            _ => {
+                return Err(retained_catalog_error(
+                    "retained MCP parser resolved a different application family",
+                ));
+            }
+        };
+    if typed_request.operation() != operation {
+        return Err(retained_catalog_error(
+            "retained MCP request does not match its catalog operation",
+        ));
+    }
+    let binding_id = retained_mcp_binding(operation)?;
+    let request_id = match protocol_request_id {
+        Some(request_id) => request_id,
+        None => application_surface::request_id()?,
+    };
+    let (deadline, cancellation) = application_surface::complete_protocol_controls(
+        surface_operation,
+        &request_id,
+        protocol_deadline,
+        protocol_cancellation,
+    )?
+    .ok_or_else(|| {
+        TraceDecayError::project_route(
+            "profile_retained_controls_unavailable",
+            true,
+            "profile retained protocol controls are unavailable",
+        )
+    })?;
+    let result = crate::daemon::retained_owner::execute_profile_retained_application(
+        crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
+            runtime_registry: Some(runtime_registry),
+            session_identity: admission.session_identity().clone(),
+            configuration_digest: admission.configuration_digest().clone(),
+            lcm_authority,
+        },
+        admission,
+        typed_request,
+        request_id,
+        deadline,
+        cancellation,
+    )
+    .await?;
+    application_surface::render_retained_result(
+        project_root,
+        surface_operation,
+        binding_id,
+        result,
+        requested_format,
+    )
 }

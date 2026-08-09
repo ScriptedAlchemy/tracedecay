@@ -18,7 +18,6 @@ use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
-use tracedecay::sessions::SessionRecord;
 use tracedecay::storage::{
     ActiveProjectContext, EnrollmentMarker, GraphScopeId, PrivateStoreIo, ProjectPath,
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath,
@@ -31,6 +30,7 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
+use tracedecay_sessions::runtime::SessionRecord;
 
 use crate::support::HOME_ENV_LOCK;
 

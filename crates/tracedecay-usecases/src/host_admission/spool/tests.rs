@@ -374,33 +374,45 @@ fn malformed_empty_and_oversized_metadata_are_typed() {
 }
 
 #[test]
-fn unknown_metadata_version_is_typed() {
+fn future_metadata_version_is_typed_reset_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
-    fs::write(
-        temp.path().join(META_FILE),
-        br#"{"version":2,"committed_through":0,"next_seq":1,"integrity":"healthy"}"#,
-    )
-    .unwrap();
+    let meta_path = temp.path().join(META_FILE);
+    let future =
+        br#"{"version":2,"committed_through":0,"next_seq":1,"integrity":"healthy"}"#.to_vec();
+    fs::write(&meta_path, &future).unwrap();
     let error = HostAdmissionSpool::open(temp.path(), bounds()).unwrap_err();
     assert_eq!(error, SpoolError::UnsupportedVersion(2));
+    assert!(!error.to_outcome().retryable);
+    let open_error = error.to_open_error();
     assert_eq!(
-        error.to_outcome(),
-        HostAdmissionOutcome::spool_unsupported_version()
+        open_error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("host-admission spool")
     );
+    assert!(open_error.hook_runtime_context().is_none());
+    assert_eq!(fs::read(meta_path).unwrap(), future);
 }
 
 #[test]
-fn unknown_frame_version_is_typed() {
+fn future_frame_version_is_typed_reset_without_mutation() {
     let temp = tempfile::tempdir().unwrap();
     let mut frame = encode_frame(1, b"a", b"x").unwrap();
     frame[4..6].copy_from_slice(&2u16.to_le_bytes());
-    fs::write(temp.path().join(RECORDS_FILE), frame).unwrap();
+    let records_path = temp.path().join(RECORDS_FILE);
+    fs::write(&records_path, &frame).unwrap();
     let error = HostAdmissionSpool::open(temp.path(), bounds()).unwrap_err();
     assert_eq!(error, SpoolError::UnsupportedVersion(2));
+    assert!(!error.to_outcome().retryable);
+    let open_error = error.to_open_error();
     assert_eq!(
-        error.to_outcome(),
-        HostAdmissionOutcome::spool_unsupported_version()
+        open_error
+            .reset_required_context()
+            .map(|(authority, _)| authority),
+        Some("host-admission spool")
     );
+    assert!(open_error.hook_runtime_context().is_none());
+    assert_eq!(fs::read(records_path).unwrap(), frame);
 }
 
 #[test]

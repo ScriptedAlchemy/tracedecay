@@ -134,14 +134,24 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
 async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
+    let grace = std::time::Duration::from_millis(300);
+    let poll = std::time::Duration::from_millis(50);
+    let started = tokio::time::Instant::now();
 
     let err = super::super::connect_with_restart_grace(
         &super::super::connection_for_socket_path(&socket),
-        std::time::Duration::from_millis(300),
-        std::time::Duration::from_millis(50),
+        grace,
+        poll,
     )
     .await
     .expect_err("connect should fail when no daemon ever binds");
+
+    let elapsed = started.elapsed();
+    assert!(elapsed >= grace, "restart grace must be fully observed");
+    assert!(
+        elapsed <= grace + poll,
+        "restart retries must stop within one poll interval after grace"
+    );
 
     let message = err.to_string();
     assert!(

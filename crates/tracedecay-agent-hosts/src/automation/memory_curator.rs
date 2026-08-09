@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tracedecay_application::memory::{
     VerifiedMemorySimilarityPairQueryV1, VerifiedMemorySimilarityReadV1,
 };
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256};
 
 use super::artifacts::sha256_json;
@@ -21,8 +22,8 @@ use crate::ports::project_runtime::TraceDecay;
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_policy::{
-    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
-    CurationValidationDispositionV1, evaluate_curation_apply,
+    CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
+    CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
 use tracedecay_runtime_core::memory::types::MemoryGroomingOperation;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
@@ -69,6 +70,7 @@ pub struct MemoryCuratorAutomationRun {
 pub async fn run_memory_curator_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
@@ -76,6 +78,7 @@ pub async fn run_memory_curator_with_backend(
     run_memory_curator_for_store(
         MemoryCuratorStore::Project { cg, sessions_db },
         config,
+        configuration_revision_id,
         backend,
         options,
     )
@@ -87,6 +90,7 @@ pub(crate) async fn run_user_memory_curator_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
@@ -98,6 +102,7 @@ pub(crate) async fn run_user_memory_curator_with_backend(
             sessions_db,
         },
         config,
+        configuration_revision_id,
         backend,
         options,
     )
@@ -139,6 +144,33 @@ impl MemoryCuratorStore<'_> {
         }
     }
 
+    fn curation_authority(
+        &self,
+        configuration_revision_id: &ConfigurationRevisionId,
+    ) -> Result<CurationApplyAuthorityV1> {
+        let actor_id = ActorId::new("automation:memory-curator").map_err(memory_contract_error)?;
+        let (project_id, profile_id) = match self {
+            Self::Project { cg, .. } => {
+                let project_id = match cg.project_memory_owner()? {
+                    FactOwnerV1::Project { project_id } => project_id,
+                    FactOwnerV1::Profile => {
+                        return Err(memory_validation_error(
+                            "project memory curator is missing project authority",
+                        ));
+                    }
+                };
+                (Some(project_id), cg.profile_id().clone())
+            }
+            Self::User { runtime, .. } => (None, runtime.profile_id().clone()),
+        };
+        Ok(CurationApplyAuthorityV1 {
+            actor_id,
+            project_id,
+            profile_id,
+            configuration_revision_id: configuration_revision_id.clone(),
+        })
+    }
+
     async fn read_similarity_pairs(
         &self,
         query: VerifiedMemorySimilarityPairQueryV1,
@@ -162,9 +194,11 @@ impl MemoryCuratorStore<'_> {
 async fn run_memory_curator_for_store(
     store: MemoryCuratorStore<'_>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
+    let curation_authority = store.curation_authority(configuration_revision_id)?;
     let sessions_db = store.sessions_db();
     let mut run = AgentTaskRunContext::new(
         store.dashboard_root(),
@@ -317,8 +351,12 @@ async fn run_memory_curator_for_store(
             .response_output_json(&response, evidence_hash.clone(), &retry_report)
             .await?;
     };
-    let curation_decision =
-        memory_curation_decision(config, evidence_hash.as_deref(), &accepted_ops)?;
+    let curation_decision = memory_curation_decision(
+        config,
+        &curation_authority,
+        evidence_hash.as_deref(),
+        &accepted_ops,
+    )?;
     let (applied_count, receipts) = if curation_decision.allows_apply() {
         let database = store.open_memory_database().await?;
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database))
@@ -835,6 +873,7 @@ fn memory_curation_report(
 
 fn memory_curation_decision(
     config: &AutomationConfig,
+    authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     accepted_ops: &[Value],
 ) -> Result<CurationApplyDecisionV1> {
@@ -845,6 +884,7 @@ fn memory_curation_decision(
     let output_digest = canonical_sha256(&accepted_ops).map_err(memory_contract_error)?;
     let configuration_digest = canonical_sha256(config).map_err(memory_contract_error)?;
     evaluate_curation_apply(&CurationApplyPolicyInputV1 {
+        authority: authority.clone(),
         subject: CurationApplySubjectV1::MemoryCurator,
         evidence_digest,
         output_digest,

@@ -8,11 +8,11 @@ use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::sessions::workflow_index::{
+use crate::store::GlobalDbWorkflowStore;
+use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowStatus, read_ingest_watermark,
 };
-use crate::sessions::workflow_ingest::WorkflowIngestStats;
-use crate::store::GlobalDbWorkflowStore;
+use tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats;
 
 static WORKFLOW_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
 

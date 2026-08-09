@@ -293,12 +293,8 @@ fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
 
 fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Result<()> {
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    super::retired_memory_digest::remove_state(&profile_root)?;
     crate::automation::skill_targets::install_managed_skills(
-        &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Cursor,
-        install_dir,
-    )?;
-    crate::automation::memory_digest::sync_memory_digest_export(
         &profile_root,
         crate::automation::skill_targets::SkillInstallTarget::Cursor,
         install_dir,

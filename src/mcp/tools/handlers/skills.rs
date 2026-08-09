@@ -7,22 +7,22 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 
-use crate::automation::hermes_skill_bridge::{
-    HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
-};
-use crate::automation::managed_skills::{
-    ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
-};
-use crate::automation::run_ledger::{find_run_record, read_run_artifact_payload};
-use crate::automation::skill_usage::{
-    SkillUsageAction, analytics_import_key_for_request, ingest_project_analytics_events,
-    record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
-    summarize_skill_usage, summarize_skill_usage_for,
-};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
+use tracedecay_agent_hosts::automation::hermes_skill_bridge::{
+    HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
+};
+use tracedecay_agent_hosts::automation::managed_skills::{
+    ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
+};
+use tracedecay_agent_hosts::automation::run_ledger::{find_run_record, read_run_artifact_payload};
+use tracedecay_agent_hosts::automation::skill_usage::{
+    SkillUsageAction, analytics_import_key_for_request, ingest_project_analytics_events,
+    record_skill_usage, skill_improvement_recommendations, stale_skill_recommendations,
+    summarize_skill_usage, summarize_skill_usage_for,
+};
 
 use super::super::renderers;
 use super::support::{tool_json, tool_json_with_md};
@@ -51,7 +51,6 @@ fn parse_state(args: &Value) -> Result<Option<ManagedSkillState>> {
         return Ok(None);
     };
     match state {
-        "pending_approval" => Ok(Some(ManagedSkillState::PendingApproval)),
         "active" => Ok(Some(ManagedSkillState::Active)),
         "disabled" => Ok(Some(ManagedSkillState::Disabled)),
         "archived" => Ok(Some(ManagedSkillState::Archived)),

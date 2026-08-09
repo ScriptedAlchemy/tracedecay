@@ -6,7 +6,7 @@ use crate::cli::AutomationSkillsAction;
 pub(super) async fn handle_automation_skills_command(
     action: AutomationSkillsAction,
 ) -> tracedecay::errors::Result<()> {
-    use tracedecay::automation::managed_skills::{
+    use tracedecay_agent_hosts::automation::managed_skills::{
         ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillUpdate,
         apply_managed_skill_update, archive_managed_skill, create_managed_skill,
         disable_managed_skill, list_managed_skills, load_managed_skill, restore_managed_skill,
@@ -61,7 +61,7 @@ pub(super) async fn handle_automation_skills_command(
                     title,
                     summary,
                     category,
-                    targets: tracedecay::automation::managed_skills::default_managed_skill_targets(
+                    targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
                     ),
                     body_markdown: body,
                     support_files: Vec::new(),
@@ -74,7 +74,7 @@ pub(super) async fn handle_automation_skills_command(
             )
             .await?;
             if pinned {
-                tracedecay::automation::managed_skills::set_managed_skill_pinned(
+                tracedecay_agent_hosts::automation::managed_skills::set_managed_skill_pinned(
                     &profile_root,
                     &skill.metadata.id,
                     true,
@@ -125,23 +125,24 @@ pub(super) async fn handle_automation_skills_command(
 
 fn deploy_skills_to_current_project(
     profile_root: &std::path::Path,
-) -> tracedecay::errors::Result<tracedecay::automation::skill_writer::ManagedSkillDeploymentReceipt>
-{
+) -> tracedecay::errors::Result<
+    tracedecay_agent_hosts::automation::skill_writer::ManagedSkillDeploymentReceipt,
+> {
     let current =
         std::env::current_dir().map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!("resolve current project for managed-skill deployment: {error}"),
         })?;
     let project_root =
-        tracedecay::automation::skill_materialization::resolve_project_root(&current);
+        tracedecay_agent_hosts::automation::skill_materialization::resolve_project_root(&current);
     Ok(
-        tracedecay::automation::skill_writer::deploy_managed_skills_to_project(
+        tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project(
             profile_root,
             &project_root,
         ),
     )
 }
 
-fn print_managed_skill(skill: &tracedecay::automation::managed_skills::ManagedSkill) {
+fn print_managed_skill(skill: &tracedecay_agent_hosts::automation::managed_skills::ManagedSkill) {
     println!("id: {}", skill.metadata.id);
     println!("title: {}", skill.metadata.title);
     println!("summary: {}", skill.metadata.summary);

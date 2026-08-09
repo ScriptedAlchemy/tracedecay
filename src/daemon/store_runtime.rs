@@ -40,7 +40,7 @@ mod profile_paths_parity {
     fn kernel_user_sessions_filename_matches_sessions_crate() {
         assert_eq!(
             tracedecay_runtime_core::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME,
-            crate::sessions::USER_SESSIONS_DB_FILENAME,
+            tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME,
         );
     }
 
@@ -51,7 +51,7 @@ mod profile_paths_parity {
             tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
                 profile_root
             ),
-            crate::sessions::user_sessions_db_path(profile_root),
+            tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
         );
     }
 }

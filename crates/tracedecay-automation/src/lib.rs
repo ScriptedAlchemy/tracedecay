@@ -4,7 +4,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod apply_policy;
 pub mod artifact_policy;
 pub mod backend;
 pub mod config;

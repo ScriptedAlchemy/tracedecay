@@ -288,7 +288,7 @@ impl Default for CompactionThresholdConfig {
 pub struct RetentionConfig {
     /// Session-store (LCM raw/projected) retention windows.
     #[serde(default)]
-    pub session_lcm: crate::sessions::lcm::LcmRetentionConfig,
+    pub session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig,
     /// Observation-evidence generation-scoped retention windows.
     #[serde(default)]
     pub observation: crate::global_db::observation::retention::ObservationRetentionConfig,
@@ -315,7 +315,7 @@ pub struct RetentionConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            session_lcm: crate::sessions::lcm::LcmRetentionConfig::default(),
+            session_lcm: tracedecay_sessions::runtime::lcm::LcmRetentionConfig::default(),
             observation:
                 crate::global_db::observation::retention::ObservationRetentionConfig::default(),
             orphan_store_gc_days: default_orphan_store_gc_days(),
@@ -1916,7 +1916,7 @@ fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
 /// re-exports them so every historical `crate::config::…` call site keeps
 /// resolving. The lock and its accessor are unconditional there (not gated
 /// behind `cfg(test)` / `feature = "test-helpers"`) because non-test code —
-/// `src/sessions/session_temporal_benchmark.rs`, which is always compiled and
+/// `src/session_temporal_benchmark.rs`, which is always compiled and
 /// backs `cargo bench` — takes this lock outside a test build.
 pub(crate) use tracedecay_runtime_core::config::lock_user_data_dir_test_env;
 

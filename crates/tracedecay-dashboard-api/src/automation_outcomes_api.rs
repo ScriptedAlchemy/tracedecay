@@ -7,8 +7,10 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde_json::{Value, json};
 
+use super::DashboardAutomationAuthorityErrorV1;
 use super::DashboardState;
-use super::util::http_detail;
+use super::automation_authority_error_response;
+use super::exact_automation_authority;
 use tracedecay_agent_hosts::automation::managed_skills::list_managed_skills;
 use tracedecay_agent_hosts::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
@@ -21,30 +23,36 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
     match outcomes_payload(&state).await {
         Ok(payload) => (StatusCode::OK, Json(payload)),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!(
-                "Failed to compute automation outcomes: {err}"
-            ))),
-        ),
+        Err(error) => automation_authority_error_response(error),
     }
 }
 
-async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
+async fn outcomes_payload(
+    state: &DashboardState,
+) -> std::result::Result<Value, DashboardAutomationAuthorityErrorV1> {
     let now = current_timestamp();
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
-    let skills = list_managed_skills(&profile_root).await?;
-    let summaries = summarize_skill_usage(&profile_root, &skills).await?;
+    let authority = exact_automation_authority(state)?;
+    let profile_root = authority.profile_root();
+    let skills = list_managed_skills(profile_root)
+        .await
+        .map_err(automation_failure)?;
+    let summaries = summarize_skill_usage(profile_root, &skills)
+        .await
+        .map_err(automation_failure)?;
     let skill_outcomes = compute_skill_outcomes(&summaries, now);
 
     let memory = crate::tracedecay::facts::memory_application_for_db(
         state.memory_owner.clone(),
         state.mem_db.as_ref(),
     )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not initialize dashboard memory authority: {error}"),
+    .map_err(|error| {
+        automation_failure(format!(
+            "could not initialize dashboard memory authority: {error}"
+        ))
     })?;
-    let fact_outcomes = compute_fact_outcomes(&memory, now).await?;
+    let fact_outcomes = compute_fact_outcomes(&memory, now)
+        .await
+        .map_err(automation_failure)?;
 
     let (snapshot, error) = snapshot_fields(load_outcomes_snapshot(&state.dashboard_root).await);
     Ok(json!({
@@ -54,6 +62,15 @@ async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
         "snapshot": snapshot,
         "error": error,
     }))
+}
+
+fn automation_failure(error: impl ToString) -> DashboardAutomationAuthorityErrorV1 {
+    DashboardAutomationAuthorityErrorV1::Failed {
+        detail: format!(
+            "Failed to compute automation outcomes: {}",
+            error.to_string()
+        ),
+    }
 }
 
 /// Renders the persisted snapshot's refresh watermarks, or the reason they
@@ -110,5 +127,19 @@ mod tests {
         assert_eq!(snapshot["available"], json!(true));
         assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
         assert!(error.is_empty(), "a successful read reports no error");
+    }
+
+    #[test]
+    fn absent_profile_authority_is_typed_unavailable() {
+        let (status, Json(payload)) =
+            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
+                "dashboard automation profile authority is not mounted",
+            ));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            payload["detail"],
+            json!("dashboard automation profile authority is not mounted")
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use serde_json::Value as JsonValue;
 
 use tracedecay_runtime_core::db::engine::Value;
-use tracedecay_sessions::compatibility::{
+use tracedecay_sessions::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
 

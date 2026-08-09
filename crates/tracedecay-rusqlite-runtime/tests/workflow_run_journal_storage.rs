@@ -20,16 +20,18 @@ use tracedecay_application::{
     workflow_artifact_payload_digest,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProviderId, RepositoryId, RunId, UtcMicros, WorkApprovalPolicy, WorkArtifactId,
-    WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
-    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkflowDefinition,
-    WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepId, WorktreeId,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
+    ManifestDigest, MilestoneId, ProjectId, ProposalId, ProviderId, RepositoryId, RunId, TaskId,
+    UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAuthority, WorkCommandId,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
+    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
+    WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
+    WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProposalV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRouteDecisionV1, WorkSandboxPolicy, WorkScoreKindV1,
+    WorkShapeAssessmentV1, WorkSizingV1, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowRunCommand, WorkflowRunEvent,
+    WorkflowRunEventContext, WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
@@ -56,6 +58,70 @@ fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventCont
         command_id: id::<WorkCommandId>(command),
         input_digest: digest(input),
         occurred_at: UtcMicros(occurred_at),
+    }
+}
+
+fn fan_out_input(identity: &str, input_digest: ManifestDigest) -> WorkflowFanOutInput {
+    let task_id = id::<TaskId>(&format!("task.workflow.journal.{identity}"));
+    let initiative_id = id::<InitiativeId>(&format!("initiative.workflow.journal.{identity}"));
+    let plan_id = id::<WorkPlanId>(&format!("plan.workflow.journal.{identity}"));
+    let milestone_id = id::<MilestoneId>(&format!("milestone.workflow.journal.{identity}"));
+    let created_at = UtcMicros(10);
+    let initiative = WorkInitiativeV1::new(
+        initiative_id.clone(),
+        format!("Initiative {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let plan = WorkPlanV1::new(
+        plan_id.clone(),
+        initiative_id.clone(),
+        format!("Plan {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let milestone = WorkMilestoneV1::new(
+        milestone_id.clone(),
+        plan_id.clone(),
+        format!("Milestone {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let item = WorkItemV1::new(WorkItemInputV1 {
+        task_id: task_id.clone(),
+        hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+        title: format!("Task {identity}"),
+        dependencies: BTreeSet::new(),
+        informational_relations: BTreeSet::new(),
+        causal_candidates: BTreeSet::new(),
+        acceptance_criteria: Vec::new(),
+        effort: 1,
+        scheduled_at: None,
+        deadline: None,
+        created_at,
+        updated_at: created_at,
+    })
+    .unwrap();
+    let proposal = WorkProposalV1::new(
+        id::<ProposalId>(&format!("proposal.workflow.journal.{identity}")),
+        task_id,
+        WorkGraphVersionV1::initial(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "complete fixture").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("fixture route").unwrap(),
+        format!("Proposal {identity}"),
+        input_digest.clone(),
+    )
+    .unwrap();
+    WorkflowFanOutInput {
+        instructions: identity.to_owned(),
+        input_digest,
+        initiative,
+        plan,
+        milestone,
+        item,
+        proposal,
     }
 }
 
@@ -182,10 +248,7 @@ fn admit_fan_out_run(
         max_parallel: 1,
         failure_policy: WorkflowFailurePolicy::Collect,
         provider: provider.clone(),
-        inputs: vec![WorkflowFanOutInput {
-            identity: command.to_owned(),
-            input_digest: digest('e'),
-        }],
+        inputs: vec![fan_out_input(command, digest('e'))],
     })
     .unwrap();
     let durable = durable_workflow_fan_out_plan(&planned, &provider, authority).unwrap();

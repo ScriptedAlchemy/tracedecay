@@ -20,7 +20,7 @@ import { useQuery } from '@tanstack/react-query';
 import { z } from 'zod';
 import { MultiRootCapabilityV1Schema } from '../../contracts/generated.ts';
 import type { MultiRootCapabilityV1 } from '../../contracts/generated.ts';
-import { fetchLegacy, type LegacyResult } from './legacy.ts';
+import { fetchPayload, type PayloadResult } from './payload.ts';
 
 /** The route, named once. */
 export const CAPABILITIES_URL = '/api/capabilities';
@@ -43,9 +43,9 @@ export type CapabilitiesRead = z.infer<typeof CapabilitiesReadSchema>;
 /** `GET /api/capabilities`. Unscoped: the bundle describes the daemon and the
  * project it was launched for, not the selected scope, so it is one entry. */
 export function useCapabilities() {
-  return useQuery<LegacyResult<CapabilitiesRead>>({
+  return useQuery<PayloadResult<CapabilitiesRead>>({
     queryKey: ['capabilities'],
-    queryFn: ({ signal }) => fetchLegacy(CAPABILITIES_URL, CapabilitiesReadSchema, { signal }),
+    queryFn: ({ signal }) => fetchPayload(CAPABILITIES_URL, CapabilitiesReadSchema, { signal }),
     // Capability discovery is daemon-wide and shared by every fleet surface.
     // Keep the one answer warm while those surfaces mount so separate
     // observers do not turn a single page read into duplicate requests.

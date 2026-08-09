@@ -882,7 +882,7 @@ impl DaemonRetainedRuntimeRegistrar {
         scope: ResolvedScope,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
-        port: Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>,
+        ports: Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
     ) -> Result<(), TraceDecayError> {
         if grant.scope != scope || grant.issuer != actor {
             return Err(TraceDecayError::Config {
@@ -897,7 +897,7 @@ impl DaemonRetainedRuntimeRegistrar {
                     if registered.scope == scope
                         && registered.actor == actor
                         && registered.grant.digest == grant.digest
-                        && Arc::ptr_eq(&registered.port, &port)
+                        && Arc::ptr_eq(&registered.ports, &ports)
                     {
                         registered.grant = grant.clone();
                         Ok(())
@@ -913,7 +913,7 @@ impl DaemonRetainedRuntimeRegistrar {
                         scope: scope.clone(),
                         actor: actor.clone(),
                         grant: grant.clone(),
-                        port: Arc::clone(&port),
+                        ports: Arc::clone(&ports),
                     })
                 },
             )

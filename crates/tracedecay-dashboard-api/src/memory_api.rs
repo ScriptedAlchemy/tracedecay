@@ -60,23 +60,6 @@ pub struct LimitParams {
 }
 
 #[derive(Deserialize)]
-pub struct FactProposalParams {
-    state: Option<String>,
-    limit: Option<i64>,
-}
-
-#[derive(Deserialize, Default)]
-pub struct FactProposalApplyBody {
-    reviewer: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-pub struct FactProposalRejectBody {
-    reviewer: Option<String>,
-    reason: Option<String>,
-}
-
-#[derive(Deserialize)]
 pub struct CurateApplyBody {
     ops: Vec<Value>,
 }
@@ -257,7 +240,7 @@ async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPay
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let typed_status = application
-        .dashboard_memory_status_v1()
+        .dashboard_memory_status()
         .await
         .map_err(|error| error.to_string())?;
     let as_usize = |value: u64| usize::try_from(value).map_err(|error| error.to_string());
@@ -333,14 +316,14 @@ async fn fact_trust_history_payload(
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let Some(_detail) = application
-        .dashboard_fact_detail_v1(fact_id)
+        .dashboard_fact_detail(fact_id)
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
     let history = application
-        .dashboard_feedback_history_v1(fact_id, 300)
+        .dashboard_feedback_history(fact_id, 300)
         .await
         .map_err(|error| error.to_string())?;
     let trust_history: Vec<Value> = history
@@ -665,148 +648,6 @@ pub async fn curation_runs(
     }
 }
 
-/// `GET /api/plugins/holographic/fact-proposals` — session-reflector fact
-/// proposal telemetry, plus historical applied/rejected decisions.
-pub async fn fact_proposals(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<FactProposalParams>,
-) -> (StatusCode, Json<Value>) {
-    let proposal_state = match parse_fact_proposal_state(params.state.as_deref()) {
-        Ok(state) => state,
-        Err(message) => return (StatusCode::BAD_REQUEST, Json(http_detail(&message))),
-    };
-    let limit = coerce_limit(params.limit, 50, 200) as usize;
-    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
-    {
-        Ok(memory) => memory,
-        Err(err) => return fact_proposal_error(&err),
-    };
-    match tracedecay_agent_hosts::automation::fact_proposals::list_fact_proposals(
-        &memory,
-        proposal_state,
-        limit,
-    )
-    .await
-    {
-        Ok(proposals) => (
-            StatusCode::OK,
-            Json(json!({
-                "proposals": proposals,
-                "count": proposals.len(),
-                "limit": limit,
-                "error": "",
-            })),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&err.to_string())),
-        ),
-    }
-}
-
-/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/apply` —
-/// applies a stored session-reflector fact proposal.
-pub async fn fact_proposal_apply(
-    State(state): State<DashboardState>,
-    Path(proposal_id): Path<String>,
-    body: Option<axum::extract::Json<FactProposalApplyBody>>,
-) -> (StatusCode, Json<Value>) {
-    let reviewer = body.and_then(|body| body.0.reviewer);
-    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
-    {
-        Ok(memory) => memory,
-        Err(err) => return fact_proposal_error(&err),
-    };
-    match tracedecay_agent_hosts::automation::fact_proposals::apply_fact_proposal_with_result(
-        &memory,
-        &proposal_id,
-        reviewer,
-    )
-    .await
-    {
-        Ok(result) => {
-            if result.newly_promoted {
-                tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                    &memory,
-                    &state.project_root,
-                )
-                .await;
-            }
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "proposal": result.record,
-                    "error": "",
-                })),
-            )
-        }
-        Err(err) => fact_proposal_error(&err),
-    }
-}
-
-/// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/reject` —
-/// explicit rejection for a pending session-reflector proposal.
-pub async fn fact_proposal_reject(
-    State(state): State<DashboardState>,
-    Path(proposal_id): Path<String>,
-    body: Option<axum::extract::Json<FactProposalRejectBody>>,
-) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
-    {
-        Ok(memory) => memory,
-        Err(err) => return fact_proposal_error(&err),
-    };
-    match tracedecay_agent_hosts::automation::fact_proposals::reject_fact_proposal(
-        &memory,
-        &proposal_id,
-        body.reviewer,
-        body.reason,
-    )
-    .await
-    {
-        Ok(proposal) => (
-            StatusCode::OK,
-            Json(json!({
-                "proposal": proposal,
-                "error": "",
-            })),
-        ),
-        Err(err) => fact_proposal_error(&err),
-    }
-}
-
-fn parse_fact_proposal_state(
-    state: Option<&str>,
-) -> Result<Option<tracedecay_agent_hosts::automation::fact_proposals::FactProposalState>, String> {
-    use tracedecay_agent_hosts::automation::fact_proposals::FactProposalState;
-
-    let Some(state) = state else {
-        return Ok(None);
-    };
-    let state = state.trim().to_ascii_lowercase();
-    if state.is_empty() {
-        return Ok(None);
-    }
-    FactProposalState::parse(&state)
-        .map(Some)
-        .map_err(|error| error.to_string())
-}
-
-fn fact_proposal_error(
-    err: &tracedecay_runtime_core::errors::TraceDecayError,
-) -> (StatusCode, Json<Value>) {
-    let message = err.to_string();
-    let status = if message.contains("not found") {
-        StatusCode::NOT_FOUND
-    } else if message.contains("not pending") || message.contains("no add_fact_request") {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-    (status, Json(http_detail(&message)))
-}
-
 /// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply
 /// endpoint. Body: `{"ops": [...]}` where each op is one of:
 ///
@@ -831,13 +672,6 @@ pub async fn curate_apply(
     };
 
     let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
-    if let Ok(application) = memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
-        tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
-            &application,
-            &state.project_root,
-        )
-        .await;
-    }
     (StatusCode::OK, Json(payload))
 }
 
@@ -851,17 +685,4 @@ pub async fn oplog(
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 50, 300);
     Json(memory_service::oplog_payload(&state, limit).await)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fact_proposal_state_filter_accepts_applying() {
-        assert_eq!(
-            parse_fact_proposal_state(Some("applying")).unwrap(),
-            Some(tracedecay_agent_hosts::automation::fact_proposals::FactProposalState::Applying)
-        );
-    }
 }

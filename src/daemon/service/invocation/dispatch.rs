@@ -136,6 +136,7 @@ impl DaemonInvocationService {
         let feedback_service = runtimes.feedback_owner;
         let configuration_runtime = runtimes.configuration;
         let work_runtime = runtimes.work;
+        let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
 
         let response = match request.payload {
@@ -551,6 +552,43 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                ))
+                .await
+            }
+            DaemonInvocationPayload::ObservatoryRead {
+                request,
+                resolved_scope,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                Box::pin(execute_observatory_read(
+                    self,
+                    project_root,
+                    request_id,
+                    request,
+                    resolved_scope,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                    request_cancellation,
+                ))
+                .await
+            }
+            DaemonInvocationPayload::RetainedApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                Box::pin(execute_retained_application(
+                    request_id,
+                    retained_runtime,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                    request_cancellation,
                 ))
                 .await
             }

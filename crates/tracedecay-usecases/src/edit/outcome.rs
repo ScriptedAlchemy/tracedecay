@@ -66,7 +66,7 @@ impl SourceEditDurableOutcomeV1 {
                 None,
                 None,
                 None,
-                Some(result.text_only_matches.len()),
+                Some(result.hazards.len()),
             ),
             _ => (None, None, None, None, None),
         };

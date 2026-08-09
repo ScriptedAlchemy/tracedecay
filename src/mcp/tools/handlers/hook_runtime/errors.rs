@@ -1,12 +1,16 @@
 use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::errors::TraceDecayError;
-use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use serde_json::{Value, json};
+use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
 
 pub(super) fn map_transcript_ingest_error(
-    error: &crate::sessions::source::TranscriptIngestError,
+    error: &tracedecay_sessions::runtime::source::TranscriptIngestError,
 ) -> TraceDecayError {
-    let failure = crate::sessions::classify_transcript_ingest_failure("requested", "hook", error);
+    let failure = tracedecay_sessions::runtime::classify_transcript_ingest_failure(
+        "requested",
+        "hook",
+        error,
+    );
     TraceDecayError::hook_runtime(
         failure.reason_code,
         failure.retryable,
@@ -17,7 +21,7 @@ pub(super) fn map_transcript_ingest_error(
 pub(super) fn map_claude_observation_ingest_error(
     error: &ClaudeObservationIngestError,
 ) -> TraceDecayError {
-    let failure = crate::sessions::classify_claude_observation_failure(error);
+    let failure = tracedecay_sessions::runtime::classify_claude_observation_failure(error);
     TraceDecayError::hook_runtime(failure.reason_code, failure.retryable, error.to_string())
 }
 

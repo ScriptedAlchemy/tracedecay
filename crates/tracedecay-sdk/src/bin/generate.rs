@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_sdk_registry_keeps_git_on_its_mcp_tool_transport() {
+    fn canonical_sdk_registry_selects_mounted_git_reads_and_mcp_mutations() {
         let registry = canonical_application_registry().unwrap();
         let operations = canonical_operations(&registry).unwrap();
         let git_status = operations
@@ -1088,27 +1088,41 @@ mod tests {
             .find(|operation| operation.operation_id == "operation.application.git_status")
             .expect("Git status SDK operation");
 
-        assert_eq!(git_status.name, "git_status");
+        assert_eq!(git_status.name, "application_git_status");
         assert!(matches!(
             &git_status.transport,
-            OperationTransport::McpTool { tool_name } if tool_name == "tracedecay_git_status"
+            OperationTransport::Http { route } if route == "/application/git/status"
         ));
-        for operation in [
-            "git_diff",
-            "git_history",
-            "git_blame",
-            "git_hunks",
-            "git_preview",
-            "git_apply",
+        assert_eq!(git_status.binding, "binding.http.git_status.v1");
+        for (operation, route) in [
+            ("git_diff", "/application/git/diff"),
+            ("git_history", "/application/git/history"),
+            ("git_blame", "/application/git/blame"),
+            ("git_hunks", "/application/git/hunks"),
         ] {
             let operation_id = format!("operation.application.{operation}");
-            assert!(
-                operations.iter().any(|candidate| {
-                    candidate.operation_id == operation_id
-                        && matches!(&candidate.transport, OperationTransport::McpTool { .. })
-                }),
-                "{operation_id} must generate an MCP tool transport"
-            );
+            let generated = operations
+                .iter()
+                .find(|candidate| candidate.operation_id == operation_id)
+                .unwrap_or_else(|| panic!("{operation_id} must be generated"));
+            assert_eq!(generated.name, format!("application_{operation}"));
+            assert!(matches!(
+                &generated.transport,
+                OperationTransport::Http { route: generated_route } if generated_route == route
+            ));
+        }
+        for operation in ["git_preview", "git_apply"] {
+            let operation_id = format!("operation.application.{operation}");
+            let generated = operations
+                .iter()
+                .find(|candidate| candidate.operation_id == operation_id)
+                .unwrap_or_else(|| panic!("{operation_id} must be generated"));
+            assert_eq!(generated.name, operation);
+            assert!(matches!(
+                &generated.transport,
+                OperationTransport::McpTool { tool_name }
+                    if tool_name == &format!("tracedecay_{operation}")
+            ));
         }
     }
 

@@ -2,8 +2,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
-use tracedecay::sessions::lcm::LcmStorageKind;
-use tracedecay::sessions::{
+use tracedecay_sessions::runtime::lcm::LcmStorageKind;
+use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
@@ -43,7 +43,7 @@ trait RegisteredSessionTestExt {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage>;
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>;
     async fn search_session_messages(
         &self,
         provider: &str,
@@ -66,11 +66,11 @@ trait RegisteredSessionTestExt {
         query: &str,
         limit: usize,
         filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay::sessions::git_correlation::GitScopeFilter,
+        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
     ) -> Vec<SessionMessageSearchResult>;
     async fn git_record_span_observation(
         &self,
-        observation: &tracedecay::sessions::git_correlation::SpanObservation,
+        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> tracedecay::errors::Result<i64>;
     async fn session_message_count(&self) -> tracedecay::errors::Result<i64>;
@@ -133,7 +133,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
         self.lcm_load_raw_message_for_test(provider, message_id)
             .await
     }
@@ -183,7 +183,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
         query: &str,
         limit: usize,
         filters: SessionSearchFilters<'_>,
-        git_filter: &tracedecay::sessions::git_correlation::GitScopeFilter,
+        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
     ) -> Vec<SessionMessageSearchResult> {
         self.search_session_messages_git_scoped_for_test(
             HostAdmissionScope::Profile,
@@ -200,7 +200,7 @@ impl RegisteredSessionTestExt for HostAdmissionTestRuntimeV1 {
 
     async fn git_record_span_observation(
         &self,
-        observation: &tracedecay::sessions::git_correlation::SpanObservation,
+        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> tracedecay::errors::Result<i64> {
         self.record_session_span_for_test(HostAdmissionScope::Profile, observation, merge_gap_secs)
@@ -678,7 +678,7 @@ async fn upsert_session_message_round_trips_and_updates() {
     assert!(db.upsert_session_message(&message).await);
     let updated = format!(
         "Updated answer about parsing transcripts.\n{}::updated-tail",
-        "x".repeat(tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS * 2)
+        "x".repeat(tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS * 2)
     );
     message.text = updated.clone();
     message.tool_names = Some("tracedecay_context".to_string());
@@ -695,11 +695,13 @@ async fn upsert_session_message_round_trips_and_updates() {
             .text
             .starts_with("Updated answer about parsing transcripts.")
     );
-    assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(
+        fetched.text.chars().count() <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
+    );
     assert!(
         fetched
             .text
-            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+            .contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER)
     );
     assert_eq!(fetched.tool_names.as_deref(), Some("tracedecay_context"));
     assert_eq!(fetched.source_offset, Some(99));
@@ -716,10 +718,15 @@ async fn upsert_session_message_round_trips_and_updates() {
         .await
         .expect("raw search fields")
         .expect("raw message should exist");
-    assert!(snippet_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_SNIPPET_CHARS);
-    assert!(snippet_text.contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
-    assert!(index_text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(index_text.contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        snippet_text.chars().count()
+            <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_SNIPPET_CHARS
+    );
+    assert!(snippet_text.contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER));
+    assert!(
+        index_text.chars().count() <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
+    );
+    assert!(index_text.contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER));
 }
 
 #[tokio::test]
@@ -782,12 +789,13 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .await
         .expect("compatibility message should exist");
     assert!(
-        compatibility.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS
+        compatibility.text.chars().count()
+            <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
     );
     assert!(
         compatibility
             .text
-            .contains(tracedecay::sessions::lcm::DERIVED_TRUNCATION_MARKER)
+            .contains(tracedecay_sessions::runtime::lcm::DERIVED_TRUNCATION_MARKER)
     );
 
     let raw = db
@@ -835,7 +843,9 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
         .get_session_message("cursor", "tool-large")
         .await
         .expect("projection should exist");
-    assert!(fetched.text.chars().count() <= tracedecay::sessions::lcm::MAX_DERIVED_TEXT_CHARS);
+    assert!(
+        fetched.text.chars().count() <= tracedecay_sessions::runtime::lcm::MAX_DERIVED_TEXT_CHARS
+    );
     assert!(!fetched.text.contains(body_secret));
     assert!(
         fetched
@@ -880,13 +890,13 @@ async fn upsert_session_message_externalizes_tool_payload_without_indexing_body_
     );
 
     let expanded = db
-        .lcm_expand_for_test(tracedecay::sessions::lcm::LcmExpandRequest {
+        .lcm_expand_for_test(tracedecay_sessions::runtime::lcm::LcmExpandRequest {
             provider: "cursor".to_string(),
             session_id: "session-1".to_string(),
-            target: tracedecay::sessions::lcm::LcmExpandTarget::ExternalPayload {
+            target: tracedecay_sessions::runtime::lcm::LcmExpandTarget::ExternalPayload {
                 payload_ref: payload_ref.clone(),
             },
-            content_slice: Some(tracedecay::sessions::lcm::LcmContentSlice {
+            content_slice: Some(tracedecay_sessions::runtime::lcm::LcmContentSlice {
                 offset: 0,
                 limit: payload.chars().count(),
             }),
@@ -975,7 +985,9 @@ async fn search_session_messages_applies_hyphen_filter_before_limit() {
 
 #[tokio::test]
 async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
-    use tracedecay::sessions::git_correlation::{GitScopeFilter, SpanObservation, SpanSource};
+    use tracedecay_sessions::runtime::git_correlation::{
+        GitScopeFilter, SpanObservation, SpanSource,
+    };
 
     let tmp = TempDir::new().unwrap();
     let db = open_isolated_db(&tmp).await;
@@ -1102,7 +1114,7 @@ async fn search_session_messages_filters_by_message_timestamp() {
 async fn open_at_upgrades_existing_sessions_table_with_parent_columns() {
     let tmp = TempDir::new().unwrap();
     let profile_root = tmp.path().join(".tracedecay");
-    let db_path = tracedecay::sessions::user_sessions_db_path(&profile_root);
+    let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();

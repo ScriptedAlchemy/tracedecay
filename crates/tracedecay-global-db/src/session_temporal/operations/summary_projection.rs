@@ -4,11 +4,11 @@ use tracedecay_sessions::lcm::contracts::{LcmError, LcmSourceRef};
 
 use super::CanonicalPublicationManifest;
 
-/// Materializes canonical authority into the legacy LCM projection.
+/// Materializes canonical publication authority into the shipped LCM summary
+/// tables used by retrieval, retention, and dashboard reads.
 ///
-/// This module intentionally has no legacy reads. Existing projection rows
-/// conflict at the database boundary; they are never consulted for identity,
-/// replay, authorization, or publication decisions.
+/// Existing projection rows conflict at the database boundary; they are never
+/// consulted for identity, replay, authorization, or publication decisions.
 pub(super) async fn project_canonical_summary(
     conn: &impl Executor,
     summary_id: &str,

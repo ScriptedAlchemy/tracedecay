@@ -28,12 +28,6 @@ pub fn backend_availability(config: &AutomationConfig) -> AgentBackendAvailabili
             executable: None,
             reason: Some("automation backend is disabled".to_string()),
         },
-        AutomationBackend::ExternalCommand => AgentBackendAvailability {
-            backend: AutomationBackend::ExternalCommand,
-            available: false,
-            executable: None,
-            reason: Some("external_command backend is not implemented".to_string()),
-        },
         AutomationBackend::CodexAppServer => {
             let summary_config = CodexAppServerSummaryConfig::from_env();
             let executable = summary_config.codex_bin.clone();
@@ -103,14 +97,12 @@ pub struct CodexAppServerBackend {
 
 impl CodexAppServerBackend {
     pub fn from_automation_config(config: &AutomationConfig) -> Self {
-        Self::new(None, config.timeout_secs)
+        Self::new(config.model_id.clone(), config.timeout_secs)
     }
 
     pub fn new(model: Option<String>, timeout_secs: u64) -> Self {
         let mut config = CodexAppServerSummaryConfig::from_env();
-        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-            config.model = Some(model);
-        }
+        config.model = model.filter(|model| !model.trim().is_empty());
         config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
         Self { config }
     }

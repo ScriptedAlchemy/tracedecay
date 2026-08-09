@@ -27,7 +27,6 @@ use super::{
 
 mod bootstrap;
 mod code_index_hydration;
-mod compatibility;
 mod handshake;
 mod invocation_ownership;
 mod lifecycle;
@@ -459,25 +458,144 @@ fn spawn_noncooperative_test_task() -> (
 }
 
 #[cfg(unix)]
-fn scheduled_automation_patch(enabled: bool) -> crate::automation::config::AutomationConfigPatch {
-    crate::automation::config::AutomationConfigPatch {
+fn scheduled_automation_patch(
+    enabled: bool,
+) -> tracedecay_agent_hosts::automation::config::AutomationConfigPatch {
+    tracedecay_agent_hosts::automation::config::AutomationConfigPatch {
         enabled: Some(enabled),
-        backend: Some(crate::automation::config::AutomationBackend::CodexAppServer),
-        memory_curator: crate::automation::config::AutomationTaskPatch {
+        backend: Some(
+            tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer,
+        ),
+        memory_curator: tracedecay_agent_hosts::automation::config::AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("every:5m".to_string())),
-            ..crate::automation::config::AutomationTaskPatch::default()
+            ..tracedecay_agent_hosts::automation::config::AutomationTaskPatch::default()
         },
-        ..crate::automation::config::AutomationConfigPatch::default()
+        ..tracedecay_agent_hosts::automation::config::AutomationConfigPatch::default()
     }
 }
 
 #[cfg(unix)]
-async fn save_scheduled_automation(dashboard_root: &std::path::Path, enabled: bool) {
-    crate::automation::config::save_project_config(
-        dashboard_root,
-        &scheduled_automation_patch(enabled),
+async fn apply_project_automation_patch_via_surface(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    patch: tracedecay_agent_hosts::automation::config::AutomationConfigPatch,
+) -> Arc<crate::mcp::McpServer> {
+    let server = engine
+        .project_server(handshake)
+        .await
+        .expect("open project server before configuring automation");
+    let graph = server.cg().await;
+    let current = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("read pinned automation configuration");
+    let configured =
+        tracedecay_agent_hosts::automation::config::from_configuration_snapshot(&current.snapshot)
+            .expect("decode pinned automation configuration");
+    let desired =
+        tracedecay_agent_hosts::automation::config::effective_config(&configured, Some(&patch))
+            .expect("apply automation configuration patch");
+    let target = graph.configuration_runtime().configuration_target().clone();
+    let scope = super::project_open_owners::resolved_scope_for_project(
+        graph.project_root(),
+        &target.project_id,
+    )
+    .expect("resolve project configuration scope");
+    let project_root = graph.project_root().to_path_buf();
+    drop(graph);
+
+    let executor = super::InProcessDaemonInvocationExecutor::new(
+        engine.invocation.clone(),
+        engine.store_administration.clone(),
+        project_root,
+        scope,
+    );
+    let operation = crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch;
+    let application_operation =
+        tracedecay_application::configuration_surface_operation(operation.as_str())
+            .expect("configuration operation contract")
+            .expect("cataloged configuration operation");
+    let catalog =
+        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let maximum_millis = catalog
+        .capability(application_operation.capability_id())
+        .expect("configuration capability")
+        .deadline()
+        .maximum_millis();
+    let observed_at = crate::daemon_client::invocation_now_micros();
+    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+        observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
+    ))
+    .expect("configuration deadline");
+    let request_id = crate::request_identity::mint_global_request_id(
+        crate::request_identity::GlobalRequestSurface::Cli,
+    )
+    .expect("surface request id");
+    let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+        format!("daemon-test-automation-{}", request_id.as_str()),
+    )
+    .expect("configuration idempotency key");
+    let key = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
+    )
+    .expect("automation setting key");
+    let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
+        crate::application_surface::ConfigurationSurfaceRequest::Batch(
+            crate::application_surface::ConfigurationBatchSurfaceRequest {
+                mutations: vec![
+                    crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Set {
+                        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                            project_id: target.project_id,
+                        },
+                        key,
+                        value: tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(
+                            desired,
+                        ),
+                    },
+                ],
+                expected_revision: current.revision_id,
+                idempotency_key,
+            },
+        ),
+    );
+    let cancellation = tracedecay_application::CancellationSignal::active(format!(
+        "cancellation.surface.{}",
+        request_id.as_str()
+    ))
+    .expect("surface cancellation");
+    let dispatched =
+        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            operation,
+            request_id,
+            request,
+            tracedecay_application::PageRequest::first(10).expect("surface page"),
+            Some(deadline),
+            cancellation,
+            crate::daemon_client::RequestedOutputFormat::Json,
+        )
+        .expect("configuration batch dispatch");
+    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
+        .await
+        .expect("configuration batch application invocation")
+        .result
+        .expect("automation configuration effect");
+    server
+}
+
+#[cfg(unix)]
+async fn save_scheduled_automation(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    enabled: bool,
+) -> Arc<crate::mcp::McpServer> {
+    apply_project_automation_patch_via_surface(
+        engine,
+        handshake,
+        scheduled_automation_patch(enabled),
     )
     .await
-    .expect("save scheduled automation config");
 }

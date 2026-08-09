@@ -426,7 +426,6 @@ fn install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: TEST_BIN.to_string(),
         tool_permissions: Vec::new(),
-        project_root: None,
         dashboard: false,
     }
 }
@@ -717,37 +716,4 @@ fn codex_reports_host_native_activation_requirement() {
             .contains("codex plugin add tracedecay@personal")
     );
     assert!(CodexIntegration.interactive_activation_guidance().is_some());
-}
-
-#[test]
-fn codex_update_stages_source_without_overwriting_native_cache_or_config() {
-    let home = tempfile::tempdir().unwrap();
-    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-
-    let cache_file = codex_plugin_current_cached_install_dir(home.path()).join("user-cache.txt");
-    std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
-    std::fs::write(&cache_file, "native cache bytes").unwrap();
-    let config_path = codex_config_path(home.path());
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    std::fs::write(&config_path, "model = \"user-choice\"\n").unwrap();
-
-    let outcome = CodexIntegration
-        .update_plugin(&install_ctx(home.path()))
-        .unwrap();
-    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
-        panic!("Codex refresh must defer to its native plugin lifecycle");
-    };
-    assert!(
-        deferred
-            .remediation
-            .contains("codex plugin update tracedecay@personal")
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cache_file).unwrap(),
-        "native cache bytes"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&config_path).unwrap(),
-        "model = \"user-choice\"\n"
-    );
 }

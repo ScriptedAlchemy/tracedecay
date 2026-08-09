@@ -63,7 +63,10 @@ const MESSAGE_SEARCH_MAX_WORK_UNITS: u64 = 100_000;
 
 mod admitted;
 mod contract;
-pub(crate) use admitted::{SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1};
+pub(crate) use admitted::{
+    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
+    TaskSessionApplicationRetrievalFutureV1,
+};
 pub(crate) use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,

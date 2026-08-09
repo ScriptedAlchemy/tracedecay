@@ -1,8 +1,8 @@
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
-use tracedecay::sessions::SessionProvider;
-use tracedecay::sessions::kiro::KiroSource;
-use tracedecay::sessions::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::kiro::KiroSource;
+use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};

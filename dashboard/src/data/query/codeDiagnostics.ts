@@ -26,8 +26,8 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 
-import { fetchLegacyWrite, type LegacyWriteResult } from './legacy.ts';
-import { legacyQueryKey, useLegacy } from './useLegacy.ts';
+import { fetchPayloadWrite, type PayloadWriteResult } from './payload.ts';
+import { payloadQueryKey, usePayload } from './usePayload.ts';
 import {
   scopeKey,
   scopeWritable,
@@ -128,7 +128,7 @@ export type Diagnostic = z.infer<typeof DiagnosticRow>;
 export type IdleBackfillMode = DiagnosticsSnapshot['settings']['idle_backfill'];
 
 export function useCodeDiagnostics() {
-  return useLegacy(codeDiagnosticsKey, codeDiagnosticsUrl, SnapshotSchema, {
+  return usePayload(codeDiagnosticsKey, codeDiagnosticsUrl, SnapshotSchema, {
     refetchInterval: 30_000,
   });
 }
@@ -209,7 +209,7 @@ function patch(body: Record<string, unknown>): RequestInit {
  * nothing was sent, so nothing changed, and the panel must not imply the broker
  * was asked and refused. */
 export type DiagnosticsControlResult =
-  | LegacyWriteResult<DiagnosticsSnapshot>
+  | PayloadWriteResult<DiagnosticsSnapshot>
   | { outcome: 'not_dispatched'; writability: ScopeWritability };
 
 /** The scope a control attempt was issued under, captured when it was issued.
@@ -232,7 +232,7 @@ interface DiagnosticsDispatch {
 export function useDiagnosticsControl() {
   const scope = useScope((s) => s.scope);
   const client = useQueryClient();
-  const snapshotKey = legacyQueryKey(scope, codeDiagnosticsKey, codeDiagnosticsUrl);
+  const snapshotKey = payloadQueryKey(scope, codeDiagnosticsKey, codeDiagnosticsUrl);
   const writability = scopeWritable(scope);
   const mutation = useMutation<
     DiagnosticsControlResult,
@@ -251,7 +251,7 @@ export function useDiagnosticsControl() {
         return { outcome: 'not_dispatched', writability };
       }
       const [url, init] = request(command, scopedUrl(scope, codeDiagnosticsUrl));
-      return fetchLegacyWrite(url, SnapshotSchema, init);
+      return fetchPayloadWrite(url, SnapshotSchema, init);
     },
     onSuccess: (result, _command, dispatch) => {
       const target = dispatch.snapshotKey;
@@ -277,7 +277,7 @@ export function useDiagnosticsControl() {
  * this browser's read and its click. The remedy is "read again", not "retry",
  * and the two must not share a sentence.
  *
- * It is recognised by the detail the legacy ladder itself produced for the
+ * It is recognised by the detail the payload ladder itself produced for the
  * route's 409, because that ladder deliberately carries no `conflict` outcome:
  * adding one would oblige every read consumer in the dashboard to handle a
  * state a GET cannot reach. The comparison is against the ladder's own token,

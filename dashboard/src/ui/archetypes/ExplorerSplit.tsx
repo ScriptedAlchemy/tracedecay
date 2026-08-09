@@ -399,7 +399,7 @@ function withPathBreaks(text: string): ReactNode {
   return nodes;
 }
 
-/** Generic key/value renderer for legacy payload inspection: honest raw data
+/** Generic key/value renderer for uncontracted payload inspection: honest raw data
  * presentation until a typed view lands per family. */
 export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: number }) {
   if (value === null || value === undefined) {

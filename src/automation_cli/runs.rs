@@ -36,7 +36,7 @@ pub(super) fn automation_run_rpc_request(
             path,
         } => {
             parse_lcm_scope_arg(&scope)?;
-            sort.parse::<tracedecay::sessions::lcm::LcmGrepSort>()
+            sort.parse::<tracedecay_sessions::runtime::lcm::LcmGrepSort>()
                 .map_err(|()| tracedecay::errors::TraceDecayError::Config {
                     message: format!(
                         "invalid session-reflection --sort '{sort}'; expected recency, relevance, or hybrid"
@@ -108,7 +108,7 @@ pub(super) async fn handle_automation_run_command(
 pub(super) async fn handle_automation_runs_command(
     action: AutomationRunsAction,
 ) -> tracedecay::errors::Result<()> {
-    use tracedecay::automation::run_ledger::{
+    use tracedecay_agent_hosts::automation::run_ledger::{
         find_run_record, load_run_records, read_run_artifact_payload,
     };
 
@@ -192,7 +192,7 @@ pub(super) async fn handle_automation_runs_command(
 }
 
 fn print_automation_run_list(
-    records: &[tracedecay::automation::run_ledger::AutomationRunLedgerRecord],
+    records: &[tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord],
 ) {
     if records.is_empty() {
         println!("No automation runs.");
@@ -204,10 +204,9 @@ fn print_automation_run_list(
             "{}\t{}\t{}\t{:?}\t{}\t{}\t{}\t{}",
             record.run_id,
             record.status.as_str(),
-            record
-                .task_key
-                .as_deref()
-                .unwrap_or_else(|| tracedecay::automation::backend::task_key(record.task)),
+            record.task_key.as_deref().unwrap_or_else(|| {
+                tracedecay_agent_hosts::automation::backend::task_key(record.task)
+            }),
             record.trigger,
             record.accepted_count,
             record.rejected_count,
@@ -218,7 +217,7 @@ fn print_automation_run_list(
 }
 
 fn print_automation_run_record(
-    record: &tracedecay::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
 ) {
     println!("run_id: {}", record.run_id);
     println!("status: {}", record.status.as_str());
@@ -227,7 +226,7 @@ fn print_automation_run_record(
         record
             .task_key
             .as_deref()
-            .unwrap_or_else(|| tracedecay::automation::backend::task_key(record.task))
+            .unwrap_or_else(|| tracedecay_agent_hosts::automation::backend::task_key(record.task))
     );
     println!("trigger: {:?}", record.trigger);
     println!("backend: {}", record.backend);
@@ -255,7 +254,7 @@ fn print_automation_run_record(
 
 fn print_automation_run_artifact(
     run_id: &str,
-    artifact: &tracedecay::automation::run_ledger::AutomationRunArtifact,
+    artifact: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifact,
     payload: &serde_json::Value,
 ) -> tracedecay::errors::Result<()> {
     println!("run_id: {run_id}");

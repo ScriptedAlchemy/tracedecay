@@ -122,13 +122,12 @@ impl AgentIntegration for KimiIntegration {
     fn project_host_component_registration_paths(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
+        _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
             project_path.join(".kimi-code/mcp.json"),
             project_path.join("AGENTS.md"),
-            super::managed_memory_digest_targets_path(home),
         ])
     }
 

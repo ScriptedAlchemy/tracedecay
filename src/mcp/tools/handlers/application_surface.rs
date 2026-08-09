@@ -20,13 +20,13 @@ use crate::mcp::tools::dispatch::{
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
 
-fn request_id() -> Result<RequestId> {
+pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
         message: "could not allocate an application surface request id".to_owned(),
     })
 }
 
-fn complete_protocol_controls(
+pub(super) fn complete_protocol_controls(
     operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
     deadline: Option<Deadline>,
@@ -162,6 +162,13 @@ fn render_result(
     cg: &TraceDecay,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<crate::mcp::tools::ToolResult> {
+    render_result_for_root(Some(cg.project_root()), result)
+}
+
+fn render_result_for_root(
+    project_root: Option<&std::path::Path>,
+    result: ApplicationSurfaceInvocationResult,
+) -> Result<crate::mcp::tools::ToolResult> {
     let (value, failure_message) = match &result.result {
         Ok(application) => (serde_json::to_value(application)?, None),
         Err(problem) => {
@@ -184,7 +191,7 @@ fn render_result(
         )?),
     };
     let text = super::super::render::finalize_with_format(
-        Some(cg.project_root()),
+        project_root,
         result.requested_format,
         &value,
         || markdown.unwrap_or_default(),
@@ -210,6 +217,29 @@ fn render_result(
             .with_failure_message(failure_message),
         None => rendered,
     })
+}
+
+pub(super) fn render_retained_result(
+    project_root: Option<&std::path::Path>,
+    operation: ApplicationSurfaceOperation,
+    binding_id: BindingId,
+    result: ApplicationResult<tracedecay_application::RetainedSurfaceResultV1>,
+    requested_format: RequestedOutputFormat,
+) -> Result<crate::mcp::tools::ToolResult> {
+    let result = crate::application_surface::retained::result_value(result).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("invalid retained application result: {error}"),
+        }
+    })?;
+    render_result_for_root(
+        project_root,
+        ApplicationSurfaceInvocationResult {
+            operation,
+            binding_id,
+            result,
+            requested_format,
+        },
+    )
 }
 
 fn render_canonical_markdown(

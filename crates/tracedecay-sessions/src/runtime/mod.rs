@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
-// Everything the root crate could once reach through `crate::sessions::…` is
-// `pub` here: crate-private visibility would now stop at the tracedecay-sessions
-// boundary and silently drop that surface from the root shim.
+// Runtime modules are public because the root composition crate mounts these
+// concrete provider and storage authorities directly.
 pub mod claude;
 pub mod claude_observation;
 pub mod cline_like;

@@ -5,6 +5,7 @@
 //! existing URL if already running for this process. Supports optional `stop`
 //! action to shut down a previously-started instance.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -318,6 +319,7 @@ pub(super) async fn handle_dashboard(
     >,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     daemon_user_profile_id: Option<UserProfileId>,
+    daemon_profile_root: Option<PathBuf>,
     lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
@@ -408,6 +410,27 @@ pub(super) async fn handle_dashboard(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained dashboard project graph is unavailable".to_string(),
             })?;
+            let automation_authority = match (
+                daemon_profile_root,
+                daemon_user_profile_id.clone(),
+                retained_project_graph_resolver.clone(),
+            ) {
+                (Some(profile_root), Some(profile_id), Some(project_graph_resolver)) => Some(
+                    crate::daemon::dashboard_automation::compose_dashboard_automation_authority(
+                        profile_root,
+                        profile_id,
+                        project_graph_resolver,
+                        Arc::clone(&automation_writer),
+                    )?,
+                ),
+                (None, None, _) => None,
+                _ => {
+                    return Err(TraceDecayError::Config {
+                        message: "dashboard automation requires one complete daemon profile and project authority"
+                            .to_owned(),
+                    });
+                }
+            };
             let dashboard_project_graph_resolver = retained_project_graph_resolver
                 .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
             // The profile write resolves its configuration layer through the
@@ -466,6 +489,7 @@ pub(super) async fn handle_dashboard(
                     git_correlation_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
+                    automation_authority,
                     automation_writer,
                     doctor_report_reader,
                     code_index_freshness_reader,

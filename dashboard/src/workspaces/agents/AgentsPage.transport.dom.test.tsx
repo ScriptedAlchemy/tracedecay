@@ -49,7 +49,7 @@ type FailKind = keyof typeof GUIDANCE;
  * They were both `error · HTTP 4xx` until the taxonomy's `unauthorized` and
  * `denied` states were actually wired to them.
  *
- * The last two rows deliberately declare the same reading. `LegacyResult`
+ * The last two rows deliberately declare the same reading. `PayloadResult`
  * carries a `detail` only on `error`, so a body that is not JSON and a body the
  * decoder rejects both arrive as a bare `unsupported_schema` — one state,
  * because both mean "this build cannot read what came back". Every other pair

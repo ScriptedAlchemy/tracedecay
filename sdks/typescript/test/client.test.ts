@@ -551,74 +551,54 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
   });
 
-  it("publishes git_status on its MCP tool transport", () => {
-    const descriptor = OPERATIONS.find(
-      (operation) => operation.operation === "git_status",
-    );
-    expect(descriptor).toBeDefined();
-    expect(descriptor?.operationId).toBe("operation.application.git_status");
-    expect(descriptor?.transport).toEqual({
-      kind: "mcp_tool",
-      toolName: "tracedecay_git_status",
-    });
-    expect(descriptor?.bindingId).toBe("binding.mcp.git_status.v1");
-    expect(
-      UNAVAILABLE_OPERATIONS.some((operation) =>
-        operation.operation.startsWith("application_git_"),
-      ),
-    ).toBe(false);
+  it("publishes mounted Git reads as application HTTP operations", () => {
+    for (const [operation, route] of [
+      ["git_status", "/application/git/status"],
+      ["git_diff", "/application/git/diff"],
+      ["git_history", "/application/git/history"],
+      ["git_blame", "/application/git/blame"],
+      ["git_hunks", "/application/git/hunks"],
+    ] as const) {
+      const descriptor = OPERATIONS.find(
+        (candidate) => candidate.operation === `application_${operation}`,
+      );
+      expect(descriptor).toBeDefined();
+      expect(descriptor?.operationId).toBe(
+        `operation.application.${operation}`,
+      );
+      expect(descriptor?.transport).toEqual({
+        kind: "http",
+        route,
+        method: "POST",
+      });
+      expect(descriptor?.bindingId).toBe(`binding.http.${operation}.v1`);
+      expect(OPERATIONS.map((candidate) => String(candidate.operation))).not.toContain(
+        operation,
+      );
+    }
   });
 
-  it("routes Git operations through the caller's MCP tool adapter", async () => {
-    const calls: Array<{ toolName: string; request: unknown }> = [];
+  it("routes application_git_status through its mounted HTTP binding", async () => {
+    let requestedUrl = "";
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
-      mcp: {
-        async callTool(toolName, request) {
-          calls.push({ toolName, request });
-          return {};
-        },
-      },
-    });
-
-    await expect(client.operations.git_status({})).rejects.toBeInstanceOf(
-      TraceDecayMalformedResponseError,
-    );
-    expect(calls).toEqual([{ toolName: "tracedecay_git_status", request: {} }]);
-  });
-
-  it("refuses Git operations without an MCP tool adapter as a typed transport failure", async () => {
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-    });
-
-    await expect(client.operations.git_status({})).rejects.toThrow(
-      /git_status requires an MCP tool adapter/,
-    );
-  });
-
-  it("propagates the caller's abort through the MCP adapter as an abort error", async () => {
-    const controller = new AbortController();
-    const client = createClient({
-      baseUrl: "http://127.0.0.1:43123",
-      projectId: "project.sdk",
-      token: "sdk-secret",
-      mcp: {
-        async callTool(_toolName, _request, { signal }) {
-          controller.abort(new Error("caller cancelled"));
-          signal?.throwIfAborted();
-          return {};
-        },
+      fetch: async (input) => {
+        requestedUrl = String(input);
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       },
     });
 
     await expect(
-      client.operations.git_status({}, { signal: controller.signal }),
-    ).rejects.toBeInstanceOf(TraceDecayAbortError);
+      client.operations.application_git_status({}),
+    ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+    expect(requestedUrl).toBe(
+      "http://127.0.0.1:43123/projects/project.sdk/application/git/status",
+    );
   });
 });
 

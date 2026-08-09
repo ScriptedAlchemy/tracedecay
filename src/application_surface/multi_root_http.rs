@@ -61,8 +61,8 @@ pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapte
 }
 
 impl RegisteredHttpOperation for MultiRootHttpOperation {
-    fn operation_id_str(self) -> &'static str {
-        MultiRootHttpOperation::operation_id(self)
+    fn operation_id(self) -> String {
+        MultiRootHttpOperation::operation_id(self).to_owned()
     }
 
     fn is_read_only(self) -> bool {
@@ -82,11 +82,10 @@ impl RegisteredHttpOperation for MultiRootHttpOperation {
 
     fn registry(
         self,
-    ) -> Result<
-        tracedecay_tool_catalog::ExecutableBindingRegistryV1,
-        tracedecay_tool_catalog::CatalogValidationError,
-    > {
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
+    {
         multi_root_executable_binding_registry()
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
 

@@ -676,14 +676,16 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn git_sessions_for_for_test(
         &self,
-        query: &crate::sessions::git_correlation::SessionsForQuery,
-        relation: crate::sessions::git_correlation::CommitRelationFilter,
+        query: &tracedecay_sessions::runtime::git_correlation::SessionsForQuery,
+        relation: tracedecay_sessions::runtime::git_correlation::CommitRelationFilter,
     ) -> std::result::Result<
-        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
-        crate::sessions::git_correlation::GitCorrelationError,
+        Vec<tracedecay_sessions::runtime::git_correlation::SessionGitCorrelationHit>,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .sessions_for_with_relation(query, relation)
@@ -797,16 +799,7 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
     ) -> Result<SharedHostAdmissionBroker> {
         let database = self.session_database_for_test(scope)?;
-        let (runtime, _) =
-            HostAdmissionRuntime::open_for_database(database.db_path()).map_err(|outcome| {
-                TraceDecayError::Database {
-                    operation: "open registered host-admission test broker".to_owned(),
-                    message: outcome
-                        .reason_code
-                        .unwrap_or("spool_runtime_unavailable")
-                        .to_owned(),
-                }
-            })?;
+        let (runtime, _) = HostAdmissionRuntime::open_for_database(database.db_path())?;
         Ok(Arc::new(HostAdmissionBroker::new(runtime)))
     }
 

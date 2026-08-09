@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile, QueryDigest,
-    QueryFallbackSubpayload, RetrievalContractError, RetrievalCursor, RetrievalCursorKeyId,
-    RetrievalError, RetrievalRequest, RetrieverKind,
+    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile,
+    PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalContractError, RetrievalCursor,
+    RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverKind,
+    RetrieverOutcome, ScoreDomainId,
 };
 
+use super::evidence_lanes::{TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1};
 use super::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, CompositionPageV1,
     FusionStageError, FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
@@ -184,6 +186,92 @@ impl QueryAuthorityV1 {
 
     pub fn profile(&self) -> &FusionProfile {
         &self.profile
+    }
+
+    pub fn privacy_domain(&self) -> &PrivacyDomainId {
+        self.keyring.privacy_domain()
+    }
+
+    pub fn ranking_revision(&self) -> &ComponentRevision {
+        self.kernel.ranking_revision()
+    }
+
+    pub fn task_session_score_domain(&self) -> Result<ScoreDomainId, QueryAuthorityErrorV1> {
+        if self.mode != QueryAuthorityModeV1::Federated {
+            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        }
+        let calibration = self
+            .profile
+            .calibrations
+            .get(&RetrieverKind::TaskSession)
+            .ok_or_else(|| {
+                QueryAuthorityErrorV1::InvalidAuthority(
+                    "federated profile omits TaskSession calibration".to_owned(),
+                )
+            })?;
+        let mut domains = self
+            .profile
+            .score_domain_calibrations
+            .iter()
+            .filter(|(_, candidate)| &candidate.calibration_profile_id == calibration)
+            .map(|(domain, _)| domain.clone());
+        let domain = domains.next().ok_or_else(|| {
+            QueryAuthorityErrorV1::InvalidAuthority(
+                "federated profile omits the TaskSession score domain".to_owned(),
+            )
+        })?;
+        if domains.next().is_some() {
+            return Err(QueryAuthorityErrorV1::InvalidAuthority(
+                "federated profile has ambiguous TaskSession score domains".to_owned(),
+            ));
+        }
+        Ok(domain)
+    }
+
+    /// Rank one exact TaskSession expansion with the active evaluated
+    /// federated profile. Unrelated lanes are not represented as successful
+    /// empty batches; this projection retains only the accepted TaskSession
+    /// calibration, weight, score-domain mapping, diversity, cursor key, and
+    /// comparator revision.
+    pub fn select_task_session(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        outcome: RetrieverOutcome<RetrieverBatch<TaskSessionLaneEvidenceV1>>,
+        page_size: usize,
+        cursor: Option<&RetrievalCursor>,
+    ) -> Result<TaskSessionCandidateSelectionV1, QueryAuthorityErrorV1> {
+        if self.mode != QueryAuthorityModeV1::Federated {
+            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        }
+        self.validate_request(request)?;
+        let mut profile = self.profile.clone();
+        profile
+            .calibrations
+            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+        profile
+            .weights_micros
+            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+        let lane = CompositionLaneInput::new(RetrieverKind::TaskSession, outcome)?;
+        let composition = self.kernel.compose_selected_lane(
+            &FusionStageInput {
+                profile,
+                lanes: vec![lane],
+            },
+            &self.diversity,
+            RetrieverKind::TaskSession,
+        )?;
+        let page = self.kernel.paginate_at(
+            request,
+            query_view,
+            &self.keyring,
+            &composition,
+            page_size,
+            cursor,
+            request.snapshot.captured_at,
+        )?;
+        TaskSessionCandidateSelectionV1::new(page.ranked_candidates, page.cursor)
+            .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
     }
 
     /// Authenticate one ephemeral sanitized query with the daemon-owned key.

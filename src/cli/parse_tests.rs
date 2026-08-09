@@ -1035,8 +1035,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
         "120",
         "--scheduler-tick-secs",
         "30",
-        "--export-memory-digest",
-        "false",
         "--memory-curator",
         "true",
         "--memory-curator-schedule",
@@ -1081,7 +1079,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
                         host_mode,
                         timeout_secs,
                         scheduler_tick_secs,
-                        export_memory_digest,
                         memory_curator,
                         memory_curator_schedule,
                         memory_curator_interval_secs,
@@ -1112,7 +1109,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert_eq!(host_mode.as_deref(), Some("delegated-host"));
     assert_eq!(timeout_secs, Some(120));
     assert_eq!(scheduler_tick_secs, Some(30));
-    assert_eq!(export_memory_digest, Some(false));
     assert_eq!(memory_curator, Some(true));
     assert_eq!(memory_curator_schedule.as_deref(), Some("manual"));
     assert_eq!(memory_curator_interval_secs.as_deref(), Some("900"));
@@ -1202,6 +1198,27 @@ fn automation_facts_rejects_removed_mutation_commands() {
         let error = Cli::try_parse_from(["tracedecay", "automation", "facts", action, "fact-7"])
             .expect_err("automation fact mutation commands must stay removed");
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+}
+
+#[test]
+fn automation_facts_help_describes_terminal_automatic_fact_receipts() {
+    let help = Cli::try_parse_from(["tracedecay", "automation", "facts", "list", "--help"])
+        .expect_err("help exits through clap")
+        .to_string()
+        .to_ascii_lowercase();
+
+    for behavior in ["automatic", "receipt", "applied", "quarantined"] {
+        assert!(
+            help.contains(behavior),
+            "automation facts help must describe {behavior} behavior:\n{help}"
+        );
+    }
+    for legacy in ["proposal", "applying", "rejected"] {
+        assert!(
+            !help.contains(legacy),
+            "automation facts help must not advertise legacy {legacy} state:\n{help}"
+        );
     }
 }
 
@@ -1328,6 +1345,25 @@ fn automation_run_skill_writing_defaults_to_all_providers() {
                 }
         }) if provider == "all"
     ));
+}
+
+#[test]
+fn automation_skill_writing_help_describes_automatic_activation() {
+    let help = Cli::try_parse_from(["tracedecay", "automation", "run", "skill-writing", "--help"])
+        .expect_err("help exits through clap")
+        .to_string()
+        .to_ascii_lowercase();
+
+    for behavior in ["validat", "activat", "deploy", "automatic"] {
+        assert!(
+            help.contains(behavior),
+            "skill-writing help must describe {behavior} behavior:\n{help}"
+        );
+    }
+    assert!(
+        !help.contains("without activating") && !help.contains("inactive draft"),
+        "skill-writing help must not advertise an inactive draft lifecycle:\n{help}"
+    );
 }
 
 #[test]

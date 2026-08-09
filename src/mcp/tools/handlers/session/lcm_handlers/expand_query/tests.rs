@@ -6,7 +6,7 @@ use super::super::test_support::*;
 use super::*;
 use crate::application::session::SessionRetrievalScope;
 use crate::mcp::tools::handlers::session::message_search::LcmExpandServiceOutcome;
-use crate::sessions::lcm::{LcmContentRange, LcmExpandResponse};
+use tracedecay_sessions::runtime::lcm::{LcmContentRange, LcmExpandResponse};
 
 #[tokio::test]
 async fn malformed_expand_query_selectors_never_call_the_service() {
@@ -152,21 +152,23 @@ async fn expand_query_translates_node_ids_through_summary_expansion() {
 #[tokio::test]
 async fn expand_query_omits_typed_unavailable_summary_sources() {
     let service = RecordingService::new(complete("unused", "assistant", None));
-    let source = |store_id, state, content: &str| crate::sessions::lcm::LcmExpandedSummarySource {
-        source_ref: LcmSourceRef::RawMessage { store_id },
-        state,
-        content: content.to_string(),
-        content_range: (state == HydrationStateV1::Available).then_some(LcmContentRange {
-            offset: 0,
-            limit: 4096,
-            returned_chars: content.chars().count() as u64,
-            total_chars: content.chars().count() as u64,
-            truncated: false,
-        }),
-        content_truncated: false,
-        raw_message: None,
-        raw_message_metadata: None,
-        summary_node: None,
+    let source = |store_id, state, content: &str| {
+        tracedecay_sessions::runtime::lcm::LcmExpandedSummarySource {
+            source_ref: LcmSourceRef::RawMessage { store_id },
+            state,
+            content: content.to_string(),
+            content_range: (state == HydrationStateV1::Available).then_some(LcmContentRange {
+                offset: 0,
+                limit: 4096,
+                returned_chars: content.chars().count() as u64,
+                total_chars: content.chars().count() as u64,
+                truncated: false,
+            }),
+            content_truncated: false,
+            raw_message: None,
+            raw_message_metadata: None,
+            summary_node: None,
+        }
     };
     service.set_expand_outcome(LcmExpandServiceOutcome::Partial {
         expansion: Some(LcmExpandResponse {

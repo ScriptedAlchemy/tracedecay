@@ -344,6 +344,7 @@ fn fact_write_rejects_stored_identity_mismatch() {
         vec![],
         vec![],
         None,
+        None,
     )
     .unwrap()
     .with_identity_material(requested_identity)
@@ -409,8 +410,17 @@ fn fact_executor_does_not_claim_replay_without_writer_ledger() {
             ],
         )
         .unwrap();
-    let batch =
-        FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
+    let batch = FactWriteBatch::new(
+        fact_id,
+        owner,
+        None,
+        vec![event],
+        vec![],
+        vec![],
+        None,
+        None,
+    )
+    .unwrap();
     let savepoint = connection.savepoint().unwrap();
 
     let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
@@ -470,6 +480,7 @@ fn purge_access_transition_clears_active_assertion() {
             vec![event],
             vec![],
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -555,6 +566,7 @@ fn stale_projection_transitions_are_rejected() {
             vec![event],
             vec![],
             vec![],
+            None,
             None,
         )
         .unwrap();

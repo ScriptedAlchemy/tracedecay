@@ -20,7 +20,7 @@ directly through the cargo tests below.
 ## Direct behavioral tests
 
 1. `cargo test --lib application::evidence_assembly::tests`
-2. `cargo test --lib sessions::claude_observation_benchmark::tests`
+2. `cargo test --lib claude_observation_benchmark::tests`
 3. `cargo test --test storage_suite migration_test::memory_v2_v19_v23`
 4. `cargo test --lib db::retrieval_anchor_authority::tests`
 5. `cargo test --lib privacy::tests`

@@ -230,10 +230,12 @@ fn feedback_owner_problem(error: FeedbackReadOwnerErrorV1) -> ApplicationProblem
         FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        FeedbackReadOwnerErrorV1::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "feedback.owner_unavailable".to_owned(),
-            message: "The feedback read owner is unavailable".to_owned(),
-        }),
+        FeedbackReadOwnerErrorV1::Unavailable | FeedbackReadOwnerErrorV1::Contract(_) => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.owner_unavailable".to_owned(),
+                message: "The feedback read owner is unavailable".to_owned(),
+            })
+        }
     }
 }
 

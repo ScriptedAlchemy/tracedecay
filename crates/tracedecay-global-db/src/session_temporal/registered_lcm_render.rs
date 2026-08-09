@@ -1,4 +1,4 @@
-//! LCM compatibility shaping over one frozen registered-store read snapshot.
+//! Released LCM response shaping over one canonical frozen-store read snapshot.
 
 use std::collections::{BTreeMap, BTreeSet};
 

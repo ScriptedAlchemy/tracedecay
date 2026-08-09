@@ -6,7 +6,7 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::retrieval_content::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::{
     dag::LcmSummaryPublicationPort,
     types::{
@@ -17,7 +17,7 @@ use tracedecay_sessions::runtime::lcm::{
 
 use super::{
     CanonicalPublicationManifest, FrozenPublicationReceipt, PUBLICATION_ROUTE, SANITIZER_VERSION,
-    compatibility, generation, load_manifest, logical_identity_digest, receipt_id, sources,
+    generation, load_manifest, logical_identity_digest, receipt_id, sources, summary_projection,
     unixepoch,
 };
 use crate::session_temporal::relations::{
@@ -254,9 +254,10 @@ pub async fn publish_immutable_summary(
     insert_sanitization_receipt(conn, &receipt_id, &summary_hash, &frozen_receipt).await?;
     sources::insert_payload_manifests(conn, summary_id, &manifest, created_at).await?;
 
-    // Compatibility is deliberately last: a projection failure rolls back all
-    // canonical rows and lets the outer payload rollback guard remove files.
-    compatibility::project_canonical_summary(conn, summary_id, &manifest, created_at).await?;
+    // The durable summary projection is deliberately last: a projection
+    // failure rolls back all canonical rows and lets the outer payload
+    // rollback guard remove files.
+    summary_projection::project_canonical_summary(conn, summary_id, &manifest, created_at).await?;
 
     Ok(LcmSummaryPublicationReceipt {
         summary: summary_node(summary_id, &manifest, created_at),

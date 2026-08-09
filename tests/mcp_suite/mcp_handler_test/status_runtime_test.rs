@@ -13,7 +13,7 @@ use tracedecay::application::host_admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::sessions::SessionRecord;
+use tracedecay_sessions::runtime::SessionRecord;
 
 // ---------------------------------------------------------------------------
 // 8. tracedecay_status
@@ -77,7 +77,7 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
     let runtime = open_active_project_session_db(&cg).await;
     let transcript = dir.path().join("claude-backlog.jsonl");
     let file = fs::File::create(&transcript).unwrap();
-    file.set_len(tracedecay::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1)
+    file.set_len(tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1)
         .unwrap();
     assert!(
         runtime

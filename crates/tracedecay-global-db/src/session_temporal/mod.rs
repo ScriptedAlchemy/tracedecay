@@ -23,7 +23,7 @@ mod schema;
 mod sql;
 pub mod store;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -82,19 +82,6 @@ pub(crate) use schema::{
     require_admissible_session_temporal_schema,
 };
 pub use store::GlobalDbSessionTemporalStore;
-
-/// Computes status from the canonical immutable-summary publication records.
-///
-/// The renderer owns the implementation; this crate-private boundary keeps
-/// the status route available to the registered LCM facade without exposing
-/// the renderer module or adding a public API surface.
-pub(crate) async fn canonical_lcm_summary_dag_status(
-    snapshot: &tracedecay_runtime_core::db::engine::ReadSnapshot,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<tracedecay_sessions::runtime::lcm::LcmDagStatus, LcmError> {
-    registered_lcm_render::canonical_lcm_summary_dag_status(snapshot, provider, session_id).await
-}
 
 struct RegisteredGitEvidenceGraphRuntime<'a>(&'a dyn ProjectGraphRuntimePortV1);
 
@@ -290,19 +277,15 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        tracedecay_sessions::runtime::lcm::require_privacy_remediated(&snapshot)
+        let summary_ids = registered_lcm_render::describe_relation_summary_ids(&snapshot, &request)
             .await
             .map_err(map_lcm_error)?;
-        if let Some(control) = control {
-            control.checkpoint().map_err(map_control_error)?;
-        }
-        let response = registered_lcm_render::describe(&snapshot, request)
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, control)
+            .await?;
+        registered_lcm_render::describe(&snapshot, request, &relations)
             .await
-            .map_err(map_lcm_error)?;
-        if let Some(control) = control {
-            control.checkpoint().map_err(map_control_error)?;
-        }
-        Ok(response)
+            .map_err(map_lcm_error)
     }
 
     pub async fn render_lcm_expand(
@@ -316,15 +299,74 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        tracedecay_sessions::runtime::lcm::require_privacy_remediated(&snapshot)
+        let summary_ids = registered_lcm_render::expand_relation_summary_ids(&request);
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, Some(control))
+            .await?;
+        registered_lcm_render::expand(&snapshot, request, canonical_content, &relations)
             .await
-            .map_err(map_lcm_error)?;
+            .map_err(map_lcm_error)
+    }
+
+    async fn lcm_summary_relations(
+        &self,
+        session_id: &str,
+        summary_ids: Vec<String>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Vec<relations::SummaryRelationRead>, SessionTemporalExecutionError> {
+        const MAX_RELATIONS: usize = 4_096;
+        if summary_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let control = control.ok_or(SessionTemporalExecutionError::Unavailable)?;
         control.checkpoint().map_err(map_control_error)?;
-        let response = registered_lcm_render::expand(&snapshot, request, canonical_content)
-            .await
-            .map_err(map_lcm_error)?;
+        let session_id =
+            SessionId::new(session_id).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let first = self
+            .db
+            .active_session_summary_relations(
+                &session_id,
+                &summary_ids,
+                MAX_RELATIONS,
+                cancellation,
+            )
+            .await;
         control.checkpoint().map_err(map_control_error)?;
-        Ok(response)
+        let (_, mut relations) = first.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+
+        let known = relations
+            .iter()
+            .map(|relation| relation.summary_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let child_ids = relations
+            .iter()
+            .flat_map(|relation| relation.sources.iter())
+            .filter_map(|source| match source {
+                relations::SummarySourceRef::Summary { summary_id }
+                    if !known.contains(summary_id.as_str()) =>
+                {
+                    Some(summary_id.clone())
+                }
+                relations::SummarySourceRef::Anchor { .. }
+                | relations::SummarySourceRef::Summary { .. } => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if child_ids.is_empty() {
+            return Ok(relations);
+        }
+        control.checkpoint().map_err(map_control_error)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let children = self
+            .db
+            .active_session_summary_relations(&session_id, &child_ids, MAX_RELATIONS, cancellation)
+            .await;
+        control.checkpoint().map_err(map_control_error)?;
+        let (_, children) = children.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        relations.extend(children);
+        Ok(relations)
     }
 
     pub async fn hydrate_lcm_external_payload(

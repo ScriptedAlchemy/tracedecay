@@ -27,7 +27,7 @@
  */
 import { RefreshCw } from 'lucide-react';
 
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
 import {
@@ -98,9 +98,9 @@ export function CodeDiagnostics() {
           text="refresh all"
         />
       </div>
-      <LegacyBoundary title="Diagnostics" pending={snapshot.isPending} result={snapshot.data}>
+      <PayloadBoundary title="Diagnostics" pending={snapshot.isPending} result={snapshot.data}>
         {(data) => <SnapshotBody data={data} controls={controls} />}
-      </LegacyBoundary>
+      </PayloadBoundary>
     </section>
   );
 }

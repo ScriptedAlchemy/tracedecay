@@ -10,8 +10,6 @@ use tracedecay::application::host_admission::{
 };
 use tracedecay::application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
-use tracedecay::sessions::source::TranscriptSource;
-use tracedecay::sessions::{claude, codex, cursor, hermes};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -26,6 +24,8 @@ use tracedecay_domain::{
     SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId,
     canonical_sha256,
 };
+use tracedecay_sessions::runtime::source::TranscriptSource;
+use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
 use tracedecay_store::ObservationReplayRequest;
 
 mod common;
@@ -708,9 +708,9 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
         }
         "kiro" => {
             write_kiro_native_fixture(home, &project);
-            let source = tracedecay::sessions::kiro::KiroSource::with_home(home);
+            let source = tracedecay_sessions::runtime::kiro::KiroSource::with_home(home);
             assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            let capture = tracedecay::sessions::kiro::capture_kiro_snapshot_observations(
+            let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
                 &project,
@@ -768,7 +768,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             &expected_scope,
             "{provider} provider usage must retain the exact admitted scope"
         );
-        tracedecay::sessions::claude_observation::drain_projection_queue(
+        tracedecay_sessions::runtime::claude_observation::drain_projection_queue(
             &facade,
             &expected_scope,
             &ObservationCancellation::default(),

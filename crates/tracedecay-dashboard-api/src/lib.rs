@@ -56,8 +56,20 @@ pub(crate) fn register_test_schema_installer() {
 mod accounting;
 pub mod analytics_api;
 pub mod application_surface;
+mod automation_authority;
+pub use automation_authority::{
+    DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
+    DashboardAutomationRunFutureV1, DashboardAutomationRunInvocationV1,
+    DashboardAutomationRunPortV1, DashboardAutomationRunRequestV1,
+    DashboardManagedSkillCommandFutureV1, DashboardManagedSkillCommandInvocationV1,
+    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandPortV1,
+    DashboardManagedSkillCommandV1,
+};
+pub(crate) use automation_authority::{
+    automation_authority_error_response, exact_automation_authority,
+};
 mod automation_config_api;
-mod automation_fact_proposals_api;
+mod automation_fact_receipts_api;
 mod automation_jobs_api;
 mod automation_outcomes_api;
 mod automation_run_api;
@@ -228,6 +240,10 @@ pub struct DashboardStateCompositionV1 {
     /// projection. Loom's git sources report unavailable without it.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    /// Exact daemon-selected profile plus its canonical automation run and
+    /// managed-skill materialization capabilities. Standalone states leave it
+    /// absent and automation mutation routes report typed unavailable.
+    pub automation_authority: Option<DashboardAutomationAuthorityV1>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -354,6 +370,9 @@ pub struct DashboardState {
     /// a broker or analyzer runtime.
     pub code_diagnostics_authority:
         Option<crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1>,
+    /// Daemon-selected profile and canonical automation mutation authority.
+    /// HTTP handlers never reconstruct this capability from the environment.
+    pub automation_authority: Option<DashboardAutomationAuthorityV1>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,
@@ -374,6 +393,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     _runtime: Arc<dyn Send + Sync>,
     project_sessions: Arc<RegisteredGlobalDb>,
     profile_database: Arc<RegisteredGlobalDb>,
+    automation_authority: Option<DashboardAutomationAuthorityV1>,
+    automation_writer: Option<DashboardAutomationWriter>,
     lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
@@ -392,10 +413,25 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             _runtime: runtime,
             project_sessions,
             profile_database,
+            automation_authority: None,
+            automation_writer: None,
             lcm_read_authority: None,
             graph_read_authority: None,
             git_correlation_read_authority: None,
         }
+    }
+
+    /// Attaches the same exact-profile automation authority production retains
+    /// from the daemon composition root.
+    #[must_use]
+    pub fn with_automation_authority(
+        mut self,
+        automation_authority: DashboardAutomationAuthorityV1,
+        automation_writer: DashboardAutomationWriter,
+    ) -> Self {
+        self.automation_authority = Some(automation_authority);
+        self.automation_writer = Some(automation_writer);
+        self
     }
 
     /// Attaches the daemon-owned LCM read authority so the test transport
@@ -562,6 +598,7 @@ async fn build_state_inner(
         lcm_read_authority,
         git_correlation_read_authority,
         registered_savings_db,
+        automation_authority,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
@@ -632,6 +669,7 @@ async fn build_state_inner(
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
+        automation_authority,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader: None,
@@ -672,6 +710,7 @@ pub async fn build_selected_project_state(
             lcm_read_authority: None,
             git_correlation_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
+            automation_authority: active.automation_authority.clone(),
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
             // Doctor authority is bound to the active project's exact scope.
@@ -862,8 +901,12 @@ where
                 .and_then(|authority| authority.git_correlation_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
+            automation_authority: test_authority
+                .and_then(|authority| authority.automation_authority.clone()),
             automation_scheduler_reconciler: None,
-            automation_writer: standalone_dashboard_automation_writer(),
+            automation_writer: test_authority
+                .and_then(|authority| authority.automation_writer.clone())
+                .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
@@ -1211,10 +1254,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(memory_api::curation_runs),
         )
         .route(
-            "/api/plugins/holographic/fact-proposals",
-            get(memory_api::fact_proposals),
-        )
-        .route(
             "/api/plugins/holographic/curation/config",
             get(automation_config_api::get_config).patch(automation_config_api::patch_config),
         )
@@ -1239,12 +1278,12 @@ fn project_api_router() -> Router<DashboardState> {
             post(automation_skills_api::restore),
         )
         .route(
-            "/api/automation/fact-proposals",
-            get(automation_fact_proposals_api::list),
+            "/api/automation/automatic-fact-receipts",
+            get(automation_fact_receipts_api::list),
         )
         .route(
-            "/api/automation/fact-proposals/{id}",
-            get(automation_fact_proposals_api::view),
+            "/api/automation/automatic-fact-receipts/{id}",
+            get(automation_fact_receipts_api::view),
         )
         .route(
             "/api/automation/run/memory-curator",
@@ -1841,6 +1880,7 @@ mod authority_tests {
                 curation_activity: Arc::new(RwLock::new(Vec::new())),
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
                 code_diagnostics_authority: None,
+                automation_authority: None,
                 automation_scheduler_reconciler: None,
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,

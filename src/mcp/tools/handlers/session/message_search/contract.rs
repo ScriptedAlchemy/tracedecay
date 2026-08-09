@@ -15,11 +15,11 @@ use tracedecay_temporal_query::ports::{
 
 use crate::application::session::{SessionDataFreshness, SessionTemporalQuery};
 use crate::global_db::WorkflowScopeFilter;
-use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
-use crate::sessions::{
+use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
 

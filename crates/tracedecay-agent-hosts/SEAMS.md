@@ -2,12 +2,12 @@
 
 Catalog produced by the one-shot crate split (`docs/superpowers/plans/
 2026-07-31-one-shot-crate-split.md`) when `src/agents/` and `src/automation/`
-(~60K lines) moved into this crate, then updated by the fix-to-green pass.
+(~60K lines) moved into this crate, then updated as those seams were retired.
 
-The mover's 194 unresolved `crate::<root module>` paths are down to **28**. The
-remainder are not this crate's to fix — each is blocked on a sibling that is
-still red or on the root's own `src/application/` move. "Root wiring this crate
-now owes" and "Still blocked" below are the two lists the landing needs.
+The error counts and blocker inventory below preserve extraction-time evidence;
+they are not a current readiness report. Current production callers import the
+automation authority directly from this crate, and composition-root runtime
+registration lives in `src/runtime_ports.rs`.
 
 ## Why the two trees moved as one unit
 
@@ -20,32 +20,35 @@ dependency, which the plan forbids. Because both modules kept their names at
 this crate's root, all 522 of those intra-references still resolve verbatim —
 zero rewrites were needed for the agents↔automation direction.
 
-## Root compatibility shims
+## Root call migration
 
-`src/agents.rs` and `src/automation.rs` in the root crate are
-`pub use tracedecay_agent_hosts::{agents,automation}::*;`. A glob re-export
-carries public modules as well as leaf items, so every previously public path
-(`tracedecay::agents::claude::…`, `tracedecay::automation::runner::…`) still
-resolves.
+The root crate has no automation compatibility shim. Its production callers,
+CLI journeys, and tests import `tracedecay_agent_hosts::automation` directly,
+so the extracted crate is the single public authority for managed-skill
+curation, memory curation, scheduling, and automation outcomes.
 
-A glob cannot carry non-`pub` items, so the 15 declarations below — all named
-by root call sites — were promoted from `pub(crate)`/`pub(super)` to `pub`.
-This is the only visibility change the move made; it widens this crate's API
-surface by exactly the set the root crate already depended on.
+Durable memory is not copied into profile-wide host prompt files. Host
+guidance follows the project-scoped runtime path instead: the native hook loads
+the `HookScopeBindingV1` published under the selected project's store, daemon
+admission resolves the exact project/worktree/session lifecycle, and Context
+Scout claims only the guidance authorized for that binding. Explicit memory
+reads continue through the canonical project-memory application authority.
+There is no agent-host snapshot, target manifest, or fallback empty export.
+
+The declarations below cross the crate boundary today; the table records their
+current root or sibling-crate callers.
 
 | Item | Root call sites |
 |---|---|
-| `agents::CLI_FALLBACK_PROMPT_RULES` | `src/hooks/steering.rs:141` |
-| `agents::context_scout_owner::lookup_registered_context_scout_owners` | `src/daemon/service/invocation.rs:2862` |
-| `agents::cursor::cursor_plugin_install_dir` | `src/hooks/memory_inject.rs` (4 sites) |
+| `agents::CLI_FALLBACK_PROMPT_RULES` | `src/hooks/steering.rs` |
+| `agents::context_scout_owner::lookup_registered_context_scout_owners` | `src/daemon/service/invocation/primitive.rs` |
 | `agents::hermes::read_config_pinned_project_root` (+ its `hermes/profile_config.rs` definition) | `src/runtime_ports.rs`, `crates/tracedecay-sessions/src/runtime/hermes/ingest.rs` |
-| `automation::config_error` | `src/mcp/tools/handlers/hook_runtime.rs:8` |
-| `automation::run_ledger::read_published_artifact_chain` | `src/dashboard/automation_run_api.rs:19` |
-| `automation::runner::registered_project_automation_retrieval` (+ its `runner/retrieval.rs` definition) | `src/daemon/scheduler.rs:1260,1475` |
-| `automation::runner::run_user_session_automation_with_backend` | `src/mcp/tools/handlers/hook_runtime.rs:2020` |
-| `automation::scheduler::load_session_activity` | `src/dashboard/automation_scheduler_api.rs:15`, `src/application/host_admission.rs:2578` |
-| `automation::skill_usage::analytics_import_key_for_request` (+ its `skill_usage/analytics.rs` definition) | `src/mcp/tools/handlers/skills.rs:16` |
-| `automation::skill_usage::ingest_project_analytics_events` (+ its `skill_usage/analytics.rs` definition) | `src/dashboard/automation_skills_api.rs:19`, `src/mcp/tools/handlers/skills.rs:16` |
+| `automation::config_error` | `src/mcp/tools/handlers/hook_runtime/` |
+| `automation::run_ledger::read_published_artifact_chain` | `crates/tracedecay-dashboard-api/src/automation_run_api.rs` |
+| `automation::runner::registered_project_automation_retrieval` (+ its `runner/retrieval.rs` definition) | `src/daemon/scheduler.rs` |
+| `automation::scheduler::load_session_activity` | `crates/tracedecay-dashboard-api/src/automation_scheduler_api.rs`, `src/application/host_admission/session_test_support.rs` |
+| `automation::skill_usage::analytics_import_key_for_request` (+ its `skill_usage/analytics.rs` definition) | `src/mcp/tools/handlers/skills.rs` |
+| `automation::skill_usage::ingest_project_analytics_events` (+ its `skill_usage/analytics.rs` definition) | `crates/tracedecay-dashboard-api/src/automation_skills_api.rs`, `src/mcp/tools/handlers/skills.rs` |
 
 ## Embedded assets (all verified resolving)
 
@@ -98,11 +101,11 @@ between (a) making this crate `publish = false`, (b) copying the trees into the
 crate, or (c) having `build.rs` stage them into `OUT_DIR` is an aftermath-queue
 item, not a mover decision.
 
-## Root-module couplings
+## Historical root-module couplings
 
-The mover left **194** unresolved `crate::<root module>` paths. The fix-to-green
-pass took that to **28**, all of them in `automation/` and all blocked on other
-movers (see "Still blocked" below). Trajectory:
+The mover left **194** unresolved `crate::<root module>` paths. At the time of
+the fix-to-green pass, that count reached **28**, all in `automation/` and then
+blocked on other movers. The table is retained as migration provenance:
 
 | After | Errors | What changed |
 |---|---|---|
@@ -137,12 +140,11 @@ it collapsed 125 of the 194 errors on its own. `crate::tracedecay` is a
 hand-written module carrying only the kernel's `current_timestamp`; the
 `TraceDecay` façade itself is a port row below.
 
-## Root wiring this crate still owes
+## Composition-root runtime wiring
 
-Everything below is **required before the root crate compiles against this
-one**. Registered ports degrade to a documented inert answer when unregistered,
-so this crate's own gate passes without them — but the product does not behave
-correctly until they are wired.
+The root installs the current registered ports from `src/runtime_ports.rs`.
+Registered ports degrade to a documented inert answer when unregistered, so a
+crate-local gate is not evidence that the production composition root is wired.
 
 ### Registered ports (root calls `register` at startup)
 
@@ -181,12 +183,16 @@ Until each row lands, the definition is duplicated in both crates.
 |---|---|
 | `agents::cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER` | `src/serve.rs` re-exports |
 
-### Canonical compatibility shims
+### Direct canonical authorities
 
-| Historical path retained here | Canonical owner |
+The former cancellation and configuration compatibility modules are removed.
+Callers import these identities from their canonical owners; no agent-hosts
+alias preserves the obsolete paths.
+
+| Agent-host consumers import | Canonical owner |
 |---|---|
-| `ports::context::{CancellationToken, MonotonicDeadline}` | `tracedecay_runtime_core::cancellation` |
-| `ports::configuration::ConfigurationCurrentStateV1` | `tracedecay_usecases::configuration` |
+| `CancellationToken`, `MonotonicDeadline` | `tracedecay_runtime_core::cancellation` |
+| `ConfigurationCurrentStateV1` | `tracedecay_usecases::configuration` |
 
 ### Conversions at the boundary
 
@@ -197,20 +203,21 @@ Until each row lands, the definition is duplicated in both crates.
 | `ports::session_store::{AnalyticsEventQuery, AnalyticsEventRecord}` | `global_db::{…}` |
 | `agents::cursor::BranchAddOutcome` (private) | decoded from the `tracedecay_admin_branch_add` JSON `outcome` string; the root's `branch::BranchAddOutcome` is the producer. The **wire strings are the contract** — the two enums must keep the same variant set. |
 
-## Still blocked (28 errors, 8 files)
+## Historical blockers at the extraction checkpoint
 
-These are not this crate's to fix. Every remaining error is one of four
-clusters, and each resolves when another mover lands.
+At the extraction checkpoint, every remaining error belonged to one of four
+clusters. This table records why the split stopped there; it does not describe
+the current source tree.
 
 | Cluster | Files | Blocked on |
 |---|---|---|
-| `crate::application::{memory, session, context}` | `fact_proposals`, `memory_digest`, `outcomes`, `session_reflector`, `staged_notice`, `runner`, `runner::retrieval`, `runner::session_reflector`, `memory_curator` | The root's `src/application/` tree never moved into `tracedecay-application` — the two are **divergent parallel trees**, not a shim. `MemoryApplication`, `SessionRetrievalService`, `RequestBudgets`, `ResolvedSessionIdentity` and friends exist only in the root. |
+| `crate::application::{memory, session, context}` | `fact_proposals`, `outcomes`, `session_reflector`, `staged_notice`, `runner`, `runner::retrieval`, `runner::session_reflector`, `memory_curator` | The root's `src/application/` tree never moved into `tracedecay-application` — the two are **divergent parallel trees**, not a shim. `MemoryApplication`, `SessionRetrievalService`, `RequestBudgets`, `ResolvedSessionIdentity` and friends exist only in the root. |
 | `crate::global_db::{RegisteredGlobalDb, session_temporal::…}` | `lifecycle`, `memory_curator`, `runner`, `runner::retrieval`, `runner::session_reflector` | `tracedecay-global-db` is red (through `tracedecay-migrate`, 279 errors). `ports::session_store` already covers the reads; these sites additionally need `Arc<RegisteredGlobalDb>` as a constructed handle. |
 | `crate::daemon::{profile_identity, store_runtime::session_registry}` | `memory_curator`, `runner`, `runner::retrieval`, `runner::session_reflector`, `lifecycle` | `tracedecay-daemon` does not exist yet. |
 | `crate::tracedecay::TraceDecay`, `crate::dashboard::memory_curate`, `crate::request_identity`, `crate::memory::user::open_user_memory_db` | `memory_curator`, `runner`, `runner::retrieval`, `runner::session_reflector` | Root façade + `tracedecay-dashboard-api` (red, 210 errors). |
 
 **Sequencing note.** The `application` cluster is the true critical path: five
-of the eight blocked files (`fact_proposals`, `memory_digest`, `outcomes`,
+of the seven blocked files (`fact_proposals`, `outcomes`,
 `session_reflector`, `staged_notice`) are blocked on `application::memory`
 *alone*, so moving `src/application/memory` into `tracedecay-application` — or
 inverting `MemoryApplication` into a `FactProposalMemory` port here — clears

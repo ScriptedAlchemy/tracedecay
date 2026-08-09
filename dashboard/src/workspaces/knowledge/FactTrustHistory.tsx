@@ -17,7 +17,7 @@
  *   - A store whose feedback-history repair is unfinished or unknown has NOT
  *     said this audit is whole. That sentence sits above the list, not under it.
  */
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Readout } from '../../ui/instrument.tsx';
 import {
@@ -33,9 +33,9 @@ export function FactTrustHistory({ factId }: { factId: number | null }) {
   return (
     <section className="flex flex-col gap-2 border-t border-edge-subtle pt-3" aria-label="Trust history">
       <h3 className="td-legend">trust history</h3>
-      <LegacyBoundary title="Trust history" pending={history.isPending} result={history.data}>
+      <PayloadBoundary title="Trust history" pending={history.isPending} result={history.data}>
         {(data) => <TrustHistoryBody data={data} />}
-      </LegacyBoundary>
+      </PayloadBoundary>
     </section>
   );
 }

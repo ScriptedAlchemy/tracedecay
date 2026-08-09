@@ -34,7 +34,6 @@ pub fn register_runtime_ports() -> Result<()> {
     register_session_ports();
     register_agent_host_ports();
     crate::agents::register_mcp_tool_catalog_ports()?;
-    crate::automation::register_runtime_ports();
     crate::dashboard::register_runtime_ports();
     Ok(())
 }
@@ -89,6 +88,10 @@ fn unregistered_admission(
 fn register_agent_host_ports() {
     use tracedecay_agent_hosts::ports;
 
+    ports::codex_app_server::register(run_codex_app_server_prompt);
+    ports::session_store::register_canonical_project_key(
+        crate::global_db::RegisteredGlobalDb::canonical_project_key,
+    );
     ports::hook_runtime::register_daemon_tool_invoker(daemon_tool_json);
     ports::hook_runtime::register_memory_injection_gate(
         crate::hooks::memory_inject::memory_injection_enabled,
@@ -96,6 +99,30 @@ fn register_agent_host_ports() {
     ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes(
         cursor_catch_up_ingest_max_bytes,
     );
+}
+
+fn run_codex_app_server_prompt(
+    prompt: &str,
+    config: &tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig,
+    thread_source: &str,
+) -> std::result::Result<tracedecay_agent_hosts::ports::codex_app_server::Summary, String> {
+    let config = tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig {
+        codex_bin: config.codex_bin.clone(),
+        model: config.model.clone(),
+        timeout: config.timeout,
+    };
+    tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server(
+        prompt,
+        &config,
+        thread_source,
+    )
+    .map(
+        |summary| tracedecay_agent_hosts::ports::codex_app_server::Summary {
+            text: summary.text,
+            model: summary.model,
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Fn-pointer shim over the root's async daemon tool call.

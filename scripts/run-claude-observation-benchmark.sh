@@ -136,7 +136,7 @@ chmod u+rwx "$build_root/target"
 (
   cd "$build_root"
   TRACEDECAY_SKIP_DASHBOARD_BUILD=1 cargo test --quiet --release --lib \
-    sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- \
+    claude_observation_benchmark::production_observation_pipeline_baseline -- \
     --ignored --exact --nocapture --test-threads=1
 ) 2>&1 | tee "$capture"
 
@@ -159,7 +159,7 @@ sed "s/\"current_acceptance\": null/\"current_acceptance\": \"$result_name\"/" \
   TRACEDECAY_BENCHMARK_EVIDENCE_DIR="$repo_root/benchmarks/claude-observation" \
   TRACEDECAY_SKIP_DASHBOARD_BUILD=1 \
     cargo test --quiet --release --lib \
-      sessions::claude_observation_benchmark::evidence_directory_matches_index_contract -- \
+      claude_observation_benchmark::evidence_directory_matches_index_contract -- \
       --exact --test-threads=1
 )
 

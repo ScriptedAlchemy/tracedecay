@@ -5,24 +5,24 @@ description: 'Use when listing or reading agent-managed automation skills, viewi
 
 # Inspecting managed skills and automation output
 
-The daemon automation loop (skill writer, memory curator, session reflector) drafts managed skills and records durable run artifacts. This skill is the read-only window into that state; every lifecycle change (approve, disable, archive, install) goes through the `tracedecay automation` CLI or the dashboard instead.
+The daemon automation loop (skill writer, memory curator, session reflector) produces, validates, activates, and deploys managed skills while recording durable run artifacts. This skill is the read-only window into that state; direct operator overrides (create, update, disable, archive, restore) go through the `tracedecay automation` CLI or the dashboard instead.
 
 ## Workflow
 
 1. **List managed skills → `tracedecay_skill_list`** (`state?`: filter by lifecycle state, `include_body?`): metadata, lifecycle state, usage summary, and stale/archive/improvement evidence for every agent-managed skill in the active profile. Start here to see what automation has produced.
-2. **Read one skill → `tracedecay_skill_view`** (`id` required, `include_support_files?`): full metadata, body markdown, usage summary, and support files for a single managed skill. Use before recommending approval, edits, or archival.
+2. **Read one skill → `tracedecay_skill_view`** (`id` required, `include_support_files?`): full metadata, body markdown, usage summary, and support files for a single managed skill. Use before recommending direct edits or archival.
 3. **Read a run artifact → `tracedecay_automation_run_artifact_view`** (`run_id`, `kind`: e.g. `traces`, `feedback`, `generated_evals`, `validation_gate`, `optimizer_diagnosis`, `codex_handoff`): the hash-verified JSON payload of one durable automation run artifact. Find run ids via `tracedecay automation runs list` when needed.
 4. **Inspect standard Hermes skills → `tracedecay_hermes_skill_bridge`** (`include_skill_bodies?`, `include_pending_payloads?`): read skills, pending approval records, usage telemetry, and archive counts from the one supported `~/.hermes` install. The tool accepts no profile or home selector.
 
 ## Guardrails
 
-- All four tools are read-only; none of them approve, edit, or delete anything. For lifecycle changes hand the user the matching CLI commands: `tracedecay automation skills approve|disable|archive|restore <id>` and `tracedecay automation skills install --target <host> --output <path>`. Hermes-owned lifecycle changes stay in Hermes.
+- All four tools are read-only; none of them edit or delete anything. Validated skill-writer output activates and deploys automatically. For a direct operator override, hand the user the matching `tracedecay automation skills create|update|disable|archive|restore` command. Hermes-owned lifecycle changes stay in Hermes.
 - Managed skills are distinct from this bundled skill set: they live in the TraceDecay profile store, not in the plugin. Do not edit bundled plugin skills based on managed-skill evidence.
 
 ## Handoff
 
 - Running or configuring the automation jobs themselves → `tracedecay automation run` / `tracedecay automation config` (CLI).
-- Inspecting session-reflection fact automation outcomes → `tracedecay automation facts list|view|apply|reject` (CLI; mutate only on explicit request).
+- Inspecting session-reflection fact automation outcomes → `tracedecay automation facts list|view` (CLI).
 - Memory fact curation → `tracedecay:project-memory`.
 
 ## If tools are deferred or MCP fails

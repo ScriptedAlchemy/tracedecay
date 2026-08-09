@@ -163,6 +163,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
+        automation_authority: None,
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
@@ -211,6 +212,7 @@ fn user_state(
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
+        automation_authority: None,
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
@@ -300,7 +302,7 @@ async fn run_memory_curate_with_state(
                         message: format!("derive memory curation operation: {error}"),
                     })?;
                     let grooming_report = application
-                        .dashboard_apply_grooming_v1(
+                        .dashboard_apply_grooming(
                             grooming_ops.clone(),
                             options.min_confidence,
                             context,
@@ -875,7 +877,7 @@ async fn prevalidate_destructive_ops(state: &DashboardState, ops: &[Value]) -> R
         })?;
     for fact_id in required_facts {
         if application
-            .dashboard_fact_detail_v1(fact_id)
+            .dashboard_fact_detail(fact_id)
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("validate destructive fact {fact_id}: {error}"),
@@ -936,7 +938,7 @@ mod tests {
         )
         .unwrap();
         let seeded = memory
-            .add_fact_v1(
+            .add_fact(
                 tracedecay_runtime_core::memory::types::AddFactRequest {
                     content: "Keep diagnostic previews read only".to_string(),
                     category: tracedecay_runtime_core::memory::types::MemoryCategory::Decision,
@@ -975,7 +977,7 @@ mod tests {
             preview["derived_memory_repair"]["status"],
             json!("not_run_read_only_preview")
         );
-        assert!(memory.get_fact_v1(fact_id).await.unwrap().is_some());
+        assert!(memory.get_fact(fact_id).await.unwrap().is_some());
 
         let applied = run_user_memory_curate(
             &db,
@@ -996,7 +998,7 @@ mod tests {
                 .is_some(),
             "apply should expose the authoritative repair receipt: {applied}"
         );
-        assert!(memory.get_fact_v1(fact_id).await.unwrap().is_some());
+        assert!(memory.get_fact(fact_id).await.unwrap().is_some());
     }
 
     #[test]

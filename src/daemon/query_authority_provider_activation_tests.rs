@@ -508,7 +508,8 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
         },
     )
     .expect("production project enrollment");
-    let profile_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
+    let profile_sessions_path =
+        tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
     let _scope_guard =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "query-cursor-restart")
             .expect("daemon database scope");

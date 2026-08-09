@@ -83,13 +83,10 @@ impl AgentIntegration for ClaudeIntegration {
     fn project_host_component_registration_paths(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
+        _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        Ok(vec![
-            project_path.join(".claude/CLAUDE.md"),
-            super::managed_memory_digest_targets_path(home),
-        ])
+        Ok(vec![project_path.join(".claude/CLAUDE.md")])
     }
 
     fn deactivate_project_host_component_registration(

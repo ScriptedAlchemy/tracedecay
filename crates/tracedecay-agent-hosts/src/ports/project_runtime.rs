@@ -29,6 +29,7 @@ pub trait ProjectRuntime: Send + Sync {
     fn db(&self) -> &Database;
     fn store_layout(&self) -> &StoreLayout;
     fn project_memory_owner(&self) -> Result<FactOwnerV1>;
+    fn profile_id(&self) -> &UserProfileId;
     fn profile_database(&self) -> &Arc<RegisteredGlobalDb>;
     fn project_sessions<'a>(
         &'a self,
@@ -43,6 +44,7 @@ pub type TraceDecay = dyn ProjectRuntime;
 
 /// Profile runtime needed by projectless automation.
 pub trait ProfileRuntime: Send + Sync {
+    fn profile_id(&self) -> &UserProfileId;
     fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>>;
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database>;
     fn curate_user_memory<'a>(

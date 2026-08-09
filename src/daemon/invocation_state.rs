@@ -32,6 +32,8 @@ pub(super) struct DaemonInvocationState {
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
+    work_federated_query_authority:
+        Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1>,
     semantic_projection_scheduler:
         tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
@@ -45,6 +47,7 @@ impl Clone for DaemonInvocationState {
             github_credential_lifecycle: self.github_credential_lifecycle.clone(),
             code_index_schedulers: self.code_index_schedulers.clone(),
             query_authority_provider: self.query_authority_provider.clone(),
+            work_federated_query_authority: Arc::clone(&self.work_federated_query_authority),
             semantic_projection_scheduler: self.semantic_projection_scheduler.clone(),
         }
     }
@@ -62,6 +65,12 @@ impl Default for DaemonInvocationState {
             );
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
+        let query_authority_provider =
+            query_authority_provider::DaemonQueryAuthorityProviderV1::default();
+        let work_federated_query_authority = Arc::new(DaemonWorkFederatedQueryAuthorityV1 {
+            schedulers: code_index_schedulers.clone(),
+            provider: query_authority_provider.clone(),
+        });
         Self {
             resident_memory,
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(
@@ -71,8 +80,8 @@ impl Default for DaemonInvocationState {
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
-            query_authority_provider:
-                query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
+            query_authority_provider,
+            work_federated_query_authority,
             semantic_projection_scheduler:
                 tracedecay_usecases::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1::default(),
         }
@@ -199,6 +208,12 @@ impl DaemonInvocationState {
             cursor_keys,
         )
         .await
+    }
+
+    pub(super) fn work_federated_query_authority(
+        &self,
+    ) -> Arc<dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1> {
+        Arc::clone(&self.work_federated_query_authority)
     }
 
     pub(super) fn restore_initial_query_authority_for_project(
@@ -926,6 +941,28 @@ impl DaemonInvocationState {
             .await;
         }
         response
+    }
+}
+
+#[derive(Clone)]
+struct DaemonWorkFederatedQueryAuthorityV1 {
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
+}
+
+impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
+    for DaemonWorkFederatedQueryAuthorityV1
+{
+    fn authority_for<'a>(
+        &'a self,
+        scope: &'a tracedecay_application::ResolvedScope,
+    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+        Box::pin(async move {
+            let mounted = self.schedulers.query_authority_for_scope(scope).await?;
+            self.provider
+                .federated_authority_for(scope, mounted.privacy_domain())
+                .ok()
+        })
     }
 }
 

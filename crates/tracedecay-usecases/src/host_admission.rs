@@ -14,7 +14,7 @@ use tracedecay_store::{
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
 use crate::memory::{
-    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
+    EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchor,
 };
 use crate::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
@@ -302,14 +302,6 @@ impl HostAdmissionOutcome {
             HostAdmissionStatus::Unavailable,
             false,
             Some("spool_corrupted"),
-        )
-    }
-
-    pub const fn spool_unsupported_version() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("spool_unsupported_version"),
         )
     }
 
@@ -936,7 +928,7 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
         &self,
         owner: FactOwnerV1,
         anchor_id: RetrievalAnchorId,
-    ) -> Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError> {
+    ) -> Result<ResolvedEvidenceAnchor, EvidenceAnchorResolutionError> {
         owner
             .validate()
             .map_err(|error| EvidenceAnchorResolutionError::Authority {
@@ -985,7 +977,7 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
                 });
             }
         };
-        ResolvedEvidenceAnchorV1::new(record).map_err(|error| {
+        ResolvedEvidenceAnchor::new(record).map_err(|error| {
             EvidenceAnchorResolutionError::Authority {
                 operation: "validate resolved observation evidence anchor",
                 source: Box::new(error),

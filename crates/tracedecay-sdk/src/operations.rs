@@ -2384,18 +2384,18 @@ typed_operation!(
     1
 );
 
-pub mod git_blame {
+pub mod application_git_blame {
     pub type Request = tracedecay_application::git::GitBlameSurfaceRequest;
     pub type Result = tracedecay_application::git::GitReadResultV1;
 }
 typed_operation!(
-    GitBlame,
-    git_blame,
+    ApplicationGitBlame,
+    application_git_blame,
     "operation.application.git_blame",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_git_blame"
+    OperationTransport::Http {
+        route: "/application/git/blame"
     },
-    "binding.mcp.git_blame.v1",
+    "binding.http.git_blame.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2419,18 +2419,18 @@ typed_operation!(
     1
 );
 
-pub mod git_diff {
+pub mod application_git_diff {
     pub type Request = tracedecay_application::git::GitDiffSurfaceRequest;
     pub type Result = tracedecay_application::git::GitReadResultV1;
 }
 typed_operation!(
-    GitDiff,
-    git_diff,
+    ApplicationGitDiff,
+    application_git_diff,
     "operation.application.git_diff",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_git_diff"
+    OperationTransport::Http {
+        route: "/application/git/diff"
     },
-    "binding.mcp.git_diff.v1",
+    "binding.http.git_diff.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2454,18 +2454,18 @@ typed_operation!(
     1
 );
 
-pub mod git_history {
+pub mod application_git_history {
     pub type Request = tracedecay_application::git::GitHistorySurfaceRequest;
     pub type Result = tracedecay_application::git::GitReadResultV1;
 }
 typed_operation!(
-    GitHistory,
-    git_history,
+    ApplicationGitHistory,
+    application_git_history,
     "operation.application.git_history",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_git_history"
+    OperationTransport::Http {
+        route: "/application/git/history"
     },
-    "binding.mcp.git_history.v1",
+    "binding.http.git_history.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2489,18 +2489,18 @@ typed_operation!(
     1
 );
 
-pub mod git_hunks {
+pub mod application_git_hunks {
     pub type Request = tracedecay_application::git::GitHunksSurfaceRequest;
     pub type Result = tracedecay_application::git::GitReadResultV1;
 }
 typed_operation!(
-    GitHunks,
-    git_hunks,
+    ApplicationGitHunks,
+    application_git_hunks,
     "operation.application.git_hunks",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_git_hunks"
+    OperationTransport::Http {
+        route: "/application/git/hunks"
     },
-    "binding.mcp.git_hunks.v1",
+    "binding.http.git_hunks.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2559,18 +2559,18 @@ typed_operation!(
     1
 );
 
-pub mod git_status {
+pub mod application_git_status {
     pub type Request = tracedecay_application::git::GitStatusSurfaceRequest;
     pub type Result = tracedecay_application::git::GitReadResultV1;
 }
 typed_operation!(
-    GitStatus,
-    git_status,
+    ApplicationGitStatus,
+    application_git_status,
     "operation.application.git_status",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_git_status"
+    OperationTransport::Http {
+        route: "/application/git/status"
     },
-    "binding.mcp.git_status.v1",
+    "binding.http.git_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,

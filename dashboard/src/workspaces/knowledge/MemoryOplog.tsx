@@ -15,7 +15,7 @@
  * one. Rendering both as an empty cell would claim the second is the first, and
  * claim of the first that nothing was ever written. Both keep their chip.
  */
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { Panel, Readout } from '../../ui/instrument.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { useMemoryOplog, type OplogEvent, type OplogPayload } from '../../data/query/memory.ts';
@@ -26,9 +26,9 @@ export function MemoryOplog() {
   return (
     <div className="flex h-full min-h-0 flex-col p-3">
       <Panel legend="Memory oplog" className="min-h-0 flex-1" bodyClassName="min-h-0 flex flex-col" elevation="well">
-        <LegacyBoundary title="Memory oplog" pending={oplog.isPending} result={oplog.data}>
+        <PayloadBoundary title="Memory oplog" pending={oplog.isPending} result={oplog.data}>
           {(data) => <OplogBody data={data} />}
-        </LegacyBoundary>
+        </PayloadBoundary>
       </Panel>
     </div>
   );

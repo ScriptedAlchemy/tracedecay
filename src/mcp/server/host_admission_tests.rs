@@ -21,8 +21,10 @@ use crate::application::host_admission::{
 use crate::daemon::{DaemonHookEvent, HookAgent, HookRouteMetadata, HookTerminalReceipt};
 use crate::errors::TraceDecayError;
 use crate::mcp::project_route::HookProjectRouteCache;
-use crate::sessions::git_correlation::{CommitRelationFilter, GitRefFilter, SessionsForQuery};
-use crate::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay_sessions::runtime::git_correlation::{
+    CommitRelationFilter, GitRefFilter, SessionsForQuery,
+};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()
@@ -1486,7 +1488,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         ));
     }
     server.ledger_writes_settled().await;
-    let ready = crate::automation::host_receipts::oldest_ready(&dashboard_root)
+    let ready = tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root)
         .await
         .unwrap()
         .expect("credential receipt should join its ingested watermark");

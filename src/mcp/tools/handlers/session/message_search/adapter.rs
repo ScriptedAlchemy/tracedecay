@@ -23,8 +23,8 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::WorkflowScopeFilter;
 use crate::mcp::tools::ToolResult;
 use crate::mcp::tools::handlers::support::{argument_error, tool_json_with_md};
-use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::{
+use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::{
     ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchScope,
     SessionSearchTimeRange,
 };

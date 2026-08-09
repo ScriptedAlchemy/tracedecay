@@ -21,11 +21,11 @@ pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::memory::types::{
     AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
-pub(crate) use tracedecay::sessions::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
 pub(crate) use tracedecay_domain::ProjectId;
+pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 pub(crate) struct MessageDetails<'a> {
     pub(crate) timestamp: i64,
@@ -139,7 +139,7 @@ fn spawn_dashboard_server_with_runner(
                 ),
             };
             let authority = host_runtime
-                .dashboard_test_authority_with_session_reads(cg.as_ref())
+                .dashboard_test_authority_with_session_reads(&cg)
                 .await
                 .expect("dashboard test authority");
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
@@ -238,10 +238,9 @@ pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<Dashboar
     runtime
 }
 
-pub(crate) struct AppliedDashboardAutomationFact {
-    pub(crate) proposal_id: String,
+pub(crate) struct DashboardAutomaticFactReceipt {
+    pub(crate) apply_id: String,
     pub(crate) canonical_fact_id: String,
-    pub(crate) legacy_fact_id: Option<i64>,
 }
 
 fn dashboard_fixture_project_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
@@ -256,22 +255,22 @@ fn dashboard_fixture_project_owner(cg: &TraceDecay) -> tracedecay_domain::FactOw
     tracedecay_domain::FactOwnerV1::Project { project_id }
 }
 
-/// Creates an applied automation fact through the canonical proposal and
-/// promotion path. No sidecar JSON participates in this fixture.
-pub(crate) async fn apply_dashboard_automation_fact(
+/// Records an automatic fact effect through the canonical receipt authority.
+/// No sidecar JSON participates in this fixture.
+pub(crate) async fn record_dashboard_automatic_fact(
     cg: &TraceDecay,
     run_id: &str,
     content: &str,
-) -> AppliedDashboardAutomationFact {
-    use tracedecay::application::memory::{
-        MemoryApplication, MemoryOperationContext, automation_fact_proposal_add_command,
-    };
+) -> DashboardAutomaticFactReceipt {
+    use tracedecay::application::memory::MemoryApplication;
     use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_store::ProjectMemoryFactProposalPromotionV1;
+    use tracedecay_agent_hosts::automation::automatic_facts::{
+        AutomaticFactState, record_session_automatic_facts,
+    };
 
     let owner = dashboard_fixture_project_owner(cg);
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
+    let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db()))
         .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
     let request = AddFactRequest {
         content: content.to_string(),
@@ -282,56 +281,39 @@ pub(crate) async fn apply_dashboard_automation_fact(
         trust: Some(0.9),
         metadata: serde_json::json!({"origin": "dashboard-outcome-test"}),
     };
-    let command = automation_fact_proposal_add_command(
-        owner.clone(),
-        request,
+    let batch = record_session_automatic_facts(
+        &memory,
         run_id,
-        "dashboard-outcome-test",
-        None,
+        Some("dashboard-outcome-test"),
+        &[serde_json::json!({
+            "add_fact_request": request,
+            "validation": { "fixture": "dashboard-outcome-test" },
+        })],
     )
-    .unwrap_or_else(|error| panic!("build outcome proposal command: {error}"));
-    let context = MemoryOperationContext::from_trusted_request_id(
-        &owner,
-        "dashboard-outcome-test-proposal",
-        run_id,
-        None,
-    )
-    .unwrap_or_else(|error| panic!("derive outcome proposal identity: {error}"));
-    let submitted = memory
-        .submit_project_memory_fact_proposal(
-            context.operation_id().clone(),
-            command,
-            None,
-            tracedecay_store::ProjectMemoryFactProposalEvidenceV1::default(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
-    let promotion = ProjectMemoryFactProposalPromotionV1::new(
-        owner,
-        submitted.proposal_id().clone(),
-        submitted.revision(),
-        None,
-    )
-    .unwrap_or_else(|error| panic!("build outcome proposal promotion: {error}"));
-    let applied = memory
-        .promote_project_memory_fact_proposal(promotion)
-        .await
-        .unwrap_or_else(|error| panic!("promote outcome proposal: {error}"));
-    let canonical_fact_id = applied
-        .applied_fact_id()
-        .unwrap_or_else(|| panic!("applied outcome proposal needs canonical fact identity"))
-        .as_str()
-        .to_string();
-    AppliedDashboardAutomationFact {
-        proposal_id: applied.proposal_id().as_str().to_string(),
-        canonical_fact_id,
-        legacy_fact_id: applied.legacy_fact_id(),
+    .await
+    .unwrap_or_else(|error| panic!("record outcome automatic fact receipt: {error}"));
+    assert!(
+        batch.retry_error.is_none(),
+        "outcome automatic fact receipt must not require retry: {:?}",
+        batch.retry_error
+    );
+    let receipt = batch
+        .receipts
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("outcome automatic fact application must return a receipt"));
+    assert_eq!(receipt.state, AutomaticFactState::Applied);
+    DashboardAutomaticFactReceipt {
+        apply_id: receipt.apply_id,
+        canonical_fact_id: receipt.applied_canonical_fact_id.unwrap_or_else(|| {
+            panic!("applied outcome automatic fact receipt needs canonical fact identity")
+        }),
     }
 }
 
-pub(crate) async fn delete_dashboard_automation_fact(
+pub(crate) async fn delete_dashboard_automatic_fact(
     cg: &TraceDecay,
-    record: &AppliedDashboardAutomationFact,
+    receipt: &DashboardAutomaticFactReceipt,
 ) {
     use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
     use tracedecay::store::memory::DatabaseFactStore;
@@ -344,14 +326,14 @@ pub(crate) async fn delete_dashboard_automation_fact(
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
         .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
-    let context = MemoryOperationContext::from_trusted_request_id(
+    let context = MemoryOperationContext::from_request_id(
         &owner,
         "dashboard-outcome-test-delete",
-        &record.proposal_id,
+        &receipt.apply_id,
         None,
     )
     .unwrap_or_else(|error| panic!("derive outcome deletion identity: {error}"));
-    let canonical_fact_id = FactId::new(record.canonical_fact_id.clone())
+    let canonical_fact_id = FactId::new(receipt.canonical_fact_id.clone())
         .unwrap_or_else(|error| panic!("parse outcome canonical fact identity: {error}"));
     let target = ProjectMemoryFactTargetV1::Canonical(
         ProjectMemoryFactIdV1::new(owner, canonical_fact_id)

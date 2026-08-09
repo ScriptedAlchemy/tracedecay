@@ -8,8 +8,50 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::*;
 use crate::daemon_contract::DaemonInvocationPayload;
+
+fn report_profile_host_admission_bootstrap_status(
+    status: Option<ProfileHostAdmissionBootstrapStatus>,
+) {
+    let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = status else {
+        return;
+    };
+    if let Some((authority, reason)) = error.reset_required_context() {
+        log_daemon_event(
+            "profile_host_admission_bootstrap_terminal_observed",
+            &[
+                ("reason_code", "reset_required".to_owned()),
+                ("authority", authority.to_owned()),
+                ("reason", reason.to_owned()),
+            ],
+        );
+    } else if let Some((reason_code, retryable, detail)) = error.hook_runtime_context() {
+        log_daemon_event(
+            "profile_host_admission_bootstrap_terminal_observed",
+            &[
+                ("reason_code", reason_code.to_owned()),
+                ("retryable", retryable.to_string()),
+                ("detail", detail.to_owned()),
+            ],
+        );
+    } else if let Some((reason_code, retryable, detail)) = error.project_route_context() {
+        log_daemon_event(
+            "profile_host_admission_bootstrap_terminal_observed",
+            &[
+                ("reason_code", reason_code.to_owned()),
+                ("retryable", retryable.to_string()),
+                ("detail", detail.to_owned()),
+            ],
+        );
+    } else {
+        log_daemon_event(
+            "profile_host_admission_bootstrap_terminal_observed",
+            &[("reason_code", "bootstrap_operation_failed".to_owned())],
+        );
+    }
+}
 
 #[cfg(all(unix, test))]
 pub(super) async fn serve_socket_client(
@@ -20,22 +62,6 @@ pub(super) async fn serve_socket_client(
         BrokerStream::Unix(stream),
         engine,
         None,
-        DaemonClientAdmissionClass::General,
-    ))
-    .await
-}
-
-#[cfg(unix)]
-#[allow(dead_code)] // in-flight authenticated socket serving — staged
-pub(super) async fn serve_authenticated_socket_client(
-    stream: BrokerStream,
-    engine: DaemonEngine,
-    auth_token: String,
-) -> Result<()> {
-    Box::pin(serve_authenticated_socket_client_with_class(
-        stream,
-        engine,
-        auth_token,
         DaemonClientAdmissionClass::General,
     ))
     .await
@@ -679,11 +705,13 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     engine.log_client_version_skew(&handshake).await;
-    schedule_user_profile_host_admission_replay_for_identity(
-        &engine.store_administration,
-        &handshake.client_identity,
-    )
-    .await;
+    report_profile_host_admission_bootstrap_status(
+        schedule_user_profile_host_admission_replay_for_identity(
+            &engine.store_administration,
+            &handshake.client_identity,
+        )
+        .await,
+    );
     // Resolve initialize roots only after authentication and inside daemon
     // authority. The proxy process never opens the registry database.
     let initialize_route = apply_daemon_initialize_route(
@@ -1247,11 +1275,13 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     else {
         return Ok(());
     };
-    schedule_user_profile_host_admission_replay_for_identity(
-        &store_administration,
-        &handshake.client_identity,
-    )
-    .await;
+    report_profile_host_admission_bootstrap_status(
+        schedule_user_profile_host_admission_replay_for_identity(
+            &store_administration,
+            &handshake.client_identity,
+        )
+        .await,
+    );
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;

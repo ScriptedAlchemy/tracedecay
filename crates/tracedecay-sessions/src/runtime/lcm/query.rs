@@ -69,7 +69,7 @@ const PER_SESSION_HIT_CAP: usize = 3;
 
 /// Fetch budget before the re-rank stage, bounded by [`MAX_PAGE_LIMIT`].
 fn rerank_fetch_limit(limit: usize) -> usize {
-    crate::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
+    crate::retrieval_content::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
 pub async fn expand_query(

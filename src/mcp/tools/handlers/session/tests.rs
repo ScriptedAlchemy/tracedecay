@@ -1,6 +1,6 @@
 use super::*;
 use crate::mcp::response_handles::lock_response_handle_store;
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryResponse,
     LcmExpandQuerySynthesisPrompt,
 };
@@ -376,35 +376,38 @@ struct FakeSynthesisBackend {
     fail: bool,
 }
 
-impl crate::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
+impl tracedecay_agent_hosts::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
     fn run_task(
         &self,
-        request: &crate::automation::backend::AgentTaskRequest,
+        request: &tracedecay_agent_hosts::automation::backend::AgentTaskRequest,
     ) -> std::result::Result<
-        crate::automation::backend::AgentTaskResponse,
-        crate::automation::backend::AgentTaskError,
+        tracedecay_agent_hosts::automation::backend::AgentTaskResponse,
+        tracedecay_agent_hosts::automation::backend::AgentTaskError,
     > {
         if self.fail {
             return Err(
-                crate::automation::backend::AgentTaskError::from_backend_message(
+                tracedecay_agent_hosts::automation::backend::AgentTaskError::from_backend_message(
                     "synthesis backend permanently failed",
                 ),
             );
         }
-        Ok(crate::automation::backend::AgentTaskResponse {
-            run_id: request.run_id.clone(),
-            task: request.task,
-            output_text: self.output.clone(),
-            output_json: None,
-            model: None,
-            provider: None,
-            input_tokens: None,
-            output_tokens: None,
-        })
+        Ok(
+            tracedecay_agent_hosts::automation::backend::AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: self.output.clone(),
+                output_json: None,
+                model: None,
+                provider: None,
+                input_tokens: None,
+                output_tokens: None,
+            },
+        )
     }
 }
 
-fn expand_query_response_needing_synthesis() -> crate::sessions::lcm::LcmExpandQueryResponse {
+fn expand_query_response_needing_synthesis()
+-> tracedecay_sessions::runtime::lcm::LcmExpandQueryResponse {
     LcmExpandQueryResponse {
         answer: None,
         needs_synthesis: true,
@@ -449,7 +452,7 @@ async fn synthesize_expand_query_answer_populates_answer_with_backend() {
         output: "  We decided to ship the ranker change.  ".to_string(),
         fail: false,
     };
-    let policy = crate::automation::backend::BackendRetryPolicy::new(
+    let policy = tracedecay_agent_hosts::automation::backend::BackendRetryPolicy::new(
         1,
         Vec::new(),
         std::time::Duration::from_secs(30),
@@ -478,7 +481,7 @@ async fn synthesize_expand_query_answer_falls_back_when_backend_fails() {
         output: String::new(),
         fail: true,
     };
-    let policy = crate::automation::backend::BackendRetryPolicy::new(
+    let policy = tracedecay_agent_hosts::automation::backend::BackendRetryPolicy::new(
         1,
         Vec::new(),
         std::time::Duration::from_secs(30),

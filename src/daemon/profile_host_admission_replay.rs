@@ -83,10 +83,19 @@ struct ProfileHostAdmissionBootstrapWorker {
     state: AtomicU8,
     attempt_count: AtomicUsize,
     backoff_count: AtomicUsize,
+    terminal_error: std::sync::Mutex<Option<Arc<crate::errors::TraceDecayError>>>,
     completed_at: std::sync::Mutex<Option<Instant>>,
     completed: Notify,
     cancellation: Arc<ProfileHostAdmissionCancellation>,
     retry_budget: Duration,
+}
+
+#[derive(Clone)]
+pub(super) enum ProfileHostAdmissionBootstrapStatus {
+    Running,
+    Ready,
+    Terminal(Arc<crate::errors::TraceDecayError>),
+    Cancelled,
 }
 
 struct ProfileHostAdmissionCancellation {
@@ -175,6 +184,16 @@ impl ProfileHostAdmissionReplayRegistry {
             profile_root.to_path_buf(),
             ProfileHostAdmissionBootstrapEntry { worker, task },
         );
+    }
+
+    pub(super) async fn bootstrap_status(
+        &self,
+        profile_root: &Path,
+    ) -> Option<ProfileHostAdmissionBootstrapStatus> {
+        let workers = self.bootstrap_workers.lock().await;
+        workers
+            .get(profile_root)
+            .and_then(|entry| entry.worker.status())
     }
 
     pub(super) async fn ensure(
@@ -347,7 +366,7 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
+    pub(super) async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
             .await
@@ -358,7 +377,7 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
+    pub(super) async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
         self.bootstrap_workers
             .lock()
             .await
@@ -369,7 +388,11 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
-    async fn wait_bootstrap_completed(&self, profile_root: &Path, timeout: Duration) -> bool {
+    pub(super) async fn wait_bootstrap_completed(
+        &self,
+        profile_root: &Path,
+        timeout: Duration,
+    ) -> bool {
         let worker = {
             let workers = self.bootstrap_workers.lock().await;
             workers
@@ -419,14 +442,6 @@ impl ProfileHostAdmissionReplayRegistry {
         registry.bootstrap_retry_budget = budget;
         registry
     }
-
-    #[cfg(test)]
-    async fn bootstrap_state(&self, profile_root: &Path) -> Option<u8> {
-        let workers = self.bootstrap_workers.lock().await;
-        workers
-            .get(profile_root)
-            .map(|entry| entry.worker.state.load(Ordering::Acquire))
-    }
 }
 
 impl ProfileHostAdmissionBootstrapWorker {
@@ -435,6 +450,7 @@ impl ProfileHostAdmissionBootstrapWorker {
             state: AtomicU8::new(BOOTSTRAP_RUNNING),
             attempt_count: AtomicUsize::new(0),
             backoff_count: AtomicUsize::new(0),
+            terminal_error: std::sync::Mutex::new(None),
             completed_at: std::sync::Mutex::new(None),
             completed: Notify::new(),
             cancellation,
@@ -449,6 +465,29 @@ impl ProfileHostAdmissionBootstrapWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.state.store(state, Ordering::Release);
         self.completed.notify_waiters();
+    }
+
+    fn finish_terminal(&self, error: crate::errors::TraceDecayError) {
+        *self
+            .terminal_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(error));
+        self.finish(BOOTSTRAP_TERMINAL);
+    }
+
+    fn status(&self) -> Option<ProfileHostAdmissionBootstrapStatus> {
+        match self.state.load(Ordering::Acquire) {
+            BOOTSTRAP_RUNNING => Some(ProfileHostAdmissionBootstrapStatus::Running),
+            BOOTSTRAP_READY => Some(ProfileHostAdmissionBootstrapStatus::Ready),
+            BOOTSTRAP_TERMINAL => self
+                .terminal_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|error| ProfileHostAdmissionBootstrapStatus::Terminal(Arc::clone(error))),
+            BOOTSTRAP_CANCELLED => Some(ProfileHostAdmissionBootstrapStatus::Cancelled),
+            _ => None,
+        }
     }
 
     fn cache_valid(&self, now: Instant, cache_for: Duration) -> bool {
@@ -486,16 +525,13 @@ impl ProfileHostAdmissionBootstrapWorker {
                     return;
                 }
                 Err(error) => {
-                    let (reason_code, retryable) = error.project_route_context().map_or(
-                        ("bootstrap_operation_failed", false),
-                        |(reason, retryable, _)| (reason, retryable),
-                    );
+                    let (reason_code, retryable) = bootstrap_error_disposition(&error);
                     if !retryable {
                         log_daemon_event(
                             "profile_host_admission_bootstrap_stopped",
                             &[("reason_code", reason_code.to_owned())],
                         );
-                        self.finish(BOOTSTRAP_TERMINAL);
+                        self.finish_terminal(error);
                         return;
                     }
                     consecutive_retryable = consecutive_retryable.saturating_add(1);
@@ -528,7 +564,7 @@ impl ProfileHostAdmissionBootstrapWorker {
                                 ("attempts", consecutive_retryable.to_string()),
                             ],
                         );
-                        self.finish(BOOTSTRAP_TERMINAL);
+                        self.finish_terminal(error);
                         return;
                     }
                     tokio::select! {
@@ -541,6 +577,18 @@ impl ProfileHostAdmissionBootstrapWorker {
                 }
             }
         }
+    }
+}
+
+fn bootstrap_error_disposition(error: &crate::errors::TraceDecayError) -> (&str, bool) {
+    if error.reset_required_context().is_some() {
+        ("reset_required", false)
+    } else if let Some((reason_code, retryable, _)) = error.hook_runtime_context() {
+        (reason_code, retryable)
+    } else if let Some((reason_code, retryable, _)) = error.project_route_context() {
+        (reason_code, retryable)
+    } else {
+        ("bootstrap_operation_failed", false)
     }
 }
 
@@ -893,6 +941,129 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reset_required_bootstrap_is_typed_terminal_without_retry_or_backoff() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let operation_attempts = Arc::clone(&attempts);
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let attempts = Arc::clone(&operation_attempts);
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::AcqRel);
+                Err(crate::errors::TraceDecayError::reset_required(
+                    "host-admission spool",
+                    "future spool version 3 is incompatible with required version 2",
+                ))
+            })
+        });
+
+        registry.ensure_bootstrap(&profile_root, operation).await;
+        assert!(
+            registry
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
+                .await
+        );
+
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert_eq!(registry.bootstrap_attempt_count(&profile_root).await, 1);
+        assert_eq!(registry.bootstrap_backoff_count(&profile_root).await, 0);
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) =
+            registry.bootstrap_status(&profile_root).await
+        else {
+            panic!("reset-required bootstrap must retain its typed terminal error");
+        };
+        assert_eq!(
+            error.reset_required_context(),
+            Some((
+                "host-admission spool",
+                "future spool version 3 is incompatible with required version 2",
+            ))
+        );
+        assert!(error.project_route_context().is_none());
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bootstrap_preserves_hook_runtime_retry_dispositions() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let retryable_profile = temp.path().join("retryable");
+        let terminal_profile = temp.path().join("terminal");
+        std::fs::create_dir_all(&retryable_profile).unwrap();
+        std::fs::create_dir_all(&terminal_profile).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+
+        let retryable_attempts = Arc::new(AtomicUsize::new(0));
+        let operation_attempts = Arc::clone(&retryable_attempts);
+        let retryable_operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let attempts = Arc::clone(&operation_attempts);
+            Box::pin(async move {
+                if attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                    Err(crate::errors::TraceDecayError::hook_runtime(
+                        "spool_io_failed",
+                        true,
+                        "host-admission spool open failed",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        registry
+            .ensure_bootstrap(&retryable_profile, retryable_operation)
+            .await;
+        assert!(
+            registry
+                .wait_bootstrap_completed(&retryable_profile, Duration::from_secs(1))
+                .await
+        );
+        assert_eq!(retryable_attempts.load(Ordering::Acquire), 2);
+        assert_eq!(
+            registry.bootstrap_backoff_count(&retryable_profile).await,
+            1
+        );
+        assert!(matches!(
+            registry.bootstrap_status(&retryable_profile).await,
+            Some(ProfileHostAdmissionBootstrapStatus::Ready)
+        ));
+
+        let terminal_operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            Box::pin(async move {
+                Err(crate::errors::TraceDecayError::hook_runtime(
+                    "spool_corrupted",
+                    false,
+                    "host-admission spool is corrupted",
+                ))
+            })
+        });
+        registry
+            .ensure_bootstrap(&terminal_profile, terminal_operation)
+            .await;
+        assert!(
+            registry
+                .wait_bootstrap_completed(&terminal_profile, Duration::from_secs(1))
+                .await
+        );
+        assert_eq!(registry.bootstrap_attempt_count(&terminal_profile).await, 1);
+        assert_eq!(registry.bootstrap_backoff_count(&terminal_profile).await, 0);
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) =
+            registry.bootstrap_status(&terminal_profile).await
+        else {
+            panic!("corruption must remain a distinct nonretryable terminal");
+        };
+        assert_eq!(
+            error.hook_runtime_context(),
+            Some((
+                "spool_corrupted",
+                false,
+                "host-admission spool is corrupted",
+            ))
+        );
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bootstrap_retries_transient_failure_without_another_ensure() {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
@@ -959,10 +1130,18 @@ mod tests {
                 .await,
             "a permanently retryable bootstrap must still terminate"
         );
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) =
+            registry.bootstrap_status(&profile_root).await
+        else {
+            panic!("spending the retry budget must retain the terminal error");
+        };
         assert_eq!(
-            registry.bootstrap_state(&profile_root).await,
-            Some(BOOTSTRAP_TERMINAL),
-            "spending the retry budget is a terminal give-up, not a success"
+            error.project_route_context(),
+            Some((
+                "test_bootstrap_unavailable",
+                true,
+                "permanently retryable test failure",
+            ))
         );
         let observed = attempts.load(Ordering::Acquire);
         assert!(observed >= 2, "the budget must allow real retries first");
@@ -1004,7 +1183,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1061,7 +1240,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1112,7 +1291,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1144,7 +1323,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1178,7 +1357,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1236,7 +1415,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1310,7 +1489,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
@@ -1373,7 +1552,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();

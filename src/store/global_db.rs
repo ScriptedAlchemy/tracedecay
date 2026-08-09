@@ -9,8 +9,8 @@ use tracedecay_store::{
 };
 
 use crate::global_db::{RegisteredGlobalDb, TranscriptPersistenceError};
-use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 use crate::store::{GlobalDbGitCorrelationStore, TranscriptIngestStore};
+use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 
 /// Transcript-store adapter over an already-open authoritative
 /// [`RegisteredGlobalDb`].
@@ -220,7 +220,7 @@ where
         &self,
         provider: &str,
         session_id: &str,
-    ) -> TranscriptStoreResult<Option<crate::sessions::SessionRecord>> {
+    ) -> TranscriptStoreResult<Option<tracedecay_sessions::runtime::SessionRecord>> {
         self.db()
             .get_session_result(provider, session_id)
             .await

@@ -3,9 +3,9 @@ use std::path::Path;
 use serde_json::{Map, Value as JsonValue, json};
 use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispositionV1};
 
-pub use crate::compatibility::derived_text_for_index;
-pub use crate::compatibility::derived_text_for_snippet;
-use crate::compatibility::projected_content_hash;
+pub use crate::retrieval_content::derived_text_for_index;
+pub use crate::retrieval_content::derived_text_for_snippet;
+use crate::retrieval_content::projected_content_hash;
 use crate::runtime::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_runtime_core::privacy::{

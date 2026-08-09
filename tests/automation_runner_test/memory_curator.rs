@@ -173,26 +173,33 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         json!(1)
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["decision"]["disposition"],
+        json!("allow")
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["permanent_delete_count"],
+        run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["effect"]["permanent_delete_count"],
         json!(1)
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["mutates_store"],
+        run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["effect"]["mutates_store"],
         json!(true)
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["autonomous_memory_apply"],
-        json!(true)
+        run.report["curation_policy"]["decision"]["authority"]["actor_id"],
+        json!("automation:memory-curator")
+    );
+    assert_eq!(
+        run.report["curation_policy"]["decision"]["authority"]["configuration_revision_id"],
+        json!(test_configuration_revision())
+    );
+    assert!(run.report["curation_policy"]["decision"]["authority"]["project_id"].is_string());
+    assert!(run.report["curation_policy"]["decision"]["authority"]["profile_id"].is_string());
+    assert!(
+        run.report["curation_policy"]["decision"]["configuration_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
     );
     assert!(!fact_exists(&cg, facts.loser_id).await);
-    assert_eq!(
-        run.report["automation_apply_policy"]["memory_apply_policy"],
-        json!("validate_then_apply")
-    );
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
         json!(run.run_id)
@@ -658,12 +665,8 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
 
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert_eq!(
-        run.report["automation_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["memory_apply_policy"],
-        json!("validate_then_apply")
+        run.report["curation_policy"]["decision"]["disposition"],
+        json!("allow")
     );
     assert!(!fact_exists(&cg, facts.loser_id).await);
 }
@@ -889,19 +892,11 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
 
     assert_eq!(backend.calls(), 1);
     assert_eq!(
-        run.report["automation_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        run.report["curation_policy"]["decision"]["disposition"],
+        json!("allow")
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["memory_apply_policy"],
-        json!("validate_then_apply")
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["mutates_store"],
-        json!(true)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["autonomous_memory_apply"],
+        run.report["curation_policy"]["effect"]["mutates_store"],
         json!(true)
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
@@ -1023,11 +1018,11 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
 
     assert_eq!(backend.calls(), 1);
     assert_eq!(
-        run.report["automation_apply_policy"]["decision"],
-        json!("auto_apply_allowed")
+        run.report["curation_policy"]["decision"]["disposition"],
+        json!("allow")
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["mutates_store"],
+        run.report["curation_policy"]["effect"]["mutates_store"],
         json!(true)
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));

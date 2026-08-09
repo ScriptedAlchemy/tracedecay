@@ -1,34 +1,24 @@
 use std::any::TypeId;
 
-use tracedecay::automation::config::{
+use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationTaskPatch, default_user_automation_config, effective_config,
+    AutomationTaskPatch, effective_config,
 };
 
 #[test]
-fn automation_defaults_are_conservative() {
+fn automation_defaults_mount_the_final_v2_curators() {
     let config = AutomationConfig::default();
-
-    assert!(!config.enabled);
-    assert_eq!(config.backend, AutomationBackend::Disabled);
-    assert_eq!(config.host_mode, AutomationHostMode::Standalone);
-    assert_eq!(config.timeout_secs, 60);
-    assert_eq!(config.scheduler_tick_secs, 60);
-    assert!(!config.tasks.memory_curator.enabled);
-    assert!(!config.tasks.session_reflector.enabled);
-    assert!(!config.tasks.skill_writer.enabled);
-}
-
-#[test]
-fn projectless_automation_uses_daemon_owned_defaults() {
-    let config = default_user_automation_config();
 
     assert!(config.enabled);
     assert_eq!(config.backend, AutomationBackend::CodexAppServer);
-    assert!(!config.combine_due_tasks);
-    assert!(config.tasks.memory_curator.enabled);
-    assert!(config.tasks.session_reflector.enabled);
-    assert!(config.tasks.skill_writer.enabled);
+    assert_eq!(config.host_mode, AutomationHostMode::Standalone);
+    assert_eq!(config.timeout_secs, 60);
+    assert_eq!(config.scheduler_tick_secs, 60);
+    assert!(config.combine_due_tasks);
+    assert_eq!(config.tasks.memory_curator.interval_secs, Some(900));
+    assert_eq!(config.tasks.session_reflector.interval_secs, Some(900));
+    assert_eq!(config.tasks.skill_writer.interval_secs, Some(3_600));
+    assert_eq!(config.tasks.skill_writer.min_idle_secs, Some(900));
 }
 
 #[test]
@@ -95,11 +85,11 @@ fn validation_rejects_invalid_task_schedule() {
 #[test]
 fn production_automation_contracts_use_leaf_owned_type_identity() {
     assert_eq!(
-        TypeId::of::<tracedecay::automation::config::AutomationConfig>(),
+        TypeId::of::<tracedecay_agent_hosts::automation::config::AutomationConfig>(),
         TypeId::of::<tracedecay_automation::config::AutomationConfig>(),
     );
     assert_eq!(
-        TypeId::of::<tracedecay::automation::backend::AgentTaskKind>(),
+        TypeId::of::<tracedecay_agent_hosts::automation::backend::AgentTaskKind>(),
         TypeId::of::<tracedecay_automation::backend::AgentTaskKind>(),
     );
     assert_eq!(

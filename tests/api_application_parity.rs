@@ -76,7 +76,7 @@ fn unpinned_operations(fixture: &serde_json::Value) -> BTreeSet<String> {
 }
 
 #[tokio::test]
-async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() {
+async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner() {
     let owner = |request: HttpApplicationRequest| async move {
         CanonicalInvocationResult::<serde_json::Value>::new(
             tracedecay_tool_catalog::BindingId::new(format!(
@@ -123,6 +123,62 @@ async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() 
         (
             "/feedback/advisory_cycle",
             HttpApplicationOperation::FeedbackAdvisoryCycle,
+        ),
+    ] {
+        let resolution = BindingResolution {
+            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
+            protocol_revision: 1,
+            negotiated_features: BTreeSet::new(),
+        };
+        assert!(
+            resolver
+                .resolve_binding(BindingSurface::Http, &resolution)
+                .is_some(),
+            "{route} must remain catalog-advertised"
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri(route)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("HTTP request");
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("HTTP response");
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{route} must preserve the application problem"
+        );
+    }
+
+    for (route, operation) in [
+        (
+            "/github-stack/signal-expand",
+            HttpApplicationOperation::GitHubStackSignalExpand,
+        ),
+        (
+            "/native-integration/worktree_inventory",
+            HttpApplicationOperation::NativeIntegrationWorktreeInventory,
+        ),
+        (
+            "/native-integration/worktree_cleanup_inspect",
+            HttpApplicationOperation::NativeIntegrationWorktreeInspect,
+        ),
+        (
+            "/native-integration/worktree_cleanup_confirm",
+            HttpApplicationOperation::NativeIntegrationWorktreeConfirm,
+        ),
+        (
+            "/native-integration/worktree_cleanup_remove",
+            HttpApplicationOperation::NativeIntegrationWorktreeRemove,
+        ),
+        (
+            "/native-integration/worktree_cleanup_reconcile",
+            HttpApplicationOperation::NativeIntegrationWorktreeReconcile,
         ),
     ] {
         let resolution = BindingResolution {

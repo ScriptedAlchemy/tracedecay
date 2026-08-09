@@ -15,7 +15,8 @@ use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 #[cfg(unix)]
 use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
 use super::profile_host_admission_replay::{
-    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionReplayRegistry,
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayRegistry,
 };
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
@@ -61,32 +62,6 @@ pub(super) fn graph_writer_scope(
     class: StoreWriterClass,
 ) -> WriterScope {
     store_writer_scope(&cg.store_layout().data_root, class)
-}
-
-#[derive(Clone)]
-pub(super) enum HostAdmissionBrokerState {
-    Available(crate::application::host_admission::SharedHostAdmissionBroker),
-    Unavailable(crate::application::host_admission::HostAdmissionOutcome),
-}
-
-impl HostAdmissionBrokerState {
-    pub(super) fn broker(
-        &self,
-    ) -> Option<&crate::application::host_admission::SharedHostAdmissionBroker> {
-        match self {
-            Self::Available(broker) => Some(broker),
-            Self::Unavailable(_) => None,
-        }
-    }
-
-    pub(super) fn unavailable_outcome(
-        &self,
-    ) -> Option<crate::application::host_admission::HostAdmissionOutcome> {
-        match self {
-            Self::Available(_) => None,
-            Self::Unavailable(outcome) => Some(*outcome),
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -373,17 +348,7 @@ impl ProfileHostAdmissionBootstrapContext {
                     error.to_string(),
                 )
             })?;
-        let state = self.open_broker(&broker_path).await;
-        let broker = match state {
-            HostAdmissionBrokerState::Available(broker) => broker,
-            HostAdmissionBrokerState::Unavailable(outcome) => {
-                return Err(TraceDecayError::project_route(
-                    outcome.reason_code.unwrap_or("spool_unavailable"),
-                    outcome.retryable,
-                    "user-profile host admission spool is unavailable",
-                ));
-            }
-        };
+        let broker = self.open_broker(&broker_path).await?;
         let Some(replay) = self.profile_host_admission_replay.upgrade() else {
             return Err(TraceDecayError::project_route(
                 "daemon_shutting_down",
@@ -397,40 +362,39 @@ impl ProfileHostAdmissionBootstrapContext {
         Ok(())
     }
 
-    async fn open_broker(&self, path: &Path) -> HostAdmissionBrokerState {
+    async fn open_broker(
+        &self,
+        path: &Path,
+    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
         if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
-            return HostAdmissionBrokerState::Available(broker);
+            return Ok(broker);
         }
 
         let _open = self.host_admission_broker_gate.lock().await;
         let brokers = self.host_admission_brokers.lock().await;
         if let Some(broker) = brokers.get(path) {
-            return HostAdmissionBrokerState::Available(Arc::clone(broker));
+            return Ok(Arc::clone(broker));
         }
         drop(brokers);
         let open_path = path.to_path_buf();
-        let opened = tokio::task::spawn_blocking(move || {
+        let (runtime, _) = tokio::task::spawn_blocking(move || {
             crate::application::host_admission::HostAdmissionRuntime::open_for_database(&open_path)
         })
-        .await;
-        let state = match opened {
-            Ok(Ok((runtime, _))) => HostAdmissionBrokerState::Available(Arc::new(
-                crate::application::host_admission::HostAdmissionBroker::new(runtime),
-            )),
-            Ok(Err(outcome)) => HostAdmissionBrokerState::Unavailable(outcome),
-            Err(_) => HostAdmissionBrokerState::Unavailable(
-                crate::application::host_admission::HostAdmissionOutcome::retained_unavailable(
-                    "spool_runtime_unavailable",
-                ),
-            ),
-        };
-        if let HostAdmissionBrokerState::Available(broker) = &state {
-            self.host_admission_brokers
-                .lock()
-                .await
-                .insert(path.to_path_buf(), Arc::clone(broker));
-        }
-        state
+        .await
+        .map_err(|_| {
+            TraceDecayError::project_route(
+                "spool_runtime_unavailable",
+                true,
+                "host-admission spool runtime task failed",
+            )
+        })??;
+        let broker =
+            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+        self.host_admission_brokers
+            .lock()
+            .await
+            .insert(path.to_path_buf(), Arc::clone(&broker));
+        Ok(broker)
     }
 }
 
@@ -792,7 +756,7 @@ impl StoreAdministration {
     pub(super) async fn host_admission_broker(
         &self,
         database: &Arc<crate::global_db::RegisteredGlobalDb>,
-    ) -> Result<HostAdmissionBrokerState> {
+    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -812,12 +776,12 @@ impl StoreAdministration {
     async fn host_admission_broker_for_path(
         &self,
         database_path: &Path,
-    ) -> Result<HostAdmissionBrokerState> {
+    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
         let path = authority::canonical_identity_path(database_path)?;
         if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
             self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
                 .await;
-            return Ok(HostAdmissionBrokerState::Available(broker));
+            return Ok(broker);
         }
 
         // Serialize first-open publication without retaining the broker map
@@ -826,40 +790,34 @@ impl StoreAdministration {
         let state = {
             let brokers = self.host_admission_brokers.lock().await;
             if let Some(broker) = brokers.get(&path) {
-                HostAdmissionBrokerState::Available(Arc::clone(broker))
+                Arc::clone(broker)
             } else {
                 drop(brokers);
                 let open_path = path.clone();
-                let opened = tokio::task::spawn_blocking(move || {
+                let (runtime, _) = tokio::task::spawn_blocking(move || {
                     crate::application::host_admission::HostAdmissionRuntime::open_for_database(
                         &open_path,
                     )
                 })
-                .await;
-                let state = match opened {
-                    Ok(Ok((runtime, _))) => HostAdmissionBrokerState::Available(Arc::new(
-                        crate::application::host_admission::HostAdmissionBroker::new(runtime),
-                    )),
-                    Ok(Err(outcome)) => HostAdmissionBrokerState::Unavailable(outcome),
-                    Err(_) => HostAdmissionBrokerState::Unavailable(
-                        crate::application::host_admission::HostAdmissionOutcome::retained_unavailable(
-                            "spool_runtime_unavailable",
-                        ),
-                    ),
-                };
-                if let HostAdmissionBrokerState::Available(broker) = &state {
-                    self.host_admission_brokers
-                        .lock()
-                        .await
-                        .insert(path.clone(), Arc::clone(broker));
-                }
-                state
+                .await
+                .map_err(|_| {
+                    TraceDecayError::project_route(
+                        "spool_runtime_unavailable",
+                        true,
+                        "host-admission spool runtime task failed",
+                    )
+                })??;
+                let broker =
+                    Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+                self.host_admission_brokers
+                    .lock()
+                    .await
+                    .insert(path.clone(), Arc::clone(&broker));
+                broker
             }
         };
-        if let Some(broker) = state.broker() {
-            self.maybe_ensure_user_profile_host_admission_replay(&path, broker)
-                .await;
-        }
+        self.maybe_ensure_user_profile_host_admission_replay(&path, &state)
+            .await;
         Ok(state)
     }
 
@@ -914,13 +872,31 @@ impl StoreAdministration {
         Ok(())
     }
 
+    pub(super) async fn profile_host_admission_bootstrap_status(
+        &self,
+        profile_root: &Path,
+    ) -> Result<Option<ProfileHostAdmissionBootstrapStatus>> {
+        let profile_root = authority::canonical_identity_path(profile_root)?;
+        let authority_profile_root =
+            authority::canonical_identity_path(self.profile_identity()?.profile_root())?;
+        if profile_root != authority_profile_root {
+            return Err(TraceDecayError::Config {
+                message: "profile host-admission bootstrap identity mismatch".to_owned(),
+            });
+        }
+        Ok(self
+            .profile_host_admission_replay
+            .bootstrap_status(&profile_root)
+            .await)
+    }
+
     async fn maybe_ensure_user_profile_host_admission_replay(
         &self,
         broker_path: &Path,
         broker: &crate::application::host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(crate::sessions::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
         if !is_user_sessions {
             return;
         }
@@ -1567,6 +1543,20 @@ mod tests {
     use super::super::{ProjectRouteKey, StoreOwnerKey};
     use super::*;
 
+    fn write_future_spool_metadata(database_path: &Path) -> (PathBuf, Vec<u8>) {
+        let file_name = database_path.file_name().unwrap().to_str().unwrap();
+        let spool_path = database_path
+            .parent()
+            .unwrap()
+            .join(format!(".{file_name}.host-admission"));
+        std::fs::create_dir_all(&spool_path).unwrap();
+        let bytes =
+            br#"{"version":2,"committed_through":0,"next_seq":1,"integrity":"healthy"}"#.to_vec();
+        let meta_path = spool_path.join("meta.json");
+        std::fs::write(&meta_path, &bytes).unwrap();
+        (meta_path, bytes)
+    }
+
     #[test]
     fn branch_administration_busy_is_retryable_and_typed() {
         let error = branch_administration_busy("another daemon writer is active");
@@ -1652,24 +1642,136 @@ mod tests {
 
         let blocked = administration
             .host_admission_broker_for_path(&blocked_path)
-            .await
-            .unwrap();
-        let outcome = blocked
-            .unavailable_outcome()
-            .expect("spool open failure must be represented as typed unavailability");
+            .await;
+        let error = match blocked {
+            Err(error) => error,
+            Ok(_) => panic!("spool open failure must remain typed"),
+        };
         assert_eq!(
-            outcome.status,
-            crate::application::host_admission::HostAdmissionStatus::Unavailable
+            error.hook_runtime_context(),
+            Some(("spool_io_failed", true, "host-admission spool open failed"))
         );
-        assert!(blocked.broker().is_none());
+        assert!(error.reset_required_context().is_none());
 
         let healthy_path = temp.path().join("healthy.db");
         std::fs::File::create(&healthy_path).unwrap();
-        let healthy = administration
+        administration
             .host_admission_broker_for_path(&healthy_path)
             .await
             .unwrap();
-        assert!(healthy.broker().is_some());
+        administration.shutdown_host_admission_replay().await;
+    }
+
+    #[tokio::test]
+    async fn future_spool_version_reaches_branch_admin_as_typed_reset_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("future.db");
+        std::fs::File::create(&database_path).unwrap();
+        let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
+        let administration = StoreAdministration::default();
+
+        let result = administration
+            .host_admission_broker_for_path(&database_path)
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("future spool version must not become an unavailable outcome"),
+        };
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("host-admission spool")
+        );
+        assert!(error.project_route_context().is_none());
+        assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
+    }
+
+    #[tokio::test]
+    async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_identity =
+            crate::daemon::profile_identity::load_or_create(temp.path()).unwrap();
+        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(temp.path());
+        let (meta_path, bytes_before) = write_future_spool_metadata(&database_path);
+        let administration = StoreAdministration::default().with_profile_identity(profile_identity);
+
+        administration
+            .ensure_profile_host_admission_bootstrap(temp.path())
+            .await
+            .unwrap();
+        assert!(
+            administration
+                .profile_host_admission_replay
+                .wait_bootstrap_completed(temp.path(), Duration::from_secs(1))
+                .await,
+            "production bootstrap worker must publish its terminal state"
+        );
+        assert_eq!(
+            administration
+                .profile_host_admission_replay
+                .bootstrap_attempt_count(temp.path())
+                .await,
+            1
+        );
+        assert_eq!(
+            administration
+                .profile_host_admission_replay
+                .bootstrap_backoff_count(temp.path())
+                .await,
+            0
+        );
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = administration
+            .profile_host_admission_bootstrap_status(temp.path())
+            .await
+            .unwrap()
+        else {
+            panic!("future spool version must remain a typed bootstrap terminal");
+        };
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("host-admission spool")
+        );
+        assert!(error.project_route_context().is_none());
+        assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
+
+        let client_identity = crate::client_identity::DaemonClientIdentity {
+            profile_root: temp.path().to_path_buf(),
+            global_db_path: temp.path().join("global.db"),
+        };
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(observed_error)) =
+            super::super::project_server_lifecycle::schedule_user_profile_host_admission_replay_for_identity(
+                &administration,
+                &client_identity,
+            )
+            .await
+        else {
+            panic!("connection-serving status reader must retrieve the typed terminal");
+        };
+        assert_eq!(
+            observed_error.reset_required_context(),
+            error.reset_required_context()
+        );
+        assert_eq!(
+            administration
+                .profile_host_admission_replay
+                .bootstrap_attempt_count(temp.path())
+                .await,
+            1,
+            "reading cached terminal status must not start another attempt"
+        );
+
+        let unrelated_path = temp.path().join("unrelated.db");
+        std::fs::File::create(&unrelated_path).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            administration.host_admission_broker_for_path(&unrelated_path),
+        )
+        .await
+        .expect("typed bootstrap terminal must not block unrelated broker opens")
+        .unwrap();
         administration.shutdown_host_admission_replay().await;
     }
 

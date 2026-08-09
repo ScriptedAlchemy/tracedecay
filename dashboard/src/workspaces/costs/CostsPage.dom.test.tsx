@@ -108,7 +108,7 @@ describe('CostsPage truth claims', () => {
 
     renderCosts(payload);
 
-    // The failed legacy read reports itself...
+    // The failed payload read reports itself...
     expect(await screen.findAllByText(/Savings ledger read failed/i)).not.toHaveLength(0);
     // ...and the independent canonical projection still renders its own
     // measurements rather than being blanked by its neighbour.

@@ -14,9 +14,11 @@ use crate::dashboard::{
     DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
     DashboardLcmReadStateV1,
 };
-use crate::sessions::git_correlation::GitScopeFilter;
-use crate::sessions::lcm::{LcmDescribeResponse, LcmDescribeTarget};
-use crate::sessions::{SessionMessageType, SessionSearchScope, SessionSearchTimeRange};
+use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::lcm::{LcmDescribeResponse, LcmDescribeTarget};
+use tracedecay_sessions::runtime::{
+    SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
+};
 
 use super::{
     LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionRetrievalCommand,

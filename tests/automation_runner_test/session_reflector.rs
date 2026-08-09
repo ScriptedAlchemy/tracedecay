@@ -71,6 +71,7 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
     let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &retrieval,
         SessionReflectorAutomationOptions::default(),
@@ -140,6 +141,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
                 &cg,
                 &config,
+                &test_configuration_revision(),
                 &reflector_backend,
                 &retrieval,
                 SessionReflectorAutomationOptions::default(),
@@ -149,6 +151,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         let skill = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
+            &test_configuration_revision(),
             &skill_backend,
             &retrieval,
             SkillWriterAutomationOptions {
@@ -201,6 +204,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
             &cg,
             &config,
+            &test_configuration_revision(),
             &reflector_backend,
             &retrieval,
             SessionReflectorAutomationOptions::default(),
@@ -211,6 +215,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
             &cg,
             &config,
+            &test_configuration_revision(),
             &skill_backend,
             &retrieval,
             SkillWriterAutomationOptions {
@@ -451,6 +456,14 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     assert_eq!(
         run.report["curation_policy"]["effect"]["applied_count"],
         json!(3)
+    );
+    assert_eq!(
+        run.report["curation_policy"]["decision"]["authority"]["actor_id"],
+        json!("automation:session-reflector")
+    );
+    assert_eq!(
+        run.report["curation_policy"]["decision"]["authority"]["configuration_revision_id"],
+        json!(test_configuration_revision())
     );
     assert!(run.ledger_record.applied_ops.is_some());
     let receipt_ids = run.report["receipt"]["automatic_fact_receipt_ids"]
@@ -1013,6 +1026,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &retrieval,
         SessionReflectorAutomationOptions::default(),
@@ -1109,6 +1123,7 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &retrieval,
         SessionReflectorAutomationOptions {
@@ -1227,6 +1242,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     let run = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &NoSummaryReplayBackend,
         &retrieval,
         SessionReflectorAutomationOptions {

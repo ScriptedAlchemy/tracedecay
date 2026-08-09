@@ -68,6 +68,39 @@ pub fn register_test_schema_installer() {
     REGISTER.call_once(crate::daemon::store_runtime::register_registered_schema_installer);
 }
 
+/// Composes the production dashboard automation authority over one retained
+/// integration-test graph. The returned writer is the same serialization
+/// authority captured by managed-skill mutation/materialization and must be
+/// mounted into dashboard state with the authority. Runs use canonical runner
+/// locking directly, so a model turn never holds this broad writer.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub fn dashboard_automation_authority_for_test(
+    cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    profile_root: impl AsRef<std::path::Path>,
+) -> crate::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
+    let profile_root = profile_root.as_ref().canonicalize()?;
+    let retained_root = cg.project_root().canonicalize()?;
+    let retained_graph = std::sync::Arc::clone(&cg);
+    let resolver: crate::mcp::server::RetainedProjectGraphResolver =
+        std::sync::Arc::new(move |request| {
+            let retained_graph = std::sync::Arc::clone(&retained_graph);
+            let retained_root = retained_root.clone();
+            Box::pin(async move {
+                let requested_root = request.registered_root.canonicalize().ok();
+                Ok((requested_root.as_ref() == Some(&retained_root)).then_some(retained_graph))
+            })
+        });
+    let writer = standalone_dashboard_automation_writer();
+    let authority = crate::daemon::dashboard_automation::compose_dashboard_automation_authority(
+        profile_root,
+        cg.store_runtime_registry().profile_id().clone(),
+        resolver,
+        std::sync::Arc::clone(&writer),
+    )?;
+    Ok((authority, writer))
+}
+
 /// Root-owned graph composition used by dashboard integration tests.
 ///
 /// The dashboard API crate cannot own daemon session registration or graph
@@ -318,7 +351,7 @@ pub fn dashboard_git_correlation_read_authority_for_test(
 #[doc(hidden)]
 pub async fn record_project_span_for_test(
     project_database: &crate::global_db::RegisteredGlobalDb,
-    observation: &crate::sessions::git_correlation::SpanObservation,
+    observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
     merge_gap_secs: i64,
 ) -> crate::errors::Result<i64> {
     crate::store::GlobalDbGitCorrelationStore::new(project_database)

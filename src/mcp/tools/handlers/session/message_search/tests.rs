@@ -21,7 +21,9 @@ use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
 };
 use crate::errors::TraceDecayError;
-use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
+use tracedecay_sessions::runtime::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord,
+};
 use tracedecay_temporal_query::ports::{TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1};
 
 #[derive(Default)]
@@ -639,8 +641,8 @@ fn swept_search_result(
     message_id: &str,
     timestamp: i64,
     score: f64,
-) -> crate::sessions::SessionMessageSearchResult {
-    crate::sessions::SessionMessageSearchResult {
+) -> tracedecay_sessions::runtime::SessionMessageSearchResult {
+    tracedecay_sessions::runtime::SessionMessageSearchResult {
         session: SessionRecord {
             provider: "cursor".to_string(),
             session_id: format!("session.{project_key}"),
@@ -678,7 +680,7 @@ fn swept_search_result(
 fn sweep_root(
     project_id: &str,
     root: &str,
-    results: Vec<crate::sessions::SessionMessageSearchResult>,
+    results: Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
 ) -> SessionRetrievalSweepRootView {
     SessionRetrievalSweepRootView {
         project_id: project_id.to_string(),

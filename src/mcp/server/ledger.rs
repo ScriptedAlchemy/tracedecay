@@ -370,7 +370,7 @@ impl McpServer {
     /// Route metadata carries `(session_id, thread_id, cwd, worktree,
     /// branch)`; when the route names a session and resolves to a registered
     /// project, this folds one [`SpanObservation`] into that project's
-    /// `sessions.db` span table (see [`crate::sessions::git_correlation`]).
+    /// `sessions.db` span table (see [`tracedecay_sessions::runtime::git_correlation`]).
     /// Mid-session branch/worktree switches are handled by the span table
     /// itself — the observation always carries the *current* branch.
     ///
@@ -378,7 +378,7 @@ impl McpServer {
     /// or DB error is dropped. An in-process debounce keyed by
     /// `(provider, session, branch, worktree)` collapses a burst of tool-use
     /// events to one write per
-    /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
+    /// [`DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`](tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS)
     /// so the notification hot path never blocks on repeated writes (spans
     /// merge regardless, so a dropped observation only widens a span slightly
     /// less).

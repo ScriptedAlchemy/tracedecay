@@ -7,7 +7,7 @@ use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions, ProjectRuntime, RuntimeFuture,
 };
 use tracedecay_dashboard_api::DashboardProjectRuntime;
-use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_domain::{FactOwnerV1, ProjectId, UserProfileId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
@@ -31,6 +31,10 @@ impl ProjectRuntime for TraceDecay {
 
     fn project_memory_owner(&self) -> Result<FactOwnerV1> {
         TraceDecay::project_memory_owner(self)
+    }
+
+    fn profile_id(&self) -> &UserProfileId {
+        self.store_runtime_registry().profile_id()
     }
 
     fn profile_database(&self) -> &Arc<RegisteredGlobalDb> {

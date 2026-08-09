@@ -21,8 +21,8 @@
 use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::sessions::SessionMessageSearchResult;
 use tracedecay_domain::ProjectId;
+use tracedecay_sessions::runtime::SessionMessageSearchResult;
 
 use crate::common::{MessageRecordBuilder, global_session as sample_session};
 

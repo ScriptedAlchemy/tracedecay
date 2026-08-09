@@ -30,8 +30,6 @@ use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::{McpServer, McpTransport};
-#[cfg(feature = "test-transport")]
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
@@ -47,6 +45,8 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,

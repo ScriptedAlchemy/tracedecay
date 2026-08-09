@@ -74,21 +74,189 @@ fn dashboard_memory_status_does_not_wait_for_the_writer_lane() {
 }
 
 #[test]
+fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_receipts() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        use tracedecay::application::memory::{MemoryApplication, automatic_fact_add_command};
+        use tracedecay::store::memory::DatabaseFactStore;
+        use tracedecay_domain::{
+            ActorId, ComponentVersion, Confidence, FactCategoryV1, FactOwnerV1, PayloadReferenceV1,
+            ProvenanceId, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+            SanitizerDispositionV1, SensitivityV1,
+        };
+        use tracedecay_store::{
+            ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddCommandV1,
+        };
+
+        let fixture = start_dashboard_fixture(false).await;
+        let cg = fixture
+            .host_runtime
+            .open_project_graph_for_test(
+                &fixture.project_root,
+                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("open dashboard fixture project: {error}"));
+        let project_id = cg
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .and_then(|value| ProjectId::new(value.to_owned()).ok())
+            .unwrap_or_else(|| panic!("dashboard fixture needs an authoritative project id"));
+        let owner = FactOwnerV1::Project { project_id };
+        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
+            .unwrap_or_else(|error| panic!("initialize automatic fact authority: {error}"));
+        let apply_id = "automatic-fact-receipt-api-applied";
+        let command = automatic_fact_add_command(
+            owner,
+            AddFactRequest {
+                content: "Automatic receipt API preserves applied facts".to_owned(),
+                category: MemoryCategory::Decision,
+                source: Some("dashboard-api-test".to_owned()),
+                tags: Vec::new(),
+                entities: Vec::new(),
+                trust: Some(0.9),
+                metadata: serde_json::json!({}),
+            },
+            "run.dashboard-receipt-api",
+            apply_id,
+            Some(
+                ActorId::new("automation:dashboard-api-test".to_owned())
+                    .unwrap_or_else(|error| panic!("build automatic fact actor: {error}")),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("build automatic fact command: {error}"));
+        memory
+            .apply_project_memory_automatic_fact(
+                ProvenanceId::new(apply_id.to_owned())
+                    .unwrap_or_else(|error| panic!("build automatic fact receipt id: {error}")),
+                command,
+                ProjectMemoryAutomaticFactEvidenceV1::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("record automatic applied receipt: {error}"));
+
+        let quarantined_apply_id = "automatic-fact-receipt-api-quarantined";
+        let quarantined_content = "api_key=0000000000000000";
+        let quarantined_material = serde_json::json!({
+            "content": quarantined_content,
+            "category": FactCategoryV1::Decision,
+            "tags": [],
+            "entities": [],
+            "metadata": {},
+        });
+        let quarantine_receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.dashboard-api-quarantined".to_owned())
+                    .unwrap_or_else(|error| panic!("build sanitization receipt id: {error}")),
+                ComponentVersion::new("sanitizer.dashboard-api-test.v1".to_owned())
+                    .unwrap_or_else(|error| panic!("build sanitizer version: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("build sanitization receipt reference: {error}")),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(
+                PayloadReferenceV1::for_payload(&quarantined_material)
+                    .unwrap_or_else(|error| panic!("bind sanitization payload: {error}")),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("build accepted sanitization receipt: {error}"));
+        let quarantined_command = ProjectMemoryFactAddCommandV1::new(
+            owner,
+            ProvenanceId::new("automatic-fact-receipt-api-quarantined-operation".to_owned())
+                .unwrap_or_else(|error| panic!("build automatic operation id: {error}")),
+            quarantined_content.to_owned(),
+            FactCategoryV1::Decision,
+            Some("dashboard-api-test".to_owned()),
+            Vec::new(),
+            Vec::new(),
+            serde_json::json!({}),
+            quarantine_receipt,
+            Confidence::new(0.9).unwrap_or_else(|error| panic!("build fact confidence: {error}")),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("build quarantined automatic fact command: {error}"))
+        .with_automation_run_id("run.dashboard-receipt-api".to_owned())
+        .unwrap_or_else(|error| panic!("bind quarantined automatic fact run: {error}"));
+        memory
+            .apply_project_memory_automatic_fact(
+                ProvenanceId::new(quarantined_apply_id.to_owned()).unwrap_or_else(|error| {
+                    panic!("build quarantined automatic fact receipt id: {error}")
+                }),
+                quarantined_command,
+                ProjectMemoryAutomaticFactEvidenceV1::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("record automatic quarantined receipt: {error}"));
+
+        let agent = http_agent();
+        let endpoint = format!(
+            "{}/api/automation/automatic-fact-receipts",
+            fixture.base_url
+        );
+        let (status, listed) = get_json(&agent, &format!("{endpoint}?state=applied"));
+        assert_eq!(status, 200, "automatic receipt list failed: {listed}");
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["limit"], 50);
+        assert_eq!(listed["error"], "");
+        let receipts = listed["receipts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("automatic receipt list must contain receipts: {listed}"));
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["apply_id"], apply_id);
+        assert_eq!(receipts[0]["run_id"], "run.dashboard-receipt-api");
+        assert_eq!(receipts[0]["state"], "applied");
+        assert!(receipts[0]["applied_canonical_fact_id"].is_string());
+
+        let (status, viewed) = get_json(&agent, &format!("{endpoint}/{apply_id}"));
+        assert_eq!(status, 200, "automatic receipt view failed: {viewed}");
+        assert_eq!(viewed["error"], "");
+        assert_eq!(viewed["receipt"]["apply_id"], apply_id);
+        assert_eq!(viewed["receipt"]["state"], "applied");
+
+        let (status, quarantined) = get_json(&agent, &format!("{endpoint}?state=quarantined"));
+        assert_eq!(
+            status, 200,
+            "quarantined receipt list failed: {quarantined}"
+        );
+        assert_eq!(quarantined["count"], 1);
+        assert_eq!(quarantined["receipts"][0]["apply_id"], quarantined_apply_id);
+        assert_eq!(quarantined["receipts"][0]["state"], "quarantined");
+        assert!(quarantined["receipts"][0]["quarantine_reason"].is_string());
+        assert!(quarantined["receipts"][0]["applied_canonical_fact_id"].is_null());
+
+        let (status, rejected_filter) = get_json(&agent, &format!("{endpoint}?state=staged"));
+        assert_eq!(status, 400);
+        assert!(
+            rejected_filter["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("expected applied or quarantined")),
+            "non-terminal filter must be rejected: {rejected_filter}"
+        );
+        cg.close();
+    });
+}
+
+#[test]
 fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        use tracedecay::automation::managed_skills::{
-            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
-            create_managed_skill_draft, default_managed_skill_targets,
+        use tracedecay_agent_hosts::automation::managed_skills::{
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
+            default_managed_skill_targets,
         };
 
         let fixture = start_dashboard_fixture(false).await;
         let profile_root = tracedecay::storage::default_profile_root()
             .unwrap_or_else(|err| panic!("expected dashboard fixture profile root: {err}"));
-        let skill = create_managed_skill_draft(
+        create_managed_skill(
             &profile_root,
             ManagedSkillDraft {
                 id: "dashboard-outcome-skill".to_string(),
@@ -107,9 +275,6 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         )
         .await
         .unwrap();
-        approve_managed_skill(&profile_root, &skill.metadata.id)
-            .await
-            .unwrap();
 
         let cg = fixture
             .host_runtime
@@ -119,10 +284,10 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             )
             .await
             .unwrap_or_else(|err| panic!("failed to reopen dashboard fixture project: {err}"));
-        let applied_record = apply_dashboard_automation_fact(
+        let applied_receipt = record_dashboard_automatic_fact(
             &cg,
             "run_dashboard_outcomes",
-            "Dashboard outcome reads use authoritative proposal promotion",
+            "Dashboard outcome reads use automatic fact receipt authority",
         )
         .await;
 
@@ -141,24 +306,21 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
         let skill = skills
             .iter()
             .find(|skill| skill["skill_id"] == "dashboard-outcome-skill")
-            .unwrap_or_else(|| panic!("expected approved skill outcome: {payload}"));
+            .unwrap_or_else(|| panic!("expected activated skill outcome: {payload}"));
         assert_eq!(skill["verdict"], "too_early");
-        assert!(skill["approved_at"].is_number());
+        assert!(skill["activated_at"].is_number());
+        assert!(skill["days_since_activation"].is_number());
 
         let facts = payload["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected fact outcomes array: {payload}"));
         let fact = facts
             .iter()
-            .find(|fact| fact["proposal_id"].as_str() == Some(applied_record.proposal_id.as_str()))
+            .find(|fact| fact["apply_id"].as_str() == Some(applied_receipt.apply_id.as_str()))
             .unwrap_or_else(|| panic!("expected applied fact outcome: {payload}"));
         assert_eq!(
             fact["canonical_fact_id"],
-            serde_json::json!(applied_record.canonical_fact_id)
-        );
-        assert_eq!(
-            fact["fact_id"],
-            serde_json::json!(applied_record.legacy_fact_id)
+            serde_json::json!(applied_receipt.canonical_fact_id)
         );
         assert_eq!(fact["run_id"], "run_dashboard_outcomes");
         assert_eq!(fact["verdict"], "never_recalled");

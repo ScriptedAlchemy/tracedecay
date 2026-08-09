@@ -1,5 +1,7 @@
 #[cfg(test)]
-use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, run_agent_task_with_retry};
+use tracedecay_agent_hosts::automation::backend::{
+    AgentTaskKind, AgentTaskRequest, run_agent_task_with_retry,
+};
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId, TemporalModeV1};
 
 use super::super::lcm_args::*;
@@ -14,7 +16,7 @@ use super::super::message_search::{
 };
 use super::super::*;
 use crate::application::session::SessionRetrievalScope;
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
     LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmSourceRef,
 };
@@ -32,9 +34,9 @@ use super::shared::{
 /// records the answer. Returns `true` when an answer was synthesized.
 #[cfg(test)]
 pub(in crate::mcp::tools::handlers::session) async fn synthesize_expand_query_answer(
-    response: &mut crate::sessions::lcm::LcmExpandQueryResponse,
-    backend: &dyn crate::automation::backend::AgentTaskBackend,
-    policy: &crate::automation::backend::BackendRetryPolicy,
+    response: &mut tracedecay_sessions::runtime::lcm::LcmExpandQueryResponse,
+    backend: &dyn tracedecay_agent_hosts::automation::backend::AgentTaskBackend,
+    policy: &tracedecay_agent_hosts::automation::backend::BackendRetryPolicy,
 ) -> bool {
     if !response.needs_synthesis || response.context_blocks.is_empty() {
         return false;

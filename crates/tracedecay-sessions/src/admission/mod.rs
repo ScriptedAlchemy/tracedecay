@@ -179,14 +179,6 @@ impl HostAdmissionOutcome {
         )
     }
 
-    pub const fn spool_unsupported_version() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("spool_unsupported_version"),
-        )
-    }
-
     pub const fn durable_payload_unsupported_version() -> Self {
         Self::retained_unavailable("host_event_payload_unsupported_version")
     }

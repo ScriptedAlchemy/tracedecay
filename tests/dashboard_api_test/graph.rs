@@ -334,7 +334,7 @@ async fn start_dashboard_fixture_with(
     let base_url = format!("http://127.0.0.1:{port}");
     let server_graph = std::sync::Arc::new(cg);
     let authority = host_runtime
-        .dashboard_test_authority_with_session_reads(server_graph.as_ref())
+        .dashboard_test_authority_with_session_reads(&server_graph)
         .await
         .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"));
     let server = tokio::spawn(async move {

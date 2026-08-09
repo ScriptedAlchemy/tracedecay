@@ -163,7 +163,7 @@ pub async fn projection_payload(state: &DashboardState, query: &str, limit: i64)
         }
     };
     let points = match application
-        .dashboard_vector_points_v1(
+        .dashboard_vector_points(
             (!query.trim().is_empty()).then(|| query.trim().to_owned()),
             usize::try_from(limit.clamp(1, PROJECTION_POINT_CAP))
                 .unwrap_or(PROJECTION_POINT_CAP as usize),

@@ -15,7 +15,9 @@ use super::super::message_search::{
 };
 use crate::application::session::SessionDataFreshness;
 use crate::mcp::tools::ToolResult;
-use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
+use tracedecay_sessions::runtime::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord,
+};
 
 pub(super) struct RecordingService {
     commands: Mutex<Vec<SessionRetrievalCommand>>,

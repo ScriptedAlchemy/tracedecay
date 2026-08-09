@@ -2,12 +2,11 @@ import { z } from 'zod';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal, type ReadOnlyScopeRefusal } from '../scope/store.ts';
 
-/** Result for the legacy (pre-envelope) JSON endpoints. These are the
- * compatibility surfaces the old dashboard consumed; they return plain
- * payloads. Transport failures become truthful states, never exceptions.
- * As families migrate to DashboardEnvelopeV1, callers switch to
- * fetchEnvelope and this helper shrinks. */
-export type LegacyResult<T> =
+/** Result for a typed JSON payload route that has not adopted the envelope
+ * header. Transport failures become truthful states, never exceptions. The
+ * envelope routes use {@link fetchEnvelope}; this authority owns routes whose
+ * published response body is the schema itself. */
+export type PayloadResult<T> =
   | { outcome: 'ok'; data: T }
   /**
    * The source answered, in its own contract, that it cannot serve this.
@@ -41,15 +40,15 @@ export type LegacyResult<T> =
  * A write's result: every reading a read can produce, plus the one only a
  * write can.
  *
- * `read_only_scope` sits here rather than on `LegacyResult` because the
+ * `read_only_scope` sits here rather than on `PayloadResult` because the
  * gateway raises it only for non-GET/HEAD requests. Putting it on the read
  * type would oblige every read consumer to handle a state its request cannot
  * reach, and an arm that can never be taken is an arm nobody keeps correct.
  * A write consumer, conversely, cannot forget it: the union is exhaustive and
  * the compiler says so.
  */
-export type LegacyWriteResult<T> =
-  | LegacyResult<T>
+export type PayloadWriteResult<T> =
+  | PayloadResult<T>
   | { outcome: 'read_only_scope'; refusal: ReadOnlyScopeRefusal };
 
 /** Sentinel for a body that was not JSON at all, kept distinct from a body
@@ -81,11 +80,11 @@ function canonicalFailure(body: unknown): { status: string; reason: string | nul
   return { status, reason: typeof error === 'string' && error !== '' ? error : null };
 }
 
-async function readLegacyResponse<T>(
+async function readPayloadResponse<T>(
   url: string,
   schema: WireSchema<T>,
   init?: RequestInit,
-): Promise<LegacyWriteResult<T>> {
+): Promise<PayloadWriteResult<T>> {
   let response: Response;
   try {
     response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
@@ -157,33 +156,33 @@ async function readLegacyResponse<T>(
 }
 
 /**
- * Read a legacy endpoint.
+ * Read a typed payload endpoint.
  *
  * A caller that passes a mutating `init` gets the refusal folded into `error`,
  * carrying the daemon's own sentence — truthful, but without the arm a control
- * needs to disable itself. Writes should use {@link fetchLegacyWrite}.
+ * needs to disable itself. Writes should use {@link fetchPayloadWrite}.
  */
-export async function fetchLegacy<T>(
+export async function fetchPayload<T>(
   url: string,
   schema: WireSchema<T>,
   init?: RequestInit,
-): Promise<LegacyResult<T>> {
-  const result = await readLegacyResponse(url, schema, init);
+): Promise<PayloadResult<T>> {
+  const result = await readPayloadResponse(url, schema, init);
   return result.outcome === 'read_only_scope'
     ? { outcome: 'error', detail: result.refusal.detail }
     : result;
 }
 
-/** Write to a legacy endpoint, keeping the scope refusal as its own outcome. */
-export function fetchLegacyWrite<T>(
+/** Write to a typed payload endpoint, keeping the scope refusal as its own outcome. */
+export function fetchPayloadWrite<T>(
   url: string,
   schema: WireSchema<T>,
   init: RequestInit,
-): Promise<LegacyWriteResult<T>> {
-  return readLegacyResponse(url, schema, init);
+): Promise<PayloadWriteResult<T>> {
+  return readPayloadResponse(url, schema, init);
 }
 
-/** Loose object schema for legacy payloads we render generically. */
+/** Loose object schema for payloads we render generically. */
 export const AnyObject = z.record(z.string(), z.unknown());
 
 // `ProjectSchema`/`ProjectsSchema` — every field optional, the collection

@@ -70,6 +70,7 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
+        | DaemonInvocationOperation::ObservatoryRead
         | DaemonInvocationOperation::MultiRootScopeSetRead
         | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
         | DaemonInvocationOperation::MultiRootExecute
@@ -126,7 +127,8 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackO
         | DaemonInvocationOutcome::LspDetached => FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
-        | DaemonInvocationOutcome::CallableCode { result, .. } => {
+        | DaemonInvocationOutcome::CallableCode { result, .. }
+        | DaemonInvocationOutcome::ObservatoryRead { result, .. } => {
             match result.execution().termination {
                 OperationTermination::Completed => FeedbackOutcomeV1::Completed,
                 OperationTermination::Cancelled => FeedbackOutcomeV1::Cancelled,
@@ -236,7 +238,8 @@ pub(super) fn observe_invocation_response(
                 item_count: match &response.outcome {
                     DaemonInvocationOutcome::Feedback { result, .. }
                     | DaemonInvocationOutcome::Primitive { result, .. }
-                    | DaemonInvocationOutcome::CallableCode { result, .. } => {
+                    | DaemonInvocationOutcome::CallableCode { result, .. }
+                    | DaemonInvocationOutcome::ObservatoryRead { result, .. } => {
                         result.page().returned.try_into().unwrap_or(u32::MAX)
                     }
                     _ => 0,
@@ -276,7 +279,8 @@ pub(super) fn observe_invocation_response(
     }
     if let DaemonInvocationOutcome::Feedback { result, .. }
     | DaemonInvocationOutcome::Primitive { result, .. }
-    | DaemonInvocationOutcome::CallableCode { result, .. } = &response.outcome
+    | DaemonInvocationOutcome::CallableCode { result, .. }
+    | DaemonInvocationOutcome::ObservatoryRead { result, .. } = &response.outcome
     {
         let omitted = result.page().total.map_or_else(
             || u64::from(result.page().cursor.is_some()),

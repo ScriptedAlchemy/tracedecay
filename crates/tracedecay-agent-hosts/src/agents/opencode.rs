@@ -90,14 +90,13 @@ impl AgentIntegration for OpenCodeIntegration {
     fn project_host_component_registration_paths(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
+        _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
             project_path.join("opencode.json"),
             project_path.join(".opencode/plugins/tracedecay.ts"),
             project_path.join("AGENTS.md"),
-            super::managed_memory_digest_targets_path(home),
         ])
     }
 
@@ -216,12 +215,7 @@ impl AgentIntegration for OpenCodeIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<std::path::PathBuf> {
-        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
-        vec![
-            opencode_config_path(home),
-            opencode_prompt_path(home),
-            crate::automation::memory_digest::digest_targets_path(&profile_root),
-        ]
+        vec![opencode_config_path(home), opencode_prompt_path(home)]
     }
 
     fn host_component_registration_paths(
@@ -240,11 +234,7 @@ impl AgentIntegration for OpenCodeIntegration {
             paths.push(opencode_original_config_path(&config));
         }
         if components.contains(&HostBundleComponentV1::Core) {
-            let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
             paths.push(opencode_prompt_path(home));
-            paths.push(crate::automation::memory_digest::digest_targets_path(
-                &profile_root,
-            ));
         }
         paths.extend(external_opencode_asset_paths(home, components));
         paths

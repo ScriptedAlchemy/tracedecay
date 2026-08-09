@@ -84,18 +84,21 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
         Box::pin(async move {
             let authority =
                 crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&self.database));
-            let pass = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
-                self.profile_identity.brain_id(),
-                self.profile_identity.profile_id(),
-                &authority,
-                &self.project_root,
-                Some(self.project_id.clone()),
-                None,
-                true,
-                &self.cancellation,
-            );
+            let pass =
+                tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
+                    self.profile_identity.brain_id(),
+                    self.profile_identity.profile_id(),
+                    &authority,
+                    &self.project_root,
+                    Some(self.project_id.clone()),
+                    None,
+                    true,
+                    &self.cancellation,
+                );
             let outcome = match self.transcript_source_home.clone() {
-                Some(home) => crate::sessions::with_transcript_source_home(home, pass).await,
+                Some(home) => {
+                    tracedecay_sessions::runtime::with_transcript_source_home(home, pass).await
+                }
                 None => pass.await,
             };
             classify_transcript_ingest_outcome(outcome, &self.cancellation)
@@ -140,7 +143,7 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
             let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(
                 &self.registry_database,
             ));
-            let pass = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+            let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db(
                 self.profile_identity.brain_id(),
                 self.profile_identity.profile_id(),
                 &authority,
@@ -149,7 +152,9 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 &self.cancellation,
             );
             let outcome = match self.transcript_source_home.clone() {
-                Some(home) => crate::sessions::with_transcript_source_home(home, pass).await,
+                Some(home) => {
+                    tracedecay_sessions::runtime::with_transcript_source_home(home, pass).await
+                }
                 None => pass.await,
             };
             classify_transcript_ingest_outcome(outcome, &self.cancellation)
@@ -162,7 +167,7 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
 }
 
 fn classify_transcript_ingest_outcome(
-    outcome: crate::sessions::TranscriptIngestOutcome,
+    outcome: tracedecay_sessions::runtime::TranscriptIngestOutcome,
     cancellation: &ObservationCancellation,
 ) -> SessionHistoricalIngestOutcome {
     if cancellation.is_cancelled() {
@@ -190,14 +195,16 @@ fn classify_transcript_ingest_outcome(
 mod tests {
     use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
     use crate::application::observation::ObservationCancellation;
-    use crate::sessions::{IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome};
+    use tracedecay_sessions::runtime::{
+        IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
+    };
 
     fn ingest_outcome_with_failure(
         reason_code: &'static str,
         retryable: bool,
     ) -> TranscriptIngestOutcome {
         TranscriptIngestOutcome {
-            stats: crate::sessions::shared::TranscriptIngestStats::default(),
+            stats: tracedecay_sessions::runtime::shared::TranscriptIngestStats::default(),
             failures: vec![TranscriptCatchUpFailure {
                 provider: "codex",
                 source: "observation",

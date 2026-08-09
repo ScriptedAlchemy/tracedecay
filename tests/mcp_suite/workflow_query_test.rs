@@ -9,10 +9,10 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::sessions::git_correlation::{
+use tracedecay::tracedecay::TraceDecay;
+use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
-use tracedecay::tracedecay::TraceDecay;
 
 use crate::common;
 

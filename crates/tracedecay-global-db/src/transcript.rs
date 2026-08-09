@@ -505,9 +505,10 @@ impl RegisteredGlobalDb {
                             .await?;
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
-                            let text = tracedecay_sessions::compatibility::derived_text_for_index(
-                                &message.text,
-                            );
+                            let text =
+                                tracedecay_sessions::retrieval_content::derived_text_for_index(
+                                    &message.text,
+                                );
                             if !Self::upsert_session_message_projection(
                                 &transaction,
                                 message,

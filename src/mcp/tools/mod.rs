@@ -32,9 +32,10 @@ pub use definitions::{
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
-pub(crate) use handlers::handle_user_lcm_tool_with_authorities;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
-pub(crate) use handlers::memory::handle_user_memory_tool;
+pub(crate) use handlers::retained_catalog::{
+    execute_profile_retained_mcp_tool, retained_mcp_operation,
+};
 pub(crate) use handlers::session::message_search::SessionRetrievalOmissionView;
 pub(crate) use handlers::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,

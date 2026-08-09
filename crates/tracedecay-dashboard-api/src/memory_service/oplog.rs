@@ -11,7 +11,7 @@ pub async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
     let bounded_limit = usize::try_from(limit.clamp(1, 300)).unwrap_or(300);
     let result = match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
         Ok(application) => application
-            .dashboard_oplog_v1(bounded_limit)
+            .dashboard_oplog(bounded_limit)
             .await
             .map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),

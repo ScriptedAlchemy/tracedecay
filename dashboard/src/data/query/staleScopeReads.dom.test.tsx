@@ -24,14 +24,14 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { useLegacy } from './useLegacy.ts';
+import { usePayload } from './usePayload.ts';
 import { useScope } from '../scope/store.ts';
 
 const ProbeSchema = z.object({ project: z.string() });
 
 /** One scoped read, rendering whatever it currently holds. */
 function Probe() {
-  const query = useLegacy(['probe'], '/api/probe', ProbeSchema);
+  const query = usePayload(['probe'], '/api/probe', ProbeSchema);
   const result = query.data;
   if (!result) return <p data-probe="pending">pending</p>;
   return (
@@ -43,7 +43,7 @@ function Probe() {
 
 /** The same read against `/api/projects`, which `scopedUrl` leaves alone. */
 function RegistryProbe() {
-  const query = useLegacy(['registry-probe'], '/api/projects', ProbeSchema);
+  const query = usePayload(['registry-probe'], '/api/projects', ProbeSchema);
   const result = query.data;
   if (!result) return <p data-probe="pending">pending</p>;
   return (

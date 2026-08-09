@@ -8,7 +8,7 @@ use crate::mcp::tools::ToolDefinition;
 fn skill_state_property() -> Value {
     json!({
         "type": "string",
-        "enum": ["pending_approval", "active", "disabled", "archived"],
+        "enum": ["active", "disabled", "archived"],
         "description": "Optional managed-skill lifecycle state filter."
     })
 }

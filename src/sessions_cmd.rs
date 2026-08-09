@@ -373,7 +373,7 @@ where
             message: "--source must not exceed --target for a session refresh".to_string(),
         });
     }
-    tracedecay::sessions::ProviderScope::parse_optional(Some(&selectors.provider))
+    tracedecay_sessions::runtime::ProviderScope::parse_optional(Some(&selectors.provider))
         .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
     validate_refresh_handle(mode, handle)?;
 

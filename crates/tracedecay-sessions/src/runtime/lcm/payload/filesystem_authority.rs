@@ -39,7 +39,7 @@ pub(super) struct PayloadFileIdentity {
 /// deletion authority from unverified metadata.
 ///
 /// ```compile_fail
-/// use tracedecay::sessions::lcm::payload::VerifiedPayloadAuthority;
+/// use tracedecay_sessions::runtime::lcm::payload::VerifiedPayloadAuthority;
 ///
 /// let _forged = VerifiedPayloadAuthority {};
 /// ```

@@ -1,5 +1,5 @@
 use crate::dashboard_api_support::*;
-use tracedecay::automation::backend::AgentTaskRetryAttempt;
+use tracedecay_agent_hosts::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
 fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
@@ -51,41 +51,48 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             &format!("{base_url}/api/automation/run/memory-curator"),
             &serde_json::json!({}),
         );
-        assert_eq!(status, 202);
-        assert_eq!(memory_payload["status"], "queued");
-        assert_eq!(memory_payload["ledger_record"]["trigger"], "dashboard");
-        assert_eq!(memory_payload["ledger_record"]["task"], "memory_curator");
+        assert_eq!(status, 200);
         assert_eq!(
-            memory_payload["ledger_record"]["backend"],
+            memory_payload["run"]["ledger_record"]["trigger"],
+            "dashboard"
+        );
+        assert_eq!(
+            memory_payload["run"]["ledger_record"]["task"],
+            "memory_curator"
+        );
+        assert_eq!(
+            memory_payload["run"]["ledger_record"]["backend"],
             "codex_app_server"
         );
         assert_eq!(
-            memory_payload["ledger_record"]["host_mode"],
+            memory_payload["run"]["ledger_record"]["host_mode"],
             "standalone"
         );
-        assert!(memory_payload["ledger_record"]["model"].is_null());
+        assert!(memory_payload["run"]["ledger_record"]["model"].is_null());
 
         let (status, session_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/session-reflection"),
             &serde_json::json!({}),
         );
-        assert_eq!(status, 202);
-        assert_eq!(session_payload["status"], "queued");
-        assert_eq!(session_payload["ledger_record"]["trigger"], "dashboard");
+        assert_eq!(status, 200);
         assert_eq!(
-            session_payload["ledger_record"]["task"],
+            session_payload["run"]["ledger_record"]["trigger"],
+            "dashboard"
+        );
+        assert_eq!(
+            session_payload["run"]["ledger_record"]["task"],
             "session_reflector"
         );
         assert_eq!(
-            session_payload["ledger_record"]["backend"],
+            session_payload["run"]["ledger_record"]["backend"],
             "codex_app_server"
         );
         assert_eq!(
-            session_payload["ledger_record"]["host_mode"],
+            session_payload["run"]["ledger_record"]["host_mode"],
             "standalone"
         );
-        assert!(session_payload["ledger_record"]["model"].is_null());
+        assert!(session_payload["run"]["ledger_record"]["model"].is_null());
 
         let (status, skill_payload) = post_json_body(
             &agent,
@@ -96,19 +103,24 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
                 "evidence_limit": 7
             }),
         );
-        assert_eq!(status, 202);
-        assert_eq!(skill_payload["status"], "queued");
-        assert_eq!(skill_payload["ledger_record"]["trigger"], "dashboard");
-        assert_eq!(skill_payload["ledger_record"]["task"], "skill_writer");
+        assert_eq!(status, 200);
         assert_eq!(
-            skill_payload["ledger_record"]["backend"],
+            skill_payload["run"]["ledger_record"]["trigger"],
+            "dashboard"
+        );
+        assert_eq!(
+            skill_payload["run"]["ledger_record"]["task"],
+            "skill_writer"
+        );
+        assert_eq!(
+            skill_payload["run"]["ledger_record"]["backend"],
             "codex_app_server"
         );
         assert_eq!(
-            skill_payload["ledger_record"]["host_mode"],
+            skill_payload["run"]["ledger_record"]["host_mode"],
             "standalone"
         );
-        assert!(skill_payload["ledger_record"]["model"].is_null());
+        assert!(skill_payload["run"]["ledger_record"]["model"].is_null());
 
         let mut rejected_skill_shape = agent
             .post(&format!("{base_url}/api/automation/run/skill-writing"))
@@ -149,52 +161,51 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         }
 
         let run_ids = [
-            memory_payload["run_id"].as_str().unwrap().to_string(),
-            session_payload["run_id"].as_str().unwrap().to_string(),
-            skill_payload["run_id"].as_str().unwrap().to_string(),
+            memory_payload["run"]["run_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            session_payload["run"]["run_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            skill_payload["run"]["run_id"].as_str().unwrap().to_string(),
         ];
-        let mut records = Vec::new();
-        let mut terminal_count = 0;
-        for _ in 0..200 {
-            records = tracedecay::automation::run_ledger::load_run_records(&dashboard_root, 10)
+        let records =
+            tracedecay_agent_hosts::automation::run_ledger::load_run_records(&dashboard_root, 10)
                 .await
                 .unwrap();
-            terminal_count = records
-                .iter()
-                .filter(|record| {
-                    run_ids.contains(&record.run_id)
-                        && record.status.is_terminal()
-                        && record.error.as_deref() == Some("automation_disabled")
-                })
-                .count();
-            if terminal_count == run_ids.len() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let terminal_count = records
+            .iter()
+            .filter(|record| {
+                run_ids.contains(&record.run_id)
+                    && record.status.is_terminal()
+                    && record.error.as_deref() == Some("automation_disabled")
+            })
+            .count();
         assert_eq!(
             terminal_count,
             run_ids.len(),
-            "dashboard automation jobs did not reach terminal skipped records: {records:#?}"
+            "dashboard automation runs did not return terminal skipped records: {records:#?}"
         );
         assert_eq!(records.len(), 3);
         let tasks: Vec<_> = records.iter().map(|record| record.task).collect();
         assert_eq!(
             tasks,
             [
-                tracedecay::automation::backend::AgentTaskKind::SkillWriter,
-                tracedecay::automation::backend::AgentTaskKind::SessionReflector,
-                tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
             ]
         );
         for record in &records {
             assert_eq!(
                 record.trigger,
-                tracedecay::automation::run_ledger::AutomationTrigger::Dashboard
+                tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Dashboard
             );
             assert_eq!(
                 record.status,
-                tracedecay::automation::run_ledger::AutomationRunStatus::Skipped
+                tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
             );
             assert_eq!(record.error.as_deref(), Some("automation_disabled"));
             assert_eq!(record.backend, "codex_app_server");
@@ -213,96 +224,6 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         assert_eq!(runs["records"][0]["status"], "skipped");
         assert_eq!(runs["records"][0]["error"], "automation_disabled");
 
-        let (status, activity) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/activity"),
-        );
-        assert_eq!(status, 200);
-        let events = activity["events"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected activity events array: {activity}"));
-        let phases: Vec<_> = events
-            .iter()
-            .filter_map(|event| event["phase"].as_str())
-            .collect();
-        for phase in [
-            "queued",
-            "evidence",
-            "backend",
-            "validation",
-            "apply",
-            "report",
-            "finish",
-        ] {
-            assert!(
-                phases.contains(&phase),
-                "dashboard automation runs should emit {phase} activity; phases={phases:?}, activity={activity}"
-            );
-        }
-        let memory_skip_phases: Vec<_> = events
-            .iter()
-            .filter(|event| {
-                event["message"].as_str().is_some_and(|message| {
-                    message
-                        .to_ascii_lowercase()
-                        .contains("dashboard memory-curator automation run")
-                })
-            })
-            .filter_map(|event| event["phase"].as_str())
-            .collect();
-        for phase in [
-            "queued",
-            "evidence",
-            "backend",
-            "validation",
-            "apply",
-            "report",
-            "finish",
-        ] {
-            assert!(
-                memory_skip_phases.contains(&phase),
-                "queued memory-curator skip should emit {phase} activity; phases={memory_skip_phases:?}, activity={activity}"
-            );
-        }
-        for task_label in ["session-reflector", "skill-writer"] {
-            let task_skip_phases: Vec<_> = events
-                .iter()
-                .filter(|event| {
-                    event["message"].as_str().is_some_and(|message| {
-                        message
-                            .to_ascii_lowercase()
-                            .contains(&format!("dashboard {task_label} automation run"))
-                    })
-                })
-                .filter_map(|event| event["phase"].as_str())
-                .collect();
-            for phase in [
-                "queued",
-                "evidence",
-                "backend",
-                "validation",
-                "apply",
-                "report",
-                "finish",
-            ] {
-                assert!(
-                    task_skip_phases.contains(&phase),
-                    "queued {task_label} skip should emit {phase} activity; phases={task_skip_phases:?}, activity={activity}"
-                );
-            }
-        }
-        assert!(
-            events.iter().any(|event| event["message"]
-                .as_str()
-                .is_some_and(|message| message
-                    .contains("Dashboard memory-curator automation run skipped"))),
-            "dashboard memory-curator queued skip should emit visible activity: {activity}"
-        );
-        assert!(
-            events.iter().any(|event| event["phase"] == "report"),
-            "automation run should write a visible curation activity event: {activity}"
-        );
-
         let (status, runs) = get_json(
             &agent,
             &format!("{base_url}/api/plugins/holographic/curation/runs"),
@@ -312,7 +233,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         assert!(
             runs["records"].as_array().is_some_and(|records| records
                 .iter()
-                .any(|record| record["run_id"] == memory_payload["run_id"]
+                .any(|record| record["run_id"] == memory_payload["run"]["run_id"]
                     && record["status"] == "skipped")),
             "memory-curator run should remain visible in newest-first history: {runs}"
         );
@@ -322,7 +243,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
 }
 
 #[test]
-fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable() {
+fn dashboard_session_and_skill_runs_return_terminal_evidence_skips() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -370,91 +291,49 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
             &format!("{base_url}/api/automation/run/session-reflection"),
             &serde_json::json!({}),
         );
-        assert_eq!(status, 202, "session run should queue: {session_payload}");
-        let session_run_id = session_payload["run_id"].as_str().unwrap().to_string();
-        let mut records = Vec::new();
+        assert_eq!(
+            status, 200,
+            "session run should complete: {session_payload}"
+        );
+        let session_terminal = serde_json::from_value::<
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        >(session_payload["run"]["ledger_record"].clone())
+        .unwrap_or_else(|error| panic!("invalid session terminal ledger: {error}"));
 
         let (status, skill_payload) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/skill-writing"),
             &serde_json::json!({}),
         );
-        assert_eq!(status, 202, "skill run should queue: {skill_payload}");
-        let skill_run_id = skill_payload["run_id"].as_str().unwrap().to_string();
+        assert_eq!(status, 200, "skill run should complete: {skill_payload}");
+        let skill_terminal = serde_json::from_value::<
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        >(skill_payload["run"]["ledger_record"].clone())
+        .unwrap_or_else(|error| panic!("invalid skill terminal ledger: {error}"));
 
-        let run_ids = [session_run_id, skill_run_id];
-        let mut terminal_count = 0;
-        for _ in 0..400 {
-            records = tracedecay::automation::run_ledger::load_run_records(&dashboard_root, 10)
+        let records =
+            tracedecay_agent_hosts::automation::run_ledger::load_run_records(&dashboard_root, 10)
                 .await
                 .unwrap();
-            terminal_count = records
-                .iter()
-                .filter(|record| run_ids.contains(&record.run_id) && record.status.is_terminal())
-                .count();
-            if terminal_count == run_ids.len() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert_eq!(
-            terminal_count,
-            run_ids.len(),
-            "dashboard automation jobs did not reach terminal records: {records:#?}"
-        );
-        for run_id in &run_ids {
-            let terminal = records
-                .iter()
-                .find(|record| record.run_id == *run_id && record.status.is_terminal())
-                .unwrap_or_else(|| panic!("missing terminal record for {run_id}: {records:#?}"));
+        for terminal in [&session_terminal, &skill_terminal] {
             assert_eq!(
                 terminal.status,
-                tracedecay::automation::run_ledger::AutomationRunStatus::Skipped
+                tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
             );
             assert!(
-                terminal.error.as_deref().is_some_and(|reason| reason
-                    == "lcm_not_ingested"
-                    || reason == "no_session_evidence"
-                    || reason == "no_skill_writer_evidence"
-                    || reason == "session_evidence_retrieval_unavailable"),
+                terminal
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason == "lcm_not_ingested"
+                        || reason == "no_session_evidence"
+                        || reason == "no_skill_writer_evidence"
+                        || reason == "session_evidence_retrieval_unavailable"),
                 "unexpected evidence skip reason: {terminal:#?}"
             );
-        }
-
-        let (status, activity) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/activity?limit=50"),
-        );
-        assert_eq!(status, 200);
-        let events = activity["events"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected activity events array: {activity}"));
-        for task_label in ["session-reflector", "skill-writer"] {
-            let task_phases: Vec<_> = events
-                .iter()
-                .filter(|event| {
-                    event["message"].as_str().is_some_and(|message| {
-                        message
-                            .to_ascii_lowercase()
-                            .contains(&format!("dashboard {task_label} automation run"))
-                    })
-                })
-                .filter_map(|event| event["phase"].as_str())
-                .collect();
-            for phase in [
-                "queued",
-                "evidence",
-                "backend",
-                "validation",
-                "apply",
-                "report",
-                "finish",
-            ] {
-                assert!(
-                    task_phases.contains(&phase),
-                    "queued {task_label} run should emit {phase} activity; phases={task_phases:?}, activity={activity}"
-                );
-            }
+            assert!(
+                records.iter().any(|record| record == terminal),
+                "returned terminal ledger must be durably visible: {records:#?}"
+            );
         }
 
         server.stop();
@@ -462,7 +341,7 @@ fn dashboard_session_and_skill_runs_emit_activity_when_evidence_is_unavailable()
 }
 
 #[test]
-fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() {
+fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -509,7 +388,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
         assert_eq!(config["effective"]["enabled"], true);
         assert_eq!(config["effective"]["backend"], "codex_app_server");
 
-        let (status, queued) = post_json_body(
+        let (status, completed) = post_json_body(
             &agent,
             &format!("{base_url}/api/automation/run/memory-curator"),
             &serde_json::json!({
@@ -517,36 +396,35 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                 "min_confidence": 0.5
             }),
         );
-        assert_eq!(status, 202, "dashboard automation run failed: {queued}");
-        assert_eq!(queued["status"], "queued");
-        let run_id = queued["run_id"]
+        assert_eq!(
+            status, 200,
+            "dashboard automation run failed: {completed}"
+        );
+        let run_id = completed["run"]["run_id"]
             .as_str()
-            .unwrap_or_else(|| panic!("queued response should include run_id: {queued}"))
+            .unwrap_or_else(|| panic!("completed response should include run_id: {completed}"))
             .to_string();
-
-        let mut record = None;
-        for _ in 0..200 {
-            let records = tracedecay::automation::run_ledger::load_run_records(&dashboard_root, 10)
-                .await
-                .unwrap();
-            record = records
-                .into_iter()
-                .find(|record| record.run_id == run_id && record.status.is_terminal());
-            if record.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        let record = record.unwrap_or_else(|| {
-            panic!("dashboard automation run did not reach a terminal ledger record")
-        });
+        let record = serde_json::from_value::<
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+        >(completed["run"]["ledger_record"].clone())
+        .unwrap_or_else(|error| panic!("invalid completed run ledger: {error}"));
         assert_eq!(
             record.status,
-            tracedecay::automation::run_ledger::AutomationRunStatus::Succeeded
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
         );
         assert_eq!(record.accepted_count, 1);
         assert_eq!(record.rejected_count, 0);
         assert_eq!(record.artifacts.len(), 6);
+        let records = tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+            &dashboard_root,
+            10,
+        )
+        .await
+        .unwrap();
+        assert!(
+            records.iter().any(|stored| stored == &record),
+            "returned terminal ledger must be durably visible: {records:#?}"
+        );
 
         let artifact_url = format!("{base_url}/api/automation/runs/{run_id}/artifacts");
         let (status, listed) = get_json(&agent, &artifact_url);
@@ -618,9 +496,9 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
             &serde_json::json!({
                 "id": "final-smoke-review",
                 "title": "Final smoke review",
-                "summary": "Inspect self-improvement run artifacts and skill approval state.",
+                "summary": "Inspect self-improvement run artifacts and active skill state.",
                 "category": "workflow",
-                "body_markdown": "Check the run ledger, generated evals, validation gate, and pending skill approval.",
+                "body_markdown": "Check the run ledger, generated evals, validation gate, and active skill.",
                 "targets": ["codex"],
                 "provenance": {
                     "source": "automation_run",
@@ -629,28 +507,18 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                 }
             }),
         );
-        assert_eq!(status, 200, "skill draft should be accepted: {created_skill}");
-        assert_eq!(
-            created_skill["skill"]["metadata"]["state"],
-            "pending_approval"
-        );
+        assert_eq!(status, 200, "skill create should be accepted: {created_skill}");
+        assert_eq!(created_skill["skill"]["metadata"]["state"], "active");
         assert_eq!(
             created_skill["skill"]["metadata"]["provenance"]["run_id"],
             run_id
         );
 
-        let (status, approved_skill) = post_json(
-            &agent,
-            &format!("{base_url}/api/automation/skills/final-smoke-review/approve"),
-        );
-        assert_eq!(status, 200, "skill approval should succeed: {approved_skill}");
-        assert_eq!(approved_skill["skill"]["metadata"]["state"], "active");
-
         let (status, skill_detail) = get_json(
             &agent,
             &format!("{base_url}/api/automation/skills/final-smoke-review"),
         );
-        assert_eq!(status, 200, "approved skill should remain reviewable: {skill_detail}");
+        assert_eq!(status, 200, "active skill should remain inspectable: {skill_detail}");
         assert_eq!(skill_detail["skill"]["metadata"]["state"], "active");
         assert_eq!(
             skill_detail["skill"]["metadata"]["provenance"]["source"],
@@ -674,33 +542,6 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                 ),
             "successful dashboard automation run should be visible in history: {runs}"
         );
-
-        let (status, activity) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/activity?limit=20"),
-        );
-        assert_eq!(status, 200);
-        let activity_events = activity["events"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected curation activity events: {activity}"));
-        let activity_phases: Vec<_> = activity_events
-            .iter()
-            .filter_map(|event| event["phase"].as_str())
-            .collect();
-        for phase in [
-            "queued",
-            "evidence",
-            "backend",
-            "validation",
-            "apply",
-            "report",
-            "finish",
-        ] {
-            assert!(
-                activity_phases.contains(&phase),
-                "successful dashboard automation run should emit {phase} activity; phases={activity_phases:?}, activity={activity}"
-            );
-        }
 
         server.stop();
     });
@@ -728,10 +569,10 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let run_id = "artifact_api_run";
         let created_at = "2026-06-24T00:00:00Z";
-        let artifact = tracedecay::automation::run_ledger::write_run_artifact(
+        let artifact = tracedecay_agent_hosts::automation::run_ledger::write_run_artifact(
             &dashboard_root,
             run_id,
-            tracedecay::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
             &serde_json::json!({
                 "schema_version": 1,
                 "run_id": run_id,
@@ -743,13 +584,14 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         )
         .await
         .unwrap();
-        tracedecay::automation::run_ledger::append_run_record(
+        tracedecay_agent_hosts::automation::run_ledger::append_run_record(
             &dashboard_root,
-            &tracedecay::automation::run_ledger::AutomationRunLedgerRecord {
+            &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord {
                 schema_version: 2,
                 run_id: run_id.to_string(),
-                trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
-                task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+                trigger:
+                    tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::ManualCli,
+                task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
                 task_key: Some("memory_curator".to_string()),
                 backend: "codex_app_server".to_string(),
                 host_mode: Some("standalone".to_string()),
@@ -757,7 +599,8 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 response_schema: None,
                 strict_json: None,
                 model: Some("test-model".to_string()),
-                status: tracedecay::automation::run_ledger::AutomationRunStatus::Succeeded,
+                status:
+                    tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded,
                 evidence_hash: Some("sha256:evidence".to_string()),
                 input_hash: Some("sha256:input".to_string()),
                 output_hash: Some("sha256:output".to_string()),
@@ -837,10 +680,10 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 .is_some_and(|detail| detail.contains("not found"))
         );
 
-        let artifact_path = tracedecay::automation::run_ledger::run_artifact_path(
+        let artifact_path = tracedecay_agent_hosts::automation::run_ledger::run_artifact_path(
             &dashboard_root,
             run_id,
-            tracedecay::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunArtifactKind::CodexHandoff,
         )
         .unwrap();
         std::fs::write(&artifact_path, "{\"tampered\":true}\n").unwrap();
@@ -857,7 +700,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
 }
 
 #[test]
-fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
+fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_receipt_trajectories() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -875,19 +718,45 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
-        let alive_record = apply_dashboard_automation_fact(
+        use tracedecay_agent_hosts::automation::managed_skills::{
+            ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
+            default_managed_skill_targets,
+        };
+
+        let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
+        create_managed_skill(
+            &managed_skill_profile_root,
+            ManagedSkillDraft {
+                id: "dashboard-outcome-trajectory-skill".to_owned(),
+                title: "Dashboard outcome trajectory skill".to_owned(),
+                summary: "Fixture for automatic outcome tracking.".to_owned(),
+                category: "maintenance".to_owned(),
+                targets: default_managed_skill_targets(),
+                body_markdown: "Use when checking automatic outcome trajectories.".to_owned(),
+                support_files: Vec::new(),
+                provenance: ManagedSkillProvenance {
+                    source: ManagedSkillSource::AutomationRun,
+                    actor: "tracedecay".to_owned(),
+                    run_id: Some("run_outcomes_skill".to_owned()),
+                },
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("create active managed skill: {error}"));
+
+        let alive_receipt = record_dashboard_automatic_fact(
             &cg,
             "run_outcomes_alive",
             "Automation outcomes retain canonical applied fact identity",
         )
         .await;
-        let gone_record = apply_dashboard_automation_fact(
+        let gone_receipt = record_dashboard_automatic_fact(
             &cg,
             "run_outcomes_deleted",
             "Automation outcomes retain deleted fact lineage safely",
         )
         .await;
-        delete_dashboard_automation_fact(&cg, &gone_record).await;
+        delete_dashboard_automatic_fact(&cg, &gone_receipt).await;
 
         let agent = http_agent();
         let port = pick_free_port();
@@ -903,7 +772,17 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let (status, outcomes) = get_json(&agent, &format!("{base_url}/api/automation/outcomes"));
         assert_eq!(status, 200, "outcomes endpoint failed: {outcomes}");
         assert_eq!(outcomes["error"], "");
-        assert_eq!(outcomes["skills"], serde_json::json!([]));
+        let skills = outcomes["skills"]
+            .as_array()
+            .unwrap_or_else(|| panic!("skills must be an array: {outcomes}"));
+        let skill = skills
+            .iter()
+            .find(|skill| skill["skill_id"] == "dashboard-outcome-trajectory-skill")
+            .unwrap_or_else(|| panic!("missing activated skill outcome: {outcomes}"));
+        assert_eq!(skill["verdict"], "too_early");
+        assert!(skill["activated_at"].is_number());
+        assert!(skill["days_since_activation"].is_number());
+
         let facts = outcomes["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("facts must be an array: {outcomes}"));
@@ -911,28 +790,24 @@ fn automation_outcomes_endpoint_reports_applied_fact_trajectories() {
         let by_id = |id: &str| {
             facts
                 .iter()
-                .find(|fact| fact["proposal_id"] == id)
-                .unwrap_or_else(|| panic!("missing proposal {id}: {outcomes}"))
+                .find(|fact| fact["apply_id"] == id)
+                .unwrap_or_else(|| panic!("missing automatic fact receipt {id}: {outcomes}"))
         };
-        let alive = by_id(&alive_record.proposal_id);
+        let alive = by_id(&alive_receipt.apply_id);
         assert_eq!(alive["verdict"], "never_recalled");
         assert_eq!(alive["still_exists"], true);
         assert_eq!(alive["helpful_count"], 0);
         assert_eq!(
             alive["canonical_fact_id"],
-            serde_json::json!(alive_record.canonical_fact_id)
-        );
-        assert_eq!(
-            alive["fact_id"],
-            serde_json::json!(alive_record.legacy_fact_id)
+            serde_json::json!(alive_receipt.canonical_fact_id)
         );
         assert_eq!(alive["run_id"], "run_outcomes_alive");
-        let gone = by_id(&gone_record.proposal_id);
+        let gone = by_id(&gone_receipt.apply_id);
         assert_eq!(gone["verdict"], "deleted");
         assert_eq!(gone["still_exists"], false);
         assert_eq!(
             gone["canonical_fact_id"],
-            serde_json::json!(gone_record.canonical_fact_id)
+            serde_json::json!(gone_receipt.canonical_fact_id)
         );
         assert_eq!(gone["run_id"], "run_outcomes_deleted");
 

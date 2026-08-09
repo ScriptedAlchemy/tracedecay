@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::sessions::lcm::LcmRelationProjectionStatus;
+use tracedecay_sessions::runtime::lcm::LcmRelationProjectionStatus;
 
 /// A hook only waits for the daemon's typed pressure acknowledgement; the
 /// daemon owns any eventual transcript capture and compaction work. The budget

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
-use tracedecay::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay_agent_hosts::automation::skill_frontmatter::parse_skill_frontmatter;
 
 /// The shared plugin tree root (holds Claude's manifest, skills, commands, and
 /// agents; Claude's host-specific files are `README-claude.md`, `.mcp.json`,
@@ -550,7 +550,8 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
 
     let cursor_files = tracedecay::agents::plugin_bundle::cursor_files();
     let temp = tempfile::tempdir().unwrap();
-    tracedecay::automation::agent_targets::install_codex_managed_agents(temp.path()).unwrap();
+    tracedecay_agent_hosts::automation::agent_targets::install_codex_managed_agents(temp.path())
+        .unwrap();
     for agent in EXPECTED_AGENTS {
         let stem = agent.trim_end_matches(".md");
         let claude_path = root.join("plugin/agents").join(agent);

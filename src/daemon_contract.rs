@@ -29,9 +29,9 @@ use tracedecay_application::{
     ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
     GeneratedWorkProposal, IdempotencyKey, IssueTaskHandoffRequestV1, IssueTaskHandoffResultV1,
     MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetReadRequestV1, Omission, OpenInvestigationHandoffRequestV1,
-    OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1,
-    OperationReceipt, PageRequest, PageState, PauseWorkRunCommand,
+    MultiRootScopeSetReadRequestV1, ObservatoryReadRequestV1, Omission,
+    OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
+    OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1, PreviewId,
     PreviewResult, ReconciliationState, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
     RequestId, ResolvedScope, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
@@ -409,6 +409,7 @@ pub(crate) enum DaemonInvocationOperation {
     CodeReferences,
     Configuration,
     ContextScout,
+    ObservatoryRead,
     RetainedApplication,
     MultiRootScopeSetRead,
     MultiRootScopeSetCompareAndSwap,
@@ -469,6 +470,7 @@ impl DaemonInvocationOperation {
             Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
+            Self::ObservatoryRead => "observatory_read",
             Self::RetainedApplication => "retained_application",
             Self::MultiRootScopeSetRead => "multi_root_scope_set_read",
             Self::MultiRootScopeSetCompareAndSwap => "multi_root_scope_set_compare_and_swap",
@@ -828,6 +830,14 @@ pub(crate) enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    ObservatoryRead {
+        request: ObservatoryReadRequestV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     RetainedApplication {
         request: tracedecay_application::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
@@ -998,6 +1008,7 @@ impl DaemonInvocationRequest {
                 }
             }
             crate::application_surface::ApplicationSurfaceOperation::TestResults
+            | crate::application_surface::ApplicationSurfaceOperation::ObservatoryRead
             | crate::application_surface::ApplicationSurfaceOperation::FeedbackAdvisoryCycle
             | crate::application_surface::ApplicationSurfaceOperation::SessionLookup
             | crate::application_surface::ApplicationSurfaceOperation::QualifiedName
@@ -1335,6 +1346,28 @@ impl DaemonInvocationRequest {
             delivery_route: None,
             payload: DaemonInvocationPayload::RetainedApplication {
                 request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn observatory_read(
+        request_id: impl Into<String>,
+        request: ObservatoryReadRequestV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ObservatoryRead {
+                request,
+                resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1698,7 +1731,8 @@ impl DaemonInvocationRequest {
     pub(crate) fn with_resolved_scope(mut self, scope: Option<ResolvedScope>) -> Self {
         match &mut self.payload {
             DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
-            | DaemonInvocationPayload::Configuration { resolved_scope, .. } => {
+            | DaemonInvocationPayload::Configuration { resolved_scope, .. }
+            | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. } => {
                 *resolved_scope = scope;
             }
             _ => {}
@@ -1868,6 +1902,9 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::Configuration
             }
             DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
+            DaemonInvocationPayload::ObservatoryRead { .. } => {
+                DaemonInvocationOperation::ObservatoryRead
+            }
             DaemonInvocationPayload::RetainedApplication { .. } => {
                 DaemonInvocationOperation::RetainedApplication
             }
@@ -1948,6 +1985,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeReferences
                 | DaemonInvocationOperation::Configuration
                 | DaemonInvocationOperation::ContextScout
+                | DaemonInvocationOperation::ObservatoryRead
                 | DaemonInvocationOperation::RetainedApplication
                 | DaemonInvocationOperation::MultiRootScopeSetRead
                 | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
@@ -2103,6 +2141,20 @@ impl DaemonInvocationRequest {
                 ..
             } => {
                 if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ObservatoryRead {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !(1..=365).contains(&request.window_days)
+                    || observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
                 {
@@ -2735,6 +2787,10 @@ pub(crate) enum DaemonInvocationOutcome {
     ContextScout {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
+    },
+    ObservatoryRead {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
     },
     RetainedApplication {
         scope: ResolvedScope,

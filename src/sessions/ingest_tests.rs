@@ -8,19 +8,19 @@ use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::sessions::ingest::test_support::{
+use crate::store::GlobalDbSessionIngestAuthority;
+use tracedecay_sessions::observation::ObservationCancellation;
+use tracedecay_sessions::runtime::ingest::test_support::{
     IngestPassBounds, USER_INGEST_PROVIDER_FRONTIER_KEY,
     ingest_project_sources_for_provider_without_registered_authority,
     ingest_user_global_sources_for_provider_with_roots_bounded,
     ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
     ingest_user_global_sources_for_startup_with_db_without_registered_authority,
 };
-use crate::sessions::ingest::{
+use tracedecay_sessions::runtime::ingest::{
     IngestPassCoverage, ingest_project_sources_for_provider,
     ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
 };
-use crate::store::GlobalDbSessionIngestAuthority;
-use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::{SessionProvider, TranscriptIngestStats};
 
 static INGEST_TEST_NONCE: AtomicU64 = AtomicU64::new(1);

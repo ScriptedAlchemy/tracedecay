@@ -6,14 +6,14 @@ import {
   type SettingsPayloadV1,
   type DashboardLegalActionRefV1,
 } from '../../contracts/generated.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { usePayload } from '../../data/query/usePayload.ts';
 import {
   scopeWritable,
   scopedUrl,
   useScope,
   type ScopeWritability,
 } from '../../data/scope/store.ts';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
   SettingsEditorPanel,
@@ -51,7 +51,7 @@ import {
  */
 export function SettingsPage() {
   const scope = useScope((state) => state.scope);
-  const settings = useLegacy(
+  const settings = usePayload(
     ['settings'],
     '/api/settings',
     DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
@@ -63,7 +63,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
+      <PayloadBoundary title="Settings" pending={settings.isPending} result={settings.data}>
         {(envelope) => (
           <SettingsSurface
             payload={envelope.payload}
@@ -75,7 +75,7 @@ export function SettingsPage() {
             onApplied={() => void settings.refetch()}
           />
         )}
-      </LegacyBoundary>
+      </PayloadBoundary>
     </div>
   );
 }

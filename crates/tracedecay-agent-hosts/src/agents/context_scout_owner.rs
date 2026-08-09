@@ -9,6 +9,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
 };
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::context_scout_model::context_scout_model_assistant_from_project_config;
 use super::context_scout_ports::ContextScoutConfigurationPinV1;
@@ -27,7 +28,6 @@ use super::context_scout_v2::{
 };
 use crate::automation::config::AutomationConfig;
 use crate::db::Database;
-use crate::ports::context::{CancellationToken, MonotonicDeadline};
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;
 const DELIVERY_LEASE_MICROS: i64 = 30 * 1_000_000;

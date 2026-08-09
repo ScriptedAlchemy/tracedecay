@@ -590,7 +590,7 @@ async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() 
 ///      the ingest sweep.
 #[tokio::test]
 async fn hook_route_records_spans_and_ingest_attributes_commits() {
-    use tracedecay::sessions::git_correlation::{
+    use tracedecay_sessions::runtime::git_correlation::{
         CommitRelationFilter, GitRefFilter, SessionsForQuery, SpanOverlapKind,
     };
 
@@ -793,8 +793,8 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     let sha = git_capture(&worktree, &["rev-parse", "HEAD"]);
 
     db.run_incremental_git_backfill_for_test(
-        &tracedecay::sessions::git_correlation::SystemGit,
-        tracedecay::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+        &tracedecay_sessions::runtime::git_correlation::SystemGit,
+        tracedecay_sessions::runtime::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
     )
     .await
     .unwrap();

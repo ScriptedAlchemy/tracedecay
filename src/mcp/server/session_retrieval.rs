@@ -46,11 +46,11 @@ use crate::mcp::tools::{
     SessionRetrievalUnavailableReason, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::sessions::lcm::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_sessions::runtime::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use crate::sessions::{SessionMessageSearchResult, SessionRecord};
-use crate::tracedecay::TraceDecay;
+use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionRecord};
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
 use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
@@ -713,7 +713,7 @@ impl DaemonSessionRetrievalService {
                 .await?;
             return Some(SessionMessageSearchResult {
                 session,
-                message: crate::sessions::SessionMessageRecord {
+                message: tracedecay_sessions::runtime::SessionMessageRecord {
                     provider: provider.to_string(),
                     message_id: summary_id,
                     session_id: session_id.to_string(),

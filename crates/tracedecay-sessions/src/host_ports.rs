@@ -10,7 +10,7 @@
 //! fills once during startup. Every slot has a
 //! conservative default so an unwired process still runs — it just does less.
 //!
-//! Root wiring needed: `tracedecay::sessions` install must call
+//! Root startup must call
 //! [`hermes_profile_pin::register`] and [`session_review::register`] before any
 //! transcript ingest runs.
 

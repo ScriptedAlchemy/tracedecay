@@ -147,7 +147,9 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
             }
         }
         let materialization_root =
-            crate::automation::skill_materialization::resolve_project_root(&project_path);
+            tracedecay_agent_hosts::automation::skill_materialization::resolve_project_root(
+                &project_path,
+            );
         check_managed_skill_materialization(&mut dc, home, &materialization_root);
     } else {
         dc.fail("Could not determine home directory");
@@ -313,7 +315,7 @@ fn doctor_result(
 /// conflict (a foreign file blocks the slot), or orphan (a managed file for a
 /// no-longer-active skill). A clean scope passes silently-ish with an info line.
 fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, project_root: &Path) {
-    use crate::automation::skill_materialization::doctor_detected_scopes;
+    use tracedecay_agent_hosts::automation::skill_materialization::doctor_detected_scopes;
 
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return;
@@ -363,9 +365,9 @@ enum DriftLevel {
 /// package.
 fn skill_drift_report(
     scope_desc: &str,
-    finding: &crate::automation::skill_materialization::SkillDrift,
+    finding: &tracedecay_agent_hosts::automation::skill_materialization::SkillDrift,
 ) -> (DriftLevel, String) {
-    use crate::automation::skill_materialization::SkillDrift;
+    use tracedecay_agent_hosts::automation::skill_materialization::SkillDrift;
     let path = finding.path().display();
     let skill_id = finding.skill_id();
     match finding {

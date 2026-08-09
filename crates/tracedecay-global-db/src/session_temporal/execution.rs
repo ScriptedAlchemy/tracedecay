@@ -303,7 +303,7 @@ pub trait TaskSessionRankSelectorV1: Send + Sync {
 /// Both authorities needed for one TaskSession execution. The temporal request
 /// freezes Plan-23 state; the retrieval request and profile identities drive
 /// the shared seven-lane composition callback.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AuthorizedTaskSessionExecutionRequestV1 {
     temporal: AuthorizedTemporalExecutionRequest,
     retrieval: RetrievalRequest,
@@ -326,18 +326,21 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
         score_domain: ScoreDomainId,
         policy_revision: ComponentRevision,
     ) -> Result<Self, TaskSessionSelectionCallbackErrorV1> {
-        let snapshot = temporal.snapshot_request();
-        let exact_session = matches!(
-            snapshot.retrieval_scope(),
-            tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(session_id)
-                if session_id == binding.source().session_id()
-        );
-        if !exact_session
-            || snapshot.provider_scope() != Some(binding.source().provider().as_str())
-            || temporal.limit() > retrieval.budget.max_candidates_per_lane as usize
-        {
-            return Err(TaskSessionSelectionCallbackErrorV1::Denied);
-        }
+        let control = {
+            let snapshot = temporal.snapshot_request();
+            let exact_session = matches!(
+                snapshot.retrieval_scope(),
+                tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(session_id)
+                    if session_id == binding.source().session_id()
+            );
+            if !exact_session
+                || snapshot.provider_scope() != Some(binding.source().provider().as_str())
+                || temporal.limit() > retrieval.budget.max_candidates_per_lane as usize
+            {
+                return Err(TaskSessionSelectionCallbackErrorV1::Denied);
+            }
+            EvidenceLaneExecutionControlV1::from_temporal(snapshot.execution_control().clone())
+        };
         Ok(Self {
             temporal,
             retrieval,
@@ -346,9 +349,7 @@ impl AuthorizedTaskSessionExecutionRequestV1 {
             retriever_revision,
             score_domain,
             policy_revision,
-            control: EvidenceLaneExecutionControlV1::from_temporal(
-                snapshot.execution_control().clone(),
-            ),
+            control,
         })
     }
 

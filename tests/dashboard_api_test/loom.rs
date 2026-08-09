@@ -1,5 +1,5 @@
 use crate::dashboard_api_support::*;
-use tracedecay::sessions::git_correlation::{
+use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 

@@ -1,8 +1,8 @@
 use tempfile::tempdir;
 use tokio::sync::Barrier;
 
-use tracedecay::automation::backend::AgentTaskKind;
-use tracedecay::automation::run_ledger::{
+use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
+use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, find_run_record, load_run_records, read_run_artifact_payload,
     run_artifact_path, run_ledger_path, write_run_artifact,

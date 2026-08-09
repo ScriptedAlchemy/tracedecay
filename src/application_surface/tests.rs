@@ -26,8 +26,8 @@ use super::{
     ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
-    application_http_context, application_negotiated_features,
+    HttpDisconnectCancellation, HttpOperationEventState, NativeIntegrationSurfaceRequest,
+    PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, normalize_application_tool_args,
     parse_application_surface_request, resolve_application_binding,
@@ -106,6 +106,79 @@ fn every_http_exposed_operation_resolves_from_the_canonical_catalog() {
                 "{operation:?} must resolve on the public HTTP surface",
             );
         }
+    }
+}
+
+#[test]
+fn native_worktree_http_bodies_parse_to_the_exact_daemon_operation() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let repository_target = json!({
+        "kind": "repository",
+        "project_id": "project.worktree-http",
+        "repository_id": "repository.worktree-http"
+    });
+    let worktree_target = json!({
+        "kind": "worktree",
+        "project_id": "project.worktree-http",
+        "repository_id": "repository.worktree-http",
+        "worktree_id": "worktree.worktree-http"
+    });
+    let binding = |target: Value| {
+        json!({
+            "scope_set_id": "scope-set.worktree-http",
+            "scope_set_revision": 1,
+            "scope_set_digest": digest.clone(),
+            "target": target
+        })
+    };
+    for (operation, mut body) in [
+        (
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
+            binding(repository_target),
+        ),
+        (
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
+            binding(worktree_target.clone()),
+        ),
+        (
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm,
+            binding(worktree_target.clone()),
+        ),
+        (
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove,
+            binding(worktree_target.clone()),
+        ),
+        (
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile,
+            binding(worktree_target),
+        ),
+    ] {
+        if matches!(
+            operation,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        ) {
+            body["inspection_digest"] = Value::String(digest.clone());
+        }
+        if operation == ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove {
+            body["confirmed_at"] = json!(10);
+        }
+        if matches!(
+            operation,
+            ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+        ) {
+            body["confirmation_digest"] = Value::String(digest.clone());
+        }
+        let parsed = parse_application_surface_request(operation, body)
+            .expect("canonical native worktree body");
+        let ApplicationSurfaceRequest::NativeIntegration(
+            NativeIntegrationSurfaceRequest::Worktree(request),
+        ) = parsed
+        else {
+            panic!("native worktree request must keep its typed daemon envelope");
+        };
+        assert_eq!(request.operation(), operation.as_str());
     }
 }
 

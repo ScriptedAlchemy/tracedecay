@@ -23,17 +23,6 @@ use crate::errors::{Result, TraceDecayError};
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
-    pub async fn call_user_lcm_tool_for_test(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        _profile_root: &Path,
-    ) -> Result<crate::mcp::tools::ToolResult> {
-        crate::mcp::tools::handle_user_lcm_tool_with_authorities(tool_name, arguments, None, None)
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn call_mcp_tool_for_test(
         &self,
         cg: &crate::tracedecay::TraceDecay,
@@ -88,7 +77,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn ingest_workflows_for_test(
         &self,
         project_root: &Path,
-    ) -> Result<crate::sessions::workflow_ingest::WorkflowIngestStats> {
+    ) -> Result<tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats> {
         let project_id = self
             .project_id
             .as_ref()
@@ -97,12 +86,14 @@ impl HostAdmissionTestRuntimeV1 {
                 message: "project session authority is unavailable".to_owned(),
             })?;
         let database = self.project_database_for_test()?;
-        let Some(home) = crate::sessions::home_dir() else {
-            return Ok(crate::sessions::workflow_ingest::WorkflowIngestStats::default());
+        let Some(home) = tracedecay_sessions::runtime::home_dir() else {
+            return Ok(
+                tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats::default(),
+            );
         };
         let store = crate::store::GlobalDbWorkflowStore::new(database);
         Ok(
-            crate::sessions::workflow_ingest::ingest_workflow_runs_with_sink(
+            tracedecay_sessions::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
                 &store,
                 project_id,
                 project_root,
@@ -116,7 +107,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn record_project_span_for_test(
         &self,
-        observation: &crate::sessions::git_correlation::SpanObservation,
+        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
         crate::store::GlobalDbGitCorrelationStore::new(self.project_database_for_test()?)
@@ -132,7 +123,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn record_session_span_for_test(
         &self,
         scope: HostAdmissionScope,
-        observation: &crate::sessions::git_correlation::SpanObservation,
+        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
         crate::store::GlobalDbGitCorrelationStore::new(self.session_database_for_test(scope)?)
@@ -170,12 +161,12 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn project_git_sessions_for_test(
         &self,
-        query: &crate::sessions::git_correlation::SessionsForQuery,
-    ) -> Result<Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>> {
+        query: &tracedecay_sessions::runtime::git_correlation::SessionsForQuery,
+    ) -> Result<Vec<tracedecay_sessions::runtime::git_correlation::SessionGitCorrelationHit>> {
         crate::store::GlobalDbGitCorrelationStore::new(self.project_database_for_test()?)
             .sessions_for_with_relation(
                 query,
-                crate::sessions::git_correlation::CommitRelationFilter::Produced,
+                tracedecay_sessions::runtime::git_correlation::CommitRelationFilter::Produced,
             )
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -188,14 +179,16 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn run_git_backfill_for_test(
         &self,
         analytics_events: &[crate::global_db::AnalyticsEventRecord],
-        git: &dyn crate::sessions::git_correlation::GitReflogSource,
-        options: &crate::sessions::git_correlation::BackfillOptions,
+        git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
+        options: &tracedecay_sessions::runtime::git_correlation::BackfillOptions,
     ) -> std::result::Result<
-        crate::sessions::git_correlation::BackfillStats,
-        crate::sessions::git_correlation::GitCorrelationError,
+        tracedecay_sessions::runtime::git_correlation::BackfillStats,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .run_backfill(analytics_events, git, options)
@@ -205,14 +198,16 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn run_incremental_git_backfill_for_test(
         &self,
-        git: &dyn crate::sessions::git_correlation::GitReflogSource,
+        git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
         limit_sessions: usize,
     ) -> std::result::Result<
-        crate::sessions::git_correlation::BackfillStats,
-        crate::sessions::git_correlation::GitCorrelationError,
+        tracedecay_sessions::runtime::git_correlation::BackfillStats,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .run_incremental_backfill(git, limit_sessions)
@@ -223,15 +218,19 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn git_correlation_meta_for_test(
         &self,
         key: &str,
-    ) -> std::result::Result<Option<i64>, crate::sessions::git_correlation::GitCorrelationError>
-    {
+    ) -> std::result::Result<
+        Option<i64>,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+    > {
         let database = self.project_database_for_test().map_err(|error| {
-            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         let snapshot = crate::store::GlobalDbGitCorrelationStore::new(database)
             .read_snapshot()
             .await?;
-        crate::sessions::git_correlation::read_meta_value(&snapshot, key).await
+        tracedecay_sessions::runtime::git_correlation::read_meta_value(&snapshot, key).await
     }
 
     #[doc(hidden)]

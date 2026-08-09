@@ -26,11 +26,11 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::request_identity::McpConnectionIdentityAuthority;
-use crate::sessions::git_correlation::{
+use crate::tracedecay::TraceDecay;
+use tracedecay_sessions::runtime::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
 };
-use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
@@ -307,6 +307,9 @@ pub struct McpServer {
     global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    /// Authenticated profile identity and policy grant pinned at server
+    /// construction. Profile-retained handlers can only narrow this admission.
+    profile_retained_admission: Option<crate::daemon::retained_owner::ProfileRetainedAdmissionV1>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
@@ -333,6 +336,8 @@ pub struct McpServer {
     session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
+    project_application_retrieval_service:
+        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     /// Registered-project sweep authority for `project_scope=all_registered`
     /// message search. Mounted only when this server holds the registry and a
@@ -453,9 +458,9 @@ pub struct McpServer {
     ledger_write_notify: Arc<tokio::sync::Notify>,
     /// In-process debounce for live hook-route span observations, so a burst
     /// of tool-use events for one session/branch/worktree writes at most once
-    /// per [`crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`].
+    /// per [`tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`].
     span_observation_debounce:
-        std::sync::Mutex<crate::sessions::git_correlation::SpanObservationDebounce>,
+        std::sync::Mutex<tracedecay_sessions::runtime::git_correlation::SpanObservationDebounce>,
     /// The negotiated MCP client name from the most recent `initialize`
     /// handshake's `clientInfo.name` (e.g. `"claude-code"`, `"codex"`,
     /// `"cursor"`). `None` until the first `initialize` request lands.
@@ -607,16 +612,14 @@ impl McpServer {
             && let Some(session_db) = context.session_db.as_ref()
         {
             let database_path = session_db.db_path().to_path_buf();
-            let (admission_runtime, _) = tokio::task::spawn_blocking(move || {
+            let admission_runtime = tokio::task::spawn_blocking(move || {
                 crate::host_admission::HostAdmissionRuntime::open_for_database(&database_path)
             })
             .await
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!("test server host-admission task failed: {error}"),
-            })?
-            .map_err(|error| crate::errors::TraceDecayError::Config {
-                message: format!("test server host-admission spool failed: {error:?}"),
             })?;
+            let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
                 crate::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
@@ -875,7 +878,7 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_session_retrieval_service = session_db
+        let project_session_retrieval = session_db
             .as_ref()
             .zip(project_session_retrieval_root.clone())
             .and_then(|(database, root)| match registered_session_db.as_ref() {
@@ -891,7 +894,14 @@ impl McpServer {
                     project_session_refresh_wake.clone(),
                 ),
             })
-            .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
+            .map(Arc::new);
+        let project_application_retrieval_service =
+            project_session_retrieval.clone().map(|service| {
+                service
+                    as Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>
+            });
+        let project_session_retrieval_service = project_session_retrieval
+            .map(|service| service as Arc<dyn SessionRetrievalServicePort>);
         let user_session_retrieval_service = user_session_db
             .as_ref()
             .zip(profile_session_retrieval_root.clone())
@@ -938,6 +948,40 @@ impl McpServer {
                     root.expected_runtime_shard()?,
                 )
             });
+        let profile_retained_admission = match profile_identity
+            .as_ref()
+            .zip(profile_session_retrieval_root.as_ref())
+        {
+            Some((identity, root)) => {
+                let admission =
+                    crate::daemon::retained_owner::profile_retained_configuration_digest(
+                        identity.brain_id(),
+                        identity.profile_id(),
+                        root.identity(),
+                    )
+                    .and_then(|configuration_digest| {
+                        crate::daemon::retained_owner::issue_profile_retained_policy_admission(
+                            identity.brain_id(),
+                            identity.profile_id().clone(),
+                            root.identity(),
+                            &configuration_digest,
+                            tracedecay_application::now_micros(),
+                            tracedecay_domain::UtcMicros(i64::MAX),
+                        )
+                    });
+                match admission {
+                    Ok(admission) => Some(admission),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "profile retained connection admission is unavailable"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
 
         let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
@@ -959,6 +1003,7 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
+            profile_retained_admission,
             session_db,
             registry_db,
             project_registry_reads,
@@ -974,6 +1019,7 @@ impl McpServer {
             project_session_root_id,
             session_sync_service,
             project_session_retrieval_service,
+            project_application_retrieval_service,
             user_session_retrieval_service,
             session_retrieval_sweep,
             project_lcm_authority,
@@ -1022,7 +1068,7 @@ impl McpServer {
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
             span_observation_debounce: std::sync::Mutex::new(
-                crate::sessions::git_correlation::SpanObservationDebounce::new(),
+                tracedecay_sessions::runtime::git_correlation::SpanObservationDebounce::new(),
             ),
             client_name: std::sync::Mutex::new(None),
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
@@ -1207,41 +1253,43 @@ impl McpServer {
         self.session_db.clone()
     }
 
-    pub(crate) fn retained_surface_port(
+    pub(crate) fn work_evidence_retrieval(
+        &self,
+    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
+        self.project_application_retrieval_service
+            .clone()
+            .map(crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "Work evidence retrieval requires the mounted project session authority"
+                    .to_owned(),
+            })
+    }
+
+    pub(crate) fn retained_surface_ports(
         &self,
         project_root: &Path,
+        project_id: tracedecay_domain::ProjectId,
         configuration_digest: tracedecay_domain::ManifestDigest,
-    ) -> Result<Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>> {
-        let mounted_profile_id = self
-            .profile_identity()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "retained surface requires exact mounted profile identity".to_owned(),
-            })?
-            .profile_id()
-            .clone();
-        crate::daemon::retained_owner::retained_surface_port(
+    ) -> Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>> {
+        let project_workflow_index = self.registered_session_db.as_ref().map(|database| {
+            Arc::new(DaemonWorkflowIndexReadService::new(Arc::clone(database)))
+                as Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>
+        });
+        crate::daemon::retained_owner::retained_surface_ports(
             crate::daemon::retained_owner::ProductionRetainedAuthoritiesV1 {
                 cg: Arc::clone(&self.cg),
                 project_root: project_root.to_path_buf(),
+                project_id,
                 configuration_digest,
-                mounted_profile_id,
-                mounted_session_store_id: self.project_session_store_id.clone().ok_or_else(
-                    || TraceDecayError::Config {
-                        message: "retained surface requires exact mounted session store identity"
-                            .to_owned(),
-                    },
-                )?,
-                mounted_session_root_id: self.project_session_root_id.clone().ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: "retained surface requires exact mounted session root identity"
-                            .to_owned(),
-                    }
-                })?,
-                registry_db: self.registry_db.clone(),
+                mounted_profile_id: self
+                    .profile_identity()
+                    .map(|identity| identity.profile_id().clone()),
+                mounted_session_store_id: self.project_session_store_id.clone(),
+                mounted_session_root_id: self.project_session_root_id.clone(),
                 registered_session_db: self.registered_session_db.clone(),
                 project_refresh: self.project_session_refresh_service.clone(),
                 project_retrieval: self.project_session_retrieval_service.clone(),
-                project_retrieval_sweep: self.session_retrieval_sweep.clone(),
+                project_workflow_index,
                 project_lcm: self.project_lcm_authority.clone(),
             },
         )

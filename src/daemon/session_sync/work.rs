@@ -497,15 +497,15 @@ impl SessionSyncProjectContext {
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
-        let activity_timestamp = crate::sessions::git_correlation::read_meta_value(
+        let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
-            crate::sessions::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+            tracedecay_sessions::runtime::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
         )
         .await
         .map_err(store_error)?;
-        let source_rowid = crate::sessions::git_correlation::read_meta_value(
+        let source_rowid = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
-            crate::sessions::git_correlation::GIT_HISTORY_ROWID_FRONTIER_KEY,
+            tracedecay_sessions::runtime::git_correlation::GIT_HISTORY_ROWID_FRONTIER_KEY,
         )
         .await
         .map_err(store_error)?;
@@ -529,7 +529,7 @@ impl SessionSyncProjectContext {
         let pass = async {
             let project_authority =
                 GlobalDbSessionIngestAuthority::new(Arc::clone(&self.project_sessions));
-            let project = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
+            let project = tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
                 &self.brain_id,
                 &self.profile_id,
                 &project_authority,
@@ -578,7 +578,7 @@ impl SessionSyncProjectContext {
                 let registry_authority =
                     GlobalDbSessionIngestAuthority::new(Arc::clone(&self.registry));
                 let user =
-                    crate::sessions::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
+                    tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
                         &self.brain_id,
                         &self.profile_id,
                         &user_authority,
@@ -618,9 +618,11 @@ impl SessionSyncProjectContext {
                     source_coverage(
                         "profile",
                         if profile_sweep_satisfied {
-                            crate::sessions::IngestPassCoverage::Complete
+                            tracedecay_sessions::runtime::IngestPassCoverage::Complete
                         } else {
-                            crate::sessions::IngestPassCoverage::Partial { deferred_units: 1 }
+                            tracedecay_sessions::runtime::IngestPassCoverage::Partial {
+                                deferred_units: 1,
+                            }
                         },
                     )
                 },
@@ -642,7 +644,8 @@ impl SessionSyncProjectContext {
         let pass = async {
             match &self.transcript_source_home {
                 Some(home) => {
-                    crate::sessions::with_transcript_source_home(home.clone(), pass).await
+                    tracedecay_sessions::runtime::with_transcript_source_home(home.clone(), pass)
+                        .await
                 }
                 None => pass.await,
             }
@@ -781,15 +784,16 @@ impl SessionSyncProjectContext {
             return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::TimedOut);
         }
         let cancellation = crate::application::observation::ObservationCancellation::default();
-        let control = crate::sessions::git_correlation::BoundedGitControl::new(
+        let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,
         );
         let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
-        let backfill_options = crate::sessions::git_correlation::BackfillOptions {
+        let backfill_options = tracedecay_sessions::runtime::git_correlation::BackfillOptions {
             since: options.since_unix(),
             limit_sessions: options.max_sessions(),
-            merge_gap_secs: crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+            merge_gap_secs:
+                tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
             max_commits_per_repo: usize::MAX,
             dry_run: options.dry_run(),
         };
@@ -879,7 +883,7 @@ fn git_sync_with_topology_result(
 
 pub(super) fn git_sync_work_result(
     project_id: &ProjectId,
-    outcome: crate::sessions::git_correlation::BoundedBackfillOutcome,
+    outcome: tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
     requested_interruption: Option<SessionSyncInterruption>,
 ) -> SessionSyncWorkResult {
     let stats = SessionSyncStatsV1 {
@@ -943,9 +947,9 @@ pub(super) fn git_sync_work_result(
 }
 
 const fn git_history_interruption_reason(
-    interruption: crate::sessions::git_correlation::BoundedBackfillInterruption,
+    interruption: tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption,
 ) -> &'static str {
-    use crate::sessions::git_correlation::BoundedBackfillInterruption;
+    use tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption;
 
     match interruption {
         BoundedBackfillInterruption::Cancelled => "git_sync_cancelled",
@@ -969,9 +973,9 @@ const fn git_history_interruption_reason(
 pub(super) fn git_history_frontier_from_meta(
     activity_timestamp: Option<i64>,
     source_rowid: Option<i64>,
-) -> Option<crate::sessions::git_correlation::GitHistoryIndexFrontier> {
+) -> Option<tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier> {
     activity_timestamp.map(|activity_timestamp| {
-        crate::sessions::git_correlation::GitHistoryIndexFrontier {
+        tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
             activity_timestamp,
             source_rowid: source_rowid.unwrap_or(0),
         }
@@ -980,7 +984,7 @@ pub(super) fn git_history_frontier_from_meta(
 
 pub(super) fn git_history_source_frontier(
     project_id: &ProjectId,
-    frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier,
+    frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier,
 ) -> SessionSyncSourceFrontierV1 {
     SessionSyncSourceFrontierV1 {
         store_scope: "git".to_owned(),

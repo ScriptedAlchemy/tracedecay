@@ -1,5 +1,4 @@
 use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
-use crate::automation::config_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
@@ -8,6 +7,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
+use tracedecay_agent_hosts::automation::config_error;
 
 use super::SessionAuthorities;
 use super::support::tool_json;

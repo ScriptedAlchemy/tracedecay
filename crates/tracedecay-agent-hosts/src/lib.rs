@@ -8,9 +8,9 @@
 //! former `crate::agents::*` / `crate::automation::*` paths keep resolving
 //! unchanged, which is why the module names are preserved verbatim.
 //!
-//! The root crate re-exports both modules from `src/agents.rs` and
-//! `src/automation.rs` so every previously public path
-//! (`tracedecay::agents::…`, `tracedecay::automation::…`) still resolves.
+//! The root crate calls the extracted automation authority directly through
+//! `tracedecay_agent_hosts::automation`; it does not maintain an automation
+//! compatibility facade.
 //!
 //! Remaining root couplings that this crate satisfies through injected ports
 //! rather than a dependency edge are cataloged in `SEAMS.md`.

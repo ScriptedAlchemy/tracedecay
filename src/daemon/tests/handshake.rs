@@ -79,6 +79,32 @@ fn daemon_handshake_requires_client_identity() {
     assert!(DaemonHandshake::from_line(&encoded).is_err());
 }
 
+/// Handshake metadata is negotiated over a live daemon connection. Absent
+/// capability claims must resolve to their fail-closed defaults.
+#[test]
+fn handshake_defaults_optional_metadata_when_fields_are_absent() {
+    let encoded = json!({
+        "project_path": "/work/repo",
+        "scope_prefix": null,
+        "timings": false,
+        "allow_init": false,
+        "client_identity": {
+            "profile_root": "/profiles/client",
+            "global_db_path": "/profiles/client/global.db"
+        }
+    })
+    .to_string();
+
+    let decoded =
+        DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
+
+    assert!(!decoded.allow_initialize_root_routing);
+    assert!(decoded.client_version.is_empty());
+    assert!(decoded.client_instance_id.is_empty());
+    assert!(!decoded.tool_list_changed_capable);
+    assert!(decoded.catalog_version.is_empty());
+}
+
 #[tokio::test]
 async fn portable_broker_rejects_missing_auth_before_routing() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -131,6 +157,50 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     assert!(lifecycle.accepting());
     assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert!(owners.lock().await.values().next().is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn socket_client_requires_authentication_before_routing() {
+    use tokio::io::AsyncWriteExt;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("bind broker");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        Box::pin(super::super::serve_authenticated_socket_client_with_class(
+            stream,
+            super::super::DaemonEngine::default(),
+            TOKEN.to_string(),
+            super::super::DaemonClientAdmissionClass::General,
+        ))
+        .await
+    });
+
+    let mut client = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect client");
+    client
+        .write_all(
+            test_handshake_defaults()
+                .to_line()
+                .expect("handshake")
+                .as_bytes(),
+        )
+        .await
+        .expect("write unauthenticated handshake");
+    client.write_all(b"\n").await.expect("write newline");
+    client.shutdown().await.expect("shutdown client");
+
+    let error = server
+        .await
+        .expect("server task")
+        .expect_err("missing authentication must fail closed");
+    assert!(error.to_string().contains("authentication failed"));
 }
 
 #[test]

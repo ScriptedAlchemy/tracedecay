@@ -489,6 +489,10 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
         QueryAuthorityProviderStatusV1::Available { profile_id, .. }
             if profile_id == query.profile().profile_id
     ));
+    assert!(matches!(
+        provider.federated_authority_for(&scope, &id("privacy.query-initial")),
+        Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent)
+    ));
 }
 
 #[test]

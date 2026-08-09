@@ -1,6 +1,6 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
-use crate::application::memory::{MemoryApplication, MemoryOperationContext, V1UpdateFactOutcome};
+use crate::application::memory::{MemoryApplication, MemoryOperationContext, UpdateFactOutcome};
 // The shared resolvers live in `tracedecay_usecases::memory` (the crate that
 // owns `MemoryApplication`/`MemoryApplicationError`) rather than in
 // `tracedecay-runtime-core` — that crate is a *dependency* of
@@ -77,7 +77,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("add fact")?;
         self.project_memory_application()
             .await?
-            .add_fact_v1(request, context)
+            .add_fact(request, context)
             .await
             .map_err(memory_application_error)
     }
@@ -87,7 +87,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("search facts")?;
         self.project_memory_application()
             .await?
-            .search_facts_v1(request, context)
+            .search_facts(request, context)
             .await
             .map_err(memory_application_error)
     }
@@ -102,7 +102,7 @@ impl TraceDecay {
         let owner = self.project_memory_owner()?;
         let db = self.open_project_store_db_read_only().await?;
         memory_application_for_db(owner, &db)?
-            .search_facts_untracked_v1(request)
+            .search_facts_untracked(request)
             .await
             .map_err(memory_application_error)
     }
@@ -117,7 +117,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("probe facts")?;
         self.project_memory_application()
             .await?
-            .probe_facts_v1(
+            .probe_facts(
                 SearchFactsRequest {
                     query: entity.to_owned(),
                     category,
@@ -136,12 +136,12 @@ impl TraceDecay {
         match self
             .project_memory_application()
             .await?
-            .update_fact_v1(request, context)
+            .update_fact(request, context)
             .await
             .map_err(memory_application_error)?
         {
-            V1UpdateFactOutcome::Updated(fact) => Ok(*fact),
-            V1UpdateFactOutcome::RejectedSecretLike { reason } => Err(TraceDecayError::Database {
+            UpdateFactOutcome::Updated(fact) => Ok(*fact),
+            UpdateFactOutcome::RejectedSecretLike { reason } => Err(TraceDecayError::Database {
                 operation: "update_fact".to_owned(),
                 message: reason,
             }),
@@ -152,7 +152,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("remove fact")?;
         self.project_memory_application()
             .await?
-            .remove_fact_v1(fact_id, context)
+            .remove_fact(fact_id, context)
             .await
             .map_err(memory_application_error)
     }
@@ -166,7 +166,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("list facts")?;
         self.project_memory_application()
             .await?
-            .list_facts_v1(category, min_trust, limit, context)
+            .list_facts(category, min_trust, limit, context)
             .await
             .map_err(memory_application_error)
     }
@@ -174,7 +174,7 @@ impl TraceDecay {
     pub async fn get_fact(&self, fact_id: i64) -> Result<Option<FactRecord>> {
         self.project_memory_application()
             .await?
-            .get_fact_v1(fact_id)
+            .get_fact(fact_id)
             .await
             .map_err(memory_application_error)
     }
@@ -183,7 +183,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("record fact feedback")?;
         self.project_memory_application()
             .await?
-            .record_fact_feedback_v1(request, context)
+            .record_fact_feedback(request, context)
             .await
             .map_err(memory_application_error)
     }
@@ -191,7 +191,7 @@ impl TraceDecay {
     pub async fn fact_trust_history(&self, fact_id: i64) -> Result<Vec<TrustHistoryEntry>> {
         self.project_memory_application()
             .await?
-            .fact_trust_history_v1(fact_id, MAX_FACT_HISTORY_LIMIT)
+            .fact_trust_history(fact_id, MAX_FACT_HISTORY_LIMIT)
             .await
             .map_err(memory_application_error)
     }
@@ -199,7 +199,7 @@ impl TraceDecay {
     pub async fn memory_status(&self) -> Result<MemoryStatus> {
         self.project_memory_application()
             .await?
-            .memory_status_v1()
+            .memory_status()
             .await
             .map_err(memory_application_error)
     }
@@ -217,7 +217,7 @@ impl TraceDecay {
         let context = self.generated_memory_operation("daemon memory repair")?;
         self.project_memory_application()
             .await?
-            .dashboard_repair_v1(context)
+            .dashboard_repair(context)
             .await
             .map_err(memory_application_error)
     }

@@ -317,10 +317,6 @@ pub enum Commands {
         /// (only used with --agent codex).
         #[arg(long)]
         automation: bool,
-        /// With --automation: opt in to applying accepted memory-curation ops
-        /// (permanent deletes/merges) without dashboard approval.
-        #[arg(long, requires = "automation")]
-        auto_apply: bool,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]

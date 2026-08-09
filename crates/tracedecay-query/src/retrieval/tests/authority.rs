@@ -1,14 +1,16 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision,
     EphemeralSanitizedQueryViewV1, GitOidV1, PrincipalId, PublicRetrieverStatus, QueryMac,
     QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId, RetrievalFailure,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    TemporalModeV1,
+    RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
 };
 
 use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
+use crate::retrieval::evidence_lanes::TaskSessionLaneEvidenceV1;
 use crate::retrieval::fusion::{QueryDigestAuthenticationError, RetrievalCursorKeyringV1};
 use crate::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 use crate::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
@@ -216,6 +218,29 @@ fn federated_authority_composes_every_lane_without_fallback_projection() {
     assert_eq!(
         authority.compose(&request, &query_view(), empty_foreground_lanes(), 8, None,),
         Err(QueryAuthorityErrorV1::AuthorityModeMismatch)
+    );
+}
+
+#[test]
+fn task_session_selection_uses_the_accepted_federated_profile_without_fake_lanes() {
+    let authority = federated_authority();
+    let request = request();
+    let outcome = RetrieverOutcome::Complete(RetrieverBatch::<TaskSessionLaneEvidenceV1> {
+        candidates: Vec::new(),
+        evidence_by_occurrence: BTreeMap::new(),
+        coverage: RetrieverCoverage::default(),
+        continuation: None,
+    });
+
+    let selected = authority
+        .select_task_session(&request, &query_view(), outcome, 8, None)
+        .expect("select TaskSession lane");
+
+    assert!(selected.ranked_candidates().is_empty());
+    assert!(selected.continuation().is_none());
+    assert_eq!(
+        authority.task_session_score_domain().expect("score domain"),
+        id::<ScoreDomainId>("score.task_session.v1"),
     );
 }
 

@@ -247,10 +247,11 @@ impl FeedbackCanonicalProjectionKindV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackReadOwnerErrorV1 {
     NotFoundOrNotAuthorized,
     Unavailable,
+    Contract(ApplicationContractError),
 }
 
 /// Complete daemon-mountable feedback owner: opaque request authority plus the
@@ -382,24 +383,34 @@ where
             }
             None => authorized.context,
         };
-        Ok(match authorized.request {
+        match authorized.request {
             FeedbackReadRequestV1::Diagnostics(request) => {
-                FeedbackReadInvocationResultV1::Diagnostics(
+                Ok(FeedbackReadInvocationResultV1::Diagnostics(
                     self.service
                         .diagnostics(&context, request, observed_at)
-                        .await,
-                )
+                        .await
+                        .map_err(FeedbackReadOwnerErrorV1::Contract)?,
+                ))
             }
-            FeedbackReadRequestV1::Get(request) => FeedbackReadInvocationResultV1::Get(
-                self.service.get(&context, request, observed_at).await,
-            ),
-            FeedbackReadRequestV1::Expand(request) => FeedbackReadInvocationResultV1::Expand(
-                self.service.expand(&context, request, observed_at).await,
-            ),
-            FeedbackReadRequestV1::List(request) => FeedbackReadInvocationResultV1::List(
-                self.service.list(&context, request, observed_at).await,
-            ),
-        })
+            FeedbackReadRequestV1::Get(request) => Ok(FeedbackReadInvocationResultV1::Get(
+                self.service
+                    .get(&context, request, observed_at)
+                    .await
+                    .map_err(FeedbackReadOwnerErrorV1::Contract)?,
+            )),
+            FeedbackReadRequestV1::Expand(request) => Ok(FeedbackReadInvocationResultV1::Expand(
+                self.service
+                    .expand(&context, request, observed_at)
+                    .await
+                    .map_err(FeedbackReadOwnerErrorV1::Contract)?,
+            )),
+            FeedbackReadRequestV1::List(request) => Ok(FeedbackReadInvocationResultV1::List(
+                self.service
+                    .list(&context, request, observed_at)
+                    .await
+                    .map_err(FeedbackReadOwnerErrorV1::Contract)?,
+            )),
+        }
     }
 }
 

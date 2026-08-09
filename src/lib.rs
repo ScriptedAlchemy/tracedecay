@@ -53,7 +53,6 @@ pub use application::host_admission;
 pub mod application_output;
 pub mod application_surface;
 pub use tracedecay_code_index::ast_grep_search;
-pub mod automation;
 pub mod bench;
 pub mod branch;
 pub mod branch_meta;
@@ -113,11 +112,17 @@ pub mod retention;
 pub mod runtime_identity;
 mod runtime_ports;
 pub use runtime_ports::register_runtime_ports;
+#[cfg(test)]
+#[path = "sessions/claude_observation_benchmark.rs"]
+mod claude_observation_benchmark;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;
 pub mod serve;
-pub mod sessions;
+#[cfg(test)]
+#[path = "sessions/ingest_tests.rs"]
+mod session_ingest_tests;
+pub mod session_temporal_benchmark;
 mod shell;
 mod sqlite_read_snapshot;
 pub mod storage;
@@ -133,4 +138,7 @@ pub mod user_config;
 pub mod version;
 pub mod work_cli;
 pub mod workflow_cli;
+#[cfg(test)]
+#[path = "sessions/workflow_ingest_tests.rs"]
+mod workflow_ingest_tests;
 pub mod worktree;

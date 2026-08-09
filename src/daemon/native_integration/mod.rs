@@ -10,6 +10,8 @@ mod stack_hook_wakeup;
 mod stack_runtime;
 pub(crate) mod stack_signals;
 mod store;
+mod worktree;
+mod worktree_cleanup;
 
 #[cfg(test)]
 mod journey_tests;
@@ -19,3 +21,7 @@ pub(crate) use stack_hook_wakeup::{
     github_stack_hook_available, register_github_stack_hook_runtime,
 };
 pub(crate) use stack_runtime::DaemonGitHubStackRuntimeV1;
+pub(crate) use worktree::{
+    DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority, WorktreeHolderAdmissionFenceV1,
+    daemon_worktree_holder_admission_fence,
+};

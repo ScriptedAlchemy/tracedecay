@@ -1,4 +1,4 @@
-//! Request sanitizers for legacy V1 memory payloads.
+//! Request sanitizers for persisted numeric memory payloads.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12,12 +12,12 @@ use tracedecay_store::ProjectMemoryRelationProvenanceV1;
 
 use super::error::MemoryApplicationError;
 
-pub(super) struct SanitizedAddFactRequestV1 {
+pub(super) struct SanitizedAddFactRequest {
     request: AddFactRequest,
     receipt: SanitizationReceiptV1,
 }
 
-impl SanitizedAddFactRequestV1 {
+impl SanitizedAddFactRequest {
     pub(super) fn into_parts(self) -> (AddFactRequest, SanitizationReceiptV1) {
         (self.request, self.receipt)
     }
@@ -25,7 +25,7 @@ impl SanitizedAddFactRequestV1 {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SanitizedFactPayloadWireV1 {
+struct SanitizedFactPayloadWire {
     content: String,
     category: FactCategoryV1,
     tags: Vec<String>,
@@ -35,7 +35,7 @@ struct SanitizedFactPayloadWireV1 {
 
 pub(super) fn sanitize_add_fact_request(
     mut request: AddFactRequest,
-) -> Result<Option<SanitizedAddFactRequestV1>, MemoryApplicationError> {
+) -> Result<Option<SanitizedAddFactRequest>, MemoryApplicationError> {
     strip_reserved_automation_run_id(&mut request.metadata);
     // The canonical payload sorts labels before hashing; the sanitizer receipt
     // is computed over this wire, so it must see the same canonical order.
@@ -55,28 +55,27 @@ pub(super) fn sanitize_add_fact_request(
         "metadata": &request.metadata,
     });
     let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitize_memory_fact_payload(wire)
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
+        .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "legacy add request privacy sanitizer",
         })?
     else {
         return Ok(None);
     };
-    let sanitized =
-        serde_json::from_value::<SanitizedFactPayloadWireV1>(payload).map_err(|_| {
-            MemoryApplicationError::InvalidCompatibilityInput {
-                invariant: "sanitized legacy fact payload",
-            }
-        })?;
+    let sanitized = serde_json::from_value::<SanitizedFactPayloadWire>(payload).map_err(|_| {
+        MemoryApplicationError::InvalidInput {
+            invariant: "sanitized legacy fact payload",
+        }
+    })?;
     request.content = sanitized.content;
     request.category = sanitized.category.into();
     request.tags = sanitized.tags;
     request.entities = sanitized.entities;
     request.metadata = sanitized.metadata;
     request.source = source;
-    Ok(Some(SanitizedAddFactRequestV1 { request, receipt }))
+    Ok(Some(SanitizedAddFactRequest { request, receipt }))
 }
 
-/// Prepares a typed compatibility patch without claiming it is durable-safe.
+/// Prepares a typed persisted-fact patch without claiming it is durable-safe.
 ///
 /// The exact durable fact payload does not exist until the authority merges
 /// this patch with the current assertion. The authority therefore sanitizes
@@ -130,7 +129,7 @@ pub(super) fn sanitize_curation_text(
     invariant: &'static str,
 ) -> Result<String, MemoryApplicationError> {
     sanitize_provider_metadata_text(&value)
-        .ok_or(MemoryApplicationError::InvalidCompatibilityInput { invariant })
+        .ok_or(MemoryApplicationError::InvalidInput { invariant })
 }
 
 pub(super) fn sanitize_curation_texts(
@@ -146,19 +145,15 @@ pub(super) fn sanitize_curation_texts(
 pub(super) fn sanitize_curation_metadata(
     value: serde_json::Value,
 ) -> Result<ProjectMemoryRelationProvenanceV1, MemoryApplicationError> {
-    match sanitize_memory_fact_payload(value).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "dashboard curation metadata privacy sanitizer",
-        }
+    match sanitize_memory_fact_payload(value).map_err(|_| MemoryApplicationError::InvalidInput {
+        invariant: "dashboard curation metadata privacy sanitizer",
     })? {
         MemoryFactSanitizationV1::Durable { payload, receipt } => {
             ProjectMemoryRelationProvenanceV1::new(payload, receipt)
                 .map_err(MemoryApplicationError::Store)
         }
-        MemoryFactSanitizationV1::Quarantined => {
-            Err(MemoryApplicationError::InvalidCompatibilityInput {
-                invariant: "dashboard curation metadata rejected by privacy sanitizer",
-            })
-        }
+        MemoryFactSanitizationV1::Quarantined => Err(MemoryApplicationError::InvalidInput {
+            invariant: "dashboard curation metadata rejected by privacy sanitizer",
+        }),
     }
 }

@@ -1,4 +1,3 @@
-pub mod compatibility;
 pub mod lcm;
 mod ports;
 mod refresh;

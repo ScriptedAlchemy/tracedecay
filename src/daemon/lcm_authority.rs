@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::{
-    CancellationStage, OperationTermination, RequestAdmission, RequestContext,
+    CancellationSignal, CancellationStage, OperationTermination, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_sessions::runtime::lcm::{
@@ -314,6 +314,143 @@ impl DaemonLcmAuthority {
         }
     }
 
+    async fn execute_retained_read(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        request: LcmAuthorityRequest,
+    ) -> LcmAuthorityResponse {
+        let started_at = application_observed_at();
+        let operation = request.operation();
+        let retained_operation = match &request {
+            LcmAuthorityRequest::Status(_) => {
+                Some(tracedecay_application::RetainedSurfaceOperation::LcmStatus)
+            }
+            LcmAuthorityRequest::Doctor(_) => {
+                Some(tracedecay_application::RetainedSurfaceOperation::LcmDoctor)
+            }
+            LcmAuthorityRequest::Ingest(_) | LcmAuthorityRequest::Compact(_) => None,
+        };
+        let retained_application_operation = retained_operation.and_then(|operation| {
+            tracedecay_application::retained_surface_application_operation(operation).ok()
+        });
+        if cancellation.context().token_id != context.cancellation().token_id
+            || !retained_application_operation.is_some_and(|operation| {
+                context.allows(operation.capability_id(), operation.use_case_id())
+            })
+        {
+            return terminal(
+                context,
+                operation,
+                started_at,
+                LcmAuthorityOutcome::Denied,
+                OperationTermination::Failed,
+                None,
+                None,
+                None,
+            );
+        }
+        match context.admission_at(started_at) {
+            RequestAdmission::Admitted => {}
+            RequestAdmission::Cancelled => {
+                return terminal_interruption(
+                    context,
+                    operation,
+                    started_at,
+                    RequestInterruption::Cancelled,
+                    CancellationStage::BeforeAdmission,
+                    None,
+                );
+            }
+            RequestAdmission::TimedOut => {
+                return terminal_interruption(
+                    context,
+                    operation,
+                    started_at,
+                    RequestInterruption::DeadlineExceeded,
+                    CancellationStage::BeforeAdmission,
+                    None,
+                );
+            }
+        }
+        match request {
+            LcmAuthorityRequest::Status(query) => {
+                self.execute_retained_status(context, cancellation, started_at, query)
+                    .await
+            }
+            LcmAuthorityRequest::Doctor(query) => {
+                self.execute_retained_doctor(context, cancellation, started_at, query)
+                    .await
+            }
+            LcmAuthorityRequest::Ingest(_) | LcmAuthorityRequest::Compact(_) => terminal(
+                context,
+                operation,
+                started_at,
+                LcmAuthorityOutcome::Denied,
+                OperationTermination::Failed,
+                None,
+                None,
+                None,
+            ),
+        }
+    }
+
+    async fn execute_retained_status(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        started_at: UtcMicros,
+        query: LcmStatusQuery,
+    ) -> LcmAuthorityResponse {
+        let Some(store) = self.store.as_ref() else {
+            return unavailable(
+                context,
+                LcmAuthorityOperation::Status,
+                started_at,
+                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
+            );
+        };
+        tokio::select! {
+            result = store.status(query) => status_read_response(context, started_at, result),
+            () = cancellation.cancelled() => terminal_interruption(
+                context,
+                LcmAuthorityOperation::Status,
+                started_at,
+                RequestInterruption::Cancelled,
+                CancellationStage::DuringRead,
+                None,
+            ),
+        }
+    }
+
+    async fn execute_retained_doctor(
+        &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
+        started_at: UtcMicros,
+        query: LcmDoctorQuery,
+    ) -> LcmAuthorityResponse {
+        let Some(store) = self.store.as_ref() else {
+            return unavailable(
+                context,
+                LcmAuthorityOperation::Doctor,
+                started_at,
+                LcmAuthorityUnavailableReason::StoreAuthorityUnavailable,
+            );
+        };
+        tokio::select! {
+            result = store.doctor(query) => doctor_read_response(context, started_at, result),
+            () = cancellation.cancelled() => terminal_interruption(
+                context,
+                LcmAuthorityOperation::Doctor,
+                started_at,
+                RequestInterruption::Cancelled,
+                CancellationStage::DuringRead,
+                None,
+            ),
+        }
+    }
+
     async fn execute_ingest(
         &self,
         context: &RequestContext,
@@ -526,22 +663,7 @@ impl DaemonLcmAuthority {
         )
         .await;
         match result {
-            Ok(Ok(status)) => terminal(
-                context,
-                LcmAuthorityOperation::Status,
-                started_at,
-                LcmAuthorityOutcome::Ready,
-                OperationTermination::Completed,
-                None,
-                Some(LcmAuthorityPayload::Status(status)),
-                None,
-            ),
-            Ok(Err(_)) => terminal_failure(
-                context,
-                LcmAuthorityOperation::Status,
-                started_at,
-                "LCM status read failed",
-            ),
+            Ok(result) => status_read_response(context, started_at, result),
             Err(interruption) => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Status,
@@ -576,32 +698,7 @@ impl DaemonLcmAuthority {
         )
         .await;
         match result {
-            Ok(Ok(report)) => {
-                let Ok(state) = canonical_sha256(&report) else {
-                    return terminal_failure(
-                        context,
-                        LcmAuthorityOperation::Doctor,
-                        started_at,
-                        "LCM Doctor receipt could not be encoded",
-                    );
-                };
-                terminal(
-                    context,
-                    LcmAuthorityOperation::Doctor,
-                    started_at,
-                    LcmAuthorityOutcome::Ready,
-                    OperationTermination::Completed,
-                    Some(state),
-                    Some(LcmAuthorityPayload::Doctor(report)),
-                    None,
-                )
-            }
-            Ok(Err(_)) => terminal_failure(
-                context,
-                LcmAuthorityOperation::Doctor,
-                started_at,
-                "LCM Doctor read failed",
-            ),
+            Ok(result) => doctor_read_response(context, started_at, result),
             Err(interruption) => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Doctor,
@@ -611,6 +708,64 @@ impl DaemonLcmAuthority {
                 None,
             ),
         }
+    }
+}
+
+fn status_read_response(
+    context: &RequestContext,
+    started_at: UtcMicros,
+    result: Result<LcmStatus, LcmError>,
+) -> LcmAuthorityResponse {
+    match result {
+        Ok(status) => terminal(
+            context,
+            LcmAuthorityOperation::Status,
+            started_at,
+            LcmAuthorityOutcome::Ready,
+            OperationTermination::Completed,
+            None,
+            Some(LcmAuthorityPayload::Status(status)),
+            None,
+        ),
+        Err(_) => terminal_failure(
+            context,
+            LcmAuthorityOperation::Status,
+            started_at,
+            "LCM status read failed",
+        ),
+    }
+}
+
+fn doctor_read_response(
+    context: &RequestContext,
+    started_at: UtcMicros,
+    result: Result<serde_json::Value, LcmError>,
+) -> LcmAuthorityResponse {
+    match result {
+        Ok(report) => match canonical_sha256(&report) {
+            Ok(state) => terminal(
+                context,
+                LcmAuthorityOperation::Doctor,
+                started_at,
+                LcmAuthorityOutcome::Ready,
+                OperationTermination::Completed,
+                Some(state),
+                Some(LcmAuthorityPayload::Doctor(report)),
+                None,
+            ),
+            Err(_) => terminal_failure(
+                context,
+                LcmAuthorityOperation::Doctor,
+                started_at,
+                "LCM Doctor receipt could not be encoded",
+            ),
+        },
+        Err(_) => terminal_failure(
+            context,
+            LcmAuthorityOperation::Doctor,
+            started_at,
+            "LCM Doctor read failed",
+        ),
     }
 }
 

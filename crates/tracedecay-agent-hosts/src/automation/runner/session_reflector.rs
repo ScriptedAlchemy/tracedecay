@@ -26,6 +26,7 @@ use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
@@ -325,6 +326,7 @@ pub(super) enum SessionReflectorFinalization {
 pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     config: &AutomationConfig,
+    authority: &tracedecay_policy::CurationApplyAuthorityV1,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
     validation_repairs: &[Value],
@@ -341,7 +343,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     let (accepted_facts, rejected_facts) =
         validate_session_fact_candidates(memory, proposals, evidence).await?;
     let curation_decision =
-        evaluate_session_curation(config, evidence_hash.as_deref(), &accepted_facts)?;
+        evaluate_session_curation(config, authority, evidence_hash.as_deref(), &accepted_facts)?;
     let mut terminal_rejections = rejected_facts.clone();
     let admitted_facts = if curation_decision.allows_apply() {
         accepted_facts.as_slice()
@@ -478,6 +480,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
     config: &AutomationConfig,
+    authority: &tracedecay_policy::CurationApplyAuthorityV1,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
@@ -650,6 +653,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     let (report, record) = match finalize_session_reflector_success(
         memory,
         config,
+        authority,
         &finalizer,
         ProposedAgentOutput {
             response: &response,
@@ -693,10 +697,16 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
 pub async fn run_session_reflector_with_backend_and_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
+    let authority = super::project_curation_authority(
+        cg,
+        "automation:session-reflector",
+        configuration_revision_id,
+    )?;
     let sessions_db = super::project_automation_sessions(cg).await?;
     let project_memory_db = cg.open_project_store_db().await?;
     let memory = MemoryApplication::new(
@@ -714,6 +724,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
         retrieval,
         &memory,
         config,
+        &authority,
         backend,
         options,
     )
@@ -723,6 +734,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
 pub async fn run_session_reflector_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
@@ -730,6 +742,7 @@ pub async fn run_session_reflector_with_backend(
     run_session_reflector_with_backend_and_retrieval(
         cg,
         config,
+        configuration_revision_id,
         backend,
         retrieval.as_ref(),
         options,
@@ -741,10 +754,16 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
+    let authority = super::profile_curation_authority(
+        session_registry.as_ref(),
+        "automation:session-reflector",
+        configuration_revision_id,
+    )?;
     let sessions_db = session_registry.profile_sessions().await?;
     if let SessionReflectorEvidenceOutcome::Skipped {
         reason,
@@ -780,6 +799,7 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
         retrieval,
         &memory,
         config,
+        &authority,
         backend,
         options,
     )

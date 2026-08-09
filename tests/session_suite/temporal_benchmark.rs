@@ -2,7 +2,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use tracedecay::sessions::session_temporal_benchmark::IsolatedBenchmarkEnv;
+use tracedecay::session_temporal_benchmark::IsolatedBenchmarkEnv;
 
 #[test]
 fn concurrent_benchmark_environments_do_not_overlap() {

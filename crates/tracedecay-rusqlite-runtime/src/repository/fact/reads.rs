@@ -71,6 +71,7 @@ pub(super) fn read_current(
         Confidence::new(trust.unwrap_or(0.5)).map_err(invalid)?,
         FactAssertionId::new(active_assertion).map_err(invalid)?,
         FactEventId::new(last_event).map_err(invalid)?,
+        None,
         UtcMicros(updated_at),
     )
     .map(Some)

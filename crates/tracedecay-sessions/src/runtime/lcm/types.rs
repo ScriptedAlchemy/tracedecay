@@ -6,9 +6,6 @@
 //! Only infrastructure-facing conversions — notably the SQL error mapping —
 //! stay in this module.
 
-pub use crate::compatibility::{
-    DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
-};
 pub use crate::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
@@ -16,6 +13,9 @@ pub use crate::lcm::contracts::{
     LcmExpandedSummarySource, LcmPayloadExpansion, LcmPayloadRef, LcmRawMessage,
     LcmRawMessageMetadata, LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
     LcmSummaryNodeOverview,
+};
+pub use crate::retrieval_content::{
+    DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
 
 impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {

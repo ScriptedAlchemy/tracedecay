@@ -12,6 +12,8 @@ pub struct SessionAuthorities<'a> {
     pub(crate) user: Option<&'a Arc<RegisteredGlobalDb>>,
     pub(crate) profile_identity:
         Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) profile_retained_admission:
+        Option<&'a crate::daemon::retained_owner::ProfileRetainedAdmissionV1>,
     pub(crate) project_registered: Option<&'a Arc<RegisteredGlobalDb>>,
     pub(crate) profile_registered: Option<&'a Arc<RegisteredGlobalDb>>,
     project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
@@ -35,6 +37,7 @@ impl<'a> SessionAuthorities<'a> {
             project,
             user,
             profile_identity: None,
+            profile_retained_admission: None,
             project_registered: None,
             profile_registered: None,
             project_refresh: None,
@@ -64,6 +67,14 @@ impl<'a> SessionAuthorities<'a> {
         >,
     ) -> Self {
         self.profile_identity = profile_identity;
+        self
+    }
+
+    pub(crate) const fn with_profile_retained_admission(
+        mut self,
+        admission: Option<&'a crate::daemon::retained_owner::ProfileRetainedAdmissionV1>,
+    ) -> Self {
+        self.profile_retained_admission = admission;
         self
     }
 

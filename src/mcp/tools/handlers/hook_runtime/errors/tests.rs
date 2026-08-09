@@ -178,7 +178,7 @@ fn claude_observation_failures_expose_stable_retry_contracts() {
 
 #[test]
 fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
-    let error = crate::sessions::source::TranscriptIngestError::CursorKeyMismatch {
+    let error = tracedecay_sessions::runtime::source::TranscriptIngestError::CursorKeyMismatch {
         expected: "private expected cursor".to_string(),
         actual: "private actual cursor".to_string(),
     };

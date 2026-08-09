@@ -212,7 +212,8 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let user_sessions_path = crate::sessions::user_sessions_db_path(identity.profile_root());
+    let user_sessions_path =
+        tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await

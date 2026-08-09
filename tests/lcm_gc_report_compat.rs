@@ -1,5 +1,5 @@
-use tracedecay::sessions::lcm::LcmGcReport;
-use tracedecay::sessions::lcm::gc::{
+use tracedecay_sessions::runtime::lcm::LcmGcReport;
+use tracedecay_sessions::runtime::lcm::gc::{
     LcmGcDeferredReport, LcmGcPhaseReport, LcmGcReportConfig, LcmGcTotals,
 };
 

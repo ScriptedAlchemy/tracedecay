@@ -980,28 +980,11 @@ fn unavailable_advisory_hook_sink() -> Arc<AdvisoryHookNoticeSinkV1> {
     Arc::new(unavailable_advisory_hook_notice)
 }
 
-async fn load_project_open_context_scout_model_config(
-    profile_root: &Path,
-    dashboard_root: &Path,
-) -> Result<crate::automation::config::AutomationConfig> {
-    use crate::automation::config::{effective_config, load_project_config};
-
-    let path = profile_root.join("config.toml");
-    let global: crate::user_config::UserConfig = std::fs::read_to_string(&path)
-        .map(|contents| crate::user_config::parse_or_warn_default(&path, &contents))
-        .unwrap_or_default();
-    let project = load_project_config(dashboard_root).await?;
-    effective_config(&global.automation, project.as_ref())
-}
-
 async fn install_project_open_context_scout_configuration(
     owner: &crate::agents::context_scout_owner::ProjectContextScoutOwnerV1,
     pin: ContextScoutConfigurationPinV1,
-    profile_root: &Path,
-    dashboard_root: &Path,
+    model_config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
 ) -> Result<()> {
-    let model_config =
-        load_project_open_context_scout_model_config(profile_root, dashboard_root).await?;
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
         (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
             &model_config,
@@ -1160,6 +1143,9 @@ pub(super) async fn register_project_open_production_owners(
             &access,
         )
         .await?;
+    let work_evidence_retrieval = server
+        .work_evidence_retrieval()?
+        .with_federated_authority(invocation.work_federated_query_authority());
     invocation
         .configuration_runtime_registrar()
         .register(
@@ -1190,11 +1176,11 @@ pub(super) async fn register_project_open_production_owners(
                 message: format!("project-open retained grant is invalid: {error}"),
             }
         })?;
-    let retained_port = server
-        .retained_surface_port(project_root, access.configuration_digest.clone())
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open retained authority mount failed: {error}"),
-        })?;
+    let retained_ports = server.retained_surface_ports(
+        project_root,
+        scope.project_id.clone(),
+        access.configuration_digest.clone(),
+    );
     invocation
         .retained_runtime_registrar()
         .register(
@@ -1202,7 +1188,7 @@ pub(super) async fn register_project_open_production_owners(
             scope.clone(),
             requester.clone(),
             retained_grant,
-            retained_port,
+            retained_ports,
         )
         .await
         .map_err(|error| TraceDecayError::Config {
@@ -1323,7 +1309,7 @@ pub(super) async fn register_project_open_production_owners(
             access.configuration_digest.clone(),
             work_topology_policy,
             work_proposal_routing,
-            server.work_evidence_retrieval()?,
+            work_evidence_retrieval,
         )
         .await
         .map_err(|error| TraceDecayError::Config {
@@ -1995,19 +1981,31 @@ async fn register_production_advisory_owner(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "project-open Context Scout owner is unavailable".to_owned(),
             })?;
-    let profile_root =
-        graph
-            .open_options()
-            .profile_root
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open Context Scout model requires exact profile authority"
-                    .to_owned(),
-            })?;
+    let configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open automation configuration is unavailable: {error}"),
+        })?;
+    let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
+        revision_id: configuration.revision_id.clone(),
+        snapshot: configuration.snapshot.clone(),
+    };
+    if !scout_configuration.matches_current(&current_configuration) {
+        return Err(TraceDecayError::Config {
+            message: "project-open Context Scout configuration changed before model installation"
+                .to_owned(),
+        });
+    }
+    let model_config = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
+        &configuration.snapshot,
+    )?;
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration.clone(),
-        &profile_root,
-        &graph.store_layout().dashboard_root,
+        &model_config,
     )
     .await?;
     if setup_cancellation.is_cancelled() {
@@ -2432,25 +2430,26 @@ async fn run_production_hook_cycle(
         return;
     };
     let current_configuration = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
-        revision_id: pinned_configuration.revision_id,
-        snapshot: pinned_configuration.snapshot,
+        revision_id: pinned_configuration.revision_id.clone(),
+        snapshot: pinned_configuration.snapshot.clone(),
     };
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
     else {
         return;
     };
-    let Some(profile_root) = graph.open_options().profile_root else {
-        return;
-    };
     if scout_configuration.configuration_digest() != &feedback_configuration_digest {
         return;
     }
+    let Ok(model_config) = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
+        &pinned_configuration.snapshot,
+    ) else {
+        return;
+    };
     if install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration.clone(),
-        &profile_root,
-        &graph.store_layout().dashboard_root,
+        &model_config,
     )
     .await
     .is_err()
@@ -3865,35 +3864,35 @@ mod tests {
 
     #[tokio::test]
     async fn project_open_unavailable_configured_backend_keeps_deterministic_scout() {
-        for (name, profile_config) in [
-            ("default-model", ""),
+        use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
+
+        for (name, model_config) in [
             (
-                "disabled-model",
-                "[automation]\nenabled = false\nbackend = \"disabled\"\n",
+                "automation-disabled",
+                AutomationConfig {
+                    enabled: false,
+                    backend: AutomationBackend::CodexAppServer,
+                    ..AutomationConfig::default()
+                },
             ),
             (
-                "mismatched-model",
-                "[automation]\nenabled = true\nbackend = \"external_command\"\n",
+                "backend-disabled",
+                AutomationConfig {
+                    enabled: true,
+                    backend: AutomationBackend::Disabled,
+                    model_id: None,
+                    ..AutomationConfig::default()
+                },
             ),
         ] {
             let temporary = tempfile::tempdir().expect("temporary directory");
-            let profile_root = temporary.path().join("profile");
-            let dashboard_root = temporary.path().join("dashboard");
-            std::fs::create_dir_all(&profile_root).expect("create profile");
-            std::fs::write(profile_root.join("config.toml"), profile_config)
-                .expect("write profile config");
             let pin = configured_model_pin();
             let control = pin.control();
             let owner = test_scout_owner(&temporary, name).await;
 
-            install_project_open_context_scout_configuration(
-                owner.as_ref(),
-                pin,
-                &profile_root,
-                &dashboard_root,
-            )
-            .await
-            .expect("install unavailable configured backend");
+            install_project_open_context_scout_configuration(owner.as_ref(), pin, &model_config)
+                .await
+                .expect("install unavailable configured backend");
             let outcome = owner
                 .prepare_configured(
                     &configured_model_input(control.configuration_revision),
@@ -3923,33 +3922,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_open_configured_backend_receipt_uses_exact_profile_and_project_scope() {
+    async fn project_open_configured_backend_receipt_uses_pinned_automation_configuration() {
+        use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
+
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let exact_profile = temporary.path().join("exact-profile");
-        let other_profile = temporary.path().join("other-profile");
-        let dashboard_root = temporary.path().join("project-dashboard");
-        std::fs::create_dir_all(&exact_profile).expect("create exact profile");
-        std::fs::create_dir_all(&other_profile).expect("create other profile");
-        std::fs::write(
-            exact_profile.join("config.toml"),
-            "[automation]\nenabled = false\nbackend = \"codex_app_server\"\n",
-        )
-        .expect("write exact profile config");
-        std::fs::write(
-            other_profile.join("config.toml"),
-            "[automation]\nenabled = true\nbackend = \"external_command\"\n",
-        )
-        .expect("write other profile config");
-        crate::automation::config::save_project_config(
-            &dashboard_root,
-            &crate::automation::config::AutomationConfigPatch {
-                enabled: Some(true),
-                timeout_secs: Some(73),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("write project config");
+        let model_config = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            timeout_secs: 73,
+            ..AutomationConfig::default()
+        };
 
         let setting_key = tracedecay_domain::configuration::SettingKey::new(
             tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
@@ -4016,39 +3998,17 @@ mod tests {
         .await
         .expect("Scout owner");
 
-        install_project_open_context_scout_configuration(
-            owner.as_ref(),
-            pin,
-            &exact_profile,
-            &dashboard_root,
-        )
-        .await
-        .expect("install configured backend");
-        let configured =
-            load_project_open_context_scout_model_config(&exact_profile, &dashboard_root)
-                .await
-                .expect("load exact effective config");
-        let other_configured =
-            load_project_open_context_scout_model_config(&other_profile, &dashboard_root)
-                .await
-                .expect("load other effective config");
-        let receipt = crate::automation::backend::backend_availability(&configured);
+        install_project_open_context_scout_configuration(owner.as_ref(), pin, &model_config)
+            .await
+            .expect("install configured backend");
+        let receipt =
+            tracedecay_agent_hosts::automation::backend::backend_availability(&model_config);
         let status = owner.configured_status().await.expect("configured status");
 
-        assert!(configured.enabled);
-        assert_eq!(
-            configured.backend,
-            crate::automation::config::AutomationBackend::CodexAppServer
-        );
-        assert_eq!(configured.timeout_secs, 73);
-        assert_eq!(
-            receipt.backend,
-            crate::automation::config::AutomationBackend::CodexAppServer
-        );
-        assert_eq!(
-            other_configured.backend,
-            crate::automation::config::AutomationBackend::ExternalCommand
-        );
+        assert!(model_config.enabled);
+        assert_eq!(model_config.backend, AutomationBackend::CodexAppServer);
+        assert_eq!(model_config.timeout_secs, 73);
+        assert_eq!(receipt.backend, AutomationBackend::CodexAppServer);
         assert_eq!(
             status.model_path,
             Some(crate::agents::context_scout_v2::ContextScoutModelBackendV1::CodexAppServer)

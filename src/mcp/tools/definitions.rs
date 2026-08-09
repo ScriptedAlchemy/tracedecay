@@ -31,6 +31,7 @@ mod memory;
 mod multi_root;
 mod native_integration;
 mod native_worktree;
+mod observatory;
 mod session;
 mod skills;
 mod testing;
@@ -49,6 +50,7 @@ use lcm::*;
 use memory::*;
 use multi_root::*;
 use native_integration::*;
+use observatory::*;
 use skills::*;
 use testing::*;
 
@@ -637,6 +639,7 @@ pub(super) fn get_maximal_tool_definitions()
     ];
     definitions.extend(configuration_definitions());
     definitions.extend(context_scout_control_definitions());
+    definitions.extend(observatory_definitions()?);
     definitions.extend(work::work_definitions()?);
     definitions.extend(workflow::workflow_definitions()?);
     definitions.extend(native_worktree::native_worktree_definitions());
@@ -994,9 +997,11 @@ mod tests {
             selection["oneOf"][0]["properties"]["kind"]["const"],
             "declared_stack_edge"
         );
-        assert!(selection["oneOf"][0]["properties"]["binding"]["required"]
-            .as_array()
-            .is_some_and(|required| required.contains(&json!("declared_revision"))));
+        assert!(
+            selection["oneOf"][0]["properties"]["binding"]["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("declared_revision")))
+        );
         assert_eq!(
             selection["oneOf"][1]["properties"]["kind"]["const"],
             "independent_branch"

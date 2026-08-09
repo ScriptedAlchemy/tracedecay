@@ -31,7 +31,7 @@ pub async fn similarity_computation(
     let vector_cap = usize::try_from(SIMILARITY_FACT_CAP).map_err(|error| error.to_string())?;
     let rows = vector_rows(
         application
-            .dashboard_vector_points_v1(None, vector_cap)
+            .dashboard_vector_points(None, vector_cap)
             .await
             .map_err(|error| error.to_string())?,
     );

@@ -8,6 +8,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::profile_host_admission_replay::ProfileHostAdmissionBootstrapStatus;
 use super::shutdown_coordination::ShutdownStatus;
 use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
@@ -218,24 +219,9 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
                 error.to_string(),
             )
         })?;
-    let state = store_administration
+    store_administration
         .host_admission_broker(&user_session_db)
-        .await
-        .map_err(|error| {
-            TraceDecayError::project_route(
-                "host_admission_broker_unavailable",
-                true,
-                error.to_string(),
-            )
-        })?;
-    if let Some(outcome) = state.unavailable_outcome() {
-        let reason_code = outcome.reason_code.unwrap_or("spool_unavailable");
-        return Err(TraceDecayError::project_route(
-            reason_code,
-            outcome.retryable,
-            "user-profile host admission spool is unavailable",
-        ));
-    }
+        .await?;
     // host_admission_broker already kicks the coalesced worker for user-sessions DBs.
     Ok(())
 }
@@ -246,7 +232,7 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
 pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
-) {
+) -> Option<ProfileHostAdmissionBootstrapStatus> {
     if let Err(error) = store_administration
         .ensure_profile_host_admission_bootstrap(&client_identity.profile_root)
         .await
@@ -258,6 +244,23 @@ pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
             "profile_host_admission_bootstrap_schedule_failed",
             &[("reason_code", reason_code.to_owned())],
         );
+        return None;
+    }
+    match store_administration
+        .profile_host_admission_bootstrap_status(&client_identity.profile_root)
+        .await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let reason_code = error
+                .project_route_context()
+                .map_or("authority_unavailable", |(reason_code, _, _)| reason_code);
+            log_daemon_event(
+                "profile_host_admission_bootstrap_status_failed",
+                &[("reason_code", reason_code.to_owned())],
+            );
+            None
+        }
     }
 }
 
@@ -269,9 +272,9 @@ pub(super) async fn await_user_profile_host_admission_replay_for_identity(
 ) -> Result<()> {
     ensure_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
         .await?;
-    let broker_path = authority::canonical_identity_path(&crate::sessions::user_sessions_db_path(
-        &client_identity.profile_root,
-    ))
+    let broker_path = authority::canonical_identity_path(
+        &tracedecay_sessions::runtime::user_sessions_db_path(&client_identity.profile_root),
+    )
     .map_err(|error| {
         TraceDecayError::project_route("host_admission_broker_unavailable", true, error.to_string())
     })?;

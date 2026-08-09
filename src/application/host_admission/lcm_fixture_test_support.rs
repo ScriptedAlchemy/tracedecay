@@ -634,15 +634,17 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_insert_summary_node_for_test(
         &self,
         scope: HostAdmissionScope,
-        draft: crate::sessions::lcm::LcmSummaryNodeDraft,
-    ) -> std::result::Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError>
-    {
+        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let summary_hash =
-            tracedecay_sessions::compatibility::projected_content_hash(&draft.summary_text);
-        let summary_id = crate::sessions::lcm::dag::summary_node_id(
+            tracedecay_sessions::retrieval_content::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -652,7 +654,7 @@ impl HostAdmissionTestRuntimeV1 {
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
-                crate::sessions::lcm::types::LcmImmutableSummaryPublication {
+                tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
                     summary_id,
                     predecessor_summary_id: None,
                     draft,
@@ -668,18 +670,21 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_update_lifecycle_for_test(
         &self,
         scope: HostAdmissionScope,
-        update: crate::sessions::lcm::LcmLifecycleUpdate,
-    ) -> std::result::Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError>
-    {
+        update: tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let transaction = database
             .begin_write_transaction()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let state =
-            crate::sessions::lcm::compression::update_lifecycle(&transaction, update).await?;
+            tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update)
+                .await?;
         transaction.commit().await?;
         Ok(state)
     }
@@ -688,14 +693,14 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_publish_immutable_summary_for_test(
         &self,
         scope: HostAdmissionScope,
-        publication: crate::sessions::lcm::types::LcmImmutableSummaryPublication,
+        publication: tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication,
     ) -> std::result::Result<
-        crate::sessions::lcm::types::LcmSummaryPublicationReceipt,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
@@ -1158,12 +1163,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<(String, String)>, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<Option<(String, String)>, tracedecay_sessions::runtime::lcm::LcmError>
+    {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT snippet_text, index_text
@@ -1182,12 +1188,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_raw_message_fts_count_for_test(
         &self,
         query: &str,
-    ) -> std::result::Result<i64, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<i64, tracedecay_sessions::runtime::lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT COUNT(*)
@@ -1197,7 +1203,7 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await?;
         let row = rows.next().await?.ok_or_else(|| {
-            crate::sessions::lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
+            tracedecay_sessions::runtime::lcm::LcmError::Db("COUNT(*) returned no row".to_owned())
         })?;
         Ok(row.get(0)?)
     }
@@ -1207,12 +1213,13 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> std::result::Result<Option<Option<String>>, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<Option<Option<String>>, tracedecay_sessions::runtime::lcm::LcmError>
+    {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT metadata_json
@@ -1232,44 +1239,45 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         payload_ref: &str,
-        opts: &crate::sessions::lcm::payload::DeleteOpts,
+        opts: &tracedecay_sessions::runtime::lcm::payload::DeleteOpts,
     ) -> std::result::Result<
-        crate::sessions::lcm::payload::DeleteOutcome,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::payload::DeleteOutcome,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            crate::sessions::lcm::LcmError::Db(
+            tracedecay_sessions::runtime::lcm::LcmError::Db(
                 "registered session database has no storage root".to_owned(),
             )
         })?;
         let transaction = database
             .begin_write_transaction()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let prepared = crate::sessions::lcm::payload::delete_external_payload_in_transaction(
-            &transaction,
-            storage_root,
-            payload_ref,
-            opts,
-        )
-        .await?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+        let prepared =
+            tracedecay_sessions::runtime::lcm::payload::delete_external_payload_in_transaction(
+                &transaction,
+                storage_root,
+                payload_ref,
+                opts,
+            )
+            .await?;
         transaction.commit().await?;
 
         let mut outcome = prepared.outcome;
         if prepared.pending_removal_bytes.is_some() {
-            let transaction = database
-                .begin_write_transaction()
-                .await
-                .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-            let drained = crate::sessions::lcm::gc::drain_pending_payload_delete_in_transaction(
-                &transaction,
-                storage_root,
-                payload_ref,
-            )
-            .await;
+            let transaction = database.begin_write_transaction().await.map_err(|error| {
+                tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string())
+            })?;
+            let drained =
+                tracedecay_sessions::runtime::lcm::gc::drain_pending_payload_delete_in_transaction(
+                    &transaction,
+                    storage_root,
+                    payload_ref,
+                )
+                .await;
             match drained {
                 Ok(removed) => {
                     transaction.commit().await?;
@@ -1295,13 +1303,13 @@ impl HostAdmissionTestRuntimeV1 {
         payload_ref: &str,
     ) -> std::result::Result<
         Option<LcmExternalPayloadManifestTestRecord>,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT manifest.payload_ref, manifest.session_id,
@@ -1338,12 +1346,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_summary_publication_receipt_id_for_test(
         &self,
         summary_id: &str,
-    ) -> std::result::Result<Option<String>, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<Option<String>, tracedecay_sessions::runtime::lcm::LcmError> {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let mut rows = snapshot
             .query(
                 "SELECT json_extract(publication_json, '$.receipt_id')
@@ -1363,12 +1371,12 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         payload_ref: &str,
         replacement: &LcmExternalPayloadManifestTestRecord,
-    ) -> std::result::Result<(), crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
         let transaction = self
             .primary_lcm_fixture_database_for_test()
             .begin_write_transaction()
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         transaction
             .execute_batch("DROP TRIGGER session_external_payload_manifests_immutable_update_v1;")
             .await?;
@@ -1405,14 +1413,20 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         conversation_id: &str,
-    ) -> std::result::Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError>
-    {
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let snapshot = self
             .primary_lcm_fixture_database_for_test()
             .read_snapshot()
             .await?;
-        crate::sessions::lcm::compression::lifecycle_state(&snapshot, provider, conversation_id)
-            .await
+        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
+            &snapshot,
+            provider,
+            conversation_id,
+        )
+        .await
     }
 
     #[doc(hidden)]

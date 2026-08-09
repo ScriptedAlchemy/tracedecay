@@ -7,7 +7,7 @@
 //!   signal, so it carries a **safe default retention of 180 days**.
 //! * `session_messages` and `lcm_raw_messages` — legacy session copies retained
 //!   for a six-month recovery horizon. Current session stores additionally use
-//!   projection-durability-aware retention in [`crate::sessions::lcm`].
+//!   projection-durability-aware retention in [`tracedecay_sessions::runtime::lcm`].
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
 //! timestamp is both present and strictly older than the cutoff, so rows with

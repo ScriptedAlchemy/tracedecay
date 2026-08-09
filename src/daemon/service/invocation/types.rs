@@ -816,7 +816,7 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     /// Project-open-pinned proposal routing authority over the exact admitted
     /// configuration snapshot and executable bindings.
     pub(super) proposal_routing: super::work_routing::DaemonWorkProposalRoutingAuthorityV1,
-    /// Canonical Plan 23 retrieval authority retained at project open.
+    /// Canonical Plan-23 adapter with per-request evaluated-profile resolution.
     pub(super) evidence_retrieval:
         crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1,
     /// Project-owned bounded replay for receipts that closed outside a request
@@ -839,7 +839,8 @@ pub(in crate::daemon::service) struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
-    pub(super) port: Arc<dyn tracedecay_application::RetainedSurfaceExecutionPortV1>,
+    pub(super) ports:
+        Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {

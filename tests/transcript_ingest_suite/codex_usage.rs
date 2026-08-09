@@ -5,12 +5,12 @@
 //! row mix.
 
 use tempfile::TempDir;
-use tracedecay::sessions::SessionProvider;
-use tracedecay::sessions::codex::CodexSource;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,
 };
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::codex::CodexSource;
 
 use crate::codex::write_codex_rollout_with_structured_events;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
@@ -27,7 +27,7 @@ async fn search_session_kind(
     scope: &str,
     query: &str,
     kind: &str,
-) -> Vec<tracedecay::sessions::SessionMessageRecord> {
+) -> Vec<tracedecay_sessions::runtime::SessionMessageRecord> {
     db.search_session_messages("codex", Some(scope), query, 50)
         .await
         .into_iter()
@@ -420,7 +420,7 @@ async fn codex_structured_events_produce_full_row_mix() {
     assert_eq!(stats.messages_upserted, 11);
 
     let scope = project.to_string_lossy().to_string();
-    let meta_of = |m: &tracedecay::sessions::SessionMessageRecord| -> serde_json::Value {
+    let meta_of = |m: &tracedecay_sessions::runtime::SessionMessageRecord| -> serde_json::Value {
         serde_json::from_str(m.metadata_json.as_deref().unwrap()).unwrap()
     };
     let search_kind =

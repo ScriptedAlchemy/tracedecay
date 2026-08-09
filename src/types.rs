@@ -12,5 +12,5 @@ pub use tracedecay_runtime_core::types::*;
 /// historical `crate::types::{EditResult, …}` path resolving.
 pub use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveHint, MoveResult, MultiEditResult,
-    RenameFileEditV1, RenameResult, RenameSymbolBindingV1, RenameTextOnlyMatchV1,
+    RenameFileEditV1, RenameResult, RenameSymbolBindingV1,
 };

@@ -7,17 +7,17 @@ use std::time::SystemTime;
 use tracedecay::application::host_admission::{HostAdmissionScope, LcmLineageFaultForTest};
 use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
-use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
-#[cfg(feature = "test-transport")]
-use tracedecay::sessions::lcm::{
-    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-#[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::runtime::lcm::{
+    LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 #[test]
 fn lcm_mutation_tools_remain_daemon_internal() {
@@ -2354,7 +2354,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     assert_eq!(payload["status"], "ok");
     assert_eq!(
         payload["lcm"]["schema_version"],
-        json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
+        json!(tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION)
     );
 
     runtime

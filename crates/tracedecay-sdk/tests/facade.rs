@@ -1,5 +1,5 @@
 use tracedecay_sdk::operations::{
-    GitStatus, OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate,
+    ApplicationGitStatus, OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate,
     WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
@@ -252,21 +252,24 @@ fn canonical_operation_receipt_round_trips() {
 }
 
 #[test]
-fn git_status_descriptor_matches_the_canonical_mcp_sdk_binding() {
+fn application_git_status_descriptor_matches_the_mounted_http_binding() {
     let registry = application::sdk_executable_binding_registry().expect("SDK registry");
     let binding = registry
-        .get(&operation::OperationId::new(GitStatus::OPERATION_ID).unwrap())
+        .get(&operation::OperationId::new(ApplicationGitStatus::OPERATION_ID).unwrap())
         .and_then(|availability| availability.binding())
         .expect("Git status SDK binding");
 
-    assert_eq!(binding.sdk_method().as_str(), "git_status");
-    assert_eq!(binding.binding_id().as_str(), GitStatus::BINDING_ID);
-    assert_eq!(GitStatus::EFFECT, binding.effect());
-    assert_eq!(GitStatus::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(binding.sdk_method().as_str(), "application_git_status");
     assert_eq!(
-        GitStatus::TRANSPORT,
-        OperationTransport::McpTool {
-            tool_name: "tracedecay_git_status"
+        binding.binding_id().as_str(),
+        ApplicationGitStatus::BINDING_ID
+    );
+    assert_eq!(ApplicationGitStatus::EFFECT, binding.effect());
+    assert_eq!(ApplicationGitStatus::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(
+        ApplicationGitStatus::TRANSPORT,
+        OperationTransport::Http {
+            route: "/application/git/status"
         }
     );
 }

@@ -6,7 +6,7 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::retrieval_content::projected_content_hash;
 use tracedecay_store::{
     SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,

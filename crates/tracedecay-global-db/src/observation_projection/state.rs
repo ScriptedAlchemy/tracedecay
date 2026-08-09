@@ -7,7 +7,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::retrieval_content::projected_content_hash;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 

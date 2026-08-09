@@ -28,6 +28,7 @@ use tracedecay_domain::{
     ThreadId, TurnId, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
+use tracedecay_usecases::configuration::ConfigurationCurrentStateV1;
 
 use super::context_scout_v2::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutControlV1,
@@ -38,7 +39,6 @@ use super::context_scout_v2::{
 };
 use crate::db::Database;
 use crate::db::engine::params;
-use crate::ports::configuration::ConfigurationCurrentStateV1;
 
 const ADDRESS_LEDGER_KEY_V1: &str = "agents.context-scout.addresses.v1";
 const ADDRESS_LEDGER_SCHEMA_VERSION_V1: u16 = 1;

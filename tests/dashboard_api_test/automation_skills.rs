@@ -21,6 +21,24 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         assert_eq!(empty["count"], 0);
         assert_eq!(empty["skills"].as_array().map(Vec::len), Some(0));
 
+        let (status, invalid) = post_json_body(
+            &agent,
+            &skills_url,
+            &serde_json::json!({
+                "id": "../ambient-skill",
+                "title": "Invalid skill",
+                "summary": "Must not escape the managed profile root.",
+                "category": "workflow",
+                "body_markdown": "invalid"
+            }),
+        );
+        assert_eq!(status, 400, "invalid draft must stay typed: {invalid}");
+        let (status, missing) = post_json(
+            &agent,
+            &format!("{skills_url}/missing-skill/disable"),
+        );
+        assert_eq!(status, 404, "missing target must stay typed: {missing}");
+
         let draft = serde_json::json!({
             "id": "repo-hygiene",
             "title": "Repo Hygiene",
@@ -39,14 +57,10 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
                 "run_id": "run-dashboard-1"
             }
         });
-        let (status, created) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/skills/draft"),
-            &draft,
-        );
+        let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
         assert_eq!(created["skill"]["metadata"]["id"], "repo-hygiene");
-        assert_eq!(created["skill"]["metadata"]["state"], "pending_approval");
+        assert_eq!(created["skill"]["metadata"]["state"], "active");
         assert!(created["skill"]["metadata"]["created_at"]
             .as_i64()
             .is_some_and(|value| value > 0));
@@ -58,17 +72,17 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             created["skill"]["metadata"]["provenance"]["run_id"],
             "run-dashboard-1"
         );
-        let profile_root = tracedecay::storage::default_profile_root().unwrap();
-        let skill = tracedecay::automation::managed_skills::load_managed_skill(
+        let profile_root = fixture.host_runtime.profile_root().to_path_buf();
+        let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
             &profile_root,
             "repo-hygiene",
         )
         .await
         .unwrap();
-        tracedecay::automation::skill_usage::record_skill_usage(
+        tracedecay_agent_hosts::automation::skill_usage::record_skill_usage(
             &profile_root,
             &skill,
-            tracedecay::automation::skill_usage::SkillUsageAction::Use,
+            tracedecay_agent_hosts::automation::skill_usage::SkillUsageAction::Use,
             "dashboard-test",
             vec!["cursor".to_string(), "codex".to_string()],
             Some("cursor".to_string()),
@@ -76,45 +90,15 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         )
         .await
         .unwrap();
-        fixture
-            .host_runtime
-            .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
-                provider: "mcp".to_string(),
-                project_id: DashboardTestRuntimeV1::canonical_project_key(
-                    &fixture.project_root,
-                ),
-                session_id: Some("dashboard-skill-session".to_string()),
-                timestamp: tracedecay::tracedecay::current_timestamp(),
-                event_kind: "mcp_tool_call".to_string(),
-                hook_name: None,
-                tool_name: Some("tracedecay_skill_view".to_string()),
-                tool_category: None,
-                skill_name: None,
-                hint_category: None,
-                hint_id: None,
-                outcome: Some("success".to_string()),
-                metadata_json: Some(
-                    serde_json::json!({
-                        "function": {
-                            "name": "tracedecay_skill_view",
-                            "arguments": { "id": "repo-hygiene" }
-                        }
-                    })
-                    .to_string(),
-                ),
-            })
-            .await
-            .unwrap();
-
         let (status, listed) = get_json(&agent, &skills_url);
         assert_eq!(status, 200);
         assert_eq!(listed["count"], 1);
         assert_eq!(listed["skills"][0]["metadata"]["id"], "repo-hygiene");
-        assert_eq!(listed["usage_summaries"][0]["view_count"], 1);
+        assert_eq!(listed["usage_summaries"][0]["view_count"], 0);
         assert_eq!(listed["usage_summaries"][0]["use_count"], 1);
         assert_eq!(
             listed["usage_summaries"][0]["targets"],
-            serde_json::json!(["codex", "cursor", "mcp"])
+            serde_json::json!(["codex", "cursor"])
         );
         assert_eq!(listed["stale_recommendations"][0]["skill_id"], "repo-hygiene");
         assert_eq!(listed["stale_recommendations"][0]["stale"], false);
@@ -136,29 +120,14 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "Use this when cleaning generated changes."
         );
         assert_eq!(viewed["usage_summary"]["use_count"], 1);
+        assert_eq!(viewed["usage_summary"]["view_count"], 0);
         assert_eq!(viewed["stale_recommendation"]["recommendation"], "keep");
         assert_eq!(viewed["improvement_recommendation"]["recommendation"], "none");
-
-        let (status, approved) = post_json(&agent, &format!("{skill_url}/approve"));
-        assert_eq!(status, 200);
-        assert_eq!(approved["skill"]["metadata"]["state"], "active");
-        assert_eq!(
-            approved["skill"]["metadata"]["created_at"],
-            created["skill"]["metadata"]["created_at"]
-        );
-        assert!(
-            approved["skill"]["metadata"]["updated_at"]
-                .as_i64()
-                .unwrap_or_default()
-                >= created["skill"]["metadata"]["updated_at"]
-                    .as_i64()
-                    .unwrap_or_default()
-        );
 
         let duplicate = serde_json::json!({
             "id": "repo-hygiene",
             "title": "Overwrite attempt",
-            "summary": "This should not replace the approved skill.",
+            "summary": "This should not replace the active skill.",
             "category": "workflow",
             "body_markdown": "Duplicate drafts must not bypass PATCH staging.",
             "support_files": [
@@ -174,7 +143,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             .as_str()
             .is_some_and(|detail| detail.contains("already exists")));
         let persisted_after_duplicate =
-            tracedecay::automation::managed_skills::load_managed_skill(
+            tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
                 &profile_root,
                 "repo-hygiene",
             )
@@ -191,25 +160,11 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             .join("agent_managed/skills/repo-hygiene/templates/overwrite.md")
             .exists());
 
-        let (status, missing_checksum) = patch_json_body(
-            &agent,
-            &skill_url,
-            &serde_json::json!({
-                "summary": "Updated after dashboard review.",
-                "body_markdown": "Use this when cleaning generated changes and record focused checks.",
-                "pinned": true
-            }),
-        );
-        assert_eq!(status, 400);
-        assert!(missing_checksum["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("base_checksum")));
-
         let (status, patched) = patch_json_body(
             &agent,
             &skill_url,
             &serde_json::json!({
-                "base_checksum": approved["skill"]["metadata"]["checksum"],
+                "base_checksum": created["skill"]["metadata"]["checksum"],
                 "summary": "Updated after dashboard review.",
                 "body_markdown": "Use this when cleaning generated changes and record focused checks.",
                 "pinned": true
@@ -218,36 +173,27 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         assert_eq!(status, 200);
         assert_eq!(
             patched["skill"]["metadata"]["summary"],
-            "Keep repository maintenance tasks consistent."
-        );
-        assert_eq!(patched["skill"]["metadata"]["state"], "active");
-        assert_eq!(patched["skill"]["metadata"]["pinned"], false);
-        assert_eq!(
-            patched["skill"]["pending_update"]["metadata"]["summary"],
             "Updated after dashboard review."
         );
-        assert_eq!(patched["skill"]["pending_update"]["metadata"]["pinned"], true);
-        assert_eq!(
-            patched["skill"]["pending_update"]["base_checksum"],
-            approved["skill"]["metadata"]["checksum"]
-        );
+        assert_eq!(patched["skill"]["metadata"]["state"], "active");
+        assert_eq!(patched["skill"]["metadata"]["pinned"], true);
+        assert!(patched["skill"]["pending_update"].is_null());
         assert_eq!(
             patched["skill"]["metadata"]["created_at"],
             created["skill"]["metadata"]["created_at"]
         );
 
         for (action, expected_state) in [
-            ("approve", "active"),
             ("disable", "disabled"),
             ("archive", "archived"),
-            ("restore", "pending_approval"),
+            ("restore", "active"),
         ] {
             let (status, updated) = post_json(&agent, &format!("{skill_url}/{action}"));
             assert_eq!(status, 200, "{action} should succeed");
             assert_eq!(updated["skill"]["metadata"]["state"], expected_state);
         }
 
-        let persisted = tracedecay::automation::managed_skills::load_managed_skill(
+        let persisted = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
             &profile_root,
             "repo-hygiene",
         )
@@ -255,13 +201,13 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         .unwrap();
         assert_eq!(
             persisted.metadata.state,
-            tracedecay::automation::managed_skills::ManagedSkillState::PendingApproval
+            tracedecay_agent_hosts::automation::managed_skills::ManagedSkillState::Active
         );
     });
 }
 
 #[test]
-fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
+fn managed_skills_are_dashboard_controllable_with_direct_activation() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -283,6 +229,7 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
+        let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -309,24 +256,22 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         });
         let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
-        assert_eq!(created["skill"]["metadata"]["state"], "pending_approval");
+        assert_eq!(created["skill"]["metadata"]["state"], "active");
         assert_eq!(created["skill"]["metadata"]["pinned"], true);
-        assert_eq!(
-            created["skill"]["metadata"]["provenance"]["source"],
-            "user_draft"
-        );
+        assert_eq!(created["skill"]["metadata"]["provenance"]["source"], "user");
 
         let (status, listed) = get_json(&agent, &skills_url);
         assert_eq!(status, 200);
         assert_eq!(listed["count"], 1);
         assert_eq!(listed["skills"][0]["metadata"]["id"], "repo-hygiene");
-        assert_eq!(listed["skills"][0]["metadata"]["state"], "pending_approval");
+        assert_eq!(listed["skills"][0]["metadata"]["state"], "active");
 
         let skill_url = format!("{base_url}/api/automation/skills/repo-hygiene");
         let (status, updated) = patch_json_body(
             &agent,
             &skill_url,
             &serde_json::json!({
+                "base_checksum": created["skill"]["metadata"]["checksum"],
                 "summary": "Updated with review evidence.",
                 "body_markdown": "Record the narrow command that covers each change."
             }),
@@ -336,11 +281,11 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
             updated["skill"]["metadata"]["summary"],
             "Updated with review evidence."
         );
-        assert_eq!(updated["skill"]["metadata"]["state"], "pending_approval");
+        assert_eq!(updated["skill"]["metadata"]["state"], "active");
 
         // Detected global and project-local Claude Code installs must receive
-        // the export as soon as the dashboard approves the skill — not on the
-        // next `tracedecay install` / `update-plugin`.
+        // direct lifecycle changes without waiting for the next
+        // `tracedecay install` / `update-plugin`.
         let claude_md = home.join(".claude/CLAUDE.md");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(&claude_md, "# Claude rules\n").unwrap();
@@ -365,10 +310,9 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         .unwrap();
 
         for (action, expected_state, expect_deployed) in [
-            ("approve", "active", true),
             ("disable", "disabled", false),
             ("archive", "archived", false),
-            ("restore", "pending_approval", false),
+            ("restore", "active", true),
         ] {
             let (status, payload) = post_json_body(
                 &agent,
@@ -378,7 +322,7 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
             assert_eq!(status, 200, "{action} should succeed: {payload}");
             assert_eq!(payload["skill"]["metadata"]["state"], expected_state);
 
-            let exports = payload["skill_exports"]
+            let exports = payload["deployment"]["exports"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{action} should report skill exports: {payload}"));
             let claude_report = exports
@@ -417,7 +361,7 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
             );
         }
 
-        let skill_dir = profile_root
+        let skill_dir = managed_skill_profile_root
             .join("agent_managed")
             .join("skills")
             .join("repo-hygiene");
@@ -450,6 +394,7 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
+        let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -474,7 +419,7 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
                 }
             ],
             "provenance": {
-                "source": "user_draft",
+                "source": "user",
                 "actor": "dashboard",
                 "run_id": null
             }
@@ -482,7 +427,7 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         let skills_url = format!("{base_url}/api/automation/skills");
         let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
-        assert_eq!(created["skill"]["metadata"]["state"], "pending_approval");
+        assert_eq!(created["skill"]["metadata"]["state"], "active");
         assert!(
             created["skill"]["metadata"]["created_at"]
                 .as_i64()
@@ -494,10 +439,16 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
                 .is_some_and(|value| value > 0)
         );
         assert!(
-            profile_root
+            managed_skill_profile_root
                 .join("agent_managed/skills/repo-hygiene/SKILL.md")
                 .is_file(),
-            "drafting a managed skill must persist a SKILL.md package"
+            "creating a managed skill must persist a SKILL.md package"
+        );
+        assert!(
+            !profile_root
+                .join("agent_managed/skills/repo-hygiene/SKILL.md")
+                .exists(),
+            "dashboard skill writes must not follow the ambient profile root"
         );
 
         let (status, listed) = get_json(&agent, &skills_url);
@@ -513,10 +464,9 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
         assert_eq!(viewed["skill"]["metadata"]["id"], "repo-hygiene");
 
         for (action, expected_state) in [
-            ("approve", "active"),
             ("disable", "disabled"),
             ("archive", "archived"),
-            ("restore", "pending_approval"),
+            ("restore", "active"),
         ] {
             let (status, response) = post_json(
                 &agent,
@@ -530,7 +480,7 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
 }
 
 #[test]
-fn managed_skill_dashboard_api_controls_staged_updates() {
+fn managed_skill_dashboard_api_applies_updates_immediately() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -552,6 +502,7 @@ fn managed_skill_dashboard_api_controls_staged_updates() {
         let _userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
+        let managed_skill_profile_root = host_runtime.profile_root().to_path_buf();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -576,7 +527,7 @@ fn managed_skill_dashboard_api_controls_staged_updates() {
                 }
             ],
             "provenance": {
-                "source": "user_draft",
+                "source": "user",
                 "actor": "dashboard",
                 "run_id": null
             }
@@ -585,97 +536,35 @@ fn managed_skill_dashboard_api_controls_staged_updates() {
         let skill_url = format!("{skills_url}/repo-hygiene");
         let (status, _) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
-        let (status, _) = post_json(&agent, &format!("{skill_url}/approve"));
-        assert_eq!(status, 200);
 
-        let active = tracedecay::automation::managed_skills::load_managed_skill(
-            &profile_root,
+        let active = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
+            &managed_skill_profile_root,
             "repo-hygiene",
         )
         .await
         .unwrap();
         let base_checksum = active.metadata.checksum.clone();
-        tracedecay::automation::managed_skills::stage_managed_skill_update(
-            &profile_root,
-            "repo-hygiene",
-            &base_checksum,
-            tracedecay::automation::managed_skills::ManagedSkillUpdate {
-                summary: Some("Stage dashboard-visible generated guidance.".to_string()),
-                body_markdown: Some(
-                    "Review the run ledger before applying generated edits.".to_string(),
-                ),
-                support_files: Some(vec![
-                    tracedecay::automation::managed_skills::ManagedSupportFile::new(
-                        "templates/review.md",
-                        b"review body".to_vec(),
-                    )
-                    .unwrap(),
-                ]),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let (status, staged_view) = get_json(&agent, &skill_url);
+        let (status, updated) = patch_json_body(
+            &agent,
+            &skill_url,
+            &serde_json::json!({
+                "base_checksum": base_checksum,
+                "summary": "Apply dashboard-visible generated guidance.",
+                "body_markdown": "Review the run ledger before applying generated edits.",
+                "support_files": [{
+                    "path": "templates/review.md",
+                    "bytes": [114, 101, 118, 105, 101, 119, 32, 98, 111, 100, 121]
+                }]
+            }),
+        );
         assert_eq!(status, 200);
-        assert_eq!(staged_view["skill"]["metadata"]["state"], "active");
+        assert_eq!(updated["skill"]["metadata"]["state"], "active");
         assert_eq!(
-            staged_view["skill"]["metadata"]["summary"],
-            "Keep repository maintenance guidance current."
+            updated["skill"]["metadata"]["summary"],
+            "Apply dashboard-visible generated guidance."
         );
-        assert_eq!(
-            staged_view["skill"]["pending_update"]["metadata"]["summary"],
-            "Stage dashboard-visible generated guidance."
-        );
-        let skill_dir = profile_root.join("agent_managed/skills/repo-hygiene");
-        assert!(skill_dir.join("references/checklist.md").is_file());
-        assert!(!skill_dir.join("templates/review.md").exists());
-
-        let (status, discarded) = post_json(&agent, &format!("{skill_url}/discard-update"));
-        assert_eq!(status, 200);
-        assert!(discarded["skill"]["pending_update"].is_null());
-        assert_eq!(
-            discarded["skill"]["metadata"]["summary"],
-            "Keep repository maintenance guidance current."
-        );
-
-        let active = tracedecay::automation::managed_skills::load_managed_skill(
-            &profile_root,
-            "repo-hygiene",
-        )
-        .await
-        .unwrap();
-        tracedecay::automation::managed_skills::stage_managed_skill_update(
-            &profile_root,
-            "repo-hygiene",
-            &active.metadata.checksum,
-            tracedecay::automation::managed_skills::ManagedSkillUpdate {
-                summary: Some("Approve dashboard-visible generated guidance.".to_string()),
-                body_markdown: Some(
-                    "Review the run ledger before applying generated edits.".to_string(),
-                ),
-                support_files: Some(vec![
-                    tracedecay::automation::managed_skills::ManagedSupportFile::new(
-                        "templates/review.md",
-                        b"review body".to_vec(),
-                    )
-                    .unwrap(),
-                ]),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        let (status, approved) = post_json(&agent, &format!("{skill_url}/approve"));
-        assert_eq!(status, 200);
-        assert_eq!(approved["skill"]["metadata"]["state"], "active");
-        assert_eq!(
-            approved["skill"]["metadata"]["summary"],
-            "Approve dashboard-visible generated guidance."
-        );
-        assert!(approved["skill"]["pending_update"].is_null());
+        assert!(updated["skill"]["pending_update"].is_null());
+        let skill_dir = managed_skill_profile_root.join("agent_managed/skills/repo-hygiene");
         assert!(!skill_dir.join("references/checklist.md").exists());
         assert!(skill_dir.join("templates/review.md").is_file());
 

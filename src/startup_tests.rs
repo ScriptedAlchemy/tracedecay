@@ -204,7 +204,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         local: false,
         no_dashboard: false,
         automation: false,
-        auto_apply: false,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall {
         local: false,
@@ -293,7 +292,6 @@ fn agent_install_maintenance_is_selective() {
         local: false,
         no_dashboard: false,
         automation: false,
-        auto_apply: false,
     }));
     assert!(should_skip_agent_install_maintenance(
         &Commands::Reinstall {
@@ -539,14 +537,12 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
         local: true,
         no_dashboard: false,
         automation: false,
-        auto_apply: false,
     };
     let global = Commands::Install {
         agent: Some("hermes".to_string()),
         local: false,
         no_dashboard: false,
         automation: false,
-        auto_apply: false,
     };
 
     assert!(is_local_install_command(&local));

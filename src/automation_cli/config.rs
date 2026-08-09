@@ -23,7 +23,7 @@ pub(crate) async fn notify_project_automation_scheduler(
 pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay::errors::Result<()> {
-    use tracedecay::automation::config::{AutomationBackend, AutomationConfigPatch};
+    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfigPatch};
 
     let path = match &action {
         AutomationConfigAction::Get { path, .. }
@@ -72,7 +72,6 @@ pub(super) async fn handle_automation_config_command(
             host_mode,
             timeout_secs,
             scheduler_tick_secs,
-            export_memory_digest,
             memory_curator,
             memory_curator_schedule,
             memory_curator_interval_secs,
@@ -108,7 +107,6 @@ pub(super) async fn handle_automation_config_command(
                 .then(|| Some("gpt-5.6-mini".to_owned())),
                 timeout_secs,
                 scheduler_tick_secs,
-                export_memory_digest,
                 memory_curator: automation_task_patch(
                     memory_curator,
                     memory_curator_schedule,
@@ -147,7 +145,7 @@ pub(super) async fn handle_automation_config_command(
 
 pub(crate) async fn load_canonical_automation_config(
     project_path: &std::path::Path,
-) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationConfig> {
+) -> tracedecay::errors::Result<tracedecay_agent_hosts::automation::config::AutomationConfig> {
     match crate::commands::current_project_setting(
         project_path,
         tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY,
@@ -155,7 +153,7 @@ pub(crate) async fn load_canonical_automation_config(
     .await?
     {
         tracedecay_domain::configuration::ConfigurationValueV1::AutomationSettings(config) => {
-            tracedecay::automation::config::validate_config(&config)?;
+            tracedecay_agent_hosts::automation::config::validate_config(&config)?;
             Ok(config)
         }
         _ => Err(config_error(
@@ -166,11 +164,12 @@ pub(crate) async fn load_canonical_automation_config(
 
 pub(crate) async fn apply_project_automation_patch(
     project_path: &std::path::Path,
-    patch: tracedecay::automation::config::AutomationConfigPatch,
-) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationConfig> {
+    patch: tracedecay_agent_hosts::automation::config::AutomationConfigPatch,
+) -> tracedecay::errors::Result<tracedecay_agent_hosts::automation::config::AutomationConfig> {
     let resolved = crate::commands::resolve_project_scope(project_path.to_path_buf()).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;
-    let effective = tracedecay::automation::config::effective_config(&current, Some(&patch))?;
+    let effective =
+        tracedecay_agent_hosts::automation::config::effective_config(&current, Some(&patch))?;
     if effective != current {
         let expected_revision =
             crate::commands::current_configuration_revision(&resolved.project_path).await?;
@@ -202,15 +201,20 @@ fn automation_task_patch(
     min_idle_secs: Option<String>,
     stale_lock_secs: Option<String>,
     task: &str,
-) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationTaskPatch> {
-    Ok(tracedecay::automation::config::AutomationTaskPatch {
-        enabled,
-        schedule: schedule.map(empty_string_or_none_clears),
-        interval_secs: parse_optional_u64(interval_secs, &format!("{task} interval_secs"))?,
-        cooldown_secs: parse_optional_u64(cooldown_secs, &format!("{task} cooldown_secs"))?,
-        min_idle_secs: parse_optional_u64(min_idle_secs, &format!("{task} min_idle_secs"))?,
-        stale_lock_secs: parse_optional_u64(stale_lock_secs, &format!("{task} stale_lock_secs"))?,
-    })
+) -> tracedecay::errors::Result<tracedecay_agent_hosts::automation::config::AutomationTaskPatch> {
+    Ok(
+        tracedecay_agent_hosts::automation::config::AutomationTaskPatch {
+            enabled,
+            schedule: schedule.map(empty_string_or_none_clears),
+            interval_secs: parse_optional_u64(interval_secs, &format!("{task} interval_secs"))?,
+            cooldown_secs: parse_optional_u64(cooldown_secs, &format!("{task} cooldown_secs"))?,
+            min_idle_secs: parse_optional_u64(min_idle_secs, &format!("{task} min_idle_secs"))?,
+            stale_lock_secs: parse_optional_u64(
+                stale_lock_secs,
+                &format!("{task} stale_lock_secs"),
+            )?,
+        },
+    )
 }
 
 fn empty_string_or_none_clears(value: String) -> Option<String> {
@@ -242,14 +246,16 @@ fn parse_optional_u64(
 }
 
 fn print_automation_config(
-    effective: &tracedecay::automation::config::AutomationConfig,
+    effective: &tracedecay_agent_hosts::automation::config::AutomationConfig,
     json: bool,
     explain: bool,
 ) -> tracedecay::errors::Result<()> {
-    let availability = tracedecay::automation::backend::backend_availability(effective);
+    let availability = tracedecay_agent_hosts::automation::backend::backend_availability(effective);
     let trace_decay_backend_calls = effective.enabled
-        && effective.backend == tracedecay::automation::config::AutomationBackend::CodexAppServer
-        && effective.host_mode == tracedecay::automation::config::AutomationHostMode::Standalone;
+        && effective.backend
+            == tracedecay_agent_hosts::automation::config::AutomationBackend::CodexAppServer
+        && effective.host_mode
+            == tracedecay_agent_hosts::automation::config::AutomationHostMode::Standalone;
     let payload = serde_json::json!({
         "source": "daemon_pinned_snapshot",
         "effective": effective,
@@ -257,10 +263,9 @@ fn print_automation_config(
         "explanation": {
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": effective.host_mode
-                == tracedecay::automation::config::AutomationHostMode::DelegatedHost,
+                == tracedecay_agent_hosts::automation::config::AutomationHostMode::DelegatedHost,
             "automatic_memory_apply": true,
             "automatic_skill_activation": true,
-            "export_memory_digest": effective.export_memory_digest,
         },
     });
     if json {
@@ -288,7 +293,6 @@ fn print_automation_config(
             println!("trace_decay_backend_calls: {trace_decay_backend_calls}");
             println!("automatic_memory_apply: true");
             println!("automatic_skill_activation: true");
-            println!("export_memory_digest: {}", effective.export_memory_digest);
         }
     }
     Ok(())
@@ -296,8 +300,8 @@ fn print_automation_config(
 
 fn parse_automation_backend(
     value: &str,
-) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationBackend> {
-    use tracedecay::automation::config::AutomationBackend;
+) -> tracedecay::errors::Result<tracedecay_agent_hosts::automation::config::AutomationBackend> {
+    use tracedecay_agent_hosts::automation::config::AutomationBackend;
     match value {
         "disabled" => Ok(AutomationBackend::Disabled),
         "codex-app-server" | "codex_app_server" => Ok(AutomationBackend::CodexAppServer),
@@ -309,8 +313,8 @@ fn parse_automation_backend(
 
 fn parse_automation_host_mode(
     value: &str,
-) -> tracedecay::errors::Result<tracedecay::automation::config::AutomationHostMode> {
-    use tracedecay::automation::config::AutomationHostMode;
+) -> tracedecay::errors::Result<tracedecay_agent_hosts::automation::config::AutomationHostMode> {
+    use tracedecay_agent_hosts::automation::config::AutomationHostMode;
     match value {
         "standalone" => Ok(AutomationHostMode::Standalone),
         "delegated-host" | "delegated_host" => Ok(AutomationHostMode::DelegatedHost),

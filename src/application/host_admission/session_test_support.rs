@@ -23,11 +23,13 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn session_activity_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> crate::errors::Result<crate::automation::scheduler::SessionActivity> {
-        Ok(crate::automation::scheduler::load_session_activity(
-            self.session_database_for_test(scope)?,
+    ) -> crate::errors::Result<tracedecay_agent_hosts::automation::scheduler::SessionActivity> {
+        Ok(
+            tracedecay_agent_hosts::automation::scheduler::load_session_activity(
+                self.session_database_for_test(scope)?,
+            )
+            .await,
         )
-        .await)
     }
 
     #[doc(hidden)]
@@ -149,24 +151,29 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn ingest_profile_transcript_source_for_test(
         &self,
-        source: &dyn crate::sessions::source::TranscriptSource,
+        source: &dyn tracedecay_sessions::runtime::source::TranscriptSource,
         project_root: &Path,
         max_new_bytes: Option<u64>,
-    ) -> crate::sessions::source::TranscriptIngestResult<
-        crate::sessions::shared::TranscriptIngestStats,
+    ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
+        tracedecay_sessions::runtime::shared::TranscriptIngestStats,
     > {
         let database = self
             .session_database_for_test(HostAdmissionScope::Profile)
-            .map_err(
-                |error| crate::sessions::source::TranscriptIngestError::ScanIo {
+            .map_err(|error| {
+                tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
                     operation: "bind registered profile session test runtime",
                     path: project_root.to_path_buf(),
                     source: std::io::Error::other(error.to_string()),
-                },
-            )?;
+                }
+            })?;
         let store = crate::store::GlobalDbTranscriptStore::new(database);
-        crate::sessions::source::try_ingest_source(&store, source, project_root, max_new_bytes)
-            .await
+        tracedecay_sessions::runtime::source::try_ingest_source(
+            &store,
+            source,
+            project_root,
+            max_new_bytes,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -177,7 +184,7 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> crate::errors::Result<Vec<crate::sessions::SessionMessageSearchResult>> {
+    ) -> crate::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
         Ok(self
             .session_database_for_test(scope)?
             .search_session_messages(provider, project_key, query, limit)
@@ -192,8 +199,8 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-        filters: crate::sessions::SessionSearchFilters<'_>,
-    ) -> crate::errors::Result<Vec<crate::sessions::SessionMessageSearchResult>> {
+        filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
+    ) -> crate::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
         let fetch_limit = limit.saturating_mul(16).max(limit);
         let mut results = self
             .session_database_for_test(scope)?
@@ -201,9 +208,13 @@ impl HostAdmissionTestRuntimeV1 {
             .await;
         results.retain(|result| {
             let scope_matches = match filters.scope {
-                crate::sessions::SessionSearchScope::All => true,
-                crate::sessions::SessionSearchScope::ParentsOnly => !result.session.is_subagent,
-                crate::sessions::SessionSearchScope::SubagentsOnly => result.session.is_subagent,
+                tracedecay_sessions::runtime::SessionSearchScope::All => true,
+                tracedecay_sessions::runtime::SessionSearchScope::ParentsOnly => {
+                    !result.session.is_subagent
+                }
+                tracedecay_sessions::runtime::SessionSearchScope::SubagentsOnly => {
+                    result.session.is_subagent
+                }
             };
             let tool_result = result.message.role == "tool"
                 || matches!(
@@ -224,11 +235,11 @@ impl HostAdmissionTestRuntimeV1 {
                         })
                     });
             let message_type_matches = match filters.message_type {
-                crate::sessions::SessionMessageType::All => true,
-                crate::sessions::SessionMessageType::DirectUser => {
+                tracedecay_sessions::runtime::SessionMessageType::All => true,
+                tracedecay_sessions::runtime::SessionMessageType::DirectUser => {
                     result.message.role == "user" && !tool_result
                 }
-                crate::sessions::SessionMessageType::ToolResult => tool_result,
+                tracedecay_sessions::runtime::SessionMessageType::ToolResult => tool_result,
             };
             let parent_matches = filters
                 .parent_session_id
@@ -254,9 +265,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-        filters: crate::sessions::SessionSearchFilters<'_>,
-        git_filter: &crate::sessions::git_correlation::GitScopeFilter,
-    ) -> crate::errors::Result<Vec<crate::sessions::SessionMessageSearchResult>> {
+        filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
+        git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
+    ) -> crate::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
         let provider = provider.ok_or_else(|| crate::errors::TraceDecayError::Database {
             operation: "search registered git-scoped session messages".to_owned(),
             message: "test facade requires an exact provider".to_owned(),
@@ -316,22 +327,27 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn ingest_project_transcript_source_for_test(
         &self,
-        source: &dyn crate::sessions::source::TranscriptSource,
+        source: &dyn tracedecay_sessions::runtime::source::TranscriptSource,
         project_root: &Path,
         max_new_bytes: Option<u64>,
-    ) -> crate::sessions::source::TranscriptIngestResult<
-        crate::sessions::shared::TranscriptIngestStats,
+    ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
+        tracedecay_sessions::runtime::shared::TranscriptIngestStats,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            crate::sessions::source::TranscriptIngestError::ScanIo {
+            tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
                 operation: "bind registered project session test runtime",
                 path: project_root.to_path_buf(),
                 source: std::io::Error::other(error.to_string()),
             }
         })?;
         let store = crate::store::GlobalDbTranscriptStore::new(database);
-        crate::sessions::source::try_ingest_source(&store, source, project_root, max_new_bytes)
-            .await
+        tracedecay_sessions::runtime::source::try_ingest_source(
+            &store,
+            source,
+            project_root,
+            max_new_bytes,
+        )
+        .await
     }
 
     /// Runs one selected provider through the exact registered project authority.
@@ -339,8 +355,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn ingest_project_provider_for_test(
         &self,
         project_root: &Path,
-        provider: Option<crate::sessions::SessionProvider>,
-    ) -> crate::errors::Result<crate::sessions::shared::TranscriptIngestStats> {
+        provider: Option<tracedecay_sessions::runtime::SessionProvider>,
+    ) -> crate::errors::Result<tracedecay_sessions::runtime::shared::TranscriptIngestStats> {
         let project_id =
             self.project_id
                 .as_ref()
@@ -350,17 +366,19 @@ impl HostAdmissionTestRuntimeV1 {
                 })?;
         let database = self.project_database_for_test()?;
         let authority = crate::store::GlobalDbSessionIngestAuthority::new(database);
-        Ok(crate::sessions::ingest_project_sources_for_provider(
-            &self.brain_id,
-            &self.profile_id,
-            &authority,
-            project_root,
-            Some(project_id.clone()),
-            provider,
-            true,
+        Ok(
+            tracedecay_sessions::runtime::ingest_project_sources_for_provider(
+                &self.brain_id,
+                &self.profile_id,
+                &authority,
+                project_root,
+                Some(project_id.clone()),
+                provider,
+                true,
+            )
+            .await
+            .stats,
         )
-        .await
-        .stats)
     }
 
     #[doc(hidden)]
@@ -379,7 +397,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: &str,
-    ) -> crate::errors::Result<Option<crate::sessions::SessionRecord>> {
+    ) -> crate::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>> {
         Ok(self
             .project_database_for_test()?
             .get_session(provider, session_id)
@@ -391,7 +409,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> crate::errors::Result<Option<crate::sessions::SessionMessageRecord>> {
+    ) -> crate::errors::Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>> {
         Ok(self
             .project_database_for_test()?
             .get_session_message(provider, message_id)
@@ -405,7 +423,7 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> crate::errors::Result<Vec<crate::sessions::SessionMessageSearchResult>> {
+    ) -> crate::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
         Ok(self
             .project_database_for_test()?
             .search_session_messages(provider, project_key, query, limit)
@@ -417,7 +435,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_key: &str,
         limit: usize,
-    ) -> crate::errors::Result<Vec<crate::sessions::SessionMessageSearchResult>> {
+    ) -> crate::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
         Ok(self
             .project_database_for_test()?
             .recent_session_goals(Some(project_key), limit)
@@ -429,10 +447,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> crate::errors::Result<Option<crate::sessions::lcm::LcmRawMessage>> {
+    ) -> crate::errors::Result<Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>> {
         let database = self.project_database_for_test()?;
         let snapshot = database.read_snapshot().await?;
-        crate::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+        tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
             .await
             .map_err(|error| crate::errors::TraceDecayError::Database {
                 operation: "read project LCM raw message fixture".to_owned(),

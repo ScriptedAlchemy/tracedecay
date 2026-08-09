@@ -1,8 +1,8 @@
-mod compatibility;
 mod generation;
 mod message_anchor;
 mod publication;
 mod sources;
+mod summary_projection;
 
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::retrieval_content::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
 pub(in crate::session_temporal) use publication::load_and_verify_receipt;

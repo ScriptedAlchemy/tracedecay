@@ -16,12 +16,12 @@ use tracedecay_domain::ObservationScopeV1;
 
 use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::ObservationCancellation;
-use crate::automation::config_error;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::claude_observation::ClaudeObservationIngestStats;
-use crate::sessions::snapshot_observation::SnapshotCaptureOutcome;
 use crate::tracedecay::TraceDecay;
+use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
+use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 
 use super::super::super::SessionAuthorities;
 use super::super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
@@ -63,7 +63,7 @@ impl<'a> TranscriptCaptureContext<'a> {
 /// Registered project roots as seen by the daemon session registry.
 async fn registered_project_roots(global_db: &RegisteredGlobalDb) -> Result<Vec<PathBuf>> {
     let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
-    crate::sessions::registered_project_roots_from(&registry_authority)
+    tracedecay_sessions::runtime::registered_project_roots_from(&registry_authority)
         .await
         .ok_or_else(|| config_error("daemon project registry is unavailable"))
 }
@@ -151,19 +151,19 @@ async fn capture_claude_profile(
     let session_id = required_str(ctx.args, "session_id")?.to_string();
     required_user_db(ctx.session_authorities)?;
     let roots = registered_project_roots(global_db).await?;
-    let stats = crate::sessions::claude_observation::ingest_user_sessions_with_admission(
-        profile_root,
-        Some(session_id),
-        roots,
-        ctx.facade,
-        Some(
-            ctx.max_new_bytes
-                .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
-        ),
-        ctx.cancellation.clone(),
-    )
-    .await
-    .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    let stats =
+        tracedecay_sessions::runtime::claude_observation::ingest_user_sessions_with_admission(
+            profile_root,
+            Some(session_id),
+            roots,
+            ctx.facade,
+            Some(ctx.max_new_bytes.unwrap_or(
+                tracedecay_sessions::runtime::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES,
+            )),
+            ctx.cancellation.clone(),
+        )
+        .await
+        .map_err(|error| map_claude_observation_ingest_error(&error))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: stats.transcript.messages_upserted,
         claude_observation: Some(stats),
@@ -178,7 +178,7 @@ async fn capture_codex_profile(
     let global_db = ctx.global_db()?;
     let session_id = required_str(ctx.args, "session_id")?.to_string();
     let roots = registered_project_roots(global_db).await?;
-    let stats = crate::sessions::try_ingest_user_codex_sessions_with_db_and_admission(
+    let stats = tracedecay_sessions::runtime::try_ingest_user_codex_sessions_with_db_and_admission(
         profile_root,
         Some(session_id),
         roots,
@@ -200,7 +200,7 @@ async fn capture_cursor_profile(
     let event_json = required_str(ctx.args, "event_json")?;
     let roots = registered_project_roots(global_db).await?;
     let stats =
-        crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
+        tracedecay_sessions::runtime::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
             event_json,
             ctx.facade,
             ctx.max_new_bytes,
@@ -239,11 +239,11 @@ async fn capture_kiro_profile(
 ) -> Result<TranscriptCaptureOutcome> {
     let profile_root = ctx.profile_root()?;
     let global_db = ctx.global_db()?;
-    let source = crate::sessions::kiro::KiroSource::new()
+    let source = tracedecay_sessions::runtime::kiro::KiroSource::new()
         .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
     let roots = registered_project_roots(global_db).await?;
     let source = source.for_user_scope(roots);
-    let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
+    let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
         ctx.facade,
         &source,
         profile_root,
@@ -289,7 +289,7 @@ async fn capture_codex_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let source = crate::sessions::codex::CodexSource::new()
+    let source = tracedecay_sessions::runtime::codex::CodexSource::new()
         .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
@@ -318,7 +318,7 @@ async fn capture_cursor_project(
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
     let event_json = required_str(ctx.args, "event_json")?;
-    let stats = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
+    let stats = tracedecay_sessions::runtime::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
         event_json,
         project_observation_id(cg)?,
         ctx.facade,
@@ -336,13 +336,13 @@ async fn capture_kiro_project(
     ctx: TranscriptCaptureContext<'_>,
 ) -> Result<TranscriptCaptureOutcome> {
     let cg = ctx.project()?;
-    let source = crate::sessions::kiro::KiroSource::new()
+    let source = tracedecay_sessions::runtime::kiro::KiroSource::new()
         .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
     };
-    let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
+    let capture = tracedecay_sessions::runtime::kiro::capture_kiro_snapshot_observations(
         ctx.facade,
         &source,
         cg.project_root(),

@@ -19,7 +19,7 @@ use super::message_search_cutover_tests::{MESSAGE_SEARCH_PROJECT_ID, server_with
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
 use crate::mcp::transport::JsonRpcRequest;
-use crate::sessions::claude::ClaudeSource;
+use tracedecay_sessions::runtime::claude::ClaudeSource;
 
 const SESSION: &str = "claude-recall-session";
 /// Present in every one of the four transcript records.
@@ -135,7 +135,7 @@ async fn ingest_and_project(
         project_id: ProjectId::new(MESSAGE_SEARCH_PROJECT_ID).expect("typed project identity"),
     };
     let stats =
-        crate::sessions::claude_observation::ingest_source_with_observations_with_admission(
+        tracedecay_sessions::runtime::claude_observation::ingest_source_with_observations_with_admission(
             &source,
             project,
             scope,

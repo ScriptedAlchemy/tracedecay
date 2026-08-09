@@ -32,6 +32,7 @@ pub mod kiro;
 pub mod opencode;
 pub mod plugin_bundle;
 pub mod prompt_rules;
+pub(crate) mod retired_memory_digest;
 pub mod roo_code;
 pub mod vibe;
 pub mod zed;
@@ -73,12 +74,9 @@ pub(crate) fn install_managed_skill_prompt_index(
     target: crate::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    retired_memory_digest::remove_state(&profile_root)?;
+    retired_memory_digest::remove_prompt_block(prompt_path)?;
     crate::automation::skill_targets::install_managed_skills(&profile_root, target, prompt_path)?;
-    crate::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
-        target,
-        prompt_path,
-    )?;
     Ok(())
 }
 
@@ -88,17 +86,9 @@ pub(crate) fn remove_managed_skill_prompt_index(
     target: crate::automation::skill_targets::SkillInstallTarget,
 ) -> Result<()> {
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    retired_memory_digest::remove_state(&profile_root)?;
     crate::automation::skill_targets::remove_prompt_skill_index_for_target(prompt_path, target)?;
-    crate::automation::memory_digest::remove_memory_digest_export(
-        &profile_root,
-        target,
-        prompt_path,
-    )
-}
-
-pub(crate) fn managed_memory_digest_targets_path(profile_home: &Path) -> PathBuf {
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
-    crate::automation::memory_digest::digest_targets_path(&profile_root)
+    retired_memory_digest::remove_prompt_block(prompt_path)
 }
 
 /// Per-agent outcome of a managed-skill export refresh, keyed by agent id.

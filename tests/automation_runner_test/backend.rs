@@ -9,17 +9,17 @@ use std::time::Duration;
 use serde_json::json;
 use tempfile::TempDir;
 
-use tracedecay::automation::backend::{
+use tracedecay_agent_hosts::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     BackendRetryPolicy, CodexAppServerBackend, agent_task_failure_disposition,
     backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
     run_agent_task_with_retry,
 };
-use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
-use tracedecay::sessions::codex_app_server::{
+use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
+use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
-use tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
 
 use crate::common::{
     EnvVarGuard, fake_codex_bin, install_fake_codex_launcher, windows_python_launcher,
@@ -46,7 +46,7 @@ fn fake_codex_response_timeout_secs() -> u64 {
 /// CLI and daemon startup.
 ///
 /// The Codex app-server prompt runner is a registered port: the transport
-/// lives in `tracedecay::sessions`, and `tracedecay_agent_hosts` only calls it
+/// lives in `tracedecay_sessions::runtime`, and `tracedecay_agent_hosts` only calls it
 /// through a slot the composition root fills. An unwired process reports the
 /// backend as unavailable instead of spawning anything, which is the correct
 /// production behavior — but it means a test binary, which never passes
@@ -454,7 +454,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 }
 
 #[test]
-fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model() {
+fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     // Env vars are only read while the backend is constructed, so hold the
@@ -462,8 +462,10 @@ fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model(
     let backend = {
         let _env_lock = ENV_LOCK.lock().unwrap();
         let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
+        let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
         CodexAppServerBackend::from_automation_config(&AutomationConfig {
             backend: AutomationBackend::CodexAppServer,
+            model_id: Some("configured-model".to_owned()),
             timeout_secs: fake_codex_response_timeout_secs(),
             ..AutomationConfig::default()
         })
@@ -481,8 +483,8 @@ fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model(
     assert_eq!(response.run_id, "run_runtime_options");
     assert_eq!(response.output_json.unwrap()["facts"], json!([]));
     let messages = fake.logged_messages();
-    assert!(messages[2]["params"].get("model").is_none());
-    assert!(messages[3]["params"].get("model").is_none());
+    assert_eq!(messages[2]["params"]["model"], "configured-model");
+    assert_eq!(messages[3]["params"]["model"], "configured-model");
     assert!(messages[3]["params"].get("maxOutputTokens").is_none());
     assert!(messages[3]["params"].get("temperature").is_none());
     assert_process_gone(fake.child_pid());

@@ -118,7 +118,7 @@ pub(super) async fn dashboard_overview(
 ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, String> {
     memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?
-        .dashboard_overview_v1(fact_limit, graph_limit)
+        .dashboard_overview(fact_limit, graph_limit)
         .await
         .map_err(|error| error.to_string())
 }
@@ -257,14 +257,14 @@ pub async fn fact_detail_payload(
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let Some(detail) = application
-        .dashboard_fact_detail_v1(fact_id)
+        .dashboard_fact_detail(fact_id)
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
     let vector_state = application
-        .dashboard_vector_points_v1(None, PROJECTION_POINT_CAP as usize)
+        .dashboard_vector_points(None, PROJECTION_POINT_CAP as usize)
         .await
         .ok()
         .map(|points| {

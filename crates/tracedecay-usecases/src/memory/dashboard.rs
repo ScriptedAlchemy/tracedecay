@@ -1,4 +1,4 @@
-//! Dashboard-facing V1 memory operations.
+//! Dashboard-facing memory operations.
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
@@ -24,7 +24,7 @@ use tracedecay_runtime_core::memory::types::{
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
-use super::project_memory::{compatibility_relation, legacy_usize};
+use super::project_memory::{legacy_usize, memory_relation};
 use super::sanitize::{
     sanitize_curation_metadata, sanitize_curation_text, sanitize_curation_texts,
 };
@@ -32,7 +32,7 @@ use super::sanitize::{
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Finite dashboard overview; the dashboard never opens a memory database
     /// or constructs a store query itself.
-    pub async fn dashboard_overview_v1(
+    pub async fn dashboard_overview(
         &self,
         fact_limit: usize,
         graph_limit: usize,
@@ -69,13 +69,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(overview)
     }
 
-    /// Legacy numeric detail wrapper. The fixed compatibility source and owner
+    /// Persisted numeric detail wrapper. The fixed fact-id source and owner
     /// are resolved here, never by a dashboard handler.
-    pub async fn dashboard_fact_detail_v1(
+    pub async fn dashboard_fact_detail(
         &self,
         fact_id: i64,
     ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, MemoryApplicationError> {
-        let target = self.legacy_compatibility_target(fact_id)?;
+        let target = self.persisted_fact_id_target(fact_id)?;
         let detail = self
             .authority
             .dashboard_project_memory_fact_detail(ProjectMemoryDashboardFactDetailQueryV1::new(
@@ -102,14 +102,14 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Numeric dashboard trust-history route retaining typed repair progress.
     /// Callers that need an honest incomplete state must use this rather than
-    /// the legacy lossy `fact_trust_history_v1` vector projection.
-    pub async fn dashboard_feedback_history_v1(
+    /// the legacy lossy `fact_trust_history` vector projection.
+    pub async fn dashboard_feedback_history(
         &self,
         fact_id: i64,
         limit: usize,
     ) -> Result<ProjectMemoryFactFeedbackHistoryV1, MemoryApplicationError> {
         self.get_project_memory_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
-            self.legacy_compatibility_target(fact_id)?,
+            self.persisted_fact_id_target(fact_id)?,
             None,
             limit,
         )?)
@@ -117,7 +117,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     /// Typed dashboard status including feedback-history repair progress.
-    pub async fn dashboard_memory_status_v1(
+    pub async fn dashboard_memory_status(
         &self,
     ) -> Result<ProjectMemoryMemoryStatusV1, MemoryApplicationError> {
         self.project_memory_status().await
@@ -125,7 +125,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Capped vector inputs for dashboard-side PCA and similarity. Pair scoring
     /// remains client-side over this bounded response rather than a generic DB API.
-    pub async fn dashboard_vector_points_v1(
+    pub async fn dashboard_vector_points(
         &self,
         search: Option<String>,
         limit: usize,
@@ -150,7 +150,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(points)
     }
 
-    pub async fn dashboard_oplog_v1(
+    pub async fn dashboard_oplog(
         &self,
         limit: usize,
     ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, MemoryApplicationError> {
@@ -176,7 +176,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(entries)
     }
 
-    pub async fn dashboard_curation_v1(
+    pub async fn dashboard_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
     ) -> Result<ProjectMemoryFactCurationReceiptV1, MemoryApplicationError> {
@@ -193,25 +193,24 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(receipt)
     }
 
-    /// Dashboard-facing finite curation adapter. Numeric V1 identifiers are
-    /// resolved only through the fixed compatibility scope at this boundary.
-    pub async fn dashboard_apply_grooming_v1(
+    /// Dashboard-facing finite curation adapter. Persisted numeric identifiers are
+    /// resolved only through the fixed persisted fact-id scope at this boundary.
+    pub async fn dashboard_apply_grooming(
         &self,
         operations: Vec<MemoryGroomingOperation>,
         min_confidence: f64,
         context: MemoryOperationContext,
     ) -> Result<MemoryGroomingReport, MemoryApplicationError> {
-        let minimum = Confidence::new(min_confidence).map_err(|_| {
-            MemoryApplicationError::InvalidCompatibilityInput {
+        let minimum =
+            Confidence::new(min_confidence).map_err(|_| MemoryApplicationError::InvalidInput {
                 invariant: "dashboard curation minimum confidence",
-            }
-        })?;
+            })?;
         let operations = operations
             .into_iter()
             .map(|operation| self.dashboard_curation_operation(operation))
             .collect::<Result<Vec<_>, _>>()?;
         let receipt = self
-            .dashboard_curation_v1(ProjectMemoryFactCurationBatchV1::new(
+            .dashboard_curation(ProjectMemoryFactCurationBatchV1::new(
                 self.owner.clone(),
                 context.operation_id().clone(),
                 context.actor().cloned(),
@@ -248,11 +247,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let fact_targets = |fact_ids: Vec<i64>| {
             fact_ids
                 .into_iter()
-                .map(|fact_id| self.legacy_compatibility_target(fact_id))
+                .map(|fact_id| self.persisted_fact_id_target(fact_id))
                 .collect::<Result<Vec<_>, _>>()
         };
         let confidence = |value: f64| {
-            Confidence::new(value).map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
+            Confidence::new(value).map_err(|_| MemoryApplicationError::InvalidInput {
                 invariant: "dashboard curation confidence",
             })
         };
@@ -264,7 +263,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 confidence: value,
             } => Ok(ProjectMemoryFactCurationOperationV1::NormalizeTags(
                 ProjectMemoryFactNormalizeTagsV1::new(
-                    self.legacy_compatibility_target(fact_id)?,
+                    self.persisted_fact_id_target(fact_id)?,
                     sanitize_curation_texts(tags, "dashboard curation tags")?,
                     fact_targets(evidence_fact_ids)?,
                     confidence(value)?,
@@ -311,9 +310,9 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 metadata,
             } => Ok(ProjectMemoryFactCurationOperationV1::LinkFacts(
                 ProjectMemoryFactLinkV1::new(
-                    self.legacy_compatibility_target(source_fact_id)?,
-                    self.legacy_compatibility_target(target_fact_id)?,
-                    compatibility_relation(relation),
+                    self.persisted_fact_id_target(source_fact_id)?,
+                    self.persisted_fact_id_target(target_fact_id)?,
+                    memory_relation(relation),
                     fact_targets(evidence_fact_ids)?,
                     confidence(value)?,
                     sanitize_curation_text(source, "dashboard curation relation source")?,
@@ -326,7 +325,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 confidence: value,
             } => Ok(ProjectMemoryFactCurationOperationV1::RepairVector(
                 ProjectMemoryFactRepairVectorV1::new(
-                    self.legacy_compatibility_target(fact_id)?,
+                    self.persisted_fact_id_target(fact_id)?,
                     fact_targets(evidence_fact_ids)?,
                     confidence(value)?,
                 ),
@@ -334,7 +333,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         }
     }
 
-    pub async fn dashboard_merge_facts_v1(
+    pub async fn dashboard_merge_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,
     ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryApplicationError> {
@@ -351,7 +350,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     /// Legacy numeric merge route for the dashboard. The handler supplies only
     /// IDs and a trusted operation context; fixed source/owner resolution and
     /// content privacy gating stay in the application layer.
-    pub async fn dashboard_merge_fact_ids_v1(
+    pub async fn dashboard_merge_fact_ids(
         &self,
         winner_id: i64,
         loser_ids: Vec<i64>,
@@ -361,7 +360,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let merged_content = match merged_content {
             Some(content) => {
                 if detect_secret_like(content.trim()).is_some() {
-                    return Err(MemoryApplicationError::InvalidCompatibilityInput {
+                    return Err(MemoryApplicationError::InvalidInput {
                         invariant: "dashboard merge content rejected by privacy sanitizer",
                     });
                 }
@@ -374,12 +373,12 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         };
         let losers = loser_ids
             .into_iter()
-            .map(|fact_id| self.legacy_compatibility_target(fact_id))
+            .map(|fact_id| self.persisted_fact_id_target(fact_id))
             .collect::<Result<Vec<_>, _>>()?;
-        self.dashboard_merge_facts_v1(ProjectMemoryFactMergeCommandV1::new(
+        self.dashboard_merge_facts(ProjectMemoryFactMergeCommandV1::new(
             self.owner.clone(),
             context.operation_id().clone(),
-            self.legacy_compatibility_target(winner_id)?,
+            self.persisted_fact_id_target(winner_id)?,
             losers,
             merged_content,
             context.actor().cloned(),
@@ -388,8 +387,8 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     }
 
     /// One authority repair step only. Any incomplete feedback-history repair is
-    /// surfaced through `memory_status_v1`/feedback history while the daemon resumes it.
-    pub async fn dashboard_repair_v1(
+    /// surfaced through `memory_status`/feedback history while the daemon resumes it.
+    pub async fn dashboard_repair(
         &self,
         context: MemoryOperationContext,
     ) -> Result<ProjectMemoryMemoryRepairStatsV1, MemoryApplicationError> {

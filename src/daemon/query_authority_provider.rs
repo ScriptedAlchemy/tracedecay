@@ -507,6 +507,54 @@ impl DaemonQueryAuthorityProviderV1 {
         }
         query_material_for_activated(activated, privacy_domain)
     }
+
+    /// Resolve the active evaluated all-lane profile for owning-source
+    /// TaskSession selection. The fallback/rollback profile never satisfies
+    /// this boundary, and key material remains inside the returned authority.
+    pub(crate) fn federated_authority_for(
+        &self,
+        scope: &ResolvedScope,
+        privacy_domain: &PrivacyDomainId,
+    ) -> Result<Arc<QueryAuthorityV1>, QueryAuthorityUnavailableReasonV1> {
+        scope
+            .validate()
+            .map_err(|_| QueryAuthorityUnavailableReasonV1::ScopeMismatch)?;
+        privacy_domain
+            .validate()
+            .map_err(|_| QueryAuthorityUnavailableReasonV1::KeyUnavailable)?;
+        let current = self
+            .activated
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let activated = current
+            .get(&scope.scope_digest)
+            .ok_or(QueryAuthorityUnavailableReasonV1::ActivationUnavailable)?;
+        if &activated.scope != scope {
+            return Err(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
+        }
+        if current_transition(&activated.state).is_none() {
+            return Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
+        }
+        let accepted = activated.state.active();
+        if !is_federated_profile(accepted) {
+            return Err(QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile);
+        }
+        let keyring = activated
+            .cursor_keys
+            .retrieval_keyring(privacy_domain.clone())
+            .map_err(|_| QueryAuthorityUnavailableReasonV1::KeyUnavailable)?;
+        let ranking_revision =
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)?;
+        QueryAuthorityV1::new_federated(
+            accepted.profile().clone(),
+            accepted.diversity().clone(),
+            ranking_revision,
+            keyring,
+        )
+        .map(Arc::new)
+        .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)
+    }
 }
 
 fn validate_successful_activation_update(
@@ -657,6 +705,26 @@ fn is_exact_query_profile(active: &AcceptedRetrievalProfileV1) -> bool {
             == expected
         && profile.rerank_policy_id.is_none()
         && active.compatibility().semantic.is_none()
+        && active.compatibility().rerank.is_none()
+}
+
+fn is_federated_profile(active: &AcceptedRetrievalProfileV1) -> bool {
+    let expected = BTreeSet::from(RetrieverKind::ALL_LANES);
+    active
+        .profile()
+        .calibrations
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        == expected
+        && active
+            .profile()
+            .weights_micros
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            == expected
+        && active.profile().rerank_policy_id.is_none()
         && active.compatibility().rerank.is_none()
 }
 

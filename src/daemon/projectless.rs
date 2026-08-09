@@ -15,12 +15,57 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
 
+/// Authenticated identity and retained policy state pinned once for a
+/// projectless connection. Request adapters may select an operation but cannot
+/// mint a principal, scope, or capability grant.
+struct ProjectlessConnectionStateV1 {
+    client_identity: DaemonClientIdentity,
+    profile_admission: crate::daemon::retained_owner::ProfileRetainedAdmissionV1,
+}
+
+fn admit_projectless_connection(
+    client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
+) -> Result<ProjectlessConnectionStateV1> {
+    let profile_identity = store_administration.profile_identity()?;
+    if profile_identity.profile_root() != client_identity.profile_root {
+        return Err(TraceDecayError::Config {
+            message: "projectless connection profile does not match its authenticated identity"
+                .to_owned(),
+        });
+    }
+    let profile_session_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
+        .and_then(|root| root.with_profile_runtime_shard(profile_identity))
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "projectless profile session authority is unavailable".to_owned(),
+        })?;
+    let configuration_digest =
+        crate::daemon::retained_owner::profile_retained_configuration_digest(
+            profile_identity.brain_id(),
+            profile_identity.profile_id(),
+            profile_session_root.identity(),
+        )?;
+    let profile_admission = crate::daemon::retained_owner::issue_profile_retained_policy_admission(
+        profile_identity.brain_id(),
+        profile_identity.profile_id().clone(),
+        profile_session_root.identity(),
+        &configuration_digest,
+        tracedecay_application::now_micros(),
+        tracedecay_domain::UtcMicros(i64::MAX),
+    )?;
+    Ok(ProjectlessConnectionStateV1 {
+        client_identity: client_identity.clone(),
+        profile_admission,
+    })
+}
+
 pub(super) async fn serve_projectless_client(
     transport: &mut impl McpTransport,
     client_identity: &DaemonClientIdentity,
     lifecycle: &DaemonLifecycle,
     store_administration: &StoreAdministration,
 ) -> Result<()> {
+    let connection = admit_projectless_connection(client_identity, store_administration)?;
     loop {
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(transport) => result?,
@@ -33,9 +78,7 @@ pub(super) async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => {
-                projectless_response(&request, client_identity, store_administration).await
-            }
+            Ok(request) => projectless_response(&request, &connection, store_administration).await,
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -54,7 +97,7 @@ pub(super) async fn serve_projectless_client(
 
 async fn projectless_response(
     request: &crate::mcp::JsonRpcRequest,
-    client_identity: &DaemonClientIdentity,
+    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> Option<crate::mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
@@ -75,10 +118,10 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response(
+            projectless_tools_call_response_with_connection(
                 id,
                 request.params.as_ref(),
-                client_identity,
+                connection,
                 store_administration,
             )
             .await,
@@ -92,10 +135,27 @@ async fn projectless_response(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn projectless_tools_call_response(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
     client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
+) -> crate::mcp::JsonRpcResponse {
+    let connection = match admit_projectless_connection(client_identity, store_administration) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+        }
+    };
+    projectless_tools_call_response_with_connection(id, params, &connection, store_administration)
+        .await
+}
+
+async fn projectless_tools_call_response_with_connection(
+    id: serde_json::Value,
+    params: Option<&serde_json::Value>,
+    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> crate::mcp::JsonRpcResponse {
     let (tool_name, arguments) = match projectless_tool_call(params) {
@@ -135,7 +195,7 @@ pub(super) async fn projectless_tools_call_response(
             );
         }
         let outcomes = match store_administration
-            .reconcile_cached_automation_for_profile(&client_identity.profile_root)
+            .reconcile_cached_automation_for_profile(&connection.client_identity.profile_root)
             .await
         {
             Ok(outcomes) => outcomes,
@@ -189,19 +249,16 @@ pub(super) async fn projectless_tools_call_response(
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let host_admission_state = match store_administration
+        let host_admission_broker = match store_administration
             .host_admission_broker(&user_session_db)
             .await
         {
-            Ok(state) => state,
+            Ok(broker) => broker,
             Err(error) => {
                 return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
             }
         };
-        let host_admission_broker = match &host_admission_state {
-            branch_admin::HostAdmissionBrokerState::Available(broker) => Ok(broker),
-            branch_admin::HostAdmissionBrokerState::Unavailable(outcome) => Err(*outcome),
-        };
+        let host_admission_broker = Ok(&host_admission_broker);
         let refresh_wake = store_administration
             .session_temporal_refresh_schedulers()
             .ensure_profile(
@@ -211,7 +268,7 @@ pub(super) async fn projectless_tools_call_response(
             .await;
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments.clone(),
-            &client_identity.profile_root,
+            &connection.client_identity.profile_root,
             session_runtime_registry,
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
@@ -262,7 +319,7 @@ pub(super) async fn projectless_tools_call_response(
             arguments,
             &global_db,
             crate::global_db::global_accounting_enabled().then_some(accounting_db.as_ref()),
-            &client_identity.profile_root,
+            &connection.client_identity.profile_root,
         )
         .await
         {
@@ -270,48 +327,16 @@ pub(super) async fn projectless_tools_call_response(
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
-    if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
-        return projectless_user_lcm_tools_call_response(
+    if let Some(operation) = crate::mcp::tools::retained_mcp_operation(tool_name, &arguments) {
+        return projectless_profile_retained_response(
             id,
             tool_name,
+            operation,
             arguments,
-            client_identity,
+            connection,
             store_administration,
         )
         .await;
-    }
-    if matches!(
-        tool_name,
-        "tracedecay_fact_store" | "tracedecay_fact_feedback" | "tracedecay_memory_status"
-    ) {
-        if arguments
-            .get("memory_scope")
-            .and_then(serde_json::Value::as_str)
-            != Some("user")
-        {
-            return JsonRpcResponse::error(
-                id,
-                ErrorCode::InvalidParams,
-                "projectless memory dispatch requires memory_scope=user".to_string(),
-            );
-        }
-        let runtime_registry = match store_administration.retained_runtime_registry().await {
-            Ok(registry) => registry,
-            Err(error) => {
-                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-            }
-        };
-        return match crate::mcp::tools::handle_user_memory_tool(
-            tool_name,
-            arguments,
-            runtime_registry.as_ref(),
-            &client_identity.profile_root,
-        )
-        .await
-        {
-            Ok(result) => JsonRpcResponse::success(id, result.value),
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
-        };
     }
     JsonRpcResponse::error(
         id,
@@ -320,84 +345,63 @@ pub(super) async fn projectless_tools_call_response(
     )
 }
 
-async fn projectless_user_lcm_tools_call_response(
+async fn projectless_profile_retained_response(
     id: serde_json::Value,
     tool_name: &str,
+    operation: tracedecay_application::RetainedSurfaceOperation,
     arguments: serde_json::Value,
-    client_identity: &DaemonClientIdentity,
+    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> crate::mcp::JsonRpcResponse {
-    if arguments
-        .get("storage_scope")
-        .and_then(serde_json::Value::as_str)
-        != Some("user")
-    {
+    let is_lcm =
+        tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search";
+    let requested_scope = if is_lcm {
+        arguments
+            .get("storage_scope")
+            .and_then(serde_json::Value::as_str)
+    } else {
+        arguments
+            .get("memory_scope")
+            .and_then(serde_json::Value::as_str)
+    };
+    if requested_scope != Some("user") {
         return JsonRpcResponse::error(
             id,
             ErrorCode::InvalidParams,
-            "projectless LCM dispatch requires storage_scope=user".to_string(),
+            "projectless retained dispatch requires an explicit user scope".to_string(),
         );
     }
-    if let Err(error) =
-        await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
-            .await
+    if is_lcm
+        && let Err(error) = await_user_profile_host_admission_replay_for_identity(
+            store_administration,
+            &connection.client_identity,
+        )
+        .await
     {
         return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
     }
-    let user_session_db = match store_administration
-        .registered_profile_session_database()
-        .await
-    {
-        Ok(database) => database,
+    let runtime_registry = match store_administration.retained_runtime_registry().await {
+        Ok(registry) => registry,
         Err(error) => {
-            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            return crate::mcp::server::tool_error_response(id, tool_name, &error);
         }
     };
-    let profile_identity = match store_administration.profile_identity() {
-        Ok(identity) => identity,
-        Err(error) => {
-            return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-        }
-    };
-    let refresh_wake = store_administration
-        .session_temporal_refresh_schedulers()
-        .ensure_profile(
-            user_session_db.db_path().to_path_buf(),
-            Arc::clone(&user_session_db),
-        )
-        .await;
-    let profile_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
-        .and_then(|root| root.with_profile_runtime_shard(profile_identity));
-    let retrieval_service = profile_root
-        .clone()
-        .and_then(|root| {
-            crate::mcp::server::DaemonSessionRetrievalService::new_registered(
-                Arc::clone(&user_session_db),
-                Arc::clone(&user_session_db),
-                root,
-                Some(refresh_wake.clone()),
-            )
-        })
-        .map(|service| {
-            Arc::new(service) as Arc<dyn crate::mcp::tools::SessionRetrievalServicePort>
-        });
-    let lcm_authority = profile_root.as_ref().and_then(|root| {
-        crate::daemon::lcm_authority::mount_registered_lcm_authority(
-            Arc::clone(&user_session_db),
-            root.identity().clone(),
-            root.expected_runtime_shard()?,
-        )
-    });
-    let result = crate::mcp::tools::handle_user_lcm_tool_with_authorities(
+    let result = crate::mcp::tools::execute_profile_retained_mcp_tool(
+        operation,
         tool_name,
-        arguments.clone(),
-        lcm_authority.as_deref(),
-        retrieval_service.as_deref(),
+        arguments,
+        runtime_registry.as_ref(),
+        &connection.profile_admission,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
     match result {
         Ok(result) => JsonRpcResponse::success(id, result.value),
-        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
     }
 }
 

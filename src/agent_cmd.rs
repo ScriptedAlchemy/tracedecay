@@ -3457,17 +3457,6 @@ mod tests {
 "#;
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
-    /// A host lifecycle resolves its profile root from the process-global
-    /// `TRACEDECAY_DATA_DIR`, not from the `home` the fixture passes in, and
-    /// `.cargo/config.toml` points that variable at one workspace-wide
-    /// `target/test-profile/.tracedecay` for every cargo-launched process. So
-    /// every test driving an opencode/codex/kiro `Core` registration wrote the
-    /// *same* `agent_managed/memory_digest_targets.json` no matter how private
-    /// its own `home` was: one test's write landed between another's recorded
-    /// intent and its read-back, and the second test reported its neighbour's
-    /// bytes as `StalePreview` drift. The file also outlived the process,
-    /// accumulating a stale entry per run.
-    ///
     /// [`PinnedUserDataDir`] gives each test its own profile root (and its own
     /// `HOME`) for the duration of the guard, and holds the crate-wide
     /// user-data-dir lock while the override is installed — the same lock every
@@ -4735,18 +4724,13 @@ esac
         let lifecycle = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         let prompt_path = home.path().join(".config/opencode/AGENTS.md");
-        let targets_path = home
-            .path()
-            .join(".tracedecay/agent_managed/memory_digest_targets.json");
-        for path in [&config_path, &prompt_path, &targets_path] {
+        for path in [&config_path, &prompt_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
         let original_config = b"{\"unrelated\":\"keep\"}\n";
         let original_prompt = b"user prompt\n";
-        let original_targets = b"{\"foreign\":\"keep\"}\n";
         std::fs::write(&config_path, original_config).unwrap();
         std::fs::write(&prompt_path, original_prompt).unwrap();
-        std::fs::write(&targets_path, original_targets).unwrap();
         let component_set = canonical_host_component_set(
             "opencode",
             Some(crate::cli::HostBundleComponentArg::Core),
@@ -4779,7 +4763,6 @@ esac
 
         assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
         assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
-        assert_eq!(std::fs::read(&targets_path).unwrap(), original_targets);
     }
 
     #[test]

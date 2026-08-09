@@ -358,9 +358,10 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
          matches (comments, strings, dynamic dispatch, unresolved refs) are \
          reported and never rewritten. Defaults to a DRY RUN returning the \
          per-file plan, diff, and the expected_state digest; applying is \
-         opt-in via `dry_run: false` with a fresh `idempotency_key` and that \
-         `expected_state`. The apply refuses stale identity or drifted files \
-         before any write, and a partial failure restores every preimage.",
+         opt-in via `dry_run: false` with a fresh `idempotency_key`, the \
+         preview's exact `accepted_preview` manifest, and that `expected_state`. \
+         The apply refuses stale identity, manifest, or drifted files before any \
+         write, and a partial failure restores every preimage.",
         {
             let mut schema = source_edit_schema(json!({
                 "type": "object",
@@ -389,13 +390,26 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
                         "type": "string",
                         "description": "New identifier. Must be a valid identifier and must not already occur in any touched file."
                     },
+                    "accepted_preview": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "Exact preview manifest returned by the accepted dry run. Required only when applying.",
+                        "properties": {
+                            "preview_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                            "preview_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                            "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                            "repository_revision": {"type": ["string", "null"]},
+                            "graph_revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+                        },
+                        "required": ["preview_id", "preview_digest", "plan_digest", "graph_revision"]
+                    },
                     "dry_run": {
                         "type": "boolean",
                         "description": "If true (DEFAULT), bind every site and compute the full plan, per-file diff, and expected_state but write nothing. Set false to apply."
                     },
                     "verify": {
                         "type": "boolean",
-                        "description": "If true, re-run file-scoped diagnostics after a real rename and include a compact verdict. Ignored for dry runs. Default: false."
+                        "description": "If true (DEFAULT), re-run file-scoped diagnostics after a real rename and include a compact verdict. Ignored for dry runs."
                     }
                 },
                 "required": ["node_id", "qualified_name", "kind", "file", "old_name", "new_name"]
@@ -404,6 +418,23 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
             // dry_run=false selects the apply branch.
             schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
             schema["properties"]["dry_run"]["default"] = json!(true);
+            schema["properties"]["verify"]["default"] = json!(true);
+            schema["allOf"] = json!([
+                {
+                    "if": {
+                        "properties": {"dry_run": {"const": false}},
+                        "required": ["dry_run"]
+                    },
+                    "then": {"required": ["idempotency_key", "expected_state"]}
+                },
+                {
+                    "if": {
+                        "properties": {"dry_run": {"const": false}},
+                        "required": ["dry_run"]
+                    },
+                    "then": {"required": ["accepted_preview"]}
+                }
+            ]);
             schema
         },
     )

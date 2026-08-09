@@ -1382,7 +1382,7 @@ pub(super) async fn run_session_retention(
                 "all",
                 None,
                 &config.session_lcm,
-                crate::sessions::lcm::RetentionMode::Apply,
+                tracedecay_sessions::runtime::lcm::RetentionMode::Apply,
                 now,
             )
             .await

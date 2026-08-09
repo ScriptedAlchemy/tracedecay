@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_policy::{
-    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
-    CurationValidationDispositionV1, evaluate_curation_apply,
+    CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
+    CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
 
 use crate::automation::backend::{
@@ -17,11 +17,13 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(super) fn evaluate_session_curation(
     config: &AutomationConfig,
+    authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     accepted_facts: &[Value],
 ) -> Result<CurationApplyDecisionV1> {
     evaluate_curation_output(
         config,
+        authority,
         evidence_hash,
         accepted_facts,
         CurationApplySubjectV1::SessionReflector,
@@ -31,11 +33,13 @@ pub(super) fn evaluate_session_curation(
 
 pub(super) fn evaluate_skill_curation(
     config: &AutomationConfig,
+    authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     proposals: &[Value],
 ) -> Result<CurationApplyDecisionV1> {
     evaluate_curation_output(
         config,
+        authority,
         evidence_hash,
         proposals,
         CurationApplySubjectV1::SkillWriter,
@@ -45,6 +49,7 @@ pub(super) fn evaluate_skill_curation(
 
 fn evaluate_curation_output(
     config: &AutomationConfig,
+    authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     output: &[Value],
     subject: CurationApplySubjectV1,
@@ -64,6 +69,7 @@ fn evaluate_curation_output(
             message: format!("derive {identity_label} configuration identity: {error}"),
         })?;
     evaluate_curation_apply(&CurationApplyPolicyInputV1 {
+        authority: authority.clone(),
         subject,
         evidence_digest,
         output_digest,

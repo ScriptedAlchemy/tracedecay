@@ -39,18 +39,15 @@ use tracedecay_application::{
     RequestId, ResolvedScope, ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome,
     WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
-    WorkStorageError, WorkStoragePort,
+    WorkAttemptStoragePort, WorkService, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptStateV1, WorkAuthority, WorkEffectStateV1, WorkEgressPolicy, WorkEvent,
-    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkLeaseFenceV1,
-    WorkProjection, WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkVersion, WorkflowOperationRef,
-    WorktreeId,
+    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId, ProviderId,
+    RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptStateV1, WorkAuthority,
+    WorkEffectStateV1, WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
+    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
+    WorkLeaseFenceV1, WorkProjection, WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy,
+    WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -153,54 +150,6 @@ impl WorkStoragePort for WorkEventStore {
     ) -> Result<tracedecay_application::WorkRoutingSnapshotV1, WorkStorageError> {
         self.load(authority, task_id)?;
         Ok(tracedecay_application::WorkRoutingSnapshotV1::default())
-    }
-}
-
-#[derive(Clone)]
-struct WorkSnapshotPort {
-    store: WorkEventStore,
-}
-
-impl WorkProjectionReadPort for WorkSnapshotPort {
-    fn exact_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let projection =
-            self.store
-                .projection(authority, task_id)
-                .map_err(|error| match error {
-                    WorkStorageError::NotFoundOrNotAuthorized => {
-                        WorkProjectionPortError::NotFoundOrNotAuthorized
-                    }
-                    _ => WorkProjectionPortError::Unavailable,
-                })?;
-        WorkProjectionSnapshotV1::new(
-            id::<ProjectionGenerationId>("generation.work-attempt-exec"),
-            WorkProjectionSequenceV1::new(1),
-            vec![projection],
-            WorkProjectionCoverageV1::complete(1, 1)
-                .map_err(|_| WorkProjectionPortError::Unavailable)?,
-        )
-        .map_err(|_| WorkProjectionPortError::Unavailable)
-    }
-
-    fn snapshot(
-        &self,
-        _authority: &WorkAuthority,
-        _page_size: u32,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-
-    fn delta(
-        &self,
-        _authority: &WorkAuthority,
-        _cursor: &tracedecay_domain::WorkProjectionResumeCursorV1,
-        _page_size: u32,
-    ) -> Result<tracedecay_domain::WorkProjectionDeltaV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
     }
 }
 
@@ -521,7 +470,7 @@ fn crossed_execution_snapshot(
 }
 
 struct Fixture {
-    attempts: WorkAttemptService<AttemptStore, WorkSnapshotPort, WorkEventStore>,
+    attempts: WorkAttemptService<AttemptStore>,
     rows: AttemptStore,
     context: RequestContext,
     authority: WorkAuthority,
@@ -560,13 +509,7 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
     let store = WorkEventStore::default();
     let rows = AttemptStore::default();
     let work = WorkService::new(store.clone());
-    let attempts = WorkAttemptService::new(
-        rows.clone(),
-        WorkSnapshotPort {
-            store: store.clone(),
-        },
-        WorkService::new(store),
-    );
+    let attempts = WorkAttemptService::new(rows.clone());
     let context = request_context();
 
     let task_id = id::<TaskId>(TASK);

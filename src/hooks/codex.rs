@@ -330,7 +330,9 @@ pub async fn hook_codex_post_compact() -> i32 {
     let root = event_project_root_with_identity_from_json(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
-    if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
+    if std::env::var_os(tracedecay_sessions::runtime::codex_app_server::CODEX_SUMMARY_CHILD_ENV)
+        .is_none()
+    {
         codex_post_compact(&event, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(

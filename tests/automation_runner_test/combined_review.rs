@@ -296,6 +296,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
         tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
             &cg,
             &config,
+            &test_configuration_revision(),
             &backend,
             &retrieval,
             combined_options(&profile_root),
@@ -331,6 +332,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
             tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
                 &cg,
                 &config,
+                &test_configuration_revision(),
                 &backend,
                 &retrieval,
                 combined_options(&profile_root),
@@ -364,6 +366,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
             &cg,
             &config,
+            &test_configuration_revision(),
             &backend,
             &retrieval,
             combined_options(&profile_root),

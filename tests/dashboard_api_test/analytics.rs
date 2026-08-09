@@ -16,11 +16,11 @@ use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
 };
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 struct Fixture {
     _tmp: TempDir,

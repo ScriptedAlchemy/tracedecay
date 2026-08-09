@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use serde_json::{Map, json};
 use tracedecay_domain::HydrationStateV1;
 
-use crate::compatibility::projected_content_hash;
+use crate::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
 use tracedecay_runtime_core::privacy::{
     bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,

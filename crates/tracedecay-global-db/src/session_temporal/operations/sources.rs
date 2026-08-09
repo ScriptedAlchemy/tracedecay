@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::retrieval_content::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::types::{
     LcmError, LcmImmutableSummaryPublication, LcmSourceRef, LcmStorageKind,
 };

@@ -18,8 +18,7 @@ use thiserror::Error;
 use tiktoken_rs::o200k_base_singleton;
 use tracedecay_domain::{RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
-
-use crate::ports::context::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SCOUT_CANDIDATES: usize = 32;

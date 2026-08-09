@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::application::memory::{MemoryApplication, V1UpdateFactOutcome};
+use crate::application::memory::{MemoryApplication, UpdateFactOutcome};
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{ToolResult, render, renderers};
@@ -20,7 +20,7 @@ use super::args::{
 use super::status::feedback_history_repair_payload;
 use super::{
     TargetMemoryDb, config_error, memory_application, memory_application_error,
-    memory_operation_context, open_target_memory_db, refresh_target_memory_digest,
+    memory_operation_context, open_target_memory_db,
 };
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -100,13 +100,11 @@ async fn handle_fact_store_for_target_controlled(
     let action = required_str(&args, "action")?;
     let action_kind = FactStoreAction::parse(action)
         .ok_or_else(|| config_error(format!("unknown fact_store action: {action}")))?;
-    let settlement_cancellation = cancellation.clone();
     let memory = if action_kind.writes() {
         controlled_memory_application(&target_memory, cancellation)?
     } else {
         memory_application(&target_memory)?
     };
-    let mut refresh_digest = false;
     let out = match action_kind {
         FactStoreAction::Add => {
             let request = AddFactRequest {
@@ -122,7 +120,7 @@ async fn handle_fact_store_for_target_controlled(
                 metadata: metadata_with_tags(&args),
             };
             let outcome = memory
-                .add_fact_v1(
+                .add_fact(
                     request,
                     memory_operation_context(&args, &target_memory, "add")?,
                 )
@@ -131,7 +129,6 @@ async fn handle_fact_store_for_target_controlled(
             // Additive write-time diff report fields, so writers SEE
             // near-duplicates, possible conflicts, and secret rejections.
             let count = usize::from(outcome.fact.is_some());
-            refresh_digest = count > 0;
             json!({
                 "action": action,
                 "fact": outcome.fact,
@@ -161,7 +158,7 @@ async fn handle_fact_store_for_target_controlled(
             let threshold = optional_f64(&args, "threshold").unwrap_or(0.3);
             let limit = limit(&args);
             let facts = memory
-                .contradict_facts_v1(optional_category(&args)?, threshold, limit)
+                .contradict_facts(optional_category(&args)?, threshold, limit)
                 .await
                 .map_err(memory_application_error)?;
             let count = facts.len();
@@ -170,12 +167,12 @@ async fn handle_fact_store_for_target_controlled(
         FactStoreAction::Get => {
             let id = fact_id(&args)?;
             let fact = memory
-                .get_fact_v1(id)
+                .get_fact(id)
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| config_error(format!("fact {id} not found")))?;
             let trust_history = memory
-                .fact_trust_history_with_progress_v1(id, MAX_FACT_LIMIT)
+                .fact_trust_history_with_progress(id, MAX_FACT_LIMIT)
                 .await
                 .map_err(memory_application_error)?;
             json!({
@@ -211,18 +208,17 @@ async fn handle_fact_store_for_target_controlled(
                 metadata,
             };
             match memory
-                .update_fact_v1(
+                .update_fact(
                     update,
                     memory_operation_context(&args, &target_memory, "update")?,
                 )
                 .await
                 .map_err(memory_application_error)?
             {
-                V1UpdateFactOutcome::Updated(fact) => {
-                    refresh_digest = true;
+                UpdateFactOutcome::Updated(fact) => {
                     json!({ "action": action, "fact": fact, "count": 1 })
                 }
-                V1UpdateFactOutcome::RejectedSecretLike { reason } => json!({
+                UpdateFactOutcome::RejectedSecretLike { reason } => json!({
                     "action": action,
                     "fact": Value::Null,
                     "count": 0,
@@ -235,22 +231,15 @@ async fn handle_fact_store_for_target_controlled(
         FactStoreAction::Remove => {
             let id = fact_id(&args)?;
             let removed = memory
-                .remove_fact_v1(
+                .remove_fact(
                     id,
                     memory_operation_context(&args, &target_memory, "remove")?,
                 )
                 .await
                 .map_err(memory_application_error)?;
-            refresh_digest = removed;
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
     };
-    let controlled_write_committed = settlement_cancellation
-        .as_ref()
-        .is_none_or(tracedecay_application::CancellationSignal::commit_started);
-    if refresh_digest && controlled_write_committed && !target_memory.user_scope {
-        refresh_target_memory_digest(&memory, &target_memory).await;
-    }
     Ok(rendered_fact_store(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
@@ -289,16 +278,16 @@ async fn read_facts_envelope(
             };
             let facts = if cross_project_selector {
                 match action_kind {
-                    FactStoreAction::Search => memory.search_facts_untracked_v1(request).await,
-                    FactStoreAction::Probe => memory.probe_facts_untracked_v1(request).await,
-                    _ => memory.related_facts_untracked_v1(request).await,
+                    FactStoreAction::Search => memory.search_facts_untracked(request).await,
+                    FactStoreAction::Probe => memory.probe_facts_untracked(request).await,
+                    _ => memory.related_facts_untracked(request).await,
                 }
             } else {
                 let context = memory_operation_context(args, target_memory, action)?;
                 match action_kind {
-                    FactStoreAction::Search => memory.search_facts_v1(request, context).await,
-                    FactStoreAction::Probe => memory.probe_facts_v1(request, context).await,
-                    _ => memory.related_facts_v1(request, context).await,
+                    FactStoreAction::Search => memory.search_facts(request, context).await,
+                    FactStoreAction::Probe => memory.probe_facts(request, context).await,
+                    _ => memory.related_facts(request, context).await,
                 }
             }
             .map_err(memory_application_error)?;
@@ -317,11 +306,11 @@ async fn read_facts_envelope(
             let limit = limit(args);
             let facts = if cross_project_selector {
                 memory
-                    .reason_facts_untracked_v1(entities, category, min_trust, limit)
+                    .reason_facts_untracked(entities, category, min_trust, limit)
                     .await
             } else {
                 memory
-                    .reason_facts_v1(
+                    .reason_facts(
                         entities,
                         category,
                         min_trust,
@@ -339,11 +328,11 @@ async fn read_facts_envelope(
             let limit = limit(args);
             let facts = if cross_project_selector {
                 memory
-                    .list_facts_untracked_v1(category, min_trust, limit)
+                    .list_facts_untracked(category, min_trust, limit)
                     .await
             } else {
                 memory
-                    .list_facts_v1(
+                    .list_facts(
                         category,
                         min_trust,
                         limit,

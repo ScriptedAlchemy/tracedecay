@@ -1,9 +1,7 @@
 import {
   AcceptProposalCommandSchema,
   AcceptTaskCommandSchema,
-  AdmitExecutionCommandSchema,
-  AttachRuntimeEvidenceCommandSchema,
-  CreateWorkCommandSchema,
+  AdmitWorkExecutionRequestV1Schema,
   ExecutionTopologyMetricsRequestV1Schema,
   ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
@@ -13,6 +11,9 @@ import {
   WorkAttemptListV1Schema,
   WorkGraphReadRequestV1Schema,
   WorkGraphReadV1Schema,
+  PrepareWorkProductMutationRequestV1Schema,
+  WorkProductMutationReceiptV1Schema,
+  WorkProductMutationRequestV1Schema,
   WorkProjectionDeltaRequestV1Schema,
   WorkProjectionDeltaV1Schema,
   WorkProjectionSchema,
@@ -23,7 +24,7 @@ import {
 import type { WorkRoute } from "./workApi.ts";
 
 /**
- * The twelve Work routes this build can reach, and no others.
+ * The canonical Work routes this dashboard calls or documents.
  *
  * Each one names a core operation of the canonical `WorkOperation` descriptor
  * (`crates/tracedecay-api/src/work.rs`), which is what the daemon mounts and
@@ -33,19 +34,11 @@ import type { WorkRoute } from "./workApi.ts";
  * the dashboard side, and a route invented here would be a request the daemon
  * has never mounted.
  *
- * The descriptor mounts twenty-six; these twelve are the ones the dashboard
- * declares. The five it leaves alone are `generate_proposal` and the four
- * attempt operations — start, the single-attempt status read, cancel, and
- * resume — which drive execution rather than read it, and belong to whichever
- * surface takes on running Work.
- *
- * Declared is not the same as called, and the difference is deliberate. Nine
- * of the twelve have a caller in this build; `review_proposal`,
- * `accept_proposal` and `attach_runtime_evidence` are declared and unbound.
- * They stay because this table is the dashboard's record of what the daemon
- * mounts and what contracts sit on either side of it — deleting a row would
- * not un-mount the route, it would only mean the next caller has to rediscover
- * its contract by hand.
+ * Declared is not the same as called. Proposal decisions and direct execution
+ * admission remain documented because they are mounted product operations;
+ * the dashboard's current create and admission journeys instead use the
+ * backend-owned prepare/mutate handoff so the browser never mints authority
+ * identities, clocks, or revision pins.
  */
 
 export const WORK_SNAPSHOT_ROUTE = {
@@ -129,18 +122,22 @@ export const WORK_VIEWS_ROUTE = {
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**
- * The seven commands, each answering with the projection it produced.
- *
- * Six of the seven carry `expected_version` and are therefore compare-and-swap:
- * the daemon answers 409 when the task moved underneath the caller. `create` is
- * the exception, because a task that does not exist yet has no version to
- * compare against.
+ * A graph mutation is a two-step authority handoff. The prepare read mints the
+ * exact command, including its selected scope, current graph authority, and
+ * revision pins. The mutation route consumes that returned command unchanged.
  */
-export const WORK_CREATE_ROUTE = {
-  operation: "operation.work.create",
-  path: "/api/work/create",
-  request: CreateWorkCommandSchema,
-  response: WorkProjectionSchema,
+export const WORK_PREPARE_GRAPH_MUTATION_ROUTE = {
+  operation: "operation.work.prepare_graph_mutation",
+  path: "/api/work/prepare-graph-mutation",
+  request: PrepareWorkProductMutationRequestV1Schema,
+  response: WorkProductMutationRequestV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+export const WORK_MUTATE_GRAPH_ROUTE = {
+  operation: "operation.work.mutate_graph",
+  path: "/api/work/mutate-graph",
+  request: WorkProductMutationRequestV1Schema,
+  response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 export const WORK_REPLAN_DEPENDENCIES_ROUTE = {
@@ -167,15 +164,8 @@ export const WORK_ACCEPT_PROPOSAL_ROUTE = {
 export const WORK_ADMIT_EXECUTION_ROUTE = {
   operation: "operation.work.admit_execution",
   path: "/api/work/admit-execution",
-  request: AdmitExecutionCommandSchema,
-  response: WorkProjectionSchema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_ATTACH_RUNTIME_EVIDENCE_ROUTE = {
-  operation: "operation.work.attach_runtime_evidence",
-  path: "/api/work/attach-runtime-evidence",
-  request: AttachRuntimeEvidenceCommandSchema,
-  response: WorkProjectionSchema,
+  request: AdmitWorkExecutionRequestV1Schema,
+  response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 export const WORK_ACCEPT_TASK_ROUTE = {

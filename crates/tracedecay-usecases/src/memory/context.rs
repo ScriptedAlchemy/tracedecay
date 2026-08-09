@@ -1,4 +1,4 @@
-//! Trusted operation identity for V1-facing memory use cases.
+//! Trusted operation identity for memory use cases.
 
 use serde::Serialize;
 use tracedecay_domain::{ActorId, FactOwnerV1, ProvenanceId, canonical_sha256};
@@ -8,7 +8,7 @@ use tracedecay_sessions::runtime::source::canonical_framed_sha256;
 use super::error::MemoryApplicationError;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
-/// Trusted daemon-issued identity for one V1-facing operation. The raw
+/// Trusted daemon-issued identity for one memory operation. The raw
 /// JSON-RPC identifier is never retained: it is domain-separated and hashed
 /// with owner and action before it reaches the fact authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,13 +27,12 @@ impl MemoryOperationContext {
         let owner = validated_owner(owner)?;
         validate_operation_component(action, "memory operation action")?;
         validate_actor(actor.as_ref())?;
-        let effect_digest = canonical_sha256(logical_effect).map_err(|_| {
-            MemoryApplicationError::InvalidCompatibilityInput {
+        let effect_digest =
+            canonical_sha256(logical_effect).map_err(|_| MemoryApplicationError::InvalidInput {
                 invariant: "memory logical effect identity",
-            }
-        })?;
+            })?;
         let digest = canonical_framed_sha256(
-            b"tracedecay.memory.operation.v2",
+            b"tracedecay.memory.operation.effect",
             &[
                 owner.as_bytes(),
                 action.as_bytes(),
@@ -41,8 +40,8 @@ impl MemoryOperationContext {
             ],
         );
         let operation_id =
-            ProvenanceId::new(format!("memory-operation.v2.{digest}")).map_err(|_| {
-                MemoryApplicationError::InvalidCompatibilityInput {
+            ProvenanceId::new(format!("memory-operation.effect.{digest}")).map_err(|_| {
+                MemoryApplicationError::InvalidInput {
                     invariant: "derived memory operation identity",
                 }
             })?;
@@ -52,10 +51,9 @@ impl MemoryOperationContext {
         })
     }
 
-    /// Reconstructs the request-correlation-derived V1 identity used before
-    /// logical-effect replay keys. New retriable transports must use
-    /// [`Self::from_logical_effect`].
-    pub fn from_trusted_request_id(
+    /// Derives an operation identity from a trusted transport request ID.
+    /// Retriable writes must use [`Self::from_logical_effect`] instead.
+    pub fn from_request_id(
         owner: &FactOwnerV1,
         action: &str,
         request_id: &str,
@@ -66,14 +64,12 @@ impl MemoryOperationContext {
         validate_operation_component(request_id, "memory request identity")?;
         validate_actor(actor.as_ref())?;
         let digest = canonical_framed_sha256(
-            b"tracedecay.memory.operation.v1",
+            b"tracedecay.memory.operation.request",
             &[owner.as_bytes(), action.as_bytes(), request_id.as_bytes()],
         );
-        let operation_id =
-            ProvenanceId::new(format!("memory-operation.v1.{digest}")).map_err(|_| {
-                MemoryApplicationError::InvalidCompatibilityInput {
-                    invariant: "derived memory operation identity",
-                }
+        let operation_id = ProvenanceId::new(format!("memory-operation.request.{digest}"))
+            .map_err(|_| MemoryApplicationError::InvalidInput {
+                invariant: "derived memory operation identity",
             })?;
         Ok(Self {
             operation_id,
@@ -90,11 +86,11 @@ impl MemoryOperationContext {
     ) -> Result<Self, MemoryApplicationError> {
         let raw =
             mint_global_opaque_id(GlobalOpaqueIdentityKind::MemoryOperation).map_err(|_| {
-                MemoryApplicationError::InvalidCompatibilityInput {
+                MemoryApplicationError::InvalidInput {
                     invariant: "generated memory operation identity",
                 }
             })?;
-        Self::from_trusted_request_id(owner, action, &raw, actor)
+        Self::from_request_id(owner, action, &raw, actor)
     }
 
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -118,7 +114,7 @@ fn validate_actor(actor: Option<&ActorId>) -> Result<(), MemoryApplicationError>
     actor.map_or(Ok(()), |actor| {
         actor
             .validate()
-            .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
+            .map_err(|_| MemoryApplicationError::InvalidInput {
                 invariant: "memory operation actor",
             })
     })
@@ -129,7 +125,7 @@ pub(super) fn validate_operation_component(
     invariant: &'static str,
 ) -> Result<(), MemoryApplicationError> {
     if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(MemoryApplicationError::InvalidCompatibilityInput { invariant });
+        return Err(MemoryApplicationError::InvalidInput { invariant });
     }
     Ok(())
 }
@@ -139,8 +135,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_request_identity_digest_matches_canonical_framed_sha256() {
-        let context = MemoryOperationContext::from_trusted_request_id(
+    fn request_identity_digest_matches_canonical_framed_sha256() {
+        let context = MemoryOperationContext::from_request_id(
             &FactOwnerV1::Profile,
             "feedback",
             "fixture-feedback-mcp",
@@ -150,7 +146,7 @@ mod tests {
 
         assert_eq!(
             context.operation_id().as_str(),
-            "memory-operation.v1.178353d02133a655ee53c04806709a086671ac1e7a364969759cb3be8b810a4b"
+            "memory-operation.request.5882a5798c5caa7cfd90d3af658b7ad2226e146ef4926ebce0f9ab280c882363"
         );
     }
 
@@ -184,7 +180,7 @@ mod tests {
             first
                 .operation_id()
                 .as_str()
-                .starts_with("memory-operation.v2.")
+                .starts_with("memory-operation.effect.")
         );
     }
 }

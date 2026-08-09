@@ -215,7 +215,7 @@ impl AgentIntegration for KiroIntegration {
     fn project_host_component_registration_paths(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],
-        home: &Path,
+        _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(vec![
@@ -223,7 +223,6 @@ impl AgentIntegration for KiroIntegration {
             project_path.join(".kiro/steering/tracedecay.md"),
             project_path.join(".kiro/agents/tracedecay.json"),
             project_path.join(".kiro/steering/tracedecay-managed-skills.md"),
-            super::managed_memory_digest_targets_path(home),
         ])
     }
 
@@ -250,7 +249,7 @@ impl AgentIntegration for KiroIntegration {
         )?;
         uninstall_mcp_server(&mcp_path)?;
         remove_steering_rules(&steering);
-        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path);
+        remove_kiro_managed_skill_index(&ctx.home, &skill_index_path)?;
         uninstall_managed_agent(&agent_path);
         Ok(())
     }
@@ -649,17 +648,14 @@ fn install_kiro_managed_skill_index<'a>(
     index_path: &'a Path,
 ) -> Result<Option<&'a Path>> {
     let profile_root = profile_root_for_agent_home(home);
+    super::retired_memory_digest::remove_state(&profile_root)?;
+    super::retired_memory_digest::remove_prompt_block(index_path)?;
     let summary = install_managed_skills(&profile_root, SkillInstallTarget::Kiro, index_path)?;
-    let digest_exported = crate::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
-        SkillInstallTarget::Kiro,
-        index_path,
-    )?;
-    Ok((summary.exported_count > 0 || digest_exported).then_some(index_path))
+    Ok((summary.exported_count > 0).then_some(index_path))
 }
 
-fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) {
-    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro).ok();
+fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) -> Result<()> {
+    super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro)
 }
 
 fn is_builtin_default_agent(agent: &str) -> bool {

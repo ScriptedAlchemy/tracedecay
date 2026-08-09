@@ -5,7 +5,7 @@ use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFact
 
 use crate::db::engine::{QueryExecutor, params};
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::lcm::{LcmError, LcmSummaryRequest};
+use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
 
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
@@ -33,10 +33,10 @@ async fn generate_provider_summary(
     match provider {
         "codex" => {
             let mut config =
-                crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
+                tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig::from_env();
             config.timeout = config.timeout.min(timeout);
             let result = tokio::task::spawn_blocking(move || {
-                crate::sessions::codex_app_server::summarize_with_codex_app_server(
+                tracedecay_sessions::runtime::codex_app_server::summarize_with_codex_app_server(
                     &request, &config,
                 )
             })

@@ -26,22 +26,22 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() {
     let result = git_sync_work_result(
         &ProjectId::new("project.cancel-after-commit").unwrap(),
-        crate::sessions::git_correlation::BoundedBackfillOutcome {
-            stats: crate::sessions::git_correlation::BackfillStats {
+        tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome {
+            stats: tracedecay_sessions::runtime::git_correlation::BackfillStats {
                 sessions_scanned: 1,
                 spans_written: 2,
                 commits_attributed: 3,
-                ..crate::sessions::git_correlation::BackfillStats::default()
+                ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
             },
             committed: true,
-            frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier {
+            frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
                 activity_timestamp: 1_723_456_789,
                 source_rowid: 417,
             },
             remaining_sessions: 1,
             unresolved_failures: 0,
             interruption: Some(
-                crate::sessions::git_correlation::BoundedBackfillInterruption::Cancelled,
+                tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption::Cancelled,
             ),
         },
         Some(SessionSyncInterruption::Cancelled),
@@ -97,22 +97,22 @@ fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() 
 fn deadline_after_first_git_commit_preserves_progress_and_timed_out_termination() {
     let result = git_sync_work_result(
         &ProjectId::new("project.deadline-after-commit").unwrap(),
-        crate::sessions::git_correlation::BoundedBackfillOutcome {
-            stats: crate::sessions::git_correlation::BackfillStats {
+        tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome {
+            stats: tracedecay_sessions::runtime::git_correlation::BackfillStats {
                 sessions_scanned: 1,
                 spans_written: 2,
                 commits_attributed: 3,
-                ..crate::sessions::git_correlation::BackfillStats::default()
+                ..tracedecay_sessions::runtime::git_correlation::BackfillStats::default()
             },
             committed: true,
-            frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier {
+            frontier: tracedecay_sessions::runtime::git_correlation::GitHistoryIndexFrontier {
                 activity_timestamp: 1_723_456_790,
                 source_rowid: 418,
             },
             remaining_sessions: 0,
             unresolved_failures: 0,
             interruption: Some(
-                crate::sessions::git_correlation::BoundedBackfillInterruption::Cancelled,
+                tracedecay_sessions::runtime::git_correlation::BoundedBackfillInterruption::Cancelled,
             ),
         },
         Some(SessionSyncInterruption::TimedOut),

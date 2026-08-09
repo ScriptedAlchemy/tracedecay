@@ -1,6 +1,6 @@
 //! Canonical derived-memory convergence policy.
 //!
-//! [`MemoryApplication::dashboard_repair_v1`] runs one store-bounded repair
+//! [`MemoryApplication::dashboard_repair`] runs one store-bounded repair
 //! batch and reports whether more work remains behind the batch cap. This
 //! module preserves that bound: [`MemoryApplication::converge_derived_memory`]
 //! performs exactly one pass and returns a typed pending state when the store
@@ -12,7 +12,7 @@
 //! never spin waiting for that background convergence.
 
 use tracedecay_application::{
-    DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1, converge_derived_memory,
+    DerivedMemoryRepairPort, DerivedMemoryRepairStats, converge_derived_memory,
 };
 use tracedecay_store::{ProjectMemoryFactStore, ProjectMemoryFeedbackRepairProgressV1};
 
@@ -21,26 +21,26 @@ use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
 
 pub use tracedecay_application::{
-    DerivedMemoryConvergenceReportV1, DerivedMemoryFeedbackHistoryRepairV1,
+    DerivedMemoryConvergenceReport, DerivedMemoryFeedbackHistoryRepair,
 };
 
 const fn feedback_history_repair(
     progress: ProjectMemoryFeedbackRepairProgressV1,
-) -> DerivedMemoryFeedbackHistoryRepairV1 {
+) -> DerivedMemoryFeedbackHistoryRepair {
     match progress {
         ProjectMemoryFeedbackRepairProgressV1::Unknown => {
-            DerivedMemoryFeedbackHistoryRepairV1::Unknown
+            DerivedMemoryFeedbackHistoryRepair::Unknown
         }
         ProjectMemoryFeedbackRepairProgressV1::NotRequired => {
-            DerivedMemoryFeedbackHistoryRepairV1::NotRequired
+            DerivedMemoryFeedbackHistoryRepair::NotRequired
         }
         ProjectMemoryFeedbackRepairProgressV1::Complete { processed } => {
-            DerivedMemoryFeedbackHistoryRepairV1::Complete { processed }
+            DerivedMemoryFeedbackHistoryRepair::Complete { processed }
         }
         ProjectMemoryFeedbackRepairProgressV1::Incomplete {
             processed,
             remaining,
-        } => DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+        } => DerivedMemoryFeedbackHistoryRepair::Incomplete {
             processed,
             remaining,
         },
@@ -53,10 +53,10 @@ impl<A: ProjectMemoryFactStore> DerivedMemoryRepairPort for MemoryApplication<A>
     async fn repair_derived_memory(
         &self,
         action: &str,
-    ) -> Result<DerivedMemoryRepairStatsV1, Self::Error> {
+    ) -> Result<DerivedMemoryRepairStats, Self::Error> {
         let context = MemoryOperationContext::generated(&self.owner, action, None)?;
-        let stats = self.dashboard_repair_v1(context).await?;
-        Ok(DerivedMemoryRepairStatsV1::new(
+        let stats = self.dashboard_repair(context).await?;
+        Ok(DerivedMemoryRepairStats::new(
             stats.missing_vectors_repaired(),
             stats.banks_rebuilt(),
             stats.saturated(),
@@ -66,17 +66,17 @@ impl<A: ProjectMemoryFactStore> DerivedMemoryRepairPort for MemoryApplication<A>
 }
 
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
-    /// Runs exactly one bounded compatibility-memory repair pass.
+    /// Runs exactly one bounded derived-memory repair pass.
     ///
     /// `action` names the trigger (e.g. `"dashboard-startup-repair"`) used
     /// for the pass's generated operation identity. Saturation is reported as
-    /// [`tracedecay_application::DerivedMemoryConvergenceStateV1::Pending`];
+    /// [`tracedecay_application::DerivedMemoryConvergenceState::Pending`];
     /// the caller proceeds while the existing daemon scheduler owns the
     /// remaining durable backlog.
     pub async fn converge_derived_memory(
         &self,
         action: &str,
-    ) -> Result<DerivedMemoryConvergenceReportV1, MemoryApplicationError> {
+    ) -> Result<DerivedMemoryConvergenceReport, MemoryApplicationError> {
         let report = converge_derived_memory(self, action).await?;
         if report.is_pending() {
             tracing::warn!(
@@ -91,7 +91,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::DerivedMemoryFeedbackHistoryRepairV1;
+    use tracedecay_application::DerivedMemoryFeedbackHistoryRepair;
     use tracedecay_store::ProjectMemoryFeedbackRepairProgressV1;
 
     use super::feedback_history_repair;
@@ -101,22 +101,22 @@ mod tests {
         let cases = [
             (
                 ProjectMemoryFeedbackRepairProgressV1::Unknown,
-                DerivedMemoryFeedbackHistoryRepairV1::Unknown,
+                DerivedMemoryFeedbackHistoryRepair::Unknown,
             ),
             (
                 ProjectMemoryFeedbackRepairProgressV1::NotRequired,
-                DerivedMemoryFeedbackHistoryRepairV1::NotRequired,
+                DerivedMemoryFeedbackHistoryRepair::NotRequired,
             ),
             (
                 ProjectMemoryFeedbackRepairProgressV1::Complete { processed: 2 },
-                DerivedMemoryFeedbackHistoryRepairV1::Complete { processed: 2 },
+                DerivedMemoryFeedbackHistoryRepair::Complete { processed: 2 },
             ),
             (
                 ProjectMemoryFeedbackRepairProgressV1::Incomplete {
                     processed: 3,
                     remaining: Some(7),
                 },
-                DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
+                DerivedMemoryFeedbackHistoryRepair::Incomplete {
                     processed: 3,
                     remaining: Some(7),
                 },

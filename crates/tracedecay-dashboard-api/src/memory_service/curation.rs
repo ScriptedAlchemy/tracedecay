@@ -163,7 +163,7 @@ pub async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, S
     )
     .map_err(|error| error.to_string())?;
     application
-        .remove_fact_v1(fact_id, context)
+        .remove_fact(fact_id, context)
         .await
         .map_err(|error| error.to_string())
 }
@@ -263,7 +263,7 @@ pub async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value, bool)
         }
     };
     let result = match application
-        .dashboard_merge_fact_ids_v1(winner_id, parsed_loser_ids, merged_content, context)
+        .dashboard_merge_fact_ids(winner_id, parsed_loser_ids, merged_content, context)
         .await
     {
         Ok(outcome) => json!({

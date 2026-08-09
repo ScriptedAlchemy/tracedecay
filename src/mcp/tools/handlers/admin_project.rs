@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::path::Path;
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
@@ -191,6 +192,7 @@ pub(super) async fn handle_admin_project(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    profile_root: Option<&Path>,
 ) -> Result<ToolResult> {
     let action: AdminProjectAction =
         serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
@@ -349,17 +351,20 @@ pub(super) async fn handle_admin_project(
             json!({ "receipt": automatic_fact_receipt_json(&receipt) })
         }
         AdminProjectAction::AutomationRun { task, options } => {
-            run_automation(cg, task, options).await?
+            run_automation(cg, profile_root, task, options).await?
         }
     };
     Ok(json_result(&value))
 }
 
-async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value) -> Result<Value> {
+async fn run_automation(
+    cg: &TraceDecay,
+    profile_root: Option<&Path>,
+    task: AutomationRunTask,
+    options: Value,
+) -> Result<Value> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::config::{
-        AutomationBackend, from_configuration_snapshot,
-    };
+    use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
         MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
@@ -376,11 +381,6 @@ async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value
             message: format!("automation configuration authority is unavailable: {error}"),
         })?;
     let config = from_configuration_snapshot(&pinned.snapshot)?;
-    if config.backend == AutomationBackend::ExternalCommand {
-        return Err(TraceDecayError::Config {
-            message: "automation backend external_command is not implemented yet".to_string(),
-        });
-    }
     let backend = CodexAppServerBackend::from_automation_config(&config);
 
     let run = match task {
@@ -390,6 +390,7 @@ async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value
                 run_memory_curator_with_backend(
                     cg,
                     &config,
+                    &pinned.revision_id,
                     &backend,
                     MemoryCuratorAutomationOptions {
                         trigger: AutomationTrigger::ManualCli,
@@ -407,6 +408,7 @@ async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value
                 run_session_reflector_with_backend(
                     cg,
                     &config,
+                    &pinned.revision_id,
                     &backend,
                     SessionReflectorAutomationOptions {
                         trigger: AutomationTrigger::ManualCli,
@@ -430,10 +432,15 @@ async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value
         }
         AutomationRunTask::SkillWriting => {
             let options = decode_options::<SkillWritingOptions>(options)?;
+            let profile_root = profile_root.ok_or_else(|| TraceDecayError::Config {
+                message: "automation skill writing requires exact daemon profile authority"
+                    .to_owned(),
+            })?;
             serde_json::to_value(
                 run_skill_writer_with_backend(
                     cg,
                     &config,
+                    &pinned.revision_id,
                     &backend,
                     SkillWriterAutomationOptions {
                         trigger: AutomationTrigger::ManualCli,
@@ -441,6 +448,7 @@ async fn run_automation(cg: &TraceDecay, task: AutomationRunTask, options: Value
                         provider: options.provider,
                         query: options.query,
                         evidence_limit: options.evidence_limit,
+                        profile_root: Some(profile_root.to_path_buf()),
                         ..SkillWriterAutomationOptions::default()
                     },
                 )
@@ -548,6 +556,7 @@ mod tests {
                 }),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -566,6 +575,7 @@ mod tests {
             &handle_admin_project(
                 &cg,
                 json!({ "action": "automatic_fact_receipt_view", "id": apply_id }),
+                None,
                 None,
                 None,
             )
@@ -598,7 +608,9 @@ mod tests {
             }),
         ] {
             assert!(
-                handle_admin_project(&cg, action, None, None).await.is_err(),
+                handle_admin_project(&cg, action, None, None, None)
+                    .await
+                    .is_err(),
                 "manual fact mutations must not be accepted"
             );
         }
@@ -611,6 +623,7 @@ mod tests {
                     "task": "memory_curation",
                     "options": { "max_clusters": 9, "min_confidence": 0.7 }
                 }),
+                None,
                 None,
                 None,
             )

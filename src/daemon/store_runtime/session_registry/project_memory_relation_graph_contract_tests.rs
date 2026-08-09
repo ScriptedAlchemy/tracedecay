@@ -50,7 +50,7 @@ async fn seed_relation(
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
         .expect("owner-bound memory application");
     let source = memory
-        .add_fact_v1(
+        .add_fact(
             add_request(
                 &format!("{label} stores the canonical relation source"),
                 category,
@@ -63,7 +63,7 @@ async fn seed_relation(
         .fact
         .expect("stored source fact");
     let target = memory
-        .add_fact_v1(
+        .add_fact(
             add_request(
                 &format!("{label} stores the canonical relation target"),
                 category,
@@ -76,7 +76,7 @@ async fn seed_relation(
         .fact
         .expect("stored target fact");
     memory
-        .dashboard_apply_grooming_v1(
+        .dashboard_apply_grooming(
             vec![MemoryGroomingOperation::LinkFacts {
                 source_fact_id: source.fact_id,
                 target_fact_id: target.fact_id,
@@ -93,7 +93,7 @@ async fn seed_relation(
         .await
         .expect("canonical relation write");
     memory
-        .dashboard_overview_v1(16, 16)
+        .dashboard_overview(16, 16)
         .await
         .expect("owner-bound overview")
         .facts

@@ -43,7 +43,6 @@ pub mod grep;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;
-mod lcm_tool_entry;
 pub mod memory;
 mod multi_root;
 mod project_registry;
@@ -129,7 +128,6 @@ mod dispatch_tests;
 )]
 mod tool_definition_tests;
 
-pub(crate) use lcm_tool_entry::handle_user_lcm_tool_with_authorities;
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
 use std::sync::Arc;
@@ -161,8 +159,6 @@ use super::binding::{
     tool_dispatches_registered_project_reader,
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
-#[cfg(test)]
-use dispatch_groups::dispatch_memory_operation;
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
@@ -357,6 +353,27 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 });
             }
         }
+        if args.get("memory_scope").and_then(Value::as_str) == Some("user")
+            && matches!(
+                tool_name,
+                "tracedecay_fact_store" | "tracedecay_fact_feedback" | "tracedecay_memory_status"
+            )
+        {
+            if args.get("storage_scope").is_some() {
+                return Err(TraceDecayError::Config {
+                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+                });
+            }
+            ensure_mcp_dispatch_available(tool_name)?;
+            let operation = crate::mcp::tools::retained_mcp_operation(tool_name, &args)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("{tool_name} requires a supported retained action"),
+                })?;
+            return dispatch_profile_retained_application_tool(
+                operation, tool_name, cg, args, options,
+            )
+            .await;
+        }
         if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
             if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search"
             {
@@ -380,20 +397,17 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         > = Box::pin(dispatch_profile_retained_application_tool(
                             operation,
                             tool_name,
+                            cg,
                             args,
                             options.clone(),
                         ));
                         return dispatch.await;
                     }
-                    let dispatch: std::pin::Pin<
-                        Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                    > = Box::pin(handle_user_lcm_tool_with_authorities(
-                        tool_name,
-                        args,
-                        options.session_authorities.profile_lcm,
-                        options.session_authorities.profile_retrieval,
-                    ));
-                    return dispatch.await;
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "storage_scope=user is unavailable for non-retained tool `{tool_name}`"
+                        ),
+                    });
                 }
                 "project" => {
                     if let Some(object) = args.as_object_mut() {

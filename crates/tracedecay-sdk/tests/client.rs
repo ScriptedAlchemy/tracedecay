@@ -10,7 +10,8 @@ use tracedecay_sdk::client::{
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    GitStatus, TypedOperation, WorkflowListDefinitions, WorkflowRegisterDefinition,
+    ApplicationGitStatus, CodeExactOccurrence, TypedOperation, WorkflowListDefinitions,
+    WorkflowRegisterDefinition,
 };
 
 #[derive(Debug, Default)]
@@ -326,6 +327,50 @@ fn typed_result_rejects_malformed_payloads() {
 }
 
 #[test]
+fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
+    assert_eq!(
+        CodeExactOccurrence::TRANSPORT,
+        tracedecay_sdk::operations::OperationTransport::Http {
+            route: "/application/code/code_exact_occurrence"
+        },
+        "canonical SDK generation must select the mounted HTTP executable"
+    );
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request =
+        serde_json::from_value::<<CodeExactOccurrence as TypedOperation>::Request>(json!({
+            "literal": "sdk_executable_binding_registry",
+            "kind": null,
+            "scope": {
+                "generation": "generation.sdk",
+                "path_prefix": "crates/tracedecay-application"
+            },
+            "meta": {
+                "temporal": {"kind": "current"},
+                "page": {"page_size": 10, "cursor": null},
+                "projection": "evidence",
+                "order": "relevance"
+            }
+        }))
+        .expect("canonical callable-code request");
+
+    let error = client
+        .execute::<CodeExactOccurrence>(&request)
+        .expect_err("malformed fixture response must fail closed");
+
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    let requests = server.join().unwrap();
+    assert!(
+        requests[0]
+            .contains("POST /projects/project.sdk/application/code/code_exact_occurrence HTTP/1.1")
+    );
+    assert!(requests[0].contains("sdk_executable_binding_registry"));
+}
+
+#[test]
 fn typed_result_rejects_a_terminal_outside_the_operation_contract() {
     let mut body = list_definitions_success();
     body["value"]["outcome"]["value"]["execution"]["termination"] = json!("effect_unknown");
@@ -489,59 +534,23 @@ fn malformed_sse_events_are_protocol_errors() {
 }
 
 #[test]
-fn generated_mcp_descriptor_uses_the_injected_tool_transport() {
-    let mcp = Arc::new(RecordingMcpTransport::default());
-    let client = Client::builder(ConnectionMode::local(
-        "http://127.0.0.1:43123",
-        "project.sdk",
-        "sdk-token",
-    ))
-    .mcp_transport(mcp.clone())
-    .build()
-    .expect("client configuration");
+fn mounted_git_reads_use_the_generated_http_route() {
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .expect("client configuration");
     let request =
-        serde_json::from_value::<<GitStatus as TypedOperation>::Request>(json!({})).unwrap();
+        serde_json::from_value::<<ApplicationGitStatus as TypedOperation>::Request>(json!({}))
+            .unwrap();
 
     let error = client
-        .execute_mcp::<GitStatus>(&request)
-        .expect_err("malformed MCP result must fail closed");
+        .execute::<ApplicationGitStatus>(&request)
+        .expect_err("malformed HTTP result must fail closed");
 
     assert!(matches!(error, ClientError::Protocol { .. }));
-    assert_eq!(
-        *mcp.calls.lock().expect("test MCP calls lock"),
-        vec![("tracedecay_git_status".to_owned(), json!({}))]
-    );
-}
-
-#[test]
-fn mcp_operations_refuse_the_http_execution_path_with_a_typed_error() {
-    let client = Client::builder(ConnectionMode::local(
-        "http://127.0.0.1:43123",
-        "project.sdk",
-        "sdk-token",
-    ))
-    .build()
-    .expect("client configuration");
-    let request =
-        serde_json::from_value::<<GitStatus as TypedOperation>::Request>(json!({})).unwrap();
-
-    let error = client
-        .execute::<GitStatus>(&request)
-        .expect_err("MCP-bound operations must not invent an HTTP route");
-    assert!(matches!(
-        error,
-        ClientError::UnsupportedTransport { operation_id, .. }
-            if operation_id == GitStatus::OPERATION_ID
-    ));
-
-    let error = client
-        .execute_mcp::<GitStatus>(&request)
-        .expect_err("an absent MCP transport is a typed denial, not a panic");
-    assert!(matches!(
-        error,
-        ClientError::MissingMcpTransport { operation_id }
-            if operation_id == GitStatus::OPERATION_ID
-    ));
+    let requests = server.join().unwrap();
+    assert!(requests[0].contains("POST /projects/project.sdk/application/git/status HTTP/1.1"));
 }
 
 #[test]

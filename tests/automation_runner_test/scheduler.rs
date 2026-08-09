@@ -1,14 +1,14 @@
 use tempfile::tempdir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
-use tracedecay::automation::config::{
+use tracedecay_agent_hosts::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
+use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
     AutomationTaskPatch, AutomationTaskSet, effective_config,
 };
-use tracedecay::automation::run_ledger::{
+use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
 };
-use tracedecay::automation::scheduler::{
+use tracedecay_agent_hosts::automation::scheduler::{
     AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock, SessionActivity,
     host_receipt_decision, load_scheduler_control, parse_schedule, save_scheduler_control,
     schedule_decision, scheduler_control_path,

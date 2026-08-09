@@ -12,7 +12,7 @@ use serde_json::Value;
 #[cfg(not(windows))]
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
-use tracedecay::sessions::SessionMessageRecord;
+use tracedecay_sessions::runtime::SessionMessageRecord;
 
 pub struct EnvVarGuard {
     key: &'static str,

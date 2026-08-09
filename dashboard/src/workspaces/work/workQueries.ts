@@ -141,3 +141,19 @@ export function useWorkCommand<Request, Response>(
     },
   });
 }
+
+/**
+ * A Work action that observes or prepares authority without changing the graph.
+ * Unlike commands it remains available through the selected-project read
+ * gateway, and it deliberately does not invalidate graph reads.
+ */
+export function useWorkReadAction<Request, Response>(
+  route: WorkRoute<Request, Response>,
+) {
+  const scope = useScope((state) => state.scope);
+  return useMutation<WorkResult<Response>, never, Request>({
+    mutationKey: ["work", "read-action", route.operation, scopeKey(scope)],
+    mutationFn: (request: Request) =>
+      callWork(route, request, scopedUrl(scope, route.path)),
+  });
+}

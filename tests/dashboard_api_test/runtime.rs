@@ -5,16 +5,17 @@ use serde_json::Value;
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
 use tracedecay::errors::{Result, TraceDecayError};
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 /// Dashboard integration authority assembled at the root composition layer.
 ///
 /// This wrapper owns the production registry-backed storage, graph, and HTTP
 /// authority wiring needed by root tests.
 pub(crate) struct DashboardTestRuntimeV1 {
+    profile_root: std::path::PathBuf,
     profile_database: Arc<RegisteredGlobalDb>,
     project_database: Arc<RegisteredGlobalDb>,
     graph: dashboard::DashboardGraphTestRuntimeV1,
@@ -49,12 +50,13 @@ impl DashboardTestRuntimeV1 {
         let graph_profile_root = profile_root
             .join("dashboard-test-graphs")
             .join(project_id.as_str());
-        let graph = dashboard::DashboardGraphTestRuntimeV1::open(graph_profile_root).await?;
+        let graph = dashboard::DashboardGraphTestRuntimeV1::open(&graph_profile_root).await?;
         let profile_database = graph.profile_database();
         let project_database = graph
             .project_sessions(project_root, project_id.clone())
             .await?;
         Ok(Self {
+            profile_root: graph_profile_root,
             profile_database,
             project_database,
             graph,
@@ -64,6 +66,10 @@ impl DashboardTestRuntimeV1 {
 
     pub(crate) fn canonical_project_key(project_path: &Path) -> String {
         RegisteredGlobalDb::canonical_project_key(project_path)
+    }
+
+    pub(crate) fn profile_root(&self) -> &Path {
+        &self.profile_root
     }
 
     pub(crate) async fn initialize_project_graph_for_test(
@@ -116,11 +122,13 @@ impl DashboardTestRuntimeV1 {
     /// explorer, and `/api/plugins/graph/*` reads.
     pub(crate) async fn dashboard_test_authority_with_session_reads(
         self: &Arc<Self>,
-        cg: &TraceDecay,
+        cg: &Arc<TraceDecay>,
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
+        let (automation_authority, automation_writer) =
+            dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)?;
         let lcm_read_authority = dashboard::dashboard_lcm_read_authority_for_test(
-            cg,
+            cg.as_ref(),
             self.profile_database.as_ref(),
             Arc::clone(&self.project_database),
         )
@@ -128,18 +136,20 @@ impl DashboardTestRuntimeV1 {
         .ok_or_else(|| TraceDecayError::Config {
             message: "dashboard fixture could not compose the LCM read authority".to_owned(),
         })?;
-        let graph_read_authority =
-            dashboard::dashboard_graph_read_authority_for_test(cg, self.project_database.as_ref())
-                .await
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "dashboard fixture could not compose the graph read authority"
-                        .to_owned(),
-                })?;
+        let graph_read_authority = dashboard::dashboard_graph_read_authority_for_test(
+            cg.as_ref(),
+            self.project_database.as_ref(),
+        )
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "dashboard fixture could not compose the graph read authority".to_owned(),
+        })?;
         let git_correlation_read_authority =
             dashboard::dashboard_git_correlation_read_authority_for_test(Arc::clone(
                 &self.project_database,
             ));
         Ok(authority
+            .with_automation_authority(automation_authority, automation_writer)
             .with_lcm_read_authority(lcm_read_authority)
             .with_graph_read_authority(graph_read_authority)
             .with_git_correlation_read_authority(git_correlation_read_authority))
@@ -351,7 +361,7 @@ impl DashboardTestRuntimeV1 {
 
     pub(crate) async fn record_project_span_for_test(
         &self,
-        observation: &tracedecay::sessions::git_correlation::SpanObservation,
+        observation: &tracedecay_sessions::runtime::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
         dashboard::record_project_span_for_test(
@@ -366,7 +376,7 @@ impl DashboardTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
         load_registered_raw_message(self.primary_session_database(), provider, message_id).await
     }
 
@@ -374,12 +384,12 @@ impl DashboardTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         message: &SessionMessageRecord,
-    ) -> std::result::Result<(), tracedecay::sessions::lcm::LcmError> {
+    ) -> std::result::Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
         let database = self
             .database(scope)
-            .map_err(|error| tracedecay::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            tracedecay::sessions::lcm::LcmError::Db(
+            tracedecay_sessions::runtime::lcm::LcmError::Db(
                 "registered session database has no storage root".to_owned(),
             )
         })?;
@@ -425,17 +435,17 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn lcm_insert_summary_node_for_test(
         &self,
         scope: HostAdmissionScope,
-        draft: tracedecay::sessions::lcm::LcmSummaryNodeDraft,
+        draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
     ) -> std::result::Result<
-        tracedecay::sessions::lcm::LcmSummaryNode,
-        tracedecay::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         let database = self
             .database(scope)
-            .map_err(|error| tracedecay::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let summary_hash =
-            tracedecay_sessions::compatibility::projected_content_hash(&draft.summary_text);
-        let summary_id = tracedecay::sessions::lcm::dag::summary_node_id(
+            tracedecay_sessions::retrieval_content::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -445,7 +455,7 @@ impl DashboardTestRuntimeV1 {
         let control = tracedecay_temporal_query::ports::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
-                tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication {
+                tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
                     summary_id,
                     predecessor_summary_id: None,
                     draft,
@@ -462,15 +472,15 @@ impl DashboardTestRuntimeV1 {
         provider: &str,
         session_id: Option<&str>,
     ) -> std::result::Result<
-        tracedecay::sessions::lcm::LcmStatus,
-        tracedecay::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.primary_session_database()
             .lcm_status_with_options(
                 provider,
                 session_id,
                 true,
-                &tracedecay::sessions::lcm::LcmGcConfig::default(),
+                &tracedecay_sessions::runtime::lcm::LcmGcConfig::default(),
             )
             .await
     }
@@ -480,12 +490,12 @@ async fn load_registered_raw_message(
     database: &RegisteredGlobalDb,
     provider: &str,
     message_id: &str,
-) -> Option<tracedecay::sessions::lcm::LcmRawMessage> {
+) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
     let snapshot = database
         .read_snapshot()
         .await
         .expect("dashboard test raw-message snapshot must remain registered");
-    tracedecay::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+    tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
         .await
         .expect("dashboard test raw-message load must not hide database or receipt failure")
 }

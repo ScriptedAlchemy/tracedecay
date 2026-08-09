@@ -501,3 +501,6 @@ mod configuration_idempotency_journey_test;
 
 #[cfg(test)]
 mod semantic_activation_journey_test;
+
+#[cfg(test)]
+mod source_edit_transaction_test;

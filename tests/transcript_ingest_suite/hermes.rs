@@ -10,17 +10,17 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::global_db::ParseOffset;
-use tracedecay::sessions::hermes::{
-    ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
-    ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
-};
-use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
-use tracedecay::sessions::source::TranscriptIngestStats;
-use tracedecay::sessions::{SessionProvider, SessionRecord};
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
 };
+use tracedecay_sessions::runtime::hermes::{
+    ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
+    ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
+};
+use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay_sessions::runtime::source::TranscriptIngestStats;
+use tracedecay_sessions::runtime::{SessionProvider, SessionRecord};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

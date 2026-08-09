@@ -19,10 +19,11 @@ use super::invocation::{
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredCallableCodeRuntime,
     RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    RegisteredHookOrchestrationRuntimeV1, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
+mod request_snapshot;
 mod shutdown;
 use shutdown::ShutdownState;
 
@@ -113,6 +114,7 @@ pub(crate) struct ProjectRuntime {
     primitive: Option<PrimitiveProjectRuntime>,
     configuration: Option<RegisteredConfigurationRuntime>,
     work: Option<RegisteredWorkRuntime>,
+    retained: Option<RegisteredRetainedRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
     advisory_hook_orchestrator: Option<RegisteredHookOrchestrationRuntimeV1>,
@@ -145,6 +147,7 @@ impl ProjectRuntime {
             || self.primitive.is_some()
             || self.configuration.is_some()
             || self.work.is_some()
+            || self.retained.is_some()
             || self.lsp_owner.is_some()
             || self.advisory.is_some()
             || self.advisory_hook_orchestrator.is_some()
@@ -203,6 +206,7 @@ project_runtime_components!(
     PrimitiveProjectRuntime => primitive,
     RegisteredConfigurationRuntime => configuration,
     RegisteredWorkRuntime => work,
+    RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
     RegisteredHookOrchestrationRuntimeV1 => advisory_hook_orchestrator,
@@ -359,6 +363,7 @@ impl ProjectRuntimePublication {
                 move_component!(primitive);
                 move_component!(configuration);
                 move_component!(work);
+                move_component!(retained);
                 move_component!(lsp_owner);
                 move_component!(advisory);
                 move_component!(advisory_hook_orchestrator);
@@ -384,22 +389,6 @@ impl ProjectRuntimePublication {
         move_all_components!(prepared, incumbent);
         Ok(())
     }
-}
-
-/// The per-project components one request may need, resolved together.
-///
-/// Dispatch used to reach for these one at a time, taking a lock per component
-/// on every request whatever its domain. Resolving them in a single pass means
-/// a request also sees one consistent view of the project rather than five
-/// views taken at five different moments.
-#[derive(Default)]
-pub(super) struct ProjectRequestRuntimesV1 {
-    pub(super) feedback: Option<Arc<FeedbackRuntime>>,
-    pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
-    pub(super) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
-    pub(super) configuration: Option<RegisteredConfigurationRuntime>,
-    pub(super) work: Option<RegisteredWorkRuntime>,
-    pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
 }
 
 /// A component was already published for this project.
@@ -989,37 +978,6 @@ impl ProjectRuntimeRegistryV1 {
             if reservation_changed.changed().await.is_err() {
                 return Err(ProjectRuntimeRegistryError::Closed.into());
             }
-        }
-    }
-
-    /// Resolve everything one request may need from a project, in one pass.
-    ///
-    /// A project opened under an uncanonical root keeps its LSP owner under
-    /// that root, so `canonical_root` is consulted only when the request's own
-    /// root has no owner — the same fallback the per-map lookup performed,
-    /// without a lock acquisition per component.
-    pub(super) async fn request_runtimes(
-        &self,
-        project_root: Option<&Path>,
-        canonical_root: Option<&Path>,
-    ) -> ProjectRequestRuntimesV1 {
-        let Some(project_root) = project_root else {
-            return ProjectRequestRuntimesV1::default();
-        };
-        let runtimes = self.lock_runtimes();
-        let runtime = runtimes.get(project_root);
-        let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
-        ProjectRequestRuntimesV1 {
-            feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
-            feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
-            configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
-            work: runtime.and_then(|runtime| runtime.work.clone()),
-            lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
-                &runtimes,
-                project_root,
-                canonical_root,
-            ),
         }
     }
 

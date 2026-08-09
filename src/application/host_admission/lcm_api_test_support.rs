@@ -4,10 +4,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_compress_for_test(
         &self,
-        request: crate::sessions::lcm::LcmCompressionRequest,
+        request: tracedecay_sessions::runtime::lcm::LcmCompressionRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmCompressionResponse,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmCompressionResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         crate::daemon::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
@@ -23,10 +23,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_describe_for_test(
         &self,
-        request: crate::sessions::lcm::LcmDescribeRequest,
+        request: tracedecay_sessions::runtime::lcm::LcmDescribeRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmDescribeResponse,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmDescribeResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -38,9 +38,11 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_expand_for_test(
         &self,
-        request: crate::sessions::lcm::LcmExpandRequest,
-    ) -> std::result::Result<crate::sessions::lcm::LcmExpandResponse, crate::sessions::lcm::LcmError>
-    {
+        request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -51,10 +53,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_expand_query_for_test(
         &self,
-        request: crate::sessions::lcm::LcmExpandQueryRequest,
+        request: tracedecay_sessions::runtime::lcm::LcmExpandQueryRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmExpandQueryResponse,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmExpandQueryResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -70,8 +72,8 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: &str,
         node_id: &str,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmSummaryExpansion,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmSummaryExpansion,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -83,9 +85,11 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_grep_for_test(
         &self,
-        request: crate::sessions::lcm::LcmGrepRequest,
-    ) -> std::result::Result<crate::sessions::lcm::LcmGrepOutcome, crate::sessions::lcm::LcmError>
-    {
+        request: tracedecay_sessions::runtime::lcm::LcmGrepRequest,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmGrepOutcome,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -97,13 +101,13 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_ingest_raw_message_for_test(
         &self,
         scope: HostAdmissionScope,
-        message: &crate::sessions::SessionMessageRecord,
-    ) -> std::result::Result<(), crate::sessions::lcm::LcmError> {
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
+    ) -> std::result::Result<(), tracedecay_sessions::runtime::lcm::LcmError> {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            crate::sessions::lcm::LcmError::Db(
+            tracedecay_sessions::runtime::lcm::LcmError::Db(
                 "registered session database has no storage root".to_string(),
             )
         })?;
@@ -116,7 +120,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<crate::sessions::lcm::LcmRawMessage> {
+    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
         let database = self
             .project_registered
             .as_deref()
@@ -125,7 +129,7 @@ impl HostAdmissionTestRuntimeV1 {
             .read_snapshot()
             .await
             .expect("test raw-message snapshot must remain registered");
-        crate::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+        tracedecay_sessions::runtime::lcm::schema::load_raw_message(&snapshot, provider, message_id)
             .await
             .expect("test raw-message load must not hide database or receipt failure")
     }
@@ -133,9 +137,11 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_load_session_for_test(
         &self,
-        request: crate::sessions::lcm::LcmLoadSessionRequest,
-    ) -> std::result::Result<crate::sessions::lcm::LcmLoadSessionPage, crate::sessions::lcm::LcmError>
-    {
+        request: tracedecay_sessions::runtime::lcm::LcmLoadSessionRequest,
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmLoadSessionPage,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -146,10 +152,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_preflight_for_test(
         &self,
-        request: crate::sessions::lcm::LcmPreflightRequest,
+        request: tracedecay_sessions::runtime::lcm::LcmPreflightRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmPreflightResponse,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmPreflightResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -164,8 +170,8 @@ impl HostAdmissionTestRuntimeV1 {
         provider: Option<&str>,
         limit: usize,
     ) -> std::result::Result<
-        Vec<crate::sessions::lcm::LcmRecentSession>,
-        crate::sessions::lcm::LcmError,
+        Vec<tracedecay_sessions::runtime::lcm::LcmRecentSession>,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -180,15 +186,17 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         session_id: Option<&str>,
-        config: &crate::sessions::lcm::LcmGcConfig,
+        config: &tracedecay_sessions::runtime::lcm::LcmGcConfig,
         now: i64,
-    ) -> std::result::Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError>
-    {
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmGcReport,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
+            .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let storage_root = database.db_path().parent().ok_or_else(|| {
-            crate::sessions::lcm::LcmError::Db(
+            tracedecay_sessions::runtime::lcm::LcmError::Db(
                 "registered session database has no storage root".to_string(),
             )
         })?;
@@ -200,10 +208,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_session_boundary_for_test(
         &self,
-        request: crate::sessions::lcm::LcmSessionBoundaryRequest,
+        request: tracedecay_sessions::runtime::lcm::LcmSessionBoundaryRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmSessionBoundaryResponse,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmSessionBoundaryResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         crate::daemon::lcm_effects::DaemonLcmEffectService::new(
             self.project_registered
@@ -220,7 +228,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_session_providers_for_test(
         &self,
         session_id: &str,
-    ) -> std::result::Result<Vec<String>, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<Vec<String>, tracedecay_sessions::runtime::lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -231,10 +239,10 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn lcm_session_replay_slice_for_test(
         &self,
-        request: &crate::sessions::lcm::LcmSessionReplayRequest,
+        request: &tracedecay_sessions::runtime::lcm::LcmSessionReplayRequest,
     ) -> std::result::Result<
-        crate::sessions::lcm::LcmSessionReplaySlice,
-        crate::sessions::lcm::LcmError,
+        tracedecay_sessions::runtime::lcm::LcmSessionReplaySlice,
+        tracedecay_sessions::runtime::lcm::LcmError,
     > {
         self.project_registered
             .as_deref()
@@ -248,7 +256,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> std::result::Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
@@ -256,7 +267,7 @@ impl HostAdmissionTestRuntimeV1 {
                 provider,
                 session_id,
                 true,
-                &crate::sessions::lcm::LcmGcConfig::default(),
+                &tracedecay_sessions::runtime::lcm::LcmGcConfig::default(),
             )
             .await
     }
@@ -266,7 +277,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> std::result::Result<crate::sessions::lcm::LcmStatus, crate::sessions::lcm::LcmError> {
+    ) -> std::result::Result<
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())

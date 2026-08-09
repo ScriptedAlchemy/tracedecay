@@ -56,7 +56,7 @@ export interface AttemptCensus {
 }
 
 export const RESTART_REASONS: readonly WorkRestartReasonV1[] = [
-  'checkpoint_rejected',
+  'failure_observed',
   'lease_lost',
   'process_lost',
   'provider_unavailable',
@@ -75,7 +75,7 @@ export const ANCHOR_CAP = 8;
 export function attemptCensus(attempts: readonly WorkAttemptV1[]): AttemptCensus {
   const recovery = { fresh: 0, restarted: 0, resumed: 0, recoveryRequired: 0 };
   const restartReasons: Record<WorkRestartReasonV1, number> = {
-    checkpoint_rejected: 0,
+    failure_observed: 0,
     lease_lost: 0,
     process_lost: 0,
     provider_unavailable: 0,

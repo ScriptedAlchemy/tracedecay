@@ -52,7 +52,7 @@ fn summary_message(
     provider: &str,
     message_id: &str,
     session_id: &str,
-) -> tracedecay::sessions::SessionMessageRecord {
+) -> tracedecay_sessions::runtime::SessionMessageRecord {
     let mut summary = sample_message(
         provider,
         message_id,
@@ -155,7 +155,7 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("late-cursor-failure.jsonl");
     let payload_dir =
-        tracedecay::sessions::lcm::payload::payload_dir(&tmp.path().join(".tracedecay"));
+        tracedecay_sessions::runtime::lcm::payload::payload_dir(&tmp.path().join(".tracedecay"));
     std::fs::create_dir_all(&payload_dir).unwrap();
     let sentinel_path = payload_dir.join("preexisting.payload");
     std::fs::write(&sentinel_path, "must survive rollback").unwrap();

@@ -22,7 +22,7 @@ compile.
 | Edge | Why | Cycle proof |
 | --- | --- | --- |
 | `tracedecay-runtime-core` | `db`, `errors`, `storage`, `config`, `worktree`, `lifecycle_lease`, `os_str_bytes`, `tracedecay`, `store_runtime` | `cargo tree -p tracedecay-runtime-core -e normal` contains no `tracedecay-global-db` |
-| `tracedecay-sessions` | every `crate::sessions::…` site, plus `lcm::contracts` and `compatibility` | `cargo tree -p tracedecay-sessions -e normal` contains no `tracedecay-global-db` |
+| `tracedecay-sessions` | every former root-session site, plus `lcm::contracts` and `retrieval_content` | `cargo tree -p tracedecay-sessions -e normal` contains no `tracedecay-global-db` |
 | `tracedecay-semantic` | `SemanticResourceCeilings`, `DEFAULT_FASTEMBED_MODEL_ID` behind the semantic setting | `cargo tree -p tracedecay-semantic -e normal` contains no `tracedecay-global-db` |
 
 ## How the seams were closed
@@ -36,7 +36,7 @@ compile.
 | `crate::config::user_data_dir` | 1 | Repointed at `tracedecay_runtime_core::config`. |
 | `crate::sessions::…` | 51 | Repointed at `tracedecay_sessions::runtime::…` (the sessions mover nested the transcript runtime under `runtime/`). |
 | `crate::sessions::workflow_index::WorkflowScopeFilter` (`lib.rs:55` re-export) | 1 | Repointed at `tracedecay_sessions::runtime::workflow_index`. |
-| `crate::application::session::compatibility` | 9 | Repointed at `tracedecay_sessions::compatibility` (the sessions mover already owns that body). |
+| `crate::application::session` retrieval-content helpers | 9 | Repointed at `tracedecay_sessions::retrieval_content` (the sessions crate owns that body). |
 | `crate::application::session::lcm::contracts` | 5 | Repointed at `tracedecay_sessions::lcm::contracts` (root's file is a one-line re-export shim). |
 | `crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, DEFAULT_FASTEMBED_MODEL_ID, SemanticResourceCeilings}` | 10 | Repointed at `tracedecay_domain::configuration` / `tracedecay_semantic`, which already own them. |
 | `crate::project_registry::{ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection}` | 4 | **Moved down** into `crate::project_registry`, beside `plan_registry_reap` — its only producer. |
@@ -55,7 +55,7 @@ compile.
 
 Pure widenings, no behavior change:
 
-- `tracedecay_sessions::compatibility::{is_inventory_text, dedupe_related_message_copies,
+- `tracedecay_sessions::retrieval_content::{is_inventory_text, dedupe_related_message_copies,
   rerank_fetch_limit, RelatedMessageCopyIdentity}` — `pub(crate)` → `pub`. The
   registered message-search reader is the only new caller.
 

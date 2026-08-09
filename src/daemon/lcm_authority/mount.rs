@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
+    CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestContext, RequestId,
 };
 use tracedecay_domain::{ActorId, UtcMicros};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
@@ -41,6 +41,13 @@ pub(crate) type MountedLcmFuture<'a> =
 /// identity, or a database handle.
 pub(crate) trait MountedLcmAuthorityPort: Send + Sync {
     fn execute(&self, request: LcmAuthorityRequest) -> MountedLcmFuture<'_>;
+
+    fn execute_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        cancellation: &'a CancellationSignal,
+        request: LcmAuthorityRequest,
+    ) -> MountedLcmFuture<'a>;
 }
 
 struct MountedLcmAuthority {
@@ -194,6 +201,18 @@ impl MountedLcmAuthorityPort for MountedLcmAuthority {
             let invocation = self.invocation(request)?;
             Some(self.authority.execute(invocation).await)
         })
+    }
+
+    fn execute_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        cancellation: &'a CancellationSignal,
+        request: LcmAuthorityRequest,
+    ) -> MountedLcmFuture<'a> {
+        Box::pin(
+            self.authority
+                .execute_retained_read(context, cancellation, request),
+        )
     }
 }
 

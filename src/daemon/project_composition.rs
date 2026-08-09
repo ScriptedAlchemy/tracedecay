@@ -104,7 +104,7 @@ pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathB
 
 #[cfg(not(test))]
 pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
-    crate::sessions::home_dir()
+    tracedecay_sessions::runtime::home_dir()
 }
 
 pub(super) async fn production_project_server(
@@ -807,11 +807,11 @@ pub(super) async fn production_project_server(
                 &delivery_access,
             )
             .await?;
-            let host_admission_broker = store_administration
-                .host_admission_broker(&session_db)
-                .await?
-                .broker()
-                .cloned();
+            let host_admission_broker = Some(
+                store_administration
+                    .host_admission_broker(&session_db)
+                    .await?,
+            );
             let project_session_refresh_wake = store_administration
                 .session_temporal_refresh_schedulers()
                 .ensure_project_with_history(

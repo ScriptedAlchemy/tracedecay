@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_application::RetainedSurfaceOperation;
 
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::errors::{Result, TraceDecayError};
@@ -11,16 +10,11 @@ use crate::tracedecay::TraceDecay;
 use super::super::ToolResult;
 
 use super::ToolCallRegistryOptions;
-use super::lcm_tool_entry::dispatch_lcm_tool;
-use super::retained_catalog::{
-    CatalogBoundRetainedMcpRequest, RetainedMcpExecutionContext, invoke_retained_mcp_request,
-};
 use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, analysis, analytics, application_surface, ast_grep_search, dashboard,
-    edit, git, graph, grep, health, hook_runtime, info, memory, redundancy, session, skills,
-    workflow, workflow_query,
+    edit, git, graph, grep, health, hook_runtime, info, redundancy, session, skills, workflow,
 };
 
 /// The hard ceiling every MCP tool call is bounded by, regardless of dispatch
@@ -93,9 +87,9 @@ pub(crate) fn tool_dispatch_budget(
 /// The typed, retryable problem a tool call reports when it exhausts the
 /// universal dispatch ceiling.
 ///
-/// Mirrors the shape `memory_deadline_error` established (stable `reason_code`,
-/// `retryable`, human `detail`) so the MCP boundary surfaces a structured error
-/// instead of holding the transport open. Retry is safe: the ceiling is a
+/// Its stable `reason_code`, retryability bit, and human detail let the MCP
+/// boundary surface a structured error instead of holding the transport open.
+/// Retry is safe: the ceiling is a
 /// backstop over work that was already admitted, never a commit signal.
 pub(crate) fn tool_dispatch_deadline_error(
     tool_name: &str,
@@ -286,6 +280,7 @@ pub(super) async fn dispatch_admin_tools(
                 args,
                 options.global_db.map(std::sync::Arc::as_ref),
                 options.automation_scheduler_reconciler.clone(),
+                options.profile_root,
             )
             .await
         }
@@ -543,42 +538,14 @@ pub(super) async fn dispatch_retained_application_tools(
     _active_lcm_context: session::LcmHandlerContext<'_>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    let operation = match tool_name {
-        "tracedecay_fact_store" => match args.get("action").and_then(Value::as_str) {
-            Some("add") => ApplicationSurfaceOperation::FactStoreAdd,
-            Some("search") => ApplicationSurfaceOperation::FactStoreSearch,
-            Some("probe") => ApplicationSurfaceOperation::FactStoreProbe,
-            Some("related") => ApplicationSurfaceOperation::FactStoreRelated,
-            Some("reason") => ApplicationSurfaceOperation::FactStoreReason,
-            Some("contradict") => ApplicationSurfaceOperation::FactStoreContradict,
-            Some("get") => ApplicationSurfaceOperation::FactStoreGet,
-            Some("update") => ApplicationSurfaceOperation::FactStoreUpdate,
-            Some("remove") => ApplicationSurfaceOperation::FactStoreRemove,
-            Some("list") => ApplicationSurfaceOperation::FactStoreList,
-            _ => {
-                return Err(TraceDecayError::Config {
-                    message: "tracedecay_fact_store requires a supported action".to_owned(),
-                });
-            }
-        },
-        "tracedecay_session_refresh" => match args.get("action").and_then(Value::as_str) {
-            Some("status") => ApplicationSurfaceOperation::SessionRefreshStatus,
-            Some("start" | "join" | "resume" | "begin") => {
-                ApplicationSurfaceOperation::SessionRefreshBegin
-            }
-            Some("cancel") => ApplicationSurfaceOperation::SessionRefreshCancel,
-            _ => {
-                return Err(TraceDecayError::Config {
-                    message: "tracedecay_session_refresh requires a supported action".to_owned(),
-                });
-            }
-        },
-        _ => ApplicationSurfaceOperation::from_tool_name(tool_name)
-            .filter(|operation| {
-                operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained
-            })
-            .ok_or_else(|| unknown_tool_error(tool_name))?,
-    };
+    let retained_operation = super::retained_catalog::retained_mcp_operation(tool_name, &args)
+        .ok_or_else(|| unknown_tool_error(tool_name))?;
+    let canonical_tool_name = format!("tracedecay_{}", retained_operation.as_str());
+    let operation = ApplicationSurfaceOperation::from_tool_name(&canonical_tool_name)
+        .filter(|operation| {
+            operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained
+        })
+        .ok_or_else(|| unknown_tool_error(tool_name))?;
     if matches!(
         tool_name,
         "tracedecay_fact_store" | "tracedecay_session_refresh"
@@ -601,140 +568,6 @@ pub(super) async fn dispatch_retained_application_tools(
         options.application_cancellation,
     )
     .await
-}
-
-/// Routes memory operations under the outer retained dispatch authority.
-pub(super) async fn dispatch_memory_operation(
-    operation: RetainedSurfaceOperation,
-    cg: &TraceDecay,
-    args: Value,
-    options: &ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    let global_db = options.global_db.map(std::sync::Arc::as_ref);
-    let operation_label = match operation {
-        RetainedSurfaceOperation::FactStore => "fact_store",
-        RetainedSurfaceOperation::FactFeedback => "fact_feedback",
-        RetainedSurfaceOperation::MemoryStatus => "memory_status",
-        _ => unreachable!("dispatch_memory_operation handles memory operations only"),
-    };
-
-    let handler = async {
-        match operation {
-            RetainedSurfaceOperation::FactStore => {
-                memory::handle_fact_store(
-                    cg,
-                    args,
-                    global_db,
-                    options.application_cancellation.clone(),
-                )
-                .await
-            }
-            RetainedSurfaceOperation::FactFeedback => {
-                memory::handle_fact_feedback(
-                    cg,
-                    args,
-                    global_db,
-                    options.application_cancellation.clone(),
-                )
-                .await
-            }
-            RetainedSurfaceOperation::MemoryStatus => {
-                memory::handle_memory_status(cg, args, global_db).await
-            }
-            _ => unreachable!("dispatch_memory_operation handles memory operations only"),
-        }
-    };
-
-    let carried_deadline = options.application_deadline.as_ref();
-    let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
-    match (carried_deadline.is_some(), remaining) {
-        (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(memory::memory_deadline_error(operation_label, remaining)),
-        },
-        // `deadline_remaining` yields `None` for a non-positive budget, so a
-        // carried deadline that already elapsed must be rejected rather than
-        // dispatched unbounded.
-        (true, None) => Err(memory::memory_deadline_error(
-            operation_label,
-            std::time::Duration::ZERO,
-        )),
-        // Standalone / non-admission callers carry no deadline and stay
-        // unbounded.
-        (false, None) => handler.await,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_project_retained_application_tool(
-    request: CatalogBoundRetainedMcpRequest,
-    cg: &TraceDecay,
-    _scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    active_lcm_context: session::LcmHandlerContext<'_>,
-    options: &ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    match request.operation {
-        RetainedSurfaceOperation::FactStoreAdd
-        | RetainedSurfaceOperation::FactStoreSearch
-        | RetainedSurfaceOperation::FactStoreProbe
-        | RetainedSurfaceOperation::FactStoreRelated
-        | RetainedSurfaceOperation::FactStoreReason
-        | RetainedSurfaceOperation::FactStoreContradict
-        | RetainedSurfaceOperation::FactStoreGet
-        | RetainedSurfaceOperation::FactStoreUpdate
-        | RetainedSurfaceOperation::FactStoreRemove
-        | RetainedSurfaceOperation::FactStoreList
-        | RetainedSurfaceOperation::SessionRefreshStatus
-        | RetainedSurfaceOperation::SessionRefreshCancel
-        | RetainedSurfaceOperation::SessionRefreshBegin => Err(TraceDecayError::Config {
-            message: "semantic retained operations require the canonical application owner"
-                .to_owned(),
-        }),
-        RetainedSurfaceOperation::FactStore
-        | RetainedSurfaceOperation::FactFeedback
-        | RetainedSurfaceOperation::MemoryStatus => {
-            dispatch_memory_operation(request.operation, cg, request.arguments, options).await
-        }
-        RetainedSurfaceOperation::SessionRefresh => {
-            session::handle_session_refresh(
-                request.arguments,
-                options.session_authorities.refresh_services(),
-            )
-            .await
-        }
-        RetainedSurfaceOperation::MessageSearch => {
-            Box::pin(session::message_search::handle_message_search_with_service(
-                Some(cg.project_root()),
-                session::message_search::SessionRetrievalStoreScope::Project,
-                request.arguments,
-                options.session_authorities.project_retrieval,
-                options.session_authorities.project_retrieval_sweep,
-            ))
-            .await
-        }
-        RetainedSurfaceOperation::SessionsFor => {
-            session::handle_sessions_for(
-                cg,
-                active_project_session_db.map(Arc::as_ref),
-                request.arguments,
-            )
-            .await
-        }
-        RetainedSurfaceOperation::Workflows => {
-            workflow_query::handle_workflows(cg, request.arguments, options.workflow_index_reads)
-                .await
-        }
-        RetainedSurfaceOperation::LcmStatus
-        | RetainedSurfaceOperation::LcmDoctor
-        | RetainedSurfaceOperation::LcmLoadSession
-        | RetainedSurfaceOperation::LcmGrep
-        | RetainedSurfaceOperation::LcmDescribe
-        | RetainedSurfaceOperation::LcmExpand
-        | RetainedSurfaceOperation::LcmExpandQuery => {
-            dispatch_lcm_tool(request.operation, request.arguments, active_lcm_context).await
-        }
-    }
 }
 
 /// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
@@ -799,6 +632,7 @@ pub(super) async fn dispatch_session_workflow_tools(
                 options.dashboard_graph_interactive_resolver.clone(),
                 options.registered_project_session_db.clone(),
                 options.daemon_user_profile_id.clone(),
+                options.profile_root.map(std::path::Path::to_path_buf),
                 options.dashboard_lcm_retrieval_service.clone(),
                 options.registered_savings_db.clone(),
                 options.automation_scheduler_reconciler.clone(),

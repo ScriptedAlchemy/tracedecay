@@ -66,7 +66,7 @@ impl LcmRawMessage {
 
 impl LcmRawMessageMetadata {
     pub fn with_verified_content(self, content: String) -> Result<LcmRawMessage, LcmError> {
-        if crate::compatibility::projected_content_hash(&content) != self.content_hash {
+        if crate::retrieval_content::projected_content_hash(&content) != self.content_hash {
             return Err(LcmError::PayloadIntegrityMismatch);
         }
         Ok(self.with_content(content))

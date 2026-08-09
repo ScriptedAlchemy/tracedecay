@@ -4,7 +4,7 @@ use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior, params,
 };
-use tracedecay_sessions::compatibility::{
+use tracedecay_sessions::retrieval_content::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
 use tracedecay_store::{

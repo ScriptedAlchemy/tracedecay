@@ -5,17 +5,17 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AnalyzerSettingsV1,
-    CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationValueKindV1,
-    ConfigurationValueV1, ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
-    DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
-    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
+    AnalyzerSettingsV1, AutomationSettingsV1, CONFIGURATION_SETTING_KEYS_V1,
+    CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationValueKindV1, ConfigurationValueV1,
+    ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
+    INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY,
+    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
@@ -138,6 +138,18 @@ impl ConfigurationRegistry {
             value_kind: ConfigurationValueKindV1::ContextScoutSettings,
             default_value: ConfigurationValueV1::ContextScoutSettings(
                 ContextScoutSettingsV1::disabled(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(AUTOMATION_SETTINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::AutomationSettings,
+            default_value: ConfigurationValueV1::AutomationSettings(
+                AutomationSettingsV1::default(),
             ),
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
@@ -373,7 +385,6 @@ struct SyncDefaults {
     full_sync_escalation_files: usize,
     max_concurrent_syncs: usize,
     branch_gc_days: u64,
-    orphan_db_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
     auto_track_pr_poll_secs: u64,
@@ -394,7 +405,6 @@ impl Default for SyncDefaults {
             full_sync_escalation_files: 500,
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
-            orphan_db_gc_days: 7,
             auto_init: true,
             auto_track_pr_branches: false,
             auto_track_pr_poll_secs: 300,
@@ -550,12 +560,6 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
-            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
             SYNC_AUTO_INIT_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_init),
             SettingSensitivityV1::Public,
@@ -683,6 +687,29 @@ mod user_profile_settings_tests {
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { minimum: 1, .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod automation_defaults_tests {
+    use super::*;
+    use tracedecay_domain::configuration::AutomationBackendV1;
+
+    #[test]
+    fn fresh_snapshot_resolves_the_active_automation_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).expect("automation key");
+        let definition = registry.definition(&key).expect("automation definition");
+        let ConfigurationValueV1::AutomationSettings(settings) = &definition.default_value else {
+            panic!("automation registry entry must retain its typed value");
+        };
+
+        assert!(settings.enabled);
+        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert!(settings.tasks.memory_curator.enabled);
+        assert!(settings.tasks.session_reflector.enabled);
+        assert!(settings.tasks.skill_writer.enabled);
     }
 }
 

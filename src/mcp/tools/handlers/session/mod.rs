@@ -10,19 +10,19 @@ use crate::mcp::response_handles::{
     RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };
 use crate::mcp::tools::{MAX_RESPONSE_CHARS, ToolResult};
-use crate::sessions::git_correlation::{
+use crate::timeutil::SearchTimeBound;
+use crate::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, GitScopeFilter, SessionsForQuery,
 };
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmContentSlice, LcmDescribeTarget,
     LcmExpandQueryRequest, LcmExpandTarget, LcmGrepSort, LcmScope,
 };
-use crate::sessions::{
+use tracedecay_sessions::runtime::{
     ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchScope,
     SessionSearchTimeRange,
 };
-use crate::timeutil::SearchTimeBound;
-use crate::tracedecay::{TraceDecay, current_timestamp};
 
 mod lcm_args;
 mod lcm_compact;

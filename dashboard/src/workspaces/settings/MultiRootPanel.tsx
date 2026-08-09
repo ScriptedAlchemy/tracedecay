@@ -15,7 +15,7 @@
  */
 import { multiRootReading, useCapabilities } from '../../data/query/capabilities.ts';
 import type { CapabilitiesRead, MultiRootReading } from '../../data/query/capabilities.ts';
-import type { LegacyResult } from '../../data/query/legacy.ts';
+import type { PayloadResult } from '../../data/query/payload.ts';
 import { CenteredState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
@@ -52,7 +52,7 @@ export function MultiRootPanel() {
 function CapabilityRefusal({
   result,
 }: {
-  result: Exclude<LegacyResult<CapabilitiesRead>, { outcome: 'ok' }>;
+  result: Exclude<PayloadResult<CapabilitiesRead>, { outcome: 'ok' }>;
 }) {
   switch (result.outcome) {
     case 'unavailable':

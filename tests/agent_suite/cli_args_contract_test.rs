@@ -32,6 +32,52 @@ fn using_the_cli_skill_teaches_json_first_with_heredoc() {
 }
 
 #[test]
+fn managed_skill_guidance_matches_automatic_activation() {
+    let inspecting = read_repo_file("plugin/skills/inspecting-managed-skills/SKILL.md");
+    let cycles = read_repo_file(".claude/skills/inspecting-automation-cycles/SKILL.md");
+
+    let inspecting_lower = inspecting.to_ascii_lowercase();
+    for behavior in ["validat", "activat", "deploy", "automatic"] {
+        assert!(
+            inspecting_lower.contains(behavior),
+            "bundled guidance must explain automatic validated skill {behavior} behavior"
+        );
+    }
+    assert!(
+        !inspecting_lower.contains("automation skills install")
+            && !inspecting_lower.contains("automation skills approve"),
+        "bundled guidance must not hand users removed install or approval commands"
+    );
+    for line in inspecting.lines().filter(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("approval") || line.contains("approve")
+    }) {
+        assert!(
+            line.to_ascii_lowercase().contains("hermes"),
+            "approval guidance is valid only for the separate Hermes-owned lifecycle: {line}"
+        );
+    }
+
+    let cycles_lower = cycles.to_ascii_lowercase();
+    assert!(
+        cycles_lower.contains("active managed-skill") && cycles_lower.contains("usage"),
+        "cycle inspection must direct agents to active-skill adoption evidence"
+    );
+    for line in cycles.lines().filter(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("approval")
+            || line.contains("approve")
+            || line.contains("review queue")
+            || line.contains("--state pending")
+    }) {
+        assert!(
+            line.to_ascii_lowercase().contains("hermes"),
+            "TraceDecay-managed skills have no review queue; only Hermes may retain approval guidance: {line}"
+        );
+    }
+}
+
+#[test]
 fn arg_catalog_does_not_teach_per_key_replacements() {
     let catalog = read_repo_file("plugin/skills/using-the-cli/references/tool-arg-catalog.md");
     assert!(

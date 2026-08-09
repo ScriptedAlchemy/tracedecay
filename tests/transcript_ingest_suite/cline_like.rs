@@ -2,9 +2,9 @@ use tempfile::TempDir;
 #[cfg(not(windows))]
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::global_db::ParseOffset;
-use tracedecay::sessions::SessionProvider;
-use tracedecay::sessions::cline_like::ClineLikeSource;
-use tracedecay::sessions::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::cline_like::ClineLikeSource;
+use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptIngestError, TranscriptSource};
 #[cfg(not(windows))]
 use tracedecay_store::ObservationProjectionStore;
 

@@ -214,7 +214,7 @@ pub(crate) fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearch
     let mut substantive = Vec::with_capacity(results.len());
     let mut inventory = Vec::new();
     for result in results.drain(..) {
-        if tracedecay_sessions::compatibility::is_inventory_text(&result.message.text) {
+        if tracedecay_sessions::retrieval_content::is_inventory_text(&result.message.text) {
             inventory.push(result);
         } else {
             substantive.push(result);

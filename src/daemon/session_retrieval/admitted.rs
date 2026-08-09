@@ -5,6 +5,11 @@ use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::{CancellationSignal, RequestContext};
+use tracedecay_domain::{
+    ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
+};
+use tracedecay_global_db::session_temporal::execution::TaskSessionRankSelectorV1;
+use tracedecay_query::retrieval::evidence_lanes::TaskSessionBindingV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_usecases::context::{
@@ -12,6 +17,7 @@ use tracedecay_usecases::context::{
 };
 use tracedecay_usecases::session::{
     SessionRequestBinding, SessionRetrievalConfiguration, SessionTemporalQuery,
+    TaskSessionRetrievalOutcomeV1,
 };
 
 use super::contract::{
@@ -64,6 +70,9 @@ impl DaemonSessionRetrievalService {
 pub(crate) type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
 
+pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
+    Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
+
 /// Application-level Plan 23 retrieval over one already-mounted session root.
 ///
 /// The caller has already crossed its application admission boundary. This
@@ -75,6 +84,22 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
         context: &'a RequestContext,
         query: SessionTemporalQuery,
     ) -> SessionApplicationRetrievalFutureV1<'a>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _temporal_query: SessionTemporalQuery,
+        _task_binding: TaskSessionBindingV1,
+        _retrieval_request: RetrievalRequest,
+        _query: EphemeralSanitizedQueryViewV1,
+        _retriever_revision: ComponentRevision,
+        _score_domain: ScoreDomainId,
+        _policy_revision: ComponentRevision,
+        _selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> TaskSessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async { TaskSessionRetrievalOutcomeV1::Unavailable })
+    }
 
     fn retrieve_admitted_with_cancellation<'a>(
         &'a self,
@@ -152,6 +177,63 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
         })
     }
 
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> TaskSessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async move {
+            if requires_refresh_worker(temporal_query.freshness_policy())
+                && self.refresh_not_current().is_some()
+            {
+                return TaskSessionRetrievalOutcomeV1::Unavailable;
+            }
+            let binding = match admitted_session_binding(&self.root, self.configuration, context) {
+                Ok(binding) => binding,
+                Err(outcome) => return task_session_binding_outcome(outcome),
+            };
+            let authorizer = super::DaemonSessionRetrievalAuthorizer {
+                actor: context.actor().clone(),
+                identity: self.root.identity.clone(),
+                session_id: temporal_query.session_id().clone(),
+                retrieval_scope: temporal_query.retrieval_scope().clone(),
+                temporal_mode: temporal_query.temporal_mode(),
+                grain: temporal_query.grain(),
+                provider: temporal_query.provider().map(str::to_owned),
+                grant_id: "grant.application.work-task-session-retrieval",
+            };
+            let Ok(execution) = self.registered_execution() else {
+                return TaskSessionRetrievalOutcomeV1::Unavailable;
+            };
+            tracedecay_usecases::session::SessionRetrievalService::new(
+                authorizer,
+                execution,
+                super::MessageSearchWordEstimator,
+                self.configuration,
+            )
+            .execute_task_session(
+                context,
+                &binding,
+                temporal_query,
+                task_binding,
+                retrieval_request,
+                query,
+                retriever_revision,
+                score_domain,
+                policy_revision,
+                selector,
+            )
+            .await
+        })
+    }
+
     fn describe_lcm_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -200,6 +282,21 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
         })
+    }
+}
+
+fn task_session_binding_outcome(
+    outcome: SessionRetrievalServiceOutcome,
+) -> TaskSessionRetrievalOutcomeV1 {
+    match outcome {
+        SessionRetrievalServiceOutcome::WrongScope => TaskSessionRetrievalOutcomeV1::WrongScope,
+        SessionRetrievalServiceOutcome::Denied => TaskSessionRetrievalOutcomeV1::Denied,
+        SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
+        SessionRetrievalServiceOutcome::BudgetExhausted
+        | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
+            TaskSessionRetrievalOutcomeV1::BudgetExhausted
+        }
+        _ => TaskSessionRetrievalOutcomeV1::Unavailable,
     }
 }
 

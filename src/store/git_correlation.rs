@@ -16,7 +16,7 @@ use crate::db::engine::ReadSnapshot;
 use crate::global_db::{
     ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
 };
-use crate::sessions::git_correlation::{
+use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
     BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
     CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
@@ -288,7 +288,7 @@ where
 
     pub(crate) fn session_ids_for_scope(
         &self,
-        filter: &crate::sessions::git_correlation::GitScopeFilter,
+        filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
     ) -> Result<std::collections::BTreeSet<(String, String)>, GitCorrelationError> {
         // No published evidence: a valid scope truthfully matches no session.
         let Some(store) = self.git_evidence_projection()? else {

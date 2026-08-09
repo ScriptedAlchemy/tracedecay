@@ -9,14 +9,16 @@ use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::params;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
-use crate::sessions::workflow_index::{
+use tracedecay_sessions::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, WorkflowAgent, WorkflowIndexError,
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
     upsert_run,
 };
 #[cfg(test)]
-use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs_with_sink};
-use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
+use tracedecay_sessions::runtime::workflow_ingest::{
+    WorkflowIngestStats, ingest_workflow_runs_with_sink,
+};
+use tracedecay_sessions::runtime::workflow_state::{WorkflowStateItem, list_unfinished};
 
 /// Borrowed adapter over an already-open project-sessions database.
 /// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`

@@ -13,9 +13,11 @@ use tracedecay_application::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, AdmitWorkSynthesisCommand, CreateWorkCommand,
-    ReviewProposalCommand, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope,
-    WorkAttemptListRequestV1, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkSynthesisAttemptV1,
+    AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
+    TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptListRequestV1,
+    WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
+    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkSynthesisAttemptV1,
     WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest, WorkflowExecutionFence,
     WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
@@ -27,23 +29,27 @@ use tracedecay_domain::configuration::{
     safe_work_topology_policy_v1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ManifestDigest, ProjectId, ProposalId,
-    ProviderId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
-    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkVersion, WorkflowDefinition,
-    WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, InitiativeId, ManifestDigest,
+    MilestoneId, ProjectId, ProposalId, ProviderId, RepositoryId, RunId, TaskId, TemporalModeV1,
+    ThreadId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1,
+    WorkCommandId, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
+    WorkFenceEpochV1, WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1,
+    WorkItemInputV1, WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId,
+    WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1,
+    WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
-    ApplicationConfigurationSet, WorkAcceptProposal, WorkAdmitExecution, WorkCreate,
-    WorkListAttempts, WorkSynthesize, WorkflowActivateDefinition, WorkflowCancelRun,
-    WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition,
-    WorkflowStartRun,
+    ApplicationConfigurationSet, WorkAdmitExecution, WorkListAttempts, WorkMutateGraph,
+    WorkPrepareGraphMutation, WorkRetrieveEvidence, WorkSynthesize, WorkViews,
+    WorkflowActivateDefinition, WorkflowCancelRun, WorkflowGetRun, WorkflowHandoffIssue,
+    WorkflowHandoffRedeem, WorkflowRegisterDefinition, WorkflowStartRun,
 };
 
 use super::common;
@@ -86,6 +92,74 @@ fn now() -> UtcMicros {
 fn sha256(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
         .expect("sha256 digest")
+}
+
+fn fan_out_input(identity: &str, graph_version: u64) -> WorkflowFanOutInput {
+    let input_digest = sha256(identity.as_bytes());
+    let task_id = id::<TaskId>(&format!("task.advanced-workflow.{identity}"));
+    let initiative_id = id::<InitiativeId>(&format!("initiative.advanced-workflow.{identity}"));
+    let plan_id = id::<WorkPlanId>(&format!("plan.advanced-workflow.{identity}"));
+    let milestone_id = id::<MilestoneId>(&format!("milestone.advanced-workflow.{identity}"));
+    let created_at = now();
+    let initiative = WorkInitiativeV1::new(
+        initiative_id.clone(),
+        format!("Advanced workflow initiative {identity}"),
+        created_at,
+    )
+    .expect("fan-out initiative");
+    let plan = WorkPlanV1::new(
+        plan_id.clone(),
+        initiative_id.clone(),
+        format!("Advanced workflow plan {identity}"),
+        created_at,
+    )
+    .expect("fan-out plan");
+    let milestone = WorkMilestoneV1::new(
+        milestone_id.clone(),
+        plan_id.clone(),
+        format!("Advanced workflow milestone {identity}"),
+        created_at,
+    )
+    .expect("fan-out milestone");
+    let item = WorkItemV1::new(WorkItemInputV1 {
+        task_id: task_id.clone(),
+        hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+        title: format!("Advanced workflow child {identity}"),
+        dependencies: BTreeSet::new(),
+        informational_relations: BTreeSet::new(),
+        causal_candidates: BTreeSet::new(),
+        acceptance_criteria: Vec::new(),
+        effort: 1,
+        scheduled_at: None,
+        deadline: None,
+        created_at,
+        updated_at: created_at,
+    })
+    .expect("fan-out Work item");
+    let proposal = WorkProposalV1::new(
+        id::<ProposalId>(&format!("proposal.advanced-workflow.{identity}")),
+        task_id,
+        WorkGraphVersionV1::new(graph_version).expect("fan-out graph version"),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1)
+            .expect("fan-out proposal shape"),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "complete workflow child")
+            .expect("fan-out proposal sizing"),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("workflow provider is pinned by admission")
+            .expect("fan-out proposal route"),
+        format!("Execute fan-out child {identity}"),
+        input_digest.clone(),
+    )
+    .expect("fan-out proposal");
+    WorkflowFanOutInput {
+        instructions: identity.to_owned(),
+        input_digest,
+        initiative,
+        plan,
+        milestone,
+        item,
+        proposal,
+    }
 }
 
 fn sha256_path(path: &Path) -> String {
@@ -447,19 +521,14 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
                 reference: None,
                 commit: commit.clone(),
                 effect_state: WorkEffectStateV1::Observational,
+                // Each fan-out product mutation advances the graph three
+                // times: create, accept its proposal, then admit execution.
+                // The proposal fence names the exact head before its child
+                // begins rather than relying on a fabricated workflow state.
                 inputs: vec![
-                    WorkflowFanOutInput {
-                        identity: "fast".to_owned(),
-                        input_digest: sha256(b"fast"),
-                    },
-                    WorkflowFanOutInput {
-                        identity: "crash".to_owned(),
-                        input_digest: sha256(b"crash"),
-                    },
-                    WorkflowFanOutInput {
-                        identity: "cancel".to_owned(),
-                        input_digest: sha256(b"cancel"),
-                    },
+                    fan_out_input("fast", 1),
+                    fan_out_input("crash", 4),
+                    fan_out_input("cancel", 7),
                 ],
             }),
             command_id: id::<WorkCommandId>("command.workflow.start"),
@@ -482,7 +551,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("force daemon crash during fan-out");
     std::fs::remove_file(&first_hold).expect("release orphaned first-generation provider");
 
-    let _restarted = common::spawn_tracedecay_daemon(&home);
+    let mut restarted = common::spawn_tracedecay_daemon(&home);
     let client = sdk_client(&home, project_id.as_str());
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
@@ -529,36 +598,71 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     });
 
     let synthesis_task: TaskId = id("task.advanced-workflow-synthesis");
-    client
-        .execute::<WorkCreate>(&CreateWorkCommand {
-            task_id: synthesis_task.clone(),
-            title: "Synthesize recovered fan-out evidence".to_owned(),
-            dependencies: BTreeSet::new(),
-            command_id: id("command.synthesis.create"),
-            occurred_at: now(),
-        })
-        .expect("create synthesis Work");
-    let proposal_id: ProposalId = id("proposal.advanced-workflow-synthesis");
-    client
-        .execute::<WorkAcceptProposal>(&AcceptProposalCommand {
-            review: ReviewProposalCommand {
-                task_id: synthesis_task.clone(),
-                proposal_id: proposal_id.clone(),
-                proposal_digest: sha256(b"advanced workflow synthesis proposal"),
-                expected_version: WorkVersion::initial(),
-                command_id: id("command.synthesis.accept"),
-                occurred_at: now(),
+    let synthesis_seed = fan_out_input("synthesis", 1);
+    let prepared_synthesis_create = client
+        .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            change: WorkProductChangeDraftV1::CreateTask {
+                initiative: synthesis_seed.initiative,
+                plan: synthesis_seed.plan,
+                milestone: synthesis_seed.milestone,
+                item: synthesis_seed.item,
             },
+            causation_event_id: None,
+            evidence: Vec::new(),
         })
-        .expect("accept synthesis proposal");
+        .expect("prepare synthesis product task")
+        .result;
+    let created_synthesis = client
+        .execute::<WorkMutateGraph>(&prepared_synthesis_create)
+        .expect("create synthesis product task")
+        .result;
+    let synthesis_input = fan_out_input(
+        "synthesis",
+        created_synthesis
+            .verified_graph_version()
+            .graph_version()
+            .get(),
+    );
+    let prepared_proposal_acceptance = client
+        .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            change: WorkProductChangeDraftV1::DecideProposal {
+                proposal: synthesis_input.proposal,
+                disposition: WorkProposalDispositionV1::Accepted,
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+        .expect("prepare synthesis proposal acceptance")
+        .result;
+    let accepted_synthesis = client
+        .execute::<WorkMutateGraph>(&prepared_proposal_acceptance)
+        .expect("accept synthesis proposal")
+        .result;
+    let prepared_execution_admission = client
+        .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            change: WorkProductChangeDraftV1::AdmitExecution {
+                task_id: synthesis_task.clone(),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+        .expect("prepare synthesis execution admission")
+        .result;
+    let WorkProductMutationRequestV1::AdmitExecution(admission) = prepared_execution_admission
+    else {
+        panic!("synthesis admission preparation must produce the canonical request");
+    };
+    assert_eq!(
+        admission.based_on_version,
+        accepted_synthesis.verified_graph_version().graph_version(),
+        "synthesis admission must use the exact graph version that accepted its proposal"
+    );
     client
-        .execute::<WorkAdmitExecution>(&AdmitExecutionCommand {
-            task_id: synthesis_task.clone(),
-            expected_version: WorkVersion::new(2).expect("accepted Work version"),
-            command_id: id("command.synthesis.admit"),
-            occurred_at: now(),
-        })
-        .expect("admit synthesis Work");
+        .execute::<WorkAdmitExecution>(&admission)
+        .expect("admit synthesis execution through the canonical product request");
     let synthesis_attempt_id: AttemptId = id("attempt.advanced-workflow-synthesis");
     let synthesis = client
         .execute::<WorkSynthesize>(&AdmitWorkSynthesisCommand {
@@ -586,12 +690,123 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     assert_eq!(admission.source_set.sources.len(), 3);
     assert_eq!(admission.uncited, sources[1..].to_vec());
     assert_eq!(admission.draft.cited_source_digests.len(), 1);
-    wait_until("synthesis provider completion", || {
+    let completed_synthesis = wait_until("synthesis provider completion", || {
         listed_attempts(&client)
             .into_iter()
             .find(|attempt| attempt.identity().attempt_id() == &synthesis_attempt_id)
             .filter(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)
     });
+    let graph = client
+        .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
+            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            now(),
+        ))
+        .expect("read synthesis product graph")
+        .result;
+    let verified_version = graph
+        .entries()
+        .last()
+        .expect("current synthesis graph version")
+        .verified_version()
+        .clone();
+    let sealed_receipt = client
+        .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            task_id: synthesis_task.clone(),
+            verified_version,
+            temporal: TemporalModeV1::Current,
+            page_size: 100,
+            expansion: None,
+            continuation: None,
+            observed_at: now(),
+        })
+        .expect("retrieve sealed synthesis attempt evidence")
+        .result
+        .sources
+        .into_iter()
+        .find_map(|source| match source {
+            WorkEvidenceSourceV1::AttemptReceipt { receipt }
+                if receipt.identity == completed_synthesis.identity().clone() =>
+            {
+                Some(receipt)
+            }
+            _ => None,
+        })
+        .expect("synthesis accepted attempt receipt");
+    let terminal_digest = match completed_synthesis.terminal() {
+        Some(WorkTerminalEvidenceV1::Succeeded {
+            evidence_digest, ..
+        }) => evidence_digest.clone(),
+        terminal => panic!("synthesis must have succeeded with terminal evidence: {terminal:?}"),
+    };
+    let sealed_evidence = sealed_receipt
+        .evidence
+        .as_ref()
+        .expect("sealed synthesis receipt contains evidence");
+    assert_eq!(
+        sealed_evidence
+            .digest()
+            .expect("sealed synthesis evidence digest"),
+        terminal_digest,
+        "the sealed receipt evidence must match the terminal attempt evidence"
+    );
+
+    restarted
+        .kill_and_wait()
+        .expect("physically restart daemon after accepted synthesis settlement");
+    let _restarted_evidence = common::spawn_tracedecay_daemon(&home);
+    let client = sdk_client(&home, project_id.as_str());
+    let restored_graph = client
+        .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
+            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            now(),
+        ))
+        .expect("read product graph after physical restart")
+        .result;
+    let restored_entry = restored_graph
+        .entries()
+        .last()
+        .expect("restored synthesis graph version");
+    let restored_item = restored_entry
+        .graph()
+        .items()
+        .iter()
+        .find(|item| item.task_id() == &synthesis_task)
+        .expect("restored synthesis task");
+    assert!(
+        restored_item
+            .accepted_attempts()
+            .contains(completed_synthesis.identity()),
+        "the accepted-attempt relation must survive physical daemon restart"
+    );
+    let restored_receipt = client
+        .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            task_id: synthesis_task.clone(),
+            verified_version: restored_entry.verified_version().clone(),
+            temporal: TemporalModeV1::Current,
+            page_size: 100,
+            expansion: None,
+            continuation: None,
+            observed_at: now(),
+        })
+        .expect("retrieve synthesis evidence after restart")
+        .result
+        .sources
+        .into_iter()
+        .find_map(|source| match source {
+            WorkEvidenceSourceV1::AttemptReceipt { receipt }
+                if receipt.identity == completed_synthesis.identity().clone() =>
+            {
+                Some(receipt)
+            }
+            _ => None,
+        })
+        .expect("restored synthesis accepted-attempt receipt");
+    assert_eq!(
+        restored_receipt, sealed_receipt,
+        "the accepted-attempt receipt must survive restart exactly"
+    );
 
     let handoff_scope = TaskHandoffScope::new(
         project_id,
@@ -609,7 +824,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     .expect("host handoff scope");
     let frontier = WorkHandoffFrontierV1::new(
         synthesis_task,
-        WorkVersion::new(3).expect("synthesis admission version"),
+        WorkVersion::new(restored_entry.verified_version().graph_version().get())
+            .expect("synthesis product graph version"),
         Vec::new(),
         vec![format!(
             "fan-out recovered and cancelled at workflow sequence {}",

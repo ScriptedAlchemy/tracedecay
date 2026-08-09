@@ -2,7 +2,6 @@ use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmission
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::automation::config_error;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
@@ -10,6 +9,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
+use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,

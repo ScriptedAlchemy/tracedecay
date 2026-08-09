@@ -34,9 +34,9 @@ pub(crate) use tracedecay_agent_hosts::automation::runner::{
     AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
     AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
     CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
-    SkillWriterAutomationOptions, run_memory_curator_with_backend,
-    run_skill_writer_with_backend_and_retrieval,
+    SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
 };
+pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -260,7 +260,12 @@ pub(crate) async fn run_session_reflector_with_backend(
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        cg, config, backend, &retrieval, options,
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
     )
     .await
 }
@@ -274,7 +279,12 @@ pub(crate) async fn run_skill_writer_with_backend(
 {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        cg, config, backend, &retrieval, options,
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
     )
     .await
 }
@@ -287,9 +297,36 @@ pub(crate) async fn run_combined_review_with_backend(
 ) -> tracedecay::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval(
-        cg, config, backend, &retrieval, options,
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        &retrieval,
+        options,
     )
     .await
+}
+
+pub(crate) async fn run_memory_curator_with_backend(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+) -> tracedecay::errors::Result<
+    tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
+> {
+    tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
+        cg,
+        config,
+        &test_configuration_revision(),
+        backend,
+        options,
+    )
+    .await
+}
+
+pub(crate) fn test_configuration_revision() -> ConfigurationRevisionId {
+    ConfigurationRevisionId::new("config.automation-test.v1").expect("configuration revision")
 }
 
 pub(crate) fn project_memory_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
@@ -347,10 +384,6 @@ impl AgentTaskBackend for JsonBackend {
             json!("needs_llm_review")
         );
         assert_eq!(request.context["apply"], json!(true));
-        assert_eq!(
-            request.context["memory_apply_policy"],
-            json!("validate_then_apply")
-        );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,

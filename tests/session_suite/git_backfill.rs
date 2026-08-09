@@ -15,12 +15,12 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::sessions::git_correlation::{
+use tracedecay_domain::ProjectId;
+use tracedecay_sessions::runtime::git_correlation::{
     BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
     SessionsForQuery, normalize_worktree,
 };
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay_domain::ProjectId;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common;
 

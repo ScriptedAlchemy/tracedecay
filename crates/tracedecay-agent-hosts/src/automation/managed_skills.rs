@@ -580,18 +580,32 @@ fn apply_managed_skill_update_unlocked(
     base_checksum: Option<&str>,
     update: ManagedSkillUpdate,
 ) -> Result<ManagedSkill> {
-    let mut skill = load_managed_skill_unlocked(profile_root, id)?;
+    let skill = load_managed_skill_unlocked(profile_root, id)?;
     if base_checksum.is_some_and(|checksum| checksum != skill.metadata.checksum) {
         return Err(config_error(format!(
             "base_checksum for managed skill id '{id}' is stale"
         )));
     }
+    let skill = preview_managed_skill_update(&skill, &update)?;
+    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
+    Ok(skill)
+}
+
+/// Applies the canonical managed-skill update semantics without persisting.
+/// This lets an adapter validate an update before entering a write without
+/// maintaining a second field-change authority.
+pub fn preview_managed_skill_update(
+    current: &ManagedSkill,
+    update: &ManagedSkillUpdate,
+) -> Result<ManagedSkill> {
+    let mut skill = current.clone();
     let original_pinned = skill.metadata.pinned;
-    let content_changed = apply_managed_skill_update_fields(&mut skill, update)?;
+    let content_changed = apply_managed_skill_update_fields(&mut skill, update.clone())?;
     let metadata_changed = skill.metadata.pinned != original_pinned;
     if !content_changed && !metadata_changed {
         return Err(config_error(format!(
-            "managed skill '{id}' update does not change the active revision"
+            "managed skill '{}' update does not change the active revision",
+            skill.metadata.id
         )));
     }
     if content_changed {
@@ -599,7 +613,6 @@ fn apply_managed_skill_update_unlocked(
     }
     skill.set_state(ManagedSkillState::Active);
     skill.touch();
-    persist_skill_transaction_unlocked(profile_root, &[&skill])?;
     Ok(skill)
 }
 

@@ -37,7 +37,8 @@ async fn projectless_hermes_receipt_uses_user_profile_without_local_writer() {
     assert_eq!(result["action"], "hermes_receipt");
     assert_eq!(result["status"], "recorded");
     assert_eq!(broker.pending_count().await, 0);
-    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    let automation_root =
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
     assert!(
         automation_root.join("host_receipts.json").is_file(),
         "receipt watermark state must live under the user TraceDecay profile"
@@ -65,7 +66,8 @@ async fn projectless_hermes_receipt_is_durable_before_apply_and_replays_after_re
     let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
-    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    let automation_root =
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
     // Block canonical apply so admission can prove durability-before-attempt.
     std::fs::write(&automation_root, "not-a-directory").unwrap();
 
@@ -149,7 +151,8 @@ async fn malformed_profile_source_does_not_starve_valid_sibling_source() {
         "terminal evidence is quarantined and the committed sibling releases active capacity"
     );
     assert_eq!(broker.quarantine_count().await, 1);
-    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    let automation_root =
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
     assert!(
         automation_root.join("host_receipts.json").is_file(),
         "valid sibling must apply under the user TraceDecay profile"
@@ -236,7 +239,8 @@ async fn unsupported_profile_payload_version_is_retained_without_apply() {
     assert!(outcome.retryable);
     assert_eq!(broker.pending_count().await, 1);
     assert_eq!(broker.quarantine_count().await, 0);
-    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    let automation_root =
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
     assert!(
         !automation_root.join("host_receipts.json").is_file(),
         "unsupported version must not attempt canonical profile apply"

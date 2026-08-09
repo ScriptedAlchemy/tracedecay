@@ -23,7 +23,7 @@ pub enum AutomationAction {
         #[command(subcommand)]
         action: AutomationSkillsAction,
     },
-    /// Inspect session-reflection fact application history.
+    /// Inspect terminal automatic fact receipts.
     Facts {
         #[command(subcommand)]
         action: AutomationFactsAction,
@@ -98,9 +98,6 @@ pub enum AutomationConfigAction {
         /// Scheduler polling cadence in seconds.
         #[arg(long)]
         scheduler_tick_secs: Option<u64>,
-        /// Export the durable-facts memory digest into host prompts.
-        #[arg(long)]
-        export_memory_digest: Option<bool>,
         /// Enable or disable the memory curator task.
         #[arg(long)]
         memory_curator: Option<bool>,
@@ -177,7 +174,7 @@ pub enum AutomationRunAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Build a session-reflection fact proposal review from LCM evidence.
+    /// Build and automatically apply session-reflection facts from LCM evidence.
     #[command(name = "session-reflection")]
     SessionReflection {
         /// LCM provider to inspect.
@@ -217,7 +214,7 @@ pub enum AutomationRunAction {
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Draft managed skills from repeated workflow evidence without activating them.
+    /// Write validated skills from repeated workflow evidence, then activate and deploy automatically.
     #[command(name = "skill-writing")]
     SkillWriting {
         /// LCM provider to inspect. Use all for unified cross-provider evidence.
@@ -331,22 +328,22 @@ pub enum AutomationSkillsAction {
 
 #[derive(Subcommand)]
 pub enum AutomationFactsAction {
-    /// List session-reflection fact application records.
+    /// List terminal automatic fact receipts.
     List {
-        /// State filter: applying, applied, rejected, or quarantined.
+        /// State filter: applied or quarantined.
         #[arg(long)]
         state: Option<String>,
-        /// Maximum proposals to show.
+        /// Maximum receipts to show.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Output the canonical proposal payload as machine-readable JSON.
+        /// Output the canonical automatic fact receipt payload as machine-readable JSON.
         #[arg(long)]
         json: bool,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,
     },
-    /// Show one fact application record.
+    /// Show one terminal automatic fact receipt.
     View {
         id: String,
         /// Project path (default: current directory, with discovery).

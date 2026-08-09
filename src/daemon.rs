@@ -39,9 +39,8 @@ use memory_repair_scheduler::{
 #[cfg(all(unix, test))]
 use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
-    automation_scheduler_tick_secs_for_project, automation_staged_log_fields,
-    daemon_scheduler_record_log_line, run_automation_scheduler_tick, scheduler_task_log_fields,
-    user_config_for_client,
+    automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
+    run_automation_scheduler_tick, scheduler_task_log_fields,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
@@ -154,6 +153,8 @@ mod connection_serving;
 pub(crate) mod context_scout_lifecycle;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
+#[cfg(all(unix, test))]
+use connection_serving::serve_socket_client;
 #[cfg(not(unix))]
 use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(test)]
@@ -161,8 +162,6 @@ use connection_serving::{
     await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
-#[cfg(all(unix, test))]
-use connection_serving::{serve_authenticated_socket_client, serve_socket_client};
 mod core_admission;
 mod engine;
 #[cfg(unix)]
@@ -181,6 +180,7 @@ mod core_proxy;
 mod database_owner_registry;
 use database_owner_registry::{DatabaseOwnerRegistry, settle_deferred_post_open_health};
 pub(crate) mod doctor_kernel;
+pub(crate) mod dashboard_automation;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
@@ -346,6 +346,7 @@ pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
+mod work_evidence_retrieval;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };

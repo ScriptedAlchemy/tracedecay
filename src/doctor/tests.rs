@@ -89,7 +89,7 @@ fn database_recovery_guidance_names_the_preserved_recovery_set() {
 /// classifier pattern used for database-recovery guidance.
 #[test]
 fn foreign_orphan_renders_as_info_without_update_remediation() {
-    use crate::automation::skill_materialization::SkillDrift;
+    use tracedecay_agent_hosts::automation::skill_materialization::SkillDrift;
     let finding = SkillDrift::ForeignOrphan {
         skill_id: "code-slop-cleanup".to_string(),
         path: std::path::PathBuf::from("/repo/.claude/skills/code-slop-cleanup/SKILL.md"),
@@ -110,7 +110,7 @@ fn foreign_orphan_renders_as_info_without_update_remediation() {
 /// remediation — the classifier must not blanket-downgrade every orphan.
 #[test]
 fn plain_orphan_still_warns_with_update_remediation() {
-    use crate::automation::skill_materialization::SkillDrift;
+    use tracedecay_agent_hosts::automation::skill_materialization::SkillDrift;
     let finding = SkillDrift::Orphan {
         skill_id: "code-slop-cleanup".to_string(),
         path: std::path::PathBuf::from("/repo/.claude/skills/code-slop-cleanup/SKILL.md"),

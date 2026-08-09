@@ -98,8 +98,6 @@ pub struct AutomationConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_tick_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub export_memory_digest: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combine_due_tasks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_job_commands: Option<bool>,
@@ -132,32 +130,6 @@ pub fn effective_config(
     }
     validate_config(&config)?;
     Ok(config)
-}
-
-pub fn default_user_automation_config() -> AutomationConfig {
-    let task = |interval_secs| AutomationTaskConfig {
-        enabled: true,
-        schedule: Some("interval".to_string()),
-        interval_secs: Some(interval_secs),
-        cooldown_secs: Some(300),
-        min_idle_secs: Some(30),
-        stale_lock_secs: Some(3_600),
-        ..AutomationTaskConfig::default()
-    };
-    AutomationConfig {
-        schema_version: AutomationConfig::SCHEMA_VERSION,
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        combine_due_tasks: false,
-        model_id: Some("gpt-5.6-mini".to_owned()),
-        tasks: AutomationTaskSet {
-            memory_curator: task(3_600),
-            session_reflector: task(900),
-            skill_writer: task(900),
-        },
-        ..AutomationConfig::default()
-    }
 }
 
 pub fn merge_project_config(
@@ -208,9 +180,6 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
     if let Some(scheduler_tick_secs) = patch.scheduler_tick_secs {
         config.scheduler_tick_secs = scheduler_tick_secs;
     }
-    if let Some(export_memory_digest) = patch.export_memory_digest {
-        config.export_memory_digest = export_memory_digest;
-    }
     if let Some(combine_due_tasks) = patch.combine_due_tasks {
         config.combine_due_tasks = combine_due_tasks;
     }
@@ -223,6 +192,9 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
         &patch.session_reflector,
     );
     apply_task_patch(&mut config.tasks.skill_writer, &patch.skill_writer);
+    if config.backend != AutomationBackend::CodexAppServer {
+        config.model_id = None;
+    }
 }
 
 fn apply_task_patch(config: &mut AutomationTaskConfig, patch: &AutomationTaskPatch) {
@@ -253,12 +225,17 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     merge_optional_field(&mut config.model_id, patch.model_id);
     merge_optional_field(&mut config.timeout_secs, patch.timeout_secs);
     merge_optional_field(&mut config.scheduler_tick_secs, patch.scheduler_tick_secs);
-    merge_optional_field(&mut config.export_memory_digest, patch.export_memory_digest);
     merge_optional_field(&mut config.combine_due_tasks, patch.combine_due_tasks);
     merge_optional_field(&mut config.allow_job_commands, patch.allow_job_commands);
     merge_task_patch(&mut config.memory_curator, patch.memory_curator);
     merge_task_patch(&mut config.session_reflector, patch.session_reflector);
     merge_task_patch(&mut config.skill_writer, patch.skill_writer);
+    if config
+        .backend
+        .is_some_and(|backend| backend != AutomationBackend::CodexAppServer)
+    {
+        config.model_id = Some(None);
+    }
 }
 
 fn merge_task_patch(config: &mut AutomationTaskPatch, patch: AutomationTaskPatch) {
@@ -564,17 +541,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_defaults_are_conservative() {
+    fn automation_defaults_mount_the_final_v2_curators() {
         let config = AutomationConfig::default();
 
-        assert!(!config.enabled);
-        assert_eq!(config.backend, AutomationBackend::Disabled);
+        assert!(config.enabled);
+        assert_eq!(config.backend, AutomationBackend::CodexAppServer);
         assert_eq!(config.host_mode, AutomationHostMode::Standalone);
         assert_eq!(config.timeout_secs, 60);
         assert_eq!(config.scheduler_tick_secs, 60);
-        assert!(!config.tasks.memory_curator.enabled);
-        assert!(!config.tasks.session_reflector.enabled);
-        assert!(!config.tasks.skill_writer.enabled);
+        assert!(config.combine_due_tasks);
+        assert_eq!(config.tasks.memory_curator.interval_secs, Some(900));
+        assert_eq!(config.tasks.session_reflector.interval_secs, Some(900));
+        assert_eq!(config.tasks.skill_writer.interval_secs, Some(3_600));
+        assert_eq!(config.tasks.skill_writer.min_idle_secs, Some(900));
     }
 
     #[test]
@@ -606,6 +585,109 @@ mod tests {
         assert_eq!(merged.scheduler_tick_secs, Some(20));
         assert_eq!(merged.memory_curator.enabled, Some(true));
         assert_eq!(merged.memory_curator.schedule, Some(None));
+    }
+
+    #[test]
+    fn non_codex_backend_wins_over_model_in_the_same_patch() {
+        let current = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            model_id: Some("gpt-5.6-mini".to_owned()),
+            ..AutomationConfig::default()
+        };
+        let patch = AutomationConfigPatch {
+            backend: Some(AutomationBackend::Disabled),
+            model_id: Some(Some("must-not-survive".to_owned())),
+            ..AutomationConfigPatch::default()
+        };
+
+        let merged = merge_project_config(None, patch.clone());
+        let effective =
+            effective_config(&current, Some(&patch)).expect("backend patch should be canonical");
+
+        assert_eq!(merged.model_id, Some(None));
+        assert_eq!(effective.backend, AutomationBackend::Disabled);
+        assert_eq!(effective.model_id, None);
+    }
+
+    #[test]
+    fn model_only_patch_is_cleared_while_backend_is_disabled() {
+        let patch = AutomationConfigPatch {
+            model_id: Some(Some("must-not-survive".to_owned())),
+            ..AutomationConfigPatch::default()
+        };
+
+        let merged = merge_project_config(
+            Some(AutomationConfigPatch {
+                backend: Some(AutomationBackend::Disabled),
+                ..AutomationConfigPatch::default()
+            }),
+            patch.clone(),
+        );
+        let disabled = AutomationConfig {
+            enabled: false,
+            backend: AutomationBackend::Disabled,
+            model_id: None,
+            tasks: AutomationTaskSet::default(),
+            ..AutomationConfig::default()
+        };
+        let effective = effective_config(&disabled, Some(&patch))
+            .expect("disabled backend should normalize away a model-only patch");
+
+        assert_eq!(merged.model_id, Some(None));
+        assert_eq!(effective.backend, AutomationBackend::Disabled);
+        assert_eq!(effective.model_id, None);
+    }
+
+    #[test]
+    fn merged_non_codex_backend_records_an_explicit_model_clear() {
+        let current = AutomationConfigPatch {
+            backend: Some(AutomationBackend::CodexAppServer),
+            model_id: Some(Some("gpt-5.6-mini".to_owned())),
+            ..AutomationConfigPatch::default()
+        };
+        let patch = AutomationConfigPatch {
+            backend: Some(AutomationBackend::Disabled),
+            ..AutomationConfigPatch::default()
+        };
+
+        let merged = merge_project_config(Some(current), patch);
+
+        assert_eq!(merged.backend, Some(AutomationBackend::Disabled));
+        assert_eq!(merged.model_id, Some(None));
+    }
+
+    #[test]
+    fn codex_model_set_and_clear_preserve_explicit_patch_intent() {
+        let codex = AutomationConfigPatch {
+            backend: Some(AutomationBackend::CodexAppServer),
+            ..AutomationConfigPatch::default()
+        };
+        let set = merge_project_config(
+            Some(codex),
+            AutomationConfigPatch {
+                model_id: Some(Some("gpt-5.6-mini".to_owned())),
+                ..AutomationConfigPatch::default()
+            },
+        );
+        assert_eq!(
+            set.model_id,
+            Some(Some("gpt-5.6-mini".to_owned())),
+            "Codex retains an explicitly pinned model"
+        );
+
+        let cleared = merge_project_config(
+            Some(set),
+            AutomationConfigPatch {
+                model_id: Some(None),
+                ..AutomationConfigPatch::default()
+            },
+        );
+        assert_eq!(
+            cleared.model_id,
+            Some(None),
+            "Codex retains an explicit model clear for validation"
+        );
     }
 
     #[test]

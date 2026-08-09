@@ -1,10 +1,10 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::sessions::source::{
+use tracedecay_sessions::runtime::source::{
     FileDiscoveryLimit, TranscriptDiscoveryBounds, TranscriptSource,
 };
-use tracedecay::sessions::vibe::VibeSource;
+use tracedecay_sessions::runtime::vibe::VibeSource;
 
 use crate::restart_atomicity::{open_project_session_db, try_ingest_source};
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};

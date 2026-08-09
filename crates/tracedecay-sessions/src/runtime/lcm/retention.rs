@@ -22,7 +22,7 @@
 //! A raw row is *projection-durable* when a summary node's lineage covers it —
 //! i.e. its `store_id` appears as a `raw_message` source in
 //! `lcm_summary_sources` (see
-//! `global_db::session_temporal::operations::compatibility`, which persists
+//! `global_db::session_temporal::operations::summary_projection`, which persists
 //! `LcmSourceRef::RawMessage { store_id }` as `('raw_message', store_id)`).
 //! Only projection-durable rows are ever acted on. Rows with no summary lineage
 //! are live, un-projected evidence and are **never** touched — this is the

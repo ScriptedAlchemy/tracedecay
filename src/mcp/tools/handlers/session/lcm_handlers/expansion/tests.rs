@@ -9,7 +9,7 @@ use super::*;
 use crate::mcp::tools::handlers::session::message_search::{
     LcmDescribeServiceOutcome, LcmExpandServiceOutcome,
 };
-use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
+use tracedecay_sessions::runtime::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
 
 #[tokio::test]
 async fn describe_maps_summary_target_to_typed_service_and_adds_temporal_metadata() {

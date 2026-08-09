@@ -652,7 +652,7 @@ fn codex_project_registration_paths(home: &Path, project_path: &Path) -> Result<
 ///
 /// A global bundle ships lifecycle hooks (declared in the manifest and trusted
 /// later by Codex itself), invokes `serve` without an explicit project path,
-/// and carries the memory digest. A repo-local bundle ships no hooks, invokes
+/// and carries lifecycle hooks. A repo-local bundle ships no hooks, invokes
 /// `serve --path .` with no env, and stays free of user-profile state. The
 /// bundle writer, manifest/MCP renderers, and doctor all consume this type
 /// instead of re-encoding the scope as ad-hoc conditionals.
@@ -704,11 +704,6 @@ impl CodexBundlePolicy {
     fn hook_trust_config_path(self, home: &Path) -> Option<PathBuf> {
         self.include_hooks().then(|| codex_config_path(home))
     }
-
-    /// The memory digest rides only the global bundle.
-    fn include_memory_digest(self) -> bool {
-        self.scope == InstallScope::Global
-    }
 }
 
 fn install_codex_plugin_bundle(
@@ -720,15 +715,6 @@ fn install_codex_plugin_bundle(
     let policy = CodexBundlePolicy::for_scope(scope);
     write_codex_plugin_bundle_base(install_dir, tracedecay_bin, policy)?;
     install_codex_managed_skill_overlay(profile_home, install_dir)?;
-    if policy.include_memory_digest() {
-        let profile_root =
-            crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
-        crate::automation::memory_digest::sync_memory_digest_export(
-            &profile_root,
-            crate::automation::skill_targets::SkillInstallTarget::Codex,
-            install_dir,
-        )?;
-    }
     Ok(())
 }
 
@@ -769,6 +755,7 @@ fn install_codex_managed_skill_overlay(
     install_dir: &Path,
 ) -> Result<crate::automation::skill_targets::SkillInstallSummary> {
     let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    super::retired_memory_digest::remove_state(&profile_root)?;
     crate::automation::skill_targets::install_managed_skills(
         &profile_root,
         crate::automation::skill_targets::SkillInstallTarget::Codex,
@@ -1538,12 +1525,6 @@ fn uninstall_codex_repo_plugin_if_present(ctx: &InstallContext) -> Result<()> {
         return Ok(());
     };
     let install_dir = codex_repo_plugin_install_dir(&project_path);
-    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
-    crate::automation::memory_digest::remove_memory_digest_export(
-        &profile_root,
-        crate::automation::skill_targets::SkillInstallTarget::Codex,
-        &install_dir,
-    )?;
     if install_dir.join(".codex-plugin/plugin.json").exists()
         && codex_plugin_dir_is_tracedecay(&install_dir)
     {

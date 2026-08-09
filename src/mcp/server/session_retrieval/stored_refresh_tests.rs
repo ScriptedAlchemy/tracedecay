@@ -14,7 +14,7 @@ const CONTENT: &str = "already projected canonical content";
 
 async fn unavailable_refresh_service() -> (
     Arc<dyn SessionRetrievalServicePort>,
-    crate::sessions::lcm::LcmRawMessage,
+    tracedecay_sessions::runtime::lcm::LcmRawMessage,
     Arc<crate::mcp::server::McpServer>,
 ) {
     let (server, _project, _pin) =
@@ -39,7 +39,7 @@ async fn unavailable_refresh_service() -> (
     runtime
         .lcm_ingest_raw_message_for_test(
             HostAdmissionScope::Project,
-            &crate::sessions::SessionMessageRecord {
+            &tracedecay_sessions::runtime::SessionMessageRecord {
                 provider: PROVIDER.to_string(),
                 message_id: MESSAGE_ID.to_string(),
                 session_id: MESSAGE_SEARCH_ROOT_SESSION_ID.to_string(),

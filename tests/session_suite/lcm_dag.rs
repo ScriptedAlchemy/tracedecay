@@ -1,9 +1,9 @@
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::sessions::lcm::types::{
+use tracedecay_sessions::runtime::lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
 };
-use tracedecay::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,
     LcmSessionBoundaryRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
 };
@@ -17,26 +17,26 @@ async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
 }
 
 trait ProfileLcmFixture {
-    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool;
+    async fn upsert_session(&self, session: &tracedecay_sessions::runtime::SessionRecord) -> bool;
 
     async fn upsert_session_message(
         &self,
-        message: &tracedecay::sessions::SessionMessageRecord,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
     ) -> bool;
 
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError>;
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError>;
 
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError>;
+    ) -> Result<tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt, LcmError>;
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
-    async fn upsert_session(&self, session: &tracedecay::sessions::SessionRecord) -> bool {
+    async fn upsert_session(&self, session: &tracedecay_sessions::runtime::SessionRecord) -> bool {
         self.upsert_session_for_test(HostAdmissionScope::Profile, session)
             .await
             .unwrap_or(false)
@@ -44,7 +44,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
 
     async fn upsert_session_message(
         &self,
-        message: &tracedecay::sessions::SessionMessageRecord,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
     ) -> bool {
         self.upsert_session_message_for_test(HostAdmissionScope::Profile, message)
             .await
@@ -54,7 +54,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError> {
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError> {
         self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
             .await
     }
@@ -62,7 +62,8 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> Result<tracedecay::sessions::lcm::types::LcmSummaryPublicationReceipt, LcmError> {
+    ) -> Result<tracedecay_sessions::runtime::lcm::types::LcmSummaryPublicationReceipt, LcmError>
+    {
         self.lcm_publish_immutable_summary_for_test(HostAdmissionScope::Profile, publication)
             .await
     }

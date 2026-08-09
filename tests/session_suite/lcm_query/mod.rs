@@ -1,15 +1,15 @@
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::global_db::ParseOffset;
-use tracedecay::sessions::lcm::{
+use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_sessions::runtime::lcm::{
     LCM_SCHEMA_VERSION, LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmError,
     LcmExpandQueryRequest, LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest,
     LcmGrepSort, LcmLifecycleUpdate, LcmLoadSessionRequest, LcmMaintenanceDebt, LcmScope,
     LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
     MAX_DERIVED_SNIPPET_CHARS,
 };
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 use crate::common::{self, lcm_dag_message as raw_message};
 
@@ -35,14 +35,14 @@ trait ProfileLcmFixture {
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError>;
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError>;
 
     async fn lcm_ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError>;
 
     async fn lcm_update_lifecycle(
         &self,
         update: LcmLifecycleUpdate,
-    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, LcmError>;
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, LcmError>;
 }
 
 impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
@@ -79,7 +79,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_insert_summary_node(
         &self,
         draft: LcmSummaryNodeDraft,
-    ) -> Result<tracedecay::sessions::lcm::LcmSummaryNode, LcmError> {
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, LcmError> {
         self.lcm_insert_summary_node_for_test(HostAdmissionScope::Profile, draft)
             .await
     }
@@ -92,7 +92,7 @@ impl ProfileLcmFixture for HostAdmissionTestRuntimeV1 {
     async fn lcm_update_lifecycle(
         &self,
         update: LcmLifecycleUpdate,
-    ) -> Result<tracedecay::sessions::lcm::LcmLifecycleState, LcmError> {
+    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, LcmError> {
         self.lcm_update_lifecycle_for_test(HostAdmissionScope::Profile, update)
             .await
     }

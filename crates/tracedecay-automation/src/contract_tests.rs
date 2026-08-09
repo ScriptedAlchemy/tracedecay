@@ -1,14 +1,10 @@
 use std::error::Error as _;
 
-use serde_json::{Value, json};
-
-use crate::apply_policy::{
-    MemoryApplyDecision, MemoryApplyPolicy, record_has_auto_applied_memory_ops,
-};
 use crate::artifact_policy::artifact_policy;
 use crate::backend::AgentTaskKind;
 use crate::text::truncate_chars_for_prompt;
 use crate::{AutomationError, AutomationRunRecord};
+use serde_json::Value;
 
 #[derive(Default)]
 struct TestRunRecord {
@@ -62,36 +58,6 @@ fn automation_error_preserves_standard_classifications() {
 
     let config = AutomationError::config("invalid schedule");
     assert!(matches!(config, AutomationError::Config { .. }));
-}
-
-#[test]
-fn apply_policy_preserves_complete_and_partial_outcomes() {
-    assert_eq!(
-        MemoryApplyPolicy::applied_curation_ops(2, 2).decision(),
-        MemoryApplyDecision::AutoApplyAllowed
-    );
-    assert_eq!(
-        MemoryApplyPolicy::applied_curation_ops(2, 1).decision(),
-        MemoryApplyDecision::ApplyIncomplete
-    );
-
-    let applied = TestRunRecord {
-        accepted_count: 2,
-        validation_report: Some(json!({"applied": 2})),
-        applied_ops: None,
-    };
-    assert!(record_has_auto_applied_memory_ops(
-        AgentTaskKind::MemoryCurator,
-        &applied
-    ));
-}
-
-#[test]
-fn apply_policy_validates_then_applies_accepted_operations() {
-    let policy = MemoryApplyPolicy::curation_ops(1);
-
-    assert_eq!(policy.decision(), MemoryApplyDecision::AutoApplyAllowed);
-    assert!(policy.to_json()["mutates_store"].as_bool().unwrap());
 }
 
 #[test]

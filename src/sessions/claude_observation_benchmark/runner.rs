@@ -11,16 +11,18 @@ use tracedecay_store::{
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
-use crate::sessions::claude::ClaudeSource;
-use crate::sessions::claude_observation::{
-    ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
-};
-use crate::sessions::cline_like::{ClineLikeSource, capture_cline_like_snapshot_observations};
-use crate::sessions::{codex, cursor, hermes, kiro};
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
+use tracedecay_sessions::runtime::claude::ClaudeSource;
+use tracedecay_sessions::runtime::claude_observation::{
+    ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
+};
+use tracedecay_sessions::runtime::cline_like::{
+    ClineLikeSource, capture_cline_like_snapshot_observations,
+};
+use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
 
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,

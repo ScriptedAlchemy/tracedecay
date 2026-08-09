@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use jsonschema::Validator;
 use serde_json::Value;
-use tracedecay::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use tracedecay_agent_hosts::automation::skill_frontmatter::{
+    SkillFrontmatterValue, parse_skill_frontmatter,
+};
 
 /// A path relative to the repository root (`CARGO_MANIFEST_DIR`).
 pub fn repo_path(relative: &str) -> PathBuf {

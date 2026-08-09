@@ -3,15 +3,15 @@ use crate::application::host_admission::{
     HostAdmissionStatus,
 };
 use crate::application::observation::ObservationCancellation;
-use crate::automation::config_error;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
+use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
     LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol, LcmTranscriptIngestCommand,
@@ -96,7 +96,7 @@ fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
 /// silently consuming the cap and reporting the pass as complete.
 async fn admit_codex_project_rollouts(
     admission: &HostAdmissionFacade<'_>,
-    source: &crate::sessions::codex::CodexSource,
+    source: &tracedecay_sessions::runtime::codex::CodexSource,
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
@@ -107,7 +107,7 @@ async fn admit_codex_project_rollouts(
     let mut paths = source.transcript_paths(project_root).into_iter().peekable();
     while let Some(path) = paths.next() {
         let progress =
-            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+            tracedecay_sessions::runtime::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
                 &path,
                 project_root,
                 project_id.clone(),
@@ -134,10 +134,13 @@ async fn drain_host_observation_projections(
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> Result<u64> {
-    let stats =
-        crate::sessions::claude_observation::drain_projection_queue(admission, scope, cancellation)
-            .await
-            .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    let stats = tracedecay_sessions::runtime::claude_observation::drain_projection_queue(
+        admission,
+        scope,
+        cancellation,
+    )
+    .await
+    .map_err(|error| map_claude_observation_ingest_error(&error))?;
     Ok(stats.transcript.messages_upserted)
 }
 
@@ -280,7 +283,7 @@ async fn admit_codex_rollouts_once(
         }
         _ => {}
     }
-    let source = crate::sessions::codex::CodexSource::new()
+    let source = tracedecay_sessions::runtime::codex::CodexSource::new()
         .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
@@ -453,7 +456,7 @@ fn pressure_only_command(
     protocol: LcmHostProtocol,
 ) -> LcmAuthorityRequest {
     LcmAuthorityRequest::Compact(LcmCompactionCommand {
-        preflight: crate::sessions::lcm::LcmPreflightRequest {
+        preflight: tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
             provider: provider.to_owned(),
             session_id: session_id.to_string(),
             messages: Vec::new(),
@@ -720,7 +723,7 @@ async fn ingest_hermes_callback_turn(
     let event_digest = tracedecay_domain::canonical_sha256(&(&"hermes", &session_id, &messages))
         .map_err(|error| config_error(format!("digest Hermes turn failed: {error}")))?;
     let request = LcmAuthorityRequest::Ingest(LcmTranscriptIngestCommand {
-        preflight: crate::sessions::lcm::LcmPreflightRequest {
+        preflight: tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
             provider: "hermes".to_owned(),
             session_id: session_id.to_owned(),
             messages,

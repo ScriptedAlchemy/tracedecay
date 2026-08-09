@@ -18,9 +18,9 @@ analytics prove whether generated output was adopted.
 3. For failures or suspicious skips, open the relevant artifact with
    `tracedecay_automation_run_artifact_view` or
    `tracedecay tool automation_run_artifact_view --args ...`.
-4. Inspect model-managed memory outcomes plus configured managed-skill review
-   queues: `tracedecay automation facts list`, dashboard telemetry, and
-   `tracedecay_skill_list --state pending`.
+4. Inspect model-managed memory outcomes plus active managed-skill adoption:
+   `tracedecay automation facts list`, dashboard telemetry, and
+   `tracedecay_skill_list --state active`.
 5. Check adoption evidence: `tracedecay analytics diagnostics --all --no-sync`,
    `tracedecay sessions search "mcp__tracedecay" --provider all`, and managed
    skill usage counts.
@@ -32,15 +32,15 @@ analytics prove whether generated output was adopted.
 | `scheduler_interval_not_elapsed` | Healthy throttling | Count only, do not fix. |
 | `scheduler_lock_active` | Another run owns the loop | Check age before calling stale. |
 | `no_new_session_activity` | Nothing new to process | Verify transcript ingest if surprising. |
-| `validation_gate` artifact | Mutation passed validation | Inspect apply-policy state or dashboard artifact. |
+| `validation_gate` artifact | Mutation passed validation | Inspect automatic application/deployment receipts. |
 | Many fact proposal records | Inspect validation/apply telemetry | Use `tracedecay:project-memory`. |
 | Active managed skills with zero use | Adoption telemetry gap | Use `tracedecay:diagnosing-analytics`. |
 
 ## Guardrails
 
 - Prefer read-only inspection. Do not mutate fact records.
-- Do not approve, reject, delete, or apply managed-skill drafts unless the user
-  explicitly asked for mutation.
+- Validated skill-writer output activates and deploys automatically; inspect
+  receipts rather than waiting for a manual gate.
 - Do not treat skipped runs as failures until grouped by skip reason and age.
 - Avoid parallel `tracedecay_skill_view` calls against one profile while
   automation may write usage ledgers. If a usage read reports a truncated JSON
@@ -50,6 +50,6 @@ analytics prove whether generated output was adopted.
 
 ## Deliverable
 
-Report task/status counts, the exact run or artifact ids inspected, apply-policy
-state, adoption gaps, and the next concrete command for any mutation the user
-should choose.
+Report task/status counts, the exact run or artifact ids inspected, automatic
+application/deployment state, adoption gaps, and the next concrete command for
+any direct operator override the user should choose.

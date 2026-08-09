@@ -91,7 +91,9 @@ fn current_feedback_finding(
 ) -> Result<Option<FeedbackFindingReadV1>, HandoffOpenTargetError> {
     let result = match result {
         Ok(FeedbackReadInvocationResultV1::Get(result)) => result,
-        Ok(_) | Err(FeedbackReadOwnerErrorV1::Unavailable) => {
+        Ok(_)
+        | Err(FeedbackReadOwnerErrorV1::Unavailable)
+        | Err(FeedbackReadOwnerErrorV1::Contract(_)) => {
             return Err(HandoffOpenTargetError::Unavailable);
         }
         Err(FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized) => return Ok(None),

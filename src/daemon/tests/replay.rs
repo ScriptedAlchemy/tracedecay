@@ -62,11 +62,9 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     let broker = first_admin
         .host_admission_broker(&user_db)
         .await
-        .unwrap()
-        .broker()
-        .cloned()
         .expect("fresh host admission spool");
-    let automation_root = crate::automation::runner::user_automation_root(&profile_root);
+    let automation_root =
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root);
     std::fs::write(&automation_root, "block canonical receipt apply").unwrap();
     let params = serde_json::json!({
         "name": "tracedecay_hook_runtime",
@@ -118,12 +116,9 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     let recovered = restarted
         .host_admission_broker(&recovered_db)
         .await
-        .unwrap()
-        .broker()
-        .cloned()
         .expect("reopened host admission spool");
     let broker_path = super::super::authority::canonical_identity_path(
-        &crate::sessions::user_sessions_db_path(&profile_root),
+        &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
     )
     .unwrap();
     assert!(
@@ -137,7 +132,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     );
     assert_eq!(recovered.pending_count().await, 0);
     assert!(
-        crate::automation::runner::user_automation_root(&profile_root)
+        tracedecay_agent_hosts::automation::runner::user_automation_root(&profile_root)
             .join("host_receipts.json")
             .is_file()
     );

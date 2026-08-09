@@ -276,7 +276,8 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
     use std::collections::BTreeSet;
 
-    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+    const THRESHOLD: u64 =
+        tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
     let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
     let observed = &ingest.observed_providers;
     let configured = observed
@@ -298,7 +299,7 @@ fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Val
         ingest.provider_coverage.iter().any(|coverage| {
             coverage.state != crate::global_db::SessionProviderCoverageState::Complete
         }) || observed.iter().any(|provider| {
-            crate::sessions::SessionProvider::parse(provider).is_some_and(|provider| {
+            tracedecay_sessions::runtime::SessionProvider::parse(provider).is_some_and(|provider| {
                 provider.writes_typed_history_coverage()
                     && !ingest.provider_coverage.iter().any(|coverage| {
                         coverage.provider == provider.id()
@@ -482,7 +483,7 @@ mod tests {
             pending_transcripts: 2,
             pending_bytes: 12_000_000,
             max_transcript_pending_bytes:
-                crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1,
+                tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1,
             ..SessionIngestHealth::default()
         })
         .expect("backlog exceeds threshold");
@@ -523,7 +524,7 @@ mod tests {
 
     #[test]
     fn historical_status_is_current_only_after_every_provider_sweep_completes() {
-        let provider_coverage = crate::sessions::SessionProvider::ALL
+        let provider_coverage = tracedecay_sessions::runtime::SessionProvider::ALL
             .iter()
             .map(|provider| SessionProviderCoverage {
                 provider: provider.id().to_owned(),
@@ -544,7 +545,7 @@ mod tests {
 
     #[test]
     fn explicit_partial_provider_sweep_never_reports_current() {
-        let provider_coverage = crate::sessions::SessionProvider::ALL
+        let provider_coverage = tracedecay_sessions::runtime::SessionProvider::ALL
             .iter()
             .map(|provider| SessionProviderCoverage {
                 provider: provider.id().to_owned(),

@@ -444,7 +444,7 @@ async fn assert_daemon_crash_stage(
         "killed daemon must not acknowledge the interrupted request"
     );
 
-    let observation_db_path = tracedecay::sessions::user_sessions_db_path(&profile_root);
+    let observation_db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
     assert_eq!(
         observation_state_counts_at(&observation_db_path).await,
         if committed_before_kill {

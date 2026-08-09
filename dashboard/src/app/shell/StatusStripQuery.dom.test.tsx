@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { useQueryCancellation } from '../../data/query/activity.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { usePayload } from '../../data/query/usePayload.ts';
 import { QueryActivityStatus, StatusStrip } from './StatusStrip.tsx';
 
 vi.mock('../../data/sse/useEvents.tsx', () => ({
@@ -57,8 +57,8 @@ function mount(cancelable: boolean, onAbort: () => void) {
   );
 }
 
-function TrackedLegacyQuery() {
-  useLegacy(
+function TrackedPayloadQuery() {
+  usePayload(
     ['graph', 'search', 'needle'],
     '/api/plugins/graph/search?q=needle',
     z.object({
@@ -127,7 +127,7 @@ describe('status-strip query activity', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <TrackedLegacyQuery />
+        <TrackedPayloadQuery />
         <StatusStrip queryActivity={<QueryActivityStatus />} />
       </QueryClientProvider>,
     );

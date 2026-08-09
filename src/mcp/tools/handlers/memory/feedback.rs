@@ -11,7 +11,6 @@ use super::args::{fact_id, feedback_action};
 use super::fact_store::controlled_memory_application;
 use super::{
     config_error, memory_application_error, memory_operation_context, open_target_memory_db,
-    refresh_target_memory_digest,
 };
 
 pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
@@ -40,10 +39,9 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
             .map(ToOwned::to_owned),
         note,
     };
-    let settlement_cancellation = cancellation.clone();
     let memory = controlled_memory_application(&target_memory, cancellation)?;
     if memory
-        .get_fact_v1(request.fact_id)
+        .get_fact(request.fact_id)
         .await
         .map_err(memory_application_error)?
         .is_none()
@@ -51,18 +49,12 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         return Err(config_error(format!("fact {} not found", request.fact_id)));
     }
     let result = memory
-        .record_fact_feedback_v1(
+        .record_fact_feedback(
             request,
             memory_operation_context(&args, &target_memory, "feedback")?,
         )
         .await
         .map_err(memory_application_error)?;
-    let controlled_write_committed = settlement_cancellation
-        .as_ref()
-        .is_none_or(tracedecay_application::CancellationSignal::commit_started);
-    if controlled_write_committed && !target_memory.user_scope {
-        refresh_target_memory_digest(&memory, &target_memory).await;
-    }
     let value = json!({ "status": "recorded", "feedback": result });
     Ok(tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),

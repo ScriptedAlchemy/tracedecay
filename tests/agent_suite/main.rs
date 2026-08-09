@@ -16,7 +16,6 @@ mod claude_plugin_schema_test;
 mod cli_args_contract_test;
 mod managed_skill_archive_test;
 mod managed_skills_test;
-mod memory_digest_test;
 mod plugin_config_schema_test;
 mod plugin_manifest_schema_test;
 mod plugin_validation_support;

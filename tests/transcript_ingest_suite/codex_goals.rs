@@ -3,8 +3,8 @@
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
-use tracedecay::sessions::SessionProvider;
-use tracedecay::sessions::codex::CodexSource;
+use tracedecay_sessions::runtime::SessionProvider;
+use tracedecay_sessions::runtime::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 

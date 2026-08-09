@@ -567,12 +567,41 @@ impl CompositionKernel {
         }
     }
 
+    pub(crate) fn ranking_revision(&self) -> &ComponentRevision {
+        &self.ranking_revision
+    }
+
     pub fn compose(
         &self,
         input: &FusionStageInput,
         policy: &tracedecay_domain::DiversityPolicy,
     ) -> Result<CompositionOutputV1, FusionStageError> {
-        let admitted = admitted_lanes(input)?;
+        self.compose_required(
+            input,
+            policy,
+            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
+        )
+    }
+
+    /// Compose one explicitly selected lane under a projection of an already
+    /// accepted profile. This is used by exact owning-source expansion, where
+    /// claiming that unrelated lanes executed would be false.
+    pub(crate) fn compose_selected_lane(
+        &self,
+        input: &FusionStageInput,
+        policy: &tracedecay_domain::DiversityPolicy,
+        lane: RetrieverKind,
+    ) -> Result<CompositionOutputV1, FusionStageError> {
+        self.compose_required(input, policy, &[lane])
+    }
+
+    fn compose_required(
+        &self,
+        input: &FusionStageInput,
+        policy: &tracedecay_domain::DiversityPolicy,
+        required_lanes: &[RetrieverKind],
+    ) -> Result<CompositionOutputV1, FusionStageError> {
+        let admitted = admitted_lanes(input, required_lanes)?;
         let (compact, dedupe_decisions) = self
             .dedupe
             .collapse_compact_candidates(admitted.candidates)
@@ -747,7 +776,10 @@ struct AdmittedLanes {
     lane_checkpoints: Vec<RetrieverContinuation>,
 }
 
-fn admitted_lanes(input: &FusionStageInput) -> Result<AdmittedLanes, FusionStageError> {
+fn admitted_lanes(
+    input: &FusionStageInput,
+    required_lanes: &[RetrieverKind],
+) -> Result<AdmittedLanes, FusionStageError> {
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
     let mut internal_lane_outcomes = BTreeMap::new();
@@ -792,14 +824,14 @@ fn admitted_lanes(input: &FusionStageInput) -> Result<AdmittedLanes, FusionStage
             | RetrieverOutcome::BudgetExceeded(_)
             | RetrieverOutcome::TimedOut(_)
             | RetrieverOutcome::Cancelled => {
-                if matches!(lane, RetrieverKind::ExactLiteral | RetrieverKind::Lexical) {
+                if required_lanes.contains(&lane) {
                     return Err(FusionStageError::RequiredLaneUnavailable);
                 }
             }
         }
     }
 
-    if !seen.contains(&RetrieverKind::ExactLiteral) || !seen.contains(&RetrieverKind::Lexical) {
+    if required_lanes.iter().any(|lane| !seen.contains(lane)) {
         return Err(FusionStageError::RequiredLaneUnavailable);
     }
     if input
@@ -1014,7 +1046,7 @@ impl DeterministicFixedPointFusion {
 
 impl DeterministicFusionStage for DeterministicFixedPointFusion {
     fn fuse(&self, input: &FusionStageInput) -> Result<Vec<FusedCandidate>, FusionStageError> {
-        let admitted = admitted_lanes(input)?;
+        let admitted = admitted_lanes(input, &[])?;
         self.fuse_compact(&input.profile, admitted.candidates)
     }
 

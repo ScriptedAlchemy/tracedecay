@@ -16,11 +16,11 @@ use super::error::MemoryApplicationError;
 /// Immutable daemon-authorized evidence record suitable for materialization in
 /// a fact shard. It deliberately reuses the canonical retrieval-anchor model.
 #[derive(Clone, Debug)]
-pub struct ResolvedEvidenceAnchorV1 {
+pub struct ResolvedEvidenceAnchor {
     record: RetrievalAnchorRecordV2,
 }
 
-impl ResolvedEvidenceAnchorV1 {
+impl ResolvedEvidenceAnchor {
     pub fn new(record: RetrievalAnchorRecordV2) -> Result<Self, DomainError> {
         record.validate()?;
         Ok(Self { record })
@@ -58,7 +58,7 @@ pub trait EvidenceAnchorResolver: Send + Sync {
         &self,
         owner: FactOwnerV1,
         anchor_id: RetrievalAnchorId,
-    ) -> impl Future<Output = Result<ResolvedEvidenceAnchorV1, EvidenceAnchorResolutionError>> + Send;
+    ) -> impl Future<Output = Result<ResolvedEvidenceAnchor, EvidenceAnchorResolutionError>> + Send;
 }
 
 impl<A: FactStore> MemoryApplication<A> {

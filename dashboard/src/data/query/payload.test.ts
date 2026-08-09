@@ -1,5 +1,5 @@
 /**
- * The legacy transport's refusal readings.
+ * The typed payload transport's refusal readings.
  *
  * The failure this file exists to catch is a refused write that reads as
  * something else: a generic `error` the reader can only retry, or — worse — a
@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { fetchLegacy, fetchLegacyWrite } from './legacy.ts';
+import { fetchPayload, fetchPayloadWrite } from './payload.ts';
 import { READ_ONLY_SCOPE_STATUS } from '../scope/store.ts';
 
 const PayloadSchema = z.object({ status: z.string() });
@@ -46,10 +46,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('fetchLegacyWrite', () => {
+describe('fetchPayloadWrite', () => {
   it('reports the gateway read-only refusal as its own outcome, carrying the daemon reason', async () => {
     stub(405, readOnlyBody);
-    const result = await fetchLegacyWrite('/api/projects/proj_b/automation/scheduler/pause', PayloadSchema, {
+    const result = await fetchPayloadWrite('/api/projects/proj_b/automation/scheduler/pause', PayloadSchema, {
       method: 'POST',
     });
     expect(result.outcome).toBe('read_only_scope');
@@ -70,7 +70,7 @@ describe('fetchLegacyWrite', () => {
     ['null', null],
   ])('reports a 405 with %s as a plain error, never a read-only scope', async (_name, body) => {
     stub(405, body);
-    const result = await fetchLegacyWrite('/api/projects/proj_b/x', PayloadSchema, {
+    const result = await fetchPayloadWrite('/api/projects/proj_b/x', PayloadSchema, {
       method: 'POST',
     });
     expect(result.outcome).toBe('error');
@@ -80,7 +80,7 @@ describe('fetchLegacyWrite', () => {
 
   it('reports a 405 whose body is not JSON at all as a plain error', async () => {
     stub(405, null, { invalidJson: true });
-    const result = await fetchLegacyWrite('/api/projects/proj_b/x', PayloadSchema, {
+    const result = await fetchPayloadWrite('/api/projects/proj_b/x', PayloadSchema, {
       method: 'POST',
     });
     expect(result).toEqual({ outcome: 'error', detail: 'HTTP 405' });
@@ -88,37 +88,37 @@ describe('fetchLegacyWrite', () => {
 
   it('keeps the authorization refusals distinct from the scope refusal', async () => {
     stub(401, {});
-    expect((await fetchLegacyWrite('/api/x', PayloadSchema, { method: 'POST' })).outcome).toBe(
+    expect((await fetchPayloadWrite('/api/x', PayloadSchema, { method: 'POST' })).outcome).toBe(
       'unauthorized',
     );
     stub(403, {});
-    expect((await fetchLegacyWrite('/api/x', PayloadSchema, { method: 'POST' })).outcome).toBe(
+    expect((await fetchPayloadWrite('/api/x', PayloadSchema, { method: 'POST' })).outcome).toBe(
       'denied',
     );
   });
 
   it('still decodes a successful write body', async () => {
     stub(200, { status: 'paused' });
-    const result = await fetchLegacyWrite('/api/x', PayloadSchema, { method: 'POST' });
+    const result = await fetchPayloadWrite('/api/x', PayloadSchema, { method: 'POST' });
     expect(result).toEqual({ outcome: 'ok', data: { status: 'paused' } });
   });
 });
 
-describe('fetchLegacy', () => {
+describe('fetchPayload', () => {
   it('folds the refusal into error carrying the daemon sentence, not a bare status', async () => {
     // The read result type has no arm for a refusal a read cannot provoke, so
     // a mutating caller on this helper gets `error`. It carries the daemon's
     // own sentence rather than `HTTP 405`, so even the folded reading says
     // what happened — but a control that needs to disable itself has to use
-    // `fetchLegacyWrite` to get the outcome.
+    // `fetchPayloadWrite` to get the outcome.
     stub(405, readOnlyBody);
-    const result = await fetchLegacy('/api/projects/proj_b/x', PayloadSchema, { method: 'POST' });
+    const result = await fetchPayload('/api/projects/proj_b/x', PayloadSchema, { method: 'POST' });
     expect(result).toEqual({ outcome: 'error', detail: REFUSAL_DETAIL });
   });
 
   it('reports an undecodable success body as unsupported schema, never as empty', async () => {
     stub(200, null, { invalidJson: true });
-    expect((await fetchLegacy('/api/x', PayloadSchema)).outcome).toBe('unsupported_schema');
+    expect((await fetchPayload('/api/x', PayloadSchema)).outcome).toBe('unsupported_schema');
   });
 
   it('reports a body that decoded to null as unsupported schema', async () => {
@@ -126,7 +126,7 @@ describe('fetchLegacy', () => {
     // for "not JSON": a literal `null` decodes fine and must still fail the
     // schema rather than being mistaken for a decode failure or for data.
     stub(200, null);
-    expect((await fetchLegacy('/api/x', PayloadSchema)).outcome).toBe('unsupported_schema');
+    expect((await fetchPayload('/api/x', PayloadSchema)).outcome).toBe('unsupported_schema');
   });
 
   it('reports a network failure as offline', async () => {
@@ -136,7 +136,7 @@ describe('fetchLegacy', () => {
         throw new TypeError('network down');
       }),
     );
-    expect((await fetchLegacy('/api/x', PayloadSchema)).outcome).toBe('offline');
+    expect((await fetchPayload('/api/x', PayloadSchema)).outcome).toBe('offline');
   });
 });
 
@@ -152,7 +152,7 @@ describe('fetchLegacy', () => {
  * Stubbed at those statuses on purpose. A 200 fixture would exercise a shape
  * the daemon never sends and prove nothing about the path that was broken.
  */
-describe('fetchLegacy on the canonical failure statuses', () => {
+describe('fetchPayload on the canonical failure statuses', () => {
   const RegistrySchema = z.object({
     status: z.string(),
     error: z.string().nullable().optional(),
@@ -161,7 +161,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
 
   it('carries the 404 not_found body instead of reporting HTTP 404', async () => {
     stub(404, { status: 'not_found', error: 'no project registered with id proj_ghost', project: null });
-    expect(await fetchLegacy('/api/projects/proj_ghost', RegistrySchema)).toEqual({
+    expect(await fetchPayload('/api/projects/proj_ghost', RegistrySchema)).toEqual({
       outcome: 'unavailable',
       httpStatus: 404,
       status: 'not_found',
@@ -174,7 +174,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
     'carries the 503 %s body and its reason',
     async (status) => {
       stub(503, { status, error: 'registry database could not be opened' });
-      const result = await fetchLegacy('/api/projects', RegistrySchema);
+      const result = await fetchPayload('/api/projects', RegistrySchema);
       expect(result).toMatchObject({
         outcome: 'unavailable',
         httpStatus: 503,
@@ -186,7 +186,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
 
   it('reports no reason rather than an empty one when the payload sent none', async () => {
     stub(503, { status: 'registry_unavailable', error: '' });
-    expect(await fetchLegacy('/api/projects', RegistrySchema)).toMatchObject({
+    expect(await fetchPayload('/api/projects', RegistrySchema)).toMatchObject({
       outcome: 'unavailable',
       reason: null,
     });
@@ -197,7 +197,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
     // proxy. Nothing named a condition, so nothing is reported as one — the
     // open record schemas here would otherwise accept any object at all.
     stub(404, { detail: 'no route' });
-    expect(await fetchLegacy('/api/x', z.record(z.string(), z.unknown()))).toEqual({
+    expect(await fetchPayload('/api/x', z.record(z.string(), z.unknown()))).toEqual({
       outcome: 'error',
       detail: 'HTTP 404',
     });
@@ -205,7 +205,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
 
   it('leaves an unparseable 503 body as a plain error', async () => {
     stub(503, null, { invalidJson: true });
-    expect(await fetchLegacy('/api/projects', RegistrySchema)).toEqual({
+    expect(await fetchPayload('/api/projects', RegistrySchema)).toEqual({
       outcome: 'error',
       detail: 'HTTP 503',
     });
@@ -216,23 +216,23 @@ describe('fetchLegacy on the canonical failure statuses', () => {
     // this build's contract. Reporting it as a typed payload would be a claim
     // about a shape that failed to validate.
     stub(503, { status: 'registry_unavailable', error: 7 });
-    expect(await fetchLegacy('/api/projects', z.object({ error: z.string() }))).toEqual({
+    expect(await fetchPayload('/api/projects', z.object({ error: z.string() }))).toEqual({
       outcome: 'unsupported_schema',
     });
   });
 
   it('still reports 401 and 403 as refusals rather than conditions', async () => {
     stub(401, { status: 'not_found' });
-    expect((await fetchLegacy('/api/projects', RegistrySchema)).outcome).toBe('unauthorized');
+    expect((await fetchPayload('/api/projects', RegistrySchema)).outcome).toBe('unauthorized');
     stub(403, { status: 'not_found' });
-    expect((await fetchLegacy('/api/projects', RegistrySchema)).outcome).toBe('denied');
+    expect((await fetchPayload('/api/projects', RegistrySchema)).outcome).toBe('denied');
   });
 
   it('still reports a 500 read failure as an error', async () => {
     // `graph_api.rs` answers 500 `read_failed`, which is not one of the two
     // admitted statuses. Unknown error behaviour is preserved.
     stub(500, { status: 'read_failed', error: 'failed to query counts' });
-    expect(await fetchLegacy('/api/plugins/graph/overview', RegistrySchema)).toEqual({
+    expect(await fetchPayload('/api/plugins/graph/overview', RegistrySchema)).toEqual({
       outcome: 'error',
       detail: 'HTTP 500',
     });
@@ -249,7 +249,7 @@ describe('fetchLegacy on the canonical failure statuses', () => {
  * dashboard cancelled — and cache it against the abandoned scope, so returning
  * to that project would show a failure nobody ever received.
  */
-describe('fetchLegacy under cancellation', () => {
+describe('fetchPayload under cancellation', () => {
   /** Rejects only once aborted, like a real request in flight. */
   function stubPendingUntilAbort(): void {
     vi.stubGlobal(
@@ -270,7 +270,7 @@ describe('fetchLegacy under cancellation', () => {
   it('rethrows an abort rather than reporting the daemon offline', async () => {
     stubPendingUntilAbort();
     const controller = new AbortController();
-    const pending = fetchLegacy('/api/projects/proj_a', PayloadSchema, {
+    const pending = fetchPayload('/api/projects/proj_a', PayloadSchema, {
       signal: controller.signal,
     });
     controller.abort();
@@ -281,7 +281,7 @@ describe('fetchLegacy under cancellation', () => {
   it('passes the caller signal to fetch, so an abandoned read is really cancelled', async () => {
     stubPendingUntilAbort();
     const controller = new AbortController();
-    const pending = fetchLegacy('/api/projects/proj_a', PayloadSchema, {
+    const pending = fetchPayload('/api/projects/proj_a', PayloadSchema, {
       signal: controller.signal,
     });
     const call = vi.mocked(fetch).mock.calls[0];
@@ -300,7 +300,7 @@ describe('fetchLegacy under cancellation', () => {
       }),
     );
     const controller = new AbortController();
-    const result = await fetchLegacy('/api/x', PayloadSchema, { signal: controller.signal });
+    const result = await fetchPayload('/api/x', PayloadSchema, { signal: controller.signal });
     expect(result.outcome).toBe('offline');
   });
 });

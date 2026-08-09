@@ -12,11 +12,12 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
-use tracedecay_domain::FactOwnerV1;
+use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_domain::{ActorId, FactOwnerV1};
 #[cfg(test)]
 use tracedecay_domain::{
-    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
-    UtcMicros, WorktreeId,
+    ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, UtcMicros,
+    WorktreeId,
 };
 #[cfg(test)]
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -46,6 +47,7 @@ use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::ports::session_store::AutomationSessionStore;
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_policy::CurationApplyAuthorityV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 #[cfg(test)]
 use tracedecay_temporal_query::TemporalKernelResult;
@@ -141,6 +143,43 @@ pub(super) async fn project_automation_sessions(
         .await
 }
 
+fn project_curation_authority(
+    cg: &TraceDecay,
+    actor: &'static str,
+    configuration_revision_id: &ConfigurationRevisionId,
+) -> Result<CurationApplyAuthorityV1> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner()? else {
+        return Err(TraceDecayError::Config {
+            message: "project curation requires authoritative project scope".to_owned(),
+        });
+    };
+    let actor_id = ActorId::new(actor).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid curation actor identity: {error}"),
+    })?;
+    Ok(CurationApplyAuthorityV1 {
+        actor_id,
+        project_id: Some(project_id),
+        profile_id: cg.profile_id().clone(),
+        configuration_revision_id: configuration_revision_id.clone(),
+    })
+}
+
+fn profile_curation_authority(
+    runtime: &dyn ProfileRuntime,
+    actor: &'static str,
+    configuration_revision_id: &ConfigurationRevisionId,
+) -> Result<CurationApplyAuthorityV1> {
+    let actor_id = ActorId::new(actor).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid curation actor identity: {error}"),
+    })?;
+    Ok(CurationApplyAuthorityV1 {
+        actor_id,
+        project_id: None,
+        profile_id: runtime.profile_id().clone(),
+        configuration_revision_id: configuration_revision_id.clone(),
+    })
+}
+
 /// One callable projectless post-session review suitable for host hooks.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserSessionAutomationOptions {
@@ -163,6 +202,7 @@ pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: UserSessionAutomationOptions,
 ) -> Result<UserSessionAutomationRun> {
@@ -171,6 +211,7 @@ pub async fn run_user_session_automation_with_backend(
         profile_root,
         session_registry,
         config,
+        configuration_revision_id,
         backend,
         retrieval.as_ref(),
         options,
@@ -182,6 +223,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: UserSessionAutomationOptions,
@@ -190,6 +232,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         profile_root,
         Arc::clone(&session_registry),
         config,
+        configuration_revision_id,
         backend,
         retrieval,
         options.session_reflector,
@@ -199,6 +242,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         profile_root,
         Arc::clone(&session_registry),
         config,
+        configuration_revision_id,
         backend,
         options.memory_curator,
     )
@@ -207,6 +251,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
         profile_root,
         session_registry,
         config,
+        configuration_revision_id,
         backend,
         retrieval,
         options.skill_writer,
@@ -222,21 +267,32 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
 pub async fn run_skill_writer_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
     let retrieval = production_project_automation_retrieval(cg).await;
-    run_skill_writer_with_backend_and_retrieval(cg, config, backend, retrieval.as_ref(), options)
-        .await
+    run_skill_writer_with_backend_and_retrieval(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval.as_ref(),
+        options,
+    )
+    .await
 }
 
 pub async fn run_skill_writer_with_backend_and_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
+    let authority =
+        project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
     let sessions_db = project_automation_sessions(cg).await?;
     run_skill_writer_for_store(
         SkillWriterStoreRuntime {
@@ -244,6 +300,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
             sessions_db,
             analytics_project_root: Some(cg.project_root()),
             analytics_db: Some(cg.profile_database().as_ref()),
+            authority,
         },
         retrieval,
         config,
@@ -257,18 +314,25 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     mut options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
     options.profile_root = Some(profile_root.to_path_buf());
     let sessions_db = session_registry.profile_sessions().await?;
+    let authority = profile_curation_authority(
+        session_registry.as_ref(),
+        "automation:skill-writer",
+        configuration_revision_id,
+    )?;
     run_skill_writer_for_store(
         SkillWriterStoreRuntime {
             dashboard_root: user_automation_root(profile_root),
             sessions_db,
             analytics_project_root: None,
             analytics_db: None,
+            authority,
         },
         retrieval,
         config,
@@ -283,6 +347,7 @@ struct SkillWriterStoreRuntime<'a> {
     sessions_db: Arc<RegisteredGlobalDb>,
     analytics_project_root: Option<&'a Path>,
     analytics_db: Option<&'a RegisteredGlobalDb>,
+    authority: CurationApplyAuthorityV1,
 }
 
 async fn run_skill_writer_for_store(
@@ -297,6 +362,7 @@ async fn run_skill_writer_for_store(
         sessions_db,
         analytics_project_root,
         analytics_db,
+        authority,
     } = runtime;
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
@@ -481,6 +547,7 @@ async fn run_skill_writer_for_store(
         &profile_root,
         analytics_project_root,
         config,
+        &authority,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
@@ -528,6 +595,7 @@ async fn finalize_skill_writer_success(
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
     config: &AutomationConfig,
+    authority: &CurationApplyAuthorityV1,
     activation_policy: &'static str,
     output: ProposedAgentOutput<'_>,
     validation_repairs: &[Value],
@@ -541,7 +609,8 @@ async fn finalize_skill_writer_success(
         proposals,
     } = output;
     let run_id = finalizer.run_id();
-    let curation_decision = evaluate_skill_curation(config, evidence_hash.as_deref(), proposals)?;
+    let curation_decision =
+        evaluate_skill_curation(config, authority, evidence_hash.as_deref(), proposals)?;
     let proposal_outcome = validate_and_apply_skill_proposals(
         profile_root,
         project_root,
@@ -741,21 +810,39 @@ pub enum CombinedReviewDispatch {
 pub async fn run_combined_review_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
 ) -> Result<CombinedReviewDispatch> {
     let retrieval = production_project_automation_retrieval(cg).await;
-    run_combined_review_for_retrieval(cg, config, backend, retrieval.as_ref(), options).await
+    run_combined_review_for_retrieval(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval.as_ref(),
+        options,
+    )
+    .await
 }
 
 pub async fn run_combined_review_with_backend_and_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
 ) -> Result<CombinedReviewDispatch> {
-    run_combined_review_for_retrieval(cg, config, backend, retrieval, options).await
+    run_combined_review_for_retrieval(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        options,
+    )
+    .await
 }
 
 /// Gate one combined-review sub-task and hand its scheduler lock back to the
@@ -783,10 +870,18 @@ async fn acquire_combined_task_lock(
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: CombinedReviewAutomationOptions,
 ) -> Result<CombinedReviewDispatch> {
+    let reflector_authority = project_curation_authority(
+        cg,
+        "automation:session-reflector",
+        configuration_revision_id,
+    )?;
+    let skill_authority =
+        project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
     if !config.combine_due_tasks {
         return Ok(CombinedReviewDispatch::NotCombined {
             reason: "combined_mode_disabled",
@@ -1075,6 +1170,7 @@ async fn run_combined_review_for_retrieval(
     let (reflector_report, reflector_record) = match finalize_session_reflector_success(
         &memory,
         config,
+        &reflector_authority,
         &reflector_finalizer,
         ProposedAgentOutput {
             response: &response,
@@ -1127,6 +1223,7 @@ async fn run_combined_review_for_retrieval(
         &skill_bundle.profile_root,
         Some(cg.store_layout().project_root.as_path()),
         config,
+        &skill_authority,
         activation_policy,
         ProposedAgentOutput {
             response: &response,

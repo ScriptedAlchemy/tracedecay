@@ -2,33 +2,9 @@
 use super::*;
 
 #[cfg(unix)]
-use crate::automation::config::{
-    AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
+use tracedecay_agent_hosts::automation::config::{
+    AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
 };
-
-/// Caches a project server wired the way the daemon's own project-open path
-/// wires it: with the automation scheduler reconciler installed. Without the
-/// reconciler a cached owner answers every broadcast with `OwnerUnavailable`,
-/// so a reconcile fan-out looks successful while starting no scheduler.
-#[cfg(unix)]
-async fn cached_project_server_with_reconciler(
-    engine: &DaemonEngine,
-    cg: crate::tracedecay::TraceDecay,
-    key: ProjectServerKey,
-    project_path: PathBuf,
-    handshake: DaemonHandshake,
-) -> Arc<crate::mcp::McpServer> {
-    let reconciler = engine.automation_scheduler_reconciler(
-        Arc::new(tokio::sync::Mutex::new(key)),
-        Arc::new(tokio::sync::Mutex::new(project_path)),
-        handshake,
-    );
-    crate::mcp::McpServer::new_with_context(
-        crate::mcp::server::McpServerConstructionContext::direct(cg, None)
-            .with_automation_scheduler_reconciler(reconciler),
-    )
-    .await
-}
 
 #[cfg(unix)]
 struct AutomationExitBarrierRelease(Arc<AutomationSchedulerExitBarrier>);
@@ -43,13 +19,15 @@ impl Drop for AutomationExitBarrierRelease {
 #[cfg(unix)]
 #[test]
 fn automation_scheduler_starts_when_any_task_has_interval() {
-    use crate::automation::config::{
+    use tracedecay_agent_hosts::automation::config::{
         AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
     };
 
     let mut config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
+        combine_due_tasks: false,
+        tasks: Default::default(),
         ..AutomationConfig::default()
     };
     config.tasks.memory_curator = AutomationTaskConfig {
@@ -92,7 +70,7 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
     assert!(super::super::automation_scheduler_configured(&config));
 
     config.tasks.memory_curator.schedule = Some("every:5m".to_string());
-    config.backend = AutomationBackend::ExternalCommand;
+    config.backend = AutomationBackend::Disabled;
     assert!(!super::super::automation_scheduler_configured(&config));
 
     config.backend = AutomationBackend::CodexAppServer;
@@ -106,49 +84,21 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
 
 #[cfg(unix)]
 #[test]
-fn automation_scheduler_loads_client_profile_config() {
-    let profile = TempDir::new().expect("profile temp dir");
-    std::fs::write(
-        profile.path().join("config.toml"),
-        "[automation]\n\
-             enabled = true\n\
-             backend = \"codex_app_server\"\n\
-             \n\
-             [automation.tasks.memory_curator]\n\
-             enabled = true\n\
-             schedule = \"every:5m\"\n",
-    )
-    .expect("write config");
-    let client_identity = test_client_identity_for(profile.path().to_path_buf());
-
-    let config = super::super::user_config_for_client(&client_identity);
-
-    assert!(config.automation.enabled);
+fn fresh_v2_configuration_is_scheduler_work() {
     assert!(super::super::automation_scheduler_configured(
-        &config.automation
+        &tracedecay_agent_hosts::automation::config::AutomationConfig::default()
     ));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
-    use crate::automation::config::{AutomationConfigPatch, save_project_config};
-
+async fn automation_scheduler_tick_secs_reads_pinned_project_configuration() {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let layout = initialize_test_project(&project, &client_identity).await;
-    save_project_config(
-        &layout.dashboard_root,
-        &AutomationConfigPatch {
-            scheduler_tick_secs: Some(17),
-            ..AutomationConfigPatch::default()
-        },
-    )
-    .await
-    .expect("save automation config");
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -159,13 +109,16 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
         &handshake.client_identity.profile_root,
         "scheduler-tick-config-test",
     );
-    let cg = super::super::open_project_for_handshake(
-        &project,
+    let server = apply_project_automation_patch_via_surface(
+        &engine,
         &handshake,
-        &engine.store_administration,
+        AutomationConfigPatch {
+            scheduler_tick_secs: Some(17),
+            ..AutomationConfigPatch::default()
+        },
     )
-    .await
-    .expect("open scheduler tick fixture through daemon authority");
+    .await;
+    let cg = server.cg().await;
 
     let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
         &cg, &handshake,
@@ -177,7 +130,7 @@ async fn automation_scheduler_tick_secs_loads_dashboard_project_config() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
+async fn fresh_v2_project_starts_the_required_automation_scheduler() {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
@@ -192,7 +145,7 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
     let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
     let _database_scope = enter_test_daemon_database_scope(
         &handshake.client_identity.profile_root,
-        "scheduler-unconfigured-test",
+        "scheduler-fresh-default-test",
     );
     let cg = super::super::open_project_for_handshake(
         &project,
@@ -213,7 +166,9 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         .automation_schedulers()
         .lock()
         .await;
-    assert!(!schedulers.contains_key(&key));
+    assert!(schedulers.contains_key(&key));
+    drop(schedulers);
+    engine.shutdown_all().await;
 }
 
 #[cfg(unix)]
@@ -291,21 +246,10 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
         &handshake.client_identity.profile_root,
         "scheduler-stale-owner-test",
     );
-    let project_graph = super::super::open_project_for_handshake(
-        &project,
+    let server = apply_project_automation_patch_via_surface(
+        &engine,
         &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open stale-owner fixture through daemon authority");
-    let server = crate::mcp::McpServer::new_with_global_db(project_graph, None, None).await;
-    let cg = server.cg().await;
-    let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
-        .expect("stale owner key");
-
-    save_project_config(
-        &cg.store_layout().dashboard_root,
-        &AutomationConfigPatch {
+        AutomationConfigPatch {
             enabled: Some(true),
             backend: Some(AutomationBackend::CodexAppServer),
             memory_curator: AutomationTaskPatch {
@@ -316,14 +260,15 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
             ..AutomationConfigPatch::default()
         },
     )
-    .await
-    .expect("save automation config");
+    .await;
+    let cg = server.cg().await;
+    let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
+        .expect("stale owner key");
 
     let mut current_key = stale_key.clone();
     current_key.scope_prefix = Some("rekeyed".to_string());
     {
         let mut owners = engine.store_administration.project_servers().lock().await;
-        owners.insert(stale_key.clone(), server);
         assert!(owners.rekey(&stale_key, &current_key));
     }
 
@@ -353,8 +298,7 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
     let client_identity = test_client_identity_for(profile_root);
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let layout = initialize_test_project(&project, &client_identity).await;
-    let dashboard_root = layout.dashboard_root;
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -365,22 +309,9 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
         &handshake.client_identity.profile_root,
         "scheduler-reenable-test",
     );
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open scheduler re-enable fixture through daemon authority");
+    let server = save_scheduled_automation(&engine, &handshake, false).await;
+    let cg = server.cg().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(key.clone(), server);
-    save_scheduled_automation(&dashboard_root, false).await;
     let finished = tokio::spawn(async {});
     wait_for_finished_task(
         &finished,
@@ -396,7 +327,7 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
         .await
         .insert(key.clone(), test_automation_scheduler_handle(finished));
 
-    save_scheduled_automation(&dashboard_root, true).await;
+    save_scheduled_automation(&engine, &handshake, true).await;
     engine
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
@@ -429,9 +360,7 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     let client_identity = test_client_identity_for(profile_root);
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let layout = initialize_test_project(&project, &client_identity).await;
-    let dashboard_root = layout.dashboard_root;
-    save_scheduled_automation(&dashboard_root, true).await;
+    initialize_test_project(&project, &client_identity).await;
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "concurrent-reenable-test");
@@ -440,21 +369,9 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open concurrent re-enable fixture through daemon authority");
+    let server = save_scheduled_automation(&engine, &handshake, true).await;
+    let cg = server.cg().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(key.clone(), server);
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     let finished = tokio::spawn(async move {
         let _ = finished_tx.send(());
@@ -703,47 +620,14 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     };
     let engine = test_daemon_engine_for_profile(&profile_root);
     let _database_scope = enter_test_daemon_database_scope(&profile_root, "profile-reconcile-test");
-    let first_cg = super::super::open_project_for_handshake(
-        &first_project,
-        &first_handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open first cached project through daemon authority");
+    let first_server = save_scheduled_automation(&engine, &first_handshake, true).await;
+    let first_cg = first_server.cg().await;
     let first_key = ProjectServerKey::from_open_project(&first_cg, &first_handshake)
         .expect("first cached owner key");
-    let first_server = cached_project_server_with_reconciler(
-        &engine,
-        first_cg,
-        first_key.clone(),
-        first_project.clone(),
-        first_handshake.clone(),
-    )
-    .await;
-    let first_cg = first_server.cg().await;
-    let second_cg = super::super::open_project_for_handshake(
-        &second_project,
-        &second_handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open second cached project through daemon authority");
+    let second_server = save_scheduled_automation(&engine, &second_handshake, true).await;
+    let second_cg = second_server.cg().await;
     let second_key = ProjectServerKey::from_open_project(&second_cg, &second_handshake)
         .expect("second cached owner key");
-    let second_server = cached_project_server_with_reconciler(
-        &engine,
-        second_cg,
-        second_key.clone(),
-        second_project.clone(),
-        second_handshake.clone(),
-    )
-    .await;
-    let second_cg = second_server.cg().await;
-    {
-        let mut owners = engine.store_administration.project_servers().lock().await;
-        owners.insert(first_key.clone(), first_server);
-        owners.insert(second_key.clone(), second_server);
-    }
     engine
         .activate_automation_scheduler_for_open_project(
             first_key,
@@ -774,18 +658,6 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     let opens_before = engine
         .project_open_attempts
         .load(std::sync::atomic::Ordering::Relaxed);
-
-    let mut user_config = crate::user_config::UserConfig::default();
-    user_config.automation = crate::automation::config::effective_config(
-        &user_config.automation,
-        Some(&scheduled_automation_patch(true)),
-    )
-    .expect("effective global automation config");
-    std::fs::write(
-        profile_root.join("config.toml"),
-        toml::to_string_pretty(&user_config).expect("serialize global config"),
-    )
-    .expect("write global config");
 
     let params = json!({
         "name": "tracedecay_admin_project",
@@ -860,8 +732,8 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
 #[cfg(unix)]
 #[tokio::test]
 async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() {
-    use crate::automation::config::{
-        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
+    use tracedecay_agent_hosts::automation::config::{
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };
 
     let dir = TempDir::new().expect("temp dir");
@@ -921,9 +793,10 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
             .contains_key(&key)
     );
 
-    save_project_config(
-        &cg.store_layout().dashboard_root,
-        &AutomationConfigPatch {
+    apply_project_automation_patch_via_surface(
+        &engine,
+        &handshake,
+        AutomationConfigPatch {
             enabled: Some(true),
             backend: Some(AutomationBackend::CodexAppServer),
             memory_curator: AutomationTaskPatch {
@@ -934,8 +807,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
             ..AutomationConfigPatch::default()
         },
     )
-    .await
-    .expect("save automation config");
+    .await;
 
     let finished = tokio::spawn(async {});
     wait_for_finished_task(
@@ -1008,11 +880,13 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
 #[cfg(unix)]
 #[tokio::test]
 async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exits() {
-    use crate::automation::config::{
-        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
-    };
-    use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
+    use tracedecay_agent_hosts::automation::config::{
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+    };
+    use tracedecay_agent_hosts::automation::scheduler::{
+        AutomationSchedulerControl, save_scheduler_control,
+    };
 
     let dir = TempDir::new().expect("temp dir");
     let _codex_bin = isolate_codex_app_server_binary(dir.path());
@@ -1032,15 +906,6 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         },
         ..AutomationConfigPatch::default()
     };
-    save_project_config(&dashboard_root, &scheduled)
-        .await
-        .expect("enable automation");
-    save_scheduler_control(
-        &dashboard_root,
-        &AutomationSchedulerControl { paused: true },
-    )
-    .await
-    .expect("pause scheduler work");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -1051,21 +916,16 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         &handshake.client_identity.profile_root,
         "scheduler-exit-reconcile-test",
     );
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
+    let server =
+        apply_project_automation_patch_via_surface(&engine, &handshake, scheduled.clone()).await;
+    let cg = server.cg().await;
+    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    save_scheduler_control(
+        &dashboard_root,
+        &AutomationSchedulerControl { paused: true },
     )
     .await
-    .expect("open scheduler exit fixture through daemon authority");
-    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(key.clone(), server);
+    .expect("pause scheduler work");
     let barrier = Arc::new(AutomationSchedulerExitBarrier::new());
     let barrier_release = AutomationExitBarrierRelease(Arc::clone(&barrier));
     *engine.automation_scheduler_exit_barrier.lock().await = Some(Arc::clone(&barrier));
@@ -1096,15 +956,15 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     .await
     .expect("scheduler start timed out");
 
-    save_project_config(
-        &dashboard_root,
-        &AutomationConfigPatch {
+    apply_project_automation_patch_via_surface(
+        &engine,
+        &handshake,
+        AutomationConfigPatch {
             enabled: Some(false),
             ..AutomationConfigPatch::default()
         },
     )
-    .await
-    .expect("disable automation");
+    .await;
     let wake = engine
         .store_administration
         .automation_schedulers()
@@ -1122,9 +982,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     .await
     .expect("scheduler did not reach disabled-read barrier");
 
-    save_project_config(&dashboard_root, &scheduled)
-        .await
-        .expect("re-enable automation");
+    apply_project_automation_patch_via_surface(&engine, &handshake, scheduled).await;
     let reconcile = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         engine.ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone()),
@@ -1169,11 +1027,13 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
 #[cfg(unix)]
 #[tokio::test]
 async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
-    use crate::automation::config::{
-        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
+    use tracedecay_agent_hosts::automation::config::{
+        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
     };
-    use crate::automation::run_ledger::load_run_records;
-    use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
+    use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
+    use tracedecay_agent_hosts::automation::scheduler::{
+        AutomationSchedulerControl, save_scheduler_control,
+    };
 
     let dir = TempDir::new().expect("temp dir");
     let _codex_bin = isolate_codex_app_server_binary(dir.path());
@@ -1183,27 +1043,6 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
     let layout = initialize_test_project(&project, &client_identity).await;
     let dashboard_root = layout.dashboard_root;
-    save_project_config(
-        &dashboard_root,
-        &AutomationConfigPatch {
-            enabled: Some(true),
-            backend: Some(AutomationBackend::CodexAppServer),
-            memory_curator: AutomationTaskPatch {
-                enabled: Some(true),
-                schedule: Some(Some("every:1m".to_string())),
-                ..AutomationTaskPatch::default()
-            },
-            ..AutomationConfigPatch::default()
-        },
-    )
-    .await
-    .expect("save automation config");
-    save_scheduler_control(
-        &dashboard_root,
-        &AutomationSchedulerControl { paused: true },
-    )
-    .await
-    .expect("save paused scheduler control");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -1214,13 +1053,28 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
         &handshake.client_identity.profile_root,
         "paused-scheduler-tick-test",
     );
-    let cg = super::super::open_project_for_handshake(
-        &project,
+    let server = apply_project_automation_patch_via_surface(
+        &engine,
         &handshake,
-        &engine.store_administration,
+        AutomationConfigPatch {
+            enabled: Some(true),
+            backend: Some(AutomationBackend::CodexAppServer),
+            memory_curator: AutomationTaskPatch {
+                enabled: Some(true),
+                schedule: Some(Some("every:1m".to_string())),
+                ..AutomationTaskPatch::default()
+            },
+            ..AutomationConfigPatch::default()
+        },
+    )
+    .await;
+    let cg = server.cg().await;
+    save_scheduler_control(
+        &dashboard_root,
+        &AutomationSchedulerControl { paused: true },
     )
     .await
-    .expect("open paused scheduler fixture through daemon authority");
+    .expect("save paused scheduler control");
 
     Box::pin(super::super::run_automation_scheduler_tick(
         &project, &cg, &handshake, &engine,

@@ -59,6 +59,10 @@ pub(crate) fn release_process_allocator_memory() {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
+        self.identity.profile_id()
+    }
+
     pub(crate) fn runtime_telemetry(
         &self,
     ) -> crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection {
@@ -117,6 +121,10 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
+    fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
+        self.identity.profile_id()
+    }
+
     fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
         Box::pin(DaemonSessionRuntimeRegistryV1::profile_sessions(self))
     }

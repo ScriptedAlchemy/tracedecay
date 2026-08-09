@@ -7,9 +7,6 @@ use crate::common::{MessageRecordBuilder, create_runtime, global_session, sample
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::automation::run_ledger::{
-    AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
-};
 use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::storage::{
@@ -19,6 +16,9 @@ use tracedecay::storage::{
     write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_agent_hosts::PRODUCT_VERSION;
+use tracedecay_agent_hosts::automation::run_ledger::{
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
+};
 use tracedecay_domain::ProjectId;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
@@ -879,8 +879,6 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
         "standalone",
         "--timeout-secs",
         "90",
-        "--export-memory-digest",
-        "false",
         "--memory-curator",
         "true",
         "--memory-curator-schedule",
@@ -915,7 +913,6 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
         serde_json::from_slice(&output.stdout).expect("project set should print JSON");
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
     assert_eq!(payload["effective"]["model_id"], "gpt-5.6-mini");
-    assert_eq!(payload["effective"]["export_memory_digest"], false);
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
     assert_eq!(
@@ -1874,7 +1871,7 @@ async fn gitignore_reads_effective_config_for_primary_and_linked_worktrees() {
 }
 
 #[tokio::test]
-async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable() {
+async fn automation_facts_list_reports_terminal_receipt_collection() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
@@ -1886,19 +1883,6 @@ async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
 
-    let graph_db =
-        rusqlite::Connection::open(profile_shard_root(home.path()).join("tracedecay.db"))
-            .expect("fixture graph database");
-    graph_db
-        .execute_batch(
-            "DROP TABLE IF EXISTS memory_v2_proposal_current;
-             DROP TABLE IF EXISTS memory_v2_proposals;
-             CREATE TABLE memory_v2_proposal_current (proposal_id TEXT PRIMARY KEY);
-             CREATE TABLE memory_v2_proposals (proposal_id TEXT PRIMARY KEY);",
-        )
-        .expect("install incompatible compatibility proposal bank fixture");
-    drop(graph_db);
-
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["automation", "facts", "list"]);
@@ -1906,19 +1890,16 @@ async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable
 
     assert!(
         output.status.success(),
-        "fact list should return typed unavailable evidence\nstdout:\n{}\nstderr:\n{}",
+        "fact list should return terminal automatic receipt evidence\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("fact list json");
-    assert_eq!(payload["availability"]["state"], "unavailable");
-    assert_eq!(
-        payload["availability"]["reason"],
-        "compatibility_proposal_authority_incompatible"
-    );
+    assert_eq!(payload["availability"]["state"], "available");
     assert_eq!(payload["count"], 0);
-    assert_eq!(payload["proposals"], serde_json::json!([]));
+    assert_eq!(payload["receipts"], serde_json::json!([]));
+    assert!(payload["next_after_apply_id"].is_null());
 }
 
 #[test]

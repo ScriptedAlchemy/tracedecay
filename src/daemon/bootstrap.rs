@@ -481,7 +481,8 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // coordinator owns every spawned shutdown task and applies one deadline to
     // each of them; awaiting its receipt keeps this fence active until those
     // owners have either joined or reported a typed timeout.
-    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+    let _codex_shutdown =
+        tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
     log_daemon_event(
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],

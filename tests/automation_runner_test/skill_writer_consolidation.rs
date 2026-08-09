@@ -22,7 +22,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             title: "Automation run review".to_string(),
             summary: "Review automation run ledgers before applying changes.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
                 "Check run ledger counts, rejected proposals, and validation evidence before applying automation changes."
                     .to_string(),
@@ -39,7 +39,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             title: "Automation run checks".to_string(),
             summary: "Review automation run ledgers and validation gates.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
                 "Check run ledger counts, rejected proposals, and validation gates before applying automation changes."
                     .to_string(),
@@ -56,7 +56,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             title: "Pinned deployment guide".to_string(),
             summary: "Deployment rollback runbook kept pinned by the user.".to_string(),
             category: "workflow".to_string(),
-            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            targets:
+                tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(),
             body_markdown: "Roll back with the canary checklist and notify the release channel."
                 .to_string(),
             support_files: Vec::new(),
@@ -65,7 +66,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     )
     .await
     .unwrap();
-    tracedecay::automation::managed_skills::set_managed_skill_pinned(
+    tracedecay_agent_hosts::automation::managed_skills::set_managed_skill_pinned(
         &profile_root,
         &pinned.metadata.id,
         true,

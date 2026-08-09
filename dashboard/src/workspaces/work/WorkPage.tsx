@@ -164,12 +164,9 @@ export function WorkPage() {
   const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
   const topology = useWorkTopology(projection === 'topology');
   const attemptReading = workAttemptReading(attempts.data);
-  // The work-product graph feeds all four projections beside the board and
-  // nothing on the board itself, so it is read when the camera is on one of
-  // them. One query key for all four: they draw different channels off the same
-  // graph version, and four reads of one version would be four chances for them
-  // to disagree.
-  const graph = useWorkGraphViews(projection !== 'board');
+  // Create needs the exact selection a current graph read authorized. The
+  // browser never reconstructs a scope while assembling its task draft.
+  const graph = useWorkGraphViews(true);
   const graphReading = workGraphReading(graph.data);
   const result = snapshot.data;
   const value = result?.outcome === 'value' ? result.value : undefined;
@@ -294,7 +291,7 @@ export function WorkPage() {
                 ) : (
                   <WorkCommands projection={selectedProjection} snapshot={value} />
                 )}
-                <WorkCreate />
+                <WorkCreate graph={graph.data} />
               </div>
             </>
           )}

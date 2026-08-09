@@ -8,7 +8,6 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
 };
-use crate::automation::memory_digest::refresh_memory_digest_after_memory_change;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
@@ -35,7 +34,6 @@ use registered_target::open_registered_project_memory_read_only;
 pub(super) use fact_store::handle_fact_store;
 pub(super) use feedback::handle_fact_feedback;
 pub(super) use status::handle_memory_status;
-pub(crate) use status::handle_user_memory_tool;
 
 #[cfg(test)]
 use serde_json::json;
@@ -148,32 +146,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Typed "operation exceeded deadline" problem for a bounded memory operation.
-///
-/// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
-/// stable `reason_code`, a `retryable` flag, and a human `detail`) so the MCP
-/// boundary surfaces a structured, retryable error rather than a transport
-/// hang. The deadline is a backstop, so retry is safe (writes are receipt
-/// idempotent).
-///
-/// The bound itself is applied once, centrally, at the retained memory dispatch
-/// (`dispatch_groups::dispatch_memory_operation`) off the admission-carried
-/// client deadline — mirroring the git dispatcher — so every memory operation
-/// (add/search/feedback/status) is covered uniformly rather than per handler.
-pub(super) fn memory_deadline_error(
-    operation: &str,
-    deadline: std::time::Duration,
-) -> TraceDecayError {
-    TraceDecayError::project_route(
-        "memory_operation_deadline_exceeded",
-        true,
-        format!(
-            "memory {operation} operation exceeded the {}s deadline",
-            deadline.as_secs()
-        ),
-    )
-}
-
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
@@ -195,7 +167,7 @@ fn memory_operation_context(
 ) -> Result<MemoryOperationContext> {
     if matches!(action, "search" | "probe" | "related" | "reason" | "list") {
         return match args.get("__mcp_request_id").and_then(Value::as_str) {
-            Some(request_id) => MemoryOperationContext::from_trusted_request_id(
+            Some(request_id) => MemoryOperationContext::from_request_id(
                 target_memory.owner(),
                 action,
                 request_id,
@@ -218,13 +190,6 @@ fn memory_operation_context(
     .map_err(memory_application_error)
 }
 
-async fn refresh_target_memory_digest(
-    memory: &MemoryApplication<DatabaseFactStore<'_>>,
-    target_memory: &TargetMemoryDb<'_>,
-) {
-    refresh_memory_digest_after_memory_change(memory, &target_memory.project_root).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,23 +197,6 @@ mod tests {
         FactStoreError, ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
         ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery,
     };
-
-    /// The deadline problem produced by the central memory dispatch bound
-    /// (see `dispatch_groups::dispatch_memory_operation`) must stay a stable,
-    /// retryable project-route problem naming the operation and its budget.
-    #[test]
-    fn memory_deadline_error_is_a_typed_retryable_problem() {
-        let err = memory_deadline_error("fact_store add", std::time::Duration::from_secs(30));
-        let (reason_code, retryable, detail) = err
-            .project_route_context()
-            .expect("an elapsed memory deadline must surface a typed project-route problem");
-        assert_eq!(reason_code, "memory_operation_deadline_exceeded");
-        assert!(retryable, "a deadline backstop is safe to retry");
-        assert!(
-            detail.contains("fact_store add") && detail.contains("deadline"),
-            "detail must name the operation and the deadline: {detail}"
-        );
-    }
 
     fn cursor_fact(content: &str) -> AddFactRequest {
         AddFactRequest {
@@ -378,7 +326,7 @@ mod tests {
     async fn fact_count(target: &TargetMemoryDb<'_>) -> usize {
         memory_application(target)
             .unwrap()
-            .memory_status_with_repair_v1()
+            .memory_status_with_repair()
             .await
             .unwrap()
             .status
@@ -390,7 +338,7 @@ mod tests {
         assert!(
             memory_application_for_project(cg)
                 .await
-                .add_fact_v1(
+                .add_fact(
                     cursor_fact(content),
                     MemoryOperationContext::generated(&owner, content, None).unwrap(),
                 )
@@ -418,7 +366,7 @@ mod tests {
         let (tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         let fact_id = active_memory(&cg)
-            .add_fact_v1(
+            .add_fact(
                 AddFactRequest {
                     content: "existing fact".to_string(),
                     category: MemoryCategory::General,
@@ -473,7 +421,7 @@ mod tests {
         assert!(!committed.cancel(tracedecay_domain::UtcMicros(42)));
         assert_eq!(
             active_memory(&cg)
-                .list_facts_untracked_v1(None, None, 10)
+                .list_facts_untracked(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -571,7 +519,7 @@ mod tests {
         assert_eq!(
             memory_application_for_project(&active)
                 .await
-                .list_facts_untracked_v1(None, None, 10)
+                .list_facts_untracked(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -666,7 +614,7 @@ mod tests {
         .unwrap();
 
         let history = active_memory(&cg)
-            .fact_trust_history_v1(fact_id, MAX_FACT_LIMIT)
+            .fact_trust_history(fact_id, MAX_FACT_LIMIT)
             .await
             .unwrap();
         assert_eq!(history.len(), 1);
@@ -689,7 +637,7 @@ mod tests {
         }
 
         let history = active_memory(&cg)
-            .fact_trust_history_v1(fact_id, MAX_FACT_LIMIT)
+            .fact_trust_history(fact_id, MAX_FACT_LIMIT)
             .await
             .unwrap();
         assert_eq!(history.len(), 1);
@@ -726,7 +674,7 @@ mod tests {
         assert_eq!(replay.value, first.value);
         assert_eq!(
             active_memory(&cg)
-                .list_facts_untracked_v1(None, None, 10)
+                .list_facts_untracked(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -739,7 +687,7 @@ mod tests {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         active_memory(&cg)
-            .add_fact_v1(
+            .add_fact(
                 AddFactRequest {
                     content: "request-derived memory write".to_owned(),
                     category: MemoryCategory::General,
@@ -749,7 +697,7 @@ mod tests {
                     trust: None,
                     metadata: json!({}),
                 },
-                MemoryOperationContext::from_trusted_request_id(
+                MemoryOperationContext::from_request_id(
                     &owner,
                     "add",
                     "request.mcp.connection.first",
@@ -778,7 +726,7 @@ mod tests {
         assert!(!rendered.contains("near_duplicate"), "{rendered}");
         assert_eq!(
             active_memory(&cg)
-                .list_facts_untracked_v1(None, None, 10)
+                .list_facts_untracked(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -854,11 +802,7 @@ mod tests {
         .expect("local retrieval-counting actions must not hold a read snapshot")
         .unwrap();
 
-        let fact = active_memory(&cg)
-            .get_fact_v1(fact_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
         assert_eq!(fact.retrieval_count, 1);
         assert_eq!(fact.access_count, 1);
     }
@@ -892,7 +836,7 @@ mod tests {
         add.await.unwrap();
         assert_eq!(
             active_memory(&cg)
-                .list_facts_untracked_v1(None, None, 10)
+                .list_facts_untracked(None, None, 10)
                 .await
                 .unwrap()
                 .len(),
@@ -929,7 +873,7 @@ mod tests {
         record.await.unwrap();
         assert_eq!(
             active_memory(&cg)
-                .get_fact_v1(fact_id)
+                .get_fact(fact_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -938,7 +882,7 @@ mod tests {
         );
         assert_eq!(
             active_memory(&cg)
-                .get_fact_v1(fact_id)
+                .get_fact(fact_id)
                 .await
                 .unwrap()
                 .unwrap()
@@ -969,11 +913,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let fact = active_memory(&cg)
-            .get_fact_v1(fact_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
         assert_eq!(fact.retrieval_count, 1);
         assert_eq!(fact.access_count, 1);
     }
@@ -994,11 +934,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let fact = active_memory(&cg)
-            .get_fact_v1(fact_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
         assert_eq!(fact.retrieval_count, 0);
         assert_eq!(fact.access_count, 0);
     }
@@ -1017,7 +953,7 @@ mod tests {
         ] {
             assert!(
                 memory
-                    .add_fact_v1(
+                    .add_fact(
                         cursor_fact(content),
                         MemoryOperationContext::generated(&owner, operation, None).unwrap(),
                     )
@@ -1092,7 +1028,7 @@ mod tests {
         ] {
             assert!(
                 profile_memory
-                    .add_fact_v1(
+                    .add_fact(
                         cursor_fact(content),
                         MemoryOperationContext::generated(&profile_owner, operation, None).unwrap(),
                     )

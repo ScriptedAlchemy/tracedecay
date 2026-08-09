@@ -223,7 +223,7 @@ describe('shared shell truthfulness', () => {
    * The two ways a deep link fails to resolve, which the route reports with two
    * different status codes and which the dashboard must not merge.
    *
-   * They used to be one case here, because `fetchLegacy` discarded every
+   * They used to be one case here, because the payload fetcher discarded every
    * non-2xx body: a dead link and a registry that could not be opened both
    * arrived as `HTTP 404`/`HTTP 503` with nothing to tell them apart, so the
    * only honest reading available was "unconfirmed" for both. That left a stale

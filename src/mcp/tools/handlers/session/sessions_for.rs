@@ -5,7 +5,7 @@ use super::lcm_args::{
 };
 use super::lcm_compact::truncate_chars;
 use super::*;
-use crate::sessions::git_correlation::GitCorrelationError;
+use tracedecay_sessions::runtime::git_correlation::GitCorrelationError;
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 

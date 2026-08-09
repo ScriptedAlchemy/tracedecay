@@ -3,27 +3,18 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::future::Future;
 
-use super::DashboardState;
-use super::automation_config_api::effective_automation_config;
-use super::automation_run_service::{
-    self, MemoryCuratorRunRequest, SessionReflectionRunRequest, SkillWritingRunRequest,
-};
 use super::memory_api::{default_agent_plan_max_clusters, default_agent_plan_min_confidence};
-use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::util::http_detail;
-use tracedecay_agent_hosts::automation::backend::{
-    AgentTaskKind, agent_task_contract, classify_agent_task_error_message, prompt_version, task_key,
+use super::{
+    DashboardAutomationAuthorityErrorV1, DashboardAutomationRunRequestV1, DashboardState,
+    automation_authority_error_response, exact_automation_authority,
 };
-use tracedecay_agent_hosts::automation::config::AutomationConfig;
 use tracedecay_agent_hosts::automation::run_ledger::{
-    AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
+    AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
 };
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,9 +34,9 @@ impl Default for MemoryCuratorRunBody {
     }
 }
 
-impl From<MemoryCuratorRunBody> for MemoryCuratorRunRequest {
+impl From<MemoryCuratorRunBody> for DashboardAutomationRunRequestV1 {
     fn from(body: MemoryCuratorRunBody) -> Self {
-        Self {
+        Self::MemoryCurator {
             max_clusters: body.max_clusters,
             min_confidence: body.min_confidence,
         }
@@ -68,9 +59,9 @@ pub struct SessionReflectionRunBody {
     end_time: Option<i64>,
 }
 
-impl From<SessionReflectionRunBody> for SessionReflectionRunRequest {
+impl From<SessionReflectionRunBody> for DashboardAutomationRunRequestV1 {
     fn from(body: SessionReflectionRunBody) -> Self {
-        Self {
+        Self::SessionReflection {
             provider: body.provider,
             query: body.query,
             evidence_limit: body.evidence_limit,
@@ -94,9 +85,9 @@ pub struct SkillWritingRunBody {
     evidence_limit: Option<usize>,
 }
 
-impl From<SkillWritingRunBody> for SkillWritingRunRequest {
+impl From<SkillWritingRunBody> for DashboardAutomationRunRequestV1 {
     fn from(body: SkillWritingRunBody) -> Self {
-        Self {
+        Self::SkillWriting {
             provider: body.provider,
             query: body.query,
             evidence_limit: body.evidence_limit,
@@ -109,22 +100,7 @@ pub async fn memory_curator(
     body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let request = MemoryCuratorRunRequest::from(body);
-    run_dashboard_task_endpoint(
-        state,
-        AgentTaskKind::MemoryCurator,
-        move |state, run_id| async move {
-            Box::pin(
-                automation_run_service::memory_curator_run_payload_with_run_id(
-                    &state,
-                    request,
-                    Some(run_id),
-                ),
-            )
-            .await
-        },
-    )
-    .await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
 }
 
 pub async fn session_reflection(
@@ -132,22 +108,7 @@ pub async fn session_reflection(
     body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let request = SessionReflectionRunRequest::from(body);
-    run_dashboard_task_endpoint(
-        state,
-        AgentTaskKind::SessionReflector,
-        move |state, run_id| async move {
-            Box::pin(
-                automation_run_service::session_reflection_run_payload_with_run_id(
-                    &state,
-                    request,
-                    Some(run_id),
-                ),
-            )
-            .await
-        },
-    )
-    .await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
 }
 
 pub async fn skill_writing(
@@ -155,34 +116,29 @@ pub async fn skill_writing(
     body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    let request = SkillWritingRunRequest::from(body);
-    run_dashboard_task_endpoint(
-        state,
-        AgentTaskKind::SkillWriter,
-        move |state, run_id| async move {
-            Box::pin(
-                automation_run_service::skill_writing_run_payload_with_run_id(
-                    &state,
-                    request,
-                    Some(run_id),
-                ),
-            )
-            .await
-        },
-    )
-    .await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
 }
 
-async fn run_dashboard_task_endpoint<F, Fut>(
+async fn run_dashboard_task_endpoint(
     state: DashboardState,
-    task: AgentTaskKind,
-    run_job: F,
-) -> (StatusCode, Json<Value>)
-where
-    F: FnOnce(DashboardState, String) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Value, String>> + Send + 'static,
-{
-    enqueue_dashboard_run(state, task, run_job).await
+    request: DashboardAutomationRunRequestV1,
+) -> (StatusCode, Json<Value>) {
+    let authority = match exact_automation_authority(&state) {
+        Ok(authority) => authority,
+        Err(error) => return automation_authority_error_response(error),
+    };
+    execute_dashboard_task(authority, &state.project_root, request).await
+}
+
+async fn execute_dashboard_task(
+    authority: &super::DashboardAutomationAuthorityV1,
+    project_root: &std::path::Path,
+    request: DashboardAutomationRunRequestV1,
+) -> (StatusCode, Json<Value>) {
+    match authority.run(project_root, request).await {
+        Ok(payload) => (StatusCode::OK, Json(payload)),
+        Err(error) => automation_authority_error_response(error),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -364,423 +320,125 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
     ]
 }
 
-async fn enqueue_dashboard_run<F, Fut>(
-    state: DashboardState,
-    task: AgentTaskKind,
-    run_job: F,
-) -> (StatusCode, Json<Value>)
-where
-    F: FnOnce(DashboardState, String) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Value, String>> + Send + 'static,
-{
-    let run_id = dashboard_run_id(task);
-    let queued =
-        match append_dashboard_job_record(&state, &run_id, task, AutomationRunStatus::Queued, None)
-            .await
-        {
-            Ok(record) => record,
-            Err(err) => return internal_error(&format!("Failed to queue automation run: {err}")),
-        };
-
-    match dashboard_job_skip_reason(&state, task).await {
-        Ok(Some(reason)) => {
-            if let Err(err) = append_immediate_skip_records(&state, &run_id, task, reason).await {
-                return internal_error(&format!("Failed to queue automation run: {err}"));
-            }
-            push_dashboard_task_skip_activity(&state, task, reason).await;
-            return (
-                StatusCode::ACCEPTED,
-                Json(automation_job_payload(&run_id, &queued)),
-            );
-        }
-        Ok(None) => {}
-        Err(err) => return internal_error(&format!("Failed to queue automation run: {err}")),
-    }
-
-    let payload = automation_job_payload(&run_id, &queued);
-    tokio::spawn(async move {
-        Box::pin(run_dashboard_job(state, run_id, task, run_job)).await;
-    });
-    (StatusCode::ACCEPTED, Json(payload))
-}
-
-async fn run_dashboard_job<F, Fut>(
-    state: DashboardState,
-    run_id: String,
-    task: AgentTaskKind,
-    run_job: F,
-) where
-    F: FnOnce(DashboardState, String) -> Fut,
-    Fut: Future<Output = Result<Value, String>>,
-{
-    if let Err(err) = append_running_record(&state, &run_id, task).await {
-        tracing::warn!(
-            run_id,
-            task = ?task,
-            error = %err,
-            "failed to mark dashboard automation run as running"
-        );
-    }
-
-    match dashboard_job_skip_reason(&state, task).await {
-        Ok(Some(reason)) => {
-            if let Err(err) = append_skipped_record(&state, &run_id, task, reason).await {
-                tracing::warn!(
-                    run_id,
-                    task = ?task,
-                    %reason,
-                    error = %err,
-                    "failed to record dashboard automation run skip"
-                );
-            }
-            push_dashboard_task_skip_activity(&state, task, reason).await;
-            return;
-        }
-        Ok(None) => {}
-        Err(err) => {
-            append_failed_if_missing(&state, &run_id, task, err).await;
-            return;
-        }
-    }
-
-    match run_job(state.clone(), run_id.clone()).await {
-        Ok(payload) => {
-            if let Err(err) = append_returned_terminal_if_missing(&state, &run_id, &payload).await {
-                append_failed_if_missing(&state, &run_id, task, err).await;
-            }
-        }
-        Err(err) => append_failed_if_missing(&state, &run_id, task, err).await,
-    }
-}
-
-async fn append_returned_terminal_if_missing(
-    state: &DashboardState,
-    run_id: &str,
-    payload: &Value,
-) -> Result<(), String> {
-    let record = payload
-        .get("ledger_record")
-        .cloned()
-        .ok_or_else(|| "automation run payload omitted ledger_record".to_string())
-        .and_then(|record| {
-            serde_json::from_value::<AutomationRunLedgerRecord>(record)
-                .map_err(|err| format!("invalid automation run ledger_record: {err}"))
-        })?;
-    if record.run_id != run_id {
-        return Err(format!(
-            "automation run payload returned run_id '{}' for expected run '{run_id}'",
-            record.run_id
-        ));
-    }
-    if !record.status.is_terminal() {
-        return Err(format!(
-            "automation run payload returned non-terminal status '{}'",
-            record.status.as_str()
-        ));
-    }
-    let terminal_exists = find_run_record(&state.dashboard_root, run_id)
-        .await
-        .map_err(|err| format!("failed to inspect automation run ledger: {err}"))?
-        .is_some_and(|record| record.status.is_terminal());
-    if terminal_exists {
-        return Ok(());
-    }
-    append_run_record(&state.dashboard_root, &record)
-        .await
-        .map_err(|err| format!("failed to record returned automation run: {err}"))
-}
-
-async fn dashboard_job_skip_reason(
-    state: &DashboardState,
-    task: AgentTaskKind,
-) -> Result<Option<&'static str>, String> {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
-
-    let config = load_effective_dashboard_config(state)?;
-    if !config.enabled {
-        return Ok(Some("automation_disabled"));
-    }
-    if config.host_mode == AutomationHostMode::DelegatedHost {
-        return Ok(Some("delegated_host_mode"));
-    }
-    if config.backend == AutomationBackend::Disabled {
-        return Ok(Some("backend_disabled"));
-    }
-    let task_enabled = match task {
-        AgentTaskKind::MemoryCurator => config.tasks.memory_curator.enabled,
-        AgentTaskKind::SessionReflector => config.tasks.session_reflector.enabled,
-        AgentTaskKind::SkillWriter => config.tasks.skill_writer.enabled,
-        AgentTaskKind::CombinedReview => {
-            config.tasks.session_reflector.enabled && config.tasks.skill_writer.enabled
-        }
-        // User jobs carry their own enabled flag; the job runner gates on it.
-        AgentTaskKind::UserJob => return Ok(None),
-    };
-    if !task_enabled {
-        return Ok(Some(match task {
-            AgentTaskKind::MemoryCurator => "memory_curator_disabled",
-            AgentTaskKind::SessionReflector => "session_reflector_disabled",
-            AgentTaskKind::SkillWriter => "skill_writer_disabled",
-            AgentTaskKind::CombinedReview => "combined_review_disabled",
-            AgentTaskKind::UserJob => "user_job_disabled",
-        }));
-    }
-    Ok(None)
-}
-
-async fn append_immediate_skip_records(
-    state: &DashboardState,
-    run_id: &str,
-    task: AgentTaskKind,
-    reason: &'static str,
-) -> Result<(), String> {
-    append_running_record(state, run_id, task).await?;
-    append_skipped_record(state, run_id, task, reason).await
-}
-
-async fn append_running_record(
-    state: &DashboardState,
-    run_id: &str,
-    task: AgentTaskKind,
-) -> Result<(), String> {
-    append_dashboard_job_record(state, run_id, task, AutomationRunStatus::Running, None)
-        .await
-        .map(|_| ())
-        .map_err(|err| format!("failed to mark automation run running: {err}"))
-}
-
-async fn append_skipped_record(
-    state: &DashboardState,
-    run_id: &str,
-    task: AgentTaskKind,
-    reason: &'static str,
-) -> Result<(), String> {
-    append_dashboard_job_record(
-        state,
-        run_id,
-        task,
-        AutomationRunStatus::Skipped,
-        Some(reason.to_string()),
-    )
-    .await
-    .map(|_| ())
-    .map_err(|err| format!("failed to record automation run skip: {err}"))
-}
-
-async fn append_failed_if_missing(
-    state: &DashboardState,
-    run_id: &str,
-    task: AgentTaskKind,
-    err: String,
-) {
-    let terminal_exists = find_run_record(&state.dashboard_root, run_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|record| record.status.is_terminal());
-    if terminal_exists {
-        return;
-    }
-    if task == AgentTaskKind::MemoryCurator {
-        push_curation_activity_with_level(
-            state,
-            "failure",
-            format!("Dashboard memory-curator automation run failed: {err}"),
-            true,
-            "error",
-        )
-        .await;
-    }
-    if let Err(err) =
-        append_dashboard_job_record(state, run_id, task, AutomationRunStatus::Failed, Some(err))
-            .await
-    {
-        tracing::warn!(
-            run_id,
-            task = ?task,
-            error = %err,
-            "failed to record dashboard automation run failure"
-        );
-    }
-}
-
-fn dashboard_task_label(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory-curator",
-        AgentTaskKind::SessionReflector => "session-reflector",
-        AgentTaskKind::SkillWriter => "skill-writer",
-        AgentTaskKind::CombinedReview => "combined-review",
-        AgentTaskKind::UserJob => "user-job",
-    }
-}
-
-async fn push_dashboard_task_skip_activity(
-    state: &DashboardState,
-    task: AgentTaskKind,
-    reason: &str,
-) {
-    let task_label = dashboard_task_label(task);
-    push_curation_activity(
-        state,
-        "queued",
-        format!("Queued dashboard {task_label} automation run"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "evidence",
-        format!("Skipped evidence collection for dashboard {task_label} automation run: {reason}"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "backend",
-        format!("Skipped backend call for dashboard {task_label} automation run: {reason}"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "validation",
-        format!("Skipped dashboard {task_label} automation run: {reason}"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "apply",
-        format!("No mutations applied for dashboard {task_label} automation run: {reason}"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "report",
-        format!("Dashboard {task_label} automation run skipped: {reason}"),
-        true,
-    )
-    .await;
-    push_curation_activity(
-        state,
-        "finish",
-        format!("Finished skipped dashboard {task_label} automation run: {reason}"),
-        true,
-    )
-    .await;
-}
-
-async fn append_dashboard_job_record(
-    state: &DashboardState,
-    run_id: &str,
-    task: AgentTaskKind,
-    status: AutomationRunStatus,
-    error: Option<String>,
-) -> Result<AutomationRunLedgerRecord, String> {
-    let run_id = run_id.to_string();
-    let payload = super::automation_run_service::execute_dashboard_automation_write(
-        state,
-        move |state| async move {
-            let config = load_effective_dashboard_config(&state)?;
-            let record = dashboard_job_record(&run_id, task, status, error, &config);
-            append_run_record(&state.dashboard_root, &record)
-                .await
-                .map_err(|err| err.to_string())?;
-            serde_json::to_value(record).map_err(|err| err.to_string())
-        },
-    )
-    .await?;
-    serde_json::from_value(payload).map_err(|err| err.to_string())
-}
-
-fn load_effective_dashboard_config(state: &DashboardState) -> Result<AutomationConfig, String> {
-    effective_automation_config(state)
-        .map(|(_, config)| config)
-        .map_err(|error| error.to_string())
-}
-
-fn automation_job_payload(run_id: &str, ledger_record: &AutomationRunLedgerRecord) -> Value {
-    json!({
-        "run_id": run_id,
-        "status": ledger_record.status,
-        "report": {
-            "status": ledger_record.status,
-            "task": task_key(ledger_record.task),
-            "queued": ledger_record.status == AutomationRunStatus::Queued,
-        },
-        "ledger_record": ledger_record,
-        "backend_response": Value::Null,
-    })
-}
-
-fn dashboard_job_record(
-    run_id: &str,
-    task: AgentTaskKind,
-    status: AutomationRunStatus,
-    error: Option<String>,
-    config: &AutomationConfig,
-) -> AutomationRunLedgerRecord {
-    let now = current_timestamp().to_string();
-    let fallback_status = error
-        .clone()
-        .filter(|_| status == AutomationRunStatus::Skipped);
-    let error_classification = (status == AutomationRunStatus::Failed)
-        .then(|| error.as_deref().map(classify_agent_task_error_message))
-        .flatten();
-    let contract = agent_task_contract(task);
-    AutomationRunLedgerRecord {
-        schema_version: 2,
-        run_id: run_id.to_string(),
-        trigger: AutomationTrigger::Dashboard,
-        task,
-        task_key: Some(task_key(task).to_string()),
-        backend: config.backend.as_str().to_string(),
-        host_mode: Some(config.host_mode.as_str().to_string()),
-        prompt_version: Some(prompt_version(task).to_string()),
-        response_schema: Some(contract.response_schema),
-        strict_json: Some(contract.strict_json),
-        model: None,
-        status,
-        evidence_hash: None,
-        input_hash: None,
-        output_hash: None,
-        proposed_ops: None,
-        applied_ops: None,
-        rejected_ops: None,
-        validation_report: None,
-        reviewed_count: 0,
-        accepted_count: 0,
-        rejected_count: 0,
-        skipped_count: usize::from(status == AutomationRunStatus::Skipped),
-        error,
-        error_classification,
-        error_retryable: error_classification
-            .map(tracedecay_agent_hosts::automation::backend::AgentTaskFailureClass::is_retryable),
-        backend_attempt_count: 0,
-        backend_attempts: Vec::new(),
-        fallback_status,
-        report_ref: Some(json!({
-            "run_id": run_id,
-            "task": task_key(task),
-        })),
-        artifacts: Vec::new(),
-        started_at: now.clone(),
-        completed_at: now,
-    }
-}
-
-fn dashboard_run_id(task: AgentTaskKind) -> String {
-    let micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_micros())
-        .unwrap_or_default();
-    format!("dashboard_{}_{}", task_key(task), micros)
-}
-
 #[cfg(test)]
 mod run_list_tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[test]
+    fn absent_daemon_run_authority_is_typed_unavailable() {
+        let (status, Json(payload)) =
+            automation_authority_error_response(DashboardAutomationAuthorityErrorV1::unavailable(
+                "dashboard automation run authority is not mounted",
+            ));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            payload["detail"],
+            json!("dashboard automation run authority is not mounted")
+        );
+    }
+
+    #[test]
+    fn manual_run_options_cross_the_daemon_port_without_loss() {
+        let request = DashboardAutomationRunRequestV1::from(SessionReflectionRunBody {
+            provider: Some("claude".to_owned()),
+            query: Some("scheduler authority".to_owned()),
+            evidence_limit: Some(17),
+            scope: Some(LcmScope::Current),
+            session_id: Some("session-1".to_owned()),
+            include_summaries: Some(true),
+            sort: Some(LcmGrepSort::Recency),
+            source: Some("transcript".to_owned()),
+            role: Some("assistant".to_owned()),
+            start_time: Some(10),
+            end_time: Some(20),
+        });
+
+        assert!(matches!(
+            request,
+            DashboardAutomationRunRequestV1::SessionReflection {
+                provider: Some(provider),
+                evidence_limit: Some(17),
+                session_id: Some(session_id),
+                ..
+            } if provider == "claude" && session_id == "session-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dashboard_run_delegates_exact_project_scope_to_daemon_authority() {
+        let observed = Arc::new(Mutex::new(None));
+        let observed_run = Arc::clone(&observed);
+        let run: super::super::DashboardAutomationRunPortV1 = Arc::new(move |invocation| {
+            *observed_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation);
+            Box::pin(async {
+                Ok(json!({
+                    "run": {
+                        "run_id": "daemon-run-1",
+                        "ledger_record": { "status": "succeeded" }
+                    }
+                }))
+            })
+        });
+        let skills: super::super::DashboardManagedSkillCommandPortV1 = Arc::new(|_| {
+            Box::pin(async {
+                Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                    "managed skill authority is not exercised",
+                ))
+            })
+        });
+        let profile_root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\profiles\selected")
+        } else {
+            std::path::PathBuf::from("/profiles/selected")
+        };
+        let project_root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\projects\selected")
+        } else {
+            std::path::PathBuf::from("/projects/selected")
+        };
+        let authority =
+            super::super::DashboardAutomationAuthorityV1::new(profile_root, run, skills)
+                .expect("absolute automation profile root");
+
+        let (status, Json(payload)) = execute_dashboard_task(
+            &authority,
+            &project_root,
+            DashboardAutomationRunRequestV1::MemoryCurator {
+                max_clusters: 9,
+                min_confidence: 0.75,
+            },
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            payload,
+            json!({
+                "run": {
+                    "run_id": "daemon-run-1",
+                    "ledger_record": { "status": "succeeded" }
+                }
+            })
+        );
+        let invocation = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("daemon run port invocation");
+        assert_eq!(invocation.project_root, project_root);
+        assert_eq!(
+            invocation.request,
+            DashboardAutomationRunRequestV1::MemoryCurator {
+                max_clusters: 9,
+                min_confidence: 0.75,
+            }
+        );
+    }
 
     #[test]
     fn run_history_row_projects_identity_outcome_and_artifact_kinds() {

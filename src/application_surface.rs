@@ -27,6 +27,7 @@ use tracedecay_api::{
 };
 pub use tracedecay_application::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeIntegrationApproveSurfaceRequest,
+    NativeWorktreeSurfaceRequest,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -40,10 +41,10 @@ use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
-    IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
-    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    IdempotencyKey, LegalAction, ObservatoryReadRequestV1, OpaqueCursor, OperationTermination,
+    PageRequest, ProblemOwningLayer, RequestContext, RequestId, ResultContractRef,
+    ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective,
+    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -107,6 +108,7 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 mod configuration_wire;
 mod handoff;
 mod multi_root_http;
+pub(crate) mod retained;
 mod work;
 mod workflow;
 
@@ -689,7 +691,7 @@ impl ContextScoutSurfaceRequest {
     }
 }
 
-/// The five Plan 36 native-integration journey requests.
+/// The canonical native-integration and native-worktree journey requests.
 ///
 /// Each variant carries exact typed identity. There is no variant that can
 /// express a path, a raw SHA, a commit message, a patch, a Git argument, or a
@@ -702,6 +704,7 @@ pub enum NativeIntegrationSurfaceRequest {
     Apply(NativeIntegrationApplySurfaceRequest),
     Status(NativeIntegrationStatusSurfaceRequest),
     Cancel(NativeIntegrationCancelSurfaceRequest),
+    Worktree(NativeWorktreeSurfaceRequest),
 }
 
 impl NativeIntegrationSurfaceRequest {
@@ -713,6 +716,23 @@ impl NativeIntegrationSurfaceRequest {
             Self::Apply(_) => ApplicationSurfaceOperation::NativeIntegrationApply,
             Self::Status(_) => ApplicationSurfaceOperation::NativeIntegrationStatus,
             Self::Cancel(_) => ApplicationSurfaceOperation::NativeIntegrationCancel,
+            Self::Worktree(request) => match request {
+                NativeWorktreeSurfaceRequest::Inventory(_) => {
+                    ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+                }
+                NativeWorktreeSurfaceRequest::Inspect(_) => {
+                    ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+                }
+                NativeWorktreeSurfaceRequest::Confirm(_) => {
+                    ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                }
+                NativeWorktreeSurfaceRequest::Remove(_) => {
+                    ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                }
+                NativeWorktreeSurfaceRequest::Reconcile(_) => {
+                    ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
+                }
+            },
         }
     }
 }
@@ -732,8 +752,10 @@ pub enum ApplicationSurfaceRequest {
     CallableCode(CallableCodeSurfaceRequest),
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
     Primitive(PrimitiveRequest),
+    ObservatoryRead(ObservatoryReadRequestV1),
     Configuration(ConfigurationSurfaceRequest),
     ContextScout(ContextScoutSurfaceRequest),
+    Retained(tracedecay_application::RetainedSurfaceRequestV1),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -943,18 +965,18 @@ fn registered_adapter_unavailable(request_id: RequestId, code: &str, message: &s
 /// and which outcome they answer with, so both arrive here: one binding lookup,
 /// one cancellation policy, one problem taxonomy.
 trait RegisteredHttpOperation: Copy {
-    fn operation_id_str(self) -> &'static str;
+    fn operation_id(self) -> String;
     fn is_read_only(self) -> bool;
     fn problem_family(self) -> &'static str;
     fn display_family(self) -> &'static str;
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError>;
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>;
 }
 
 impl RegisteredHttpOperation for WorkOperation {
-    fn operation_id_str(self) -> &'static str {
-        WorkOperation::operation_id_str(self)
+    fn operation_id(self) -> String {
+        WorkOperation::operation_id_str(self).to_owned()
     }
 
     fn is_read_only(self) -> bool {
@@ -971,14 +993,16 @@ impl RegisteredHttpOperation for WorkOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
+    {
         tracedecay_application::work_executable_binding_registry()
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
 
 impl RegisteredHttpOperation for WorkflowOperation {
-    fn operation_id_str(self) -> &'static str {
-        WorkflowOperation::operation_id_str(self)
+    fn operation_id(self) -> String {
+        WorkflowOperation::operation_id_str(self).to_owned()
     }
 
     fn is_read_only(self) -> bool {
@@ -995,14 +1019,16 @@ impl RegisteredHttpOperation for WorkflowOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
+    {
         tracedecay_application::workflow_executable_binding_registry()
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
 
 impl RegisteredHttpOperation for HandoffOperation {
-    fn operation_id_str(self) -> &'static str {
-        HandoffOperation::operation_id_str(self)
+    fn operation_id(self) -> String {
+        HandoffOperation::operation_id_str(self).to_owned()
     }
 
     fn is_read_only(self) -> bool {
@@ -1019,8 +1045,10 @@ impl RegisteredHttpOperation for HandoffOperation {
 
     fn registry(
         self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
+    {
         tracedecay_application::handoff_executable_binding_registry()
+            .map_err(ApplicationSurfaceAdapterError::CatalogValidation)
     }
 }
 
@@ -1048,17 +1076,16 @@ where
             );
         }
     };
-    let operation_id =
-        match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
-            Ok(operation_id) => operation_id,
-            Err(_) => {
-                return registered_adapter_unavailable(
-                    request_id,
-                    &problem_code("operation_identity_unavailable"),
-                    &format!("The {family} operation identity is unavailable"),
-                );
-            }
-        };
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
+        Ok(operation_id) => operation_id,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("operation_identity_unavailable"),
+                &format!("The {family} operation identity is unavailable"),
+            );
+        }
+    };
     let Some(binding) = registry
         .get(&operation_id)
         .and_then(|availability| availability.binding())
@@ -1133,17 +1160,16 @@ where
             );
         }
     };
-    let operation_id =
-        match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
-            Ok(operation_id) => operation_id,
-            Err(_) => {
-                return registered_adapter_unavailable(
-                    request_id,
-                    &problem_code("operation_identity_unavailable"),
-                    &format!("The {family} operation identity is unavailable"),
-                );
-            }
-        };
+    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
+        Ok(operation_id) => operation_id,
+        Err(_) => {
+            return registered_adapter_unavailable(
+                request_id,
+                &problem_code("operation_identity_unavailable"),
+                &format!("The {family} operation identity is unavailable"),
+            );
+        }
+    };
     let Some(binding) = registry
         .get(&operation_id)
         .and_then(|availability| availability.binding())
@@ -1205,8 +1231,8 @@ where
                 }
                 crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "work.reset_required".to_owned(),
-                        message: "The Work store requires an explicit reset".to_owned(),
+                        code: problem_code("reset_required"),
+                        message: format!("The {family} store requires an explicit reset"),
                     })
                 }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
@@ -1312,6 +1338,7 @@ pub fn http_application_router_with_executor(
     let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
     let handoff_router = handoff_application_router_with_executor(Arc::clone(&executor))?;
     let multi_root_router = multi_root_application_router_with_executor(Arc::clone(&executor))?;
+    let retained_router = retained::router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1322,6 +1349,7 @@ pub fn http_application_router_with_executor(
         .merge(workflow_router)
         .merge(handoff_router)
         .merge(multi_root_router)
+        .merge(retained_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,
@@ -2408,6 +2436,9 @@ pub fn application_surface_dispatch_input_with_controls(
 
 impl ApplicationSurfaceRequest {
     fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        if let Self::Retained(request) = self {
+            return request.operation().as_str() == operation.as_str();
+        }
         matches!(
             (self, operation),
             (
@@ -2430,6 +2461,11 @@ impl ApplicationSurfaceRequest {
                         | ApplicationSurfaceOperation::NativeIntegrationApply
                         | ApplicationSurfaceOperation::NativeIntegrationStatus
                         | ApplicationSurfaceOperation::NativeIntegrationCancel
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+                        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile
                 )
                 | (
                     Self::Feedback(_),
@@ -2563,6 +2599,10 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::DiagnosticsRead
                 )
                 | (
+                    Self::ObservatoryRead(_),
+                    ApplicationSurfaceOperation::ObservatoryRead
+                )
+                | (
                     Self::Configuration(ConfigurationSurfaceRequest::List(_)),
                     ApplicationSurfaceOperation::ConfigurationList
                 )
@@ -2692,6 +2732,36 @@ fn parse_native_integration_surface_request(
         ApplicationSurfaceOperation::NativeIntegrationCancel => serde_json::from_value(value)
             .map(NativeIntegrationSurfaceRequest::Cancel)
             .map_err(invalid),
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Inventory)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Inspect)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Confirm)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Remove)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile => {
+            serde_json::from_value(value)
+                .map(NativeWorktreeSurfaceRequest::Reconcile)
+                .map(NativeIntegrationSurfaceRequest::Worktree)
+                .map_err(invalid)
+        }
         _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
     }
 }
@@ -2700,6 +2770,14 @@ pub fn parse_application_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
 ) -> Result<ApplicationSurfaceRequest, ApplicationSurfaceAdapterError> {
+    if operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained {
+        let retained_operation =
+            tracedecay_application::RetainedSurfaceOperation::from_name(operation.as_str())
+                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+        return retained::decode_request(retained_operation, value)
+            .map(ApplicationSurfaceRequest::Retained)
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
     match operation {
         ApplicationSurfaceOperation::GitStatus
         | ApplicationSurfaceOperation::GitDiff
@@ -2911,6 +2989,9 @@ pub fn parse_application_surface_request(
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
+        ApplicationSurfaceOperation::ObservatoryRead => serde_json::from_value(value)
+            .map(ApplicationSurfaceRequest::ObservatoryRead)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationList => serde_json::from_value(value)
             .map(ConfigurationSurfaceRequest::List)
             .map(ApplicationSurfaceRequest::Configuration)
@@ -3074,6 +3155,10 @@ pub async fn execute_application_surface(
     let deadline = Deadline::new(effective_deadline_at)?;
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
+    let resolved_scope = match &invocation.scope {
+        tracedecay_application::InvocationTarget::CurrentProject => None,
+        tracedecay_application::InvocationTarget::Resolved(scope) => Some(scope.clone()),
+    };
     let request_deadline = deadline.clone();
     let migrated_payload = match (&operation, &invocation.request) {
         (
@@ -3296,6 +3381,16 @@ pub async fn execute_application_surface(
                 cancellation_context,
             )
         }
+        ApplicationSurfaceRequest::ObservatoryRead(request) => {
+            crate::daemon_contract::DaemonInvocationRequest::observatory_read(
+                request_id.as_str(),
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+            .with_resolved_scope(resolved_scope)
+        }
         ApplicationSurfaceRequest::Configuration(request) => {
             crate::daemon_contract::DaemonInvocationRequest::configuration(
                 request_id.as_str(),
@@ -3310,6 +3405,15 @@ pub async fn execute_application_surface(
             crate::daemon_contract::DaemonInvocationRequest::context_scout(
                 request_id.as_str(),
                 operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
+        ApplicationSurfaceRequest::Retained(request) => {
+            crate::daemon_contract::DaemonInvocationRequest::retained_application(
+                request_id.as_str(),
                 request,
                 observed_at,
                 deadline,
@@ -3333,7 +3437,9 @@ pub async fn execute_application_surface(
             requested_format,
         });
     };
-    let policy = if (is_configuration_operation(operation) && catalog_effect)
+    let policy = if ((is_configuration_operation(operation)
+        || operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained)
+        && catalog_effect)
         || matches!(
             operation,
             ApplicationSurfaceOperation::GitApply
@@ -3427,7 +3533,8 @@ pub async fn execute_application_surface(
             ))
         }
         crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result }
-        | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result } => {
+        | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result }
+        | crate::daemon_contract::DaemonInvocationOutcome::ObservatoryRead { scope, result } => {
             Ok(ApplicationEnvelope::evidence(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3476,6 +3583,14 @@ pub async fn execute_application_surface(
                 request_id: request_id.clone(),
                 scope,
                 outcome,
+            })
+        }
+        crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication { scope, outcome } => {
+            Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome: retained::outcome_value(outcome)?,
             })
         }
         crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
@@ -3572,6 +3687,7 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
         | ApplicationSurfaceOperation::DiagnosticsRead
+        | ApplicationSurfaceOperation::ObservatoryRead
         | ApplicationSurfaceOperation::ConfigurationList
         | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
