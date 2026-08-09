@@ -155,7 +155,7 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
             error
                 .reset_required_context()
                 .map(|(authority, _reason)| authority),
-            Some("graph store")
+            Some("SQLite store")
         );
         assert!(
             message.contains("created by an incompatible binary"),
@@ -203,12 +203,82 @@ async fn the_former_v26_shape_is_refused_without_mutation() {
         error
             .reset_required_context()
             .map(|(authority, _reason)| authority),
-        Some("graph store")
+        Some("SQLite store")
     );
 
     assert_eq!(get_user_version(&conn).await, 26);
     assert!(table_exists(&conn, "graph_publication_replay_v1").await);
     assert!(!column_exists(&conn, "graph_publication_replay_v1", "expected_prior_head").await);
+}
+
+#[tokio::test]
+async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
+    for retired in [
+        "nodes",
+        "edges",
+        "files",
+        "unresolved_refs",
+        "nodes_fts",
+        "nodes_fts_data",
+        "node_fingerprints",
+        "redundancy_pairs",
+    ] {
+        let (conn, _dir) = create_schema_db().await;
+        conn.execute_batch(&format!("CREATE TABLE {retired} (id INTEGER);"))
+            .await
+            .unwrap();
+
+        let error = ensure_schema_current_connection(&conn)
+            .await
+            .expect_err("a current stamp must not conceal retired graph storage");
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _reason)| authority),
+            Some("SQLite store")
+        );
+        assert!(
+            error.to_string().contains(retired),
+            "the refusal must identify the retired object: {error}"
+        );
+        assert!(table_exists(&conn, retired).await);
+        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    }
+}
+
+#[tokio::test]
+async fn a_current_stamp_with_retired_memory_mirror_objects_is_reset_required() {
+    for retired in [
+        "memory_facts",
+        "memory_entities",
+        "memory_fact_entities",
+        "memory_feedback_events",
+        "memory_oplog",
+        "memory_fact_relations",
+        "memory_facts_fts",
+        "memory_facts_fts_data",
+    ] {
+        let (conn, _dir) = create_schema_db().await;
+        conn.execute_batch(&format!("CREATE TABLE {retired} (id INTEGER);"))
+            .await
+            .unwrap();
+
+        let error = ensure_schema_current_connection(&conn)
+            .await
+            .expect_err("a current stamp must not conceal the retired memory mirror");
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _reason)| authority),
+            Some("SQLite store")
+        );
+        assert!(
+            error.to_string().contains(retired),
+            "the refusal must identify the retired object: {error}"
+        );
+        assert!(table_exists(&conn, retired).await);
+        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    }
 }
 
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
@@ -235,28 +305,21 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 
     ensure_schema_current_connection(&conn).await.unwrap();
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    assert!(column_exists(&conn, "nodes", "branches").await);
-    assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
+    assert!(table_exists(&conn, "metadata").await);
+    assert!(table_exists(&conn, "read_cache").await);
+    assert!(!table_exists(&conn, "nodes").await);
 }
 
-/// The creation DDL installs the whole final shape in one transaction: graph,
-/// holographic memory, memory lineage/current projections, evidence assembly,
-/// external sources, and relational graph publication authority.
+/// The creation DDL installs the retained relational shape in one transaction:
+/// canonical memory, evidence assembly, external sources, and graph publication
+/// manifests, without recreating either superseded SQLite projection.
 #[tokio::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;
 
     for table in [
-        "nodes",
-        "edges",
-        "files",
         "metadata",
-        "node_fingerprints",
         "read_cache",
-        "redundancy_pairs",
-        "memory_facts",
-        "memory_oplog",
-        "memory_fact_relations",
         "memory_v2_facts",
         "memory_v2_assertions",
         "memory_v2_lineage_events",
@@ -267,6 +330,30 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_v2_fact_relations",
     ] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
+    }
+
+    for retired in [
+        "nodes",
+        "edges",
+        "files",
+        "unresolved_refs",
+        "nodes_fts",
+        "nodes_fts_data",
+        "node_fingerprints",
+        "redundancy_pairs",
+        "memory_facts",
+        "memory_entities",
+        "memory_fact_entities",
+        "memory_feedback_events",
+        "memory_oplog",
+        "memory_fact_relations",
+        "memory_facts_fts",
+        "memory_facts_fts_data",
+    ] {
+        assert!(
+            !table_exists(&conn, retired).await,
+            "retired SQLite projection table {retired} must not be created"
+        );
     }
 
     conn.execute(
@@ -300,7 +387,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
     assert!(!column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
-    assert!(column_exists(&conn, "memory_facts", "canonical_fact_id").await);
     for retired in [
         "memory_v2_legacy_map",
         "memory_v2_legacy_quarantine",

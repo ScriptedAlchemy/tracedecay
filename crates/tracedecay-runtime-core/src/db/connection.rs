@@ -22,11 +22,12 @@ mod integrity;
 mod pragmas;
 mod query_write;
 mod registry;
+mod retained_maintenance;
 mod runtime_lifecycle;
-mod snapshot_maintenance;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 mod test_runtime;
 
+pub use graph_binding::MemoryRelationGraphRuntime;
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 use registry::{DatabaseInner, database_slot};
@@ -60,8 +61,6 @@ impl DatabaseAccessMode {
     }
 }
 
-const NODES_FTS_CORRUPTION: &str = "malformed inverted index for FTS5 table main.nodes_fts";
-
 struct DatabaseCheckpointProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
@@ -88,7 +87,6 @@ impl RuntimeRequestProbeV1 for DatabaseCheckpointProbe {
 #[derive(Debug, PartialEq, Eq)]
 enum DatabaseHealth {
     Healthy,
-    FtsOnlyCorruption(String),
     Corrupt(String),
 }
 
@@ -214,27 +212,12 @@ where
     if results.as_slice() == ["ok"] {
         return Ok(DatabaseHealth::Healthy);
     }
-    if !results.is_empty()
-        && results
-            .iter()
-            .all(|result| is_nodes_fts_only_corruption(result))
-    {
-        return Ok(DatabaseHealth::FtsOnlyCorruption(results.join("; ")));
-    }
     let problem = if results.is_empty() {
         "PRAGMA quick_check returned no rows".to_string()
     } else {
         results.join("; ")
     };
     Ok(DatabaseHealth::Corrupt(problem))
-}
-
-fn is_nodes_fts_only_corruption(problem: &str) -> bool {
-    let problem = problem.trim();
-    matches!(
-        problem,
-        NODES_FTS_CORRUPTION | "malformed inverted index for FTS5 table nodes_fts"
-    ) || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]

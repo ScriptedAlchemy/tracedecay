@@ -18,17 +18,12 @@ use crate::errors::{Result, TraceDecayError};
 /// 2026-08-07; holographic recall re-encodes from canonical fact content at
 /// query time.
 ///
-/// v31 adds `nodes.symbol_occurrence_id`, the per-generation identity bridge
-/// between the canonical relational node row and the published code-index
-/// symbol occurrence (ruling DR-C as amended by A1', 2026-08-08). A store
-/// written before the column exists cannot answer the occurrence join, and
-/// answering it from a name key instead is the ambiguity the ruling rejects,
-/// so the version stamp refuses the older shape rather than degrade the read.
-pub const SCHEMA_VERSION: u32 = 31;
-
-/// Metadata stamp for the extraction generation currently published in the
-/// core graph tables.
-pub const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
+/// v32 removes the superseded SQLite code-graph projection and the V1 memory
+/// mirror. Code topology lives only in the verified Grafeo generation, while
+/// exact memory content, provenance, trust, retention, and feedback live only
+/// in the canonical `memory_v2_*` tables. A current-stamped store containing
+/// either retired projection fails closed before interpretation.
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
@@ -119,154 +114,10 @@ pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
 
 async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS nodes (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            qualified_name TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            start_line INTEGER NOT NULL,
-            end_line INTEGER NOT NULL,
-            start_column INTEGER NOT NULL,
-            end_column INTEGER NOT NULL,
-            docstring TEXT,
-            signature TEXT,
-            visibility TEXT NOT NULL DEFAULT 'private',
-            is_async INTEGER NOT NULL DEFAULT 0,
-            branches INTEGER NOT NULL DEFAULT 0,
-            loops INTEGER NOT NULL DEFAULT 0,
-            returns INTEGER NOT NULL DEFAULT 0,
-            max_nesting INTEGER NOT NULL DEFAULT 0,
-            unsafe_blocks INTEGER NOT NULL DEFAULT 0,
-            unchecked_calls INTEGER NOT NULL DEFAULT 0,
-            assertions INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL,
-            -- Nullable and no default: a real value (including a legitimate 0 for
-            -- an item documented at the very top of a file) is written by every
-            -- extractor, and SQL NULL is reserved as the honest unset marker so
-            -- that a stored 0 is never mistaken for a defaulted/unknown value.
-            -- See row_to_node in db/rows.rs for the read-side contract.
-            attrs_start_line INTEGER,
-            parent_id TEXT,
-            -- The symbol occurrence the published code index minted for this
-            -- node, and ONLY for the generation that published it. The
-            -- occurrence digest takes `generation_id` as an input
-            -- (tracedecay-code-index chunks.rs `symbol_occurrence_id`), so the
-            -- binding is meaningful with exactly one generation and is
-            -- deliberately NOT carried across one. `insert_nodes` omits this
-            -- column from its `INSERT OR REPLACE` column list, so re-indexing a
-            -- node clears its binding rather than preserving a value minted
-            -- against a generation that no longer exists — a read that finds
-            -- NULL must answer a typed staleness refusal, never a lookup miss.
-            -- Wire identity remains `nodes.id`; this column is the internal
-            -- join key only (ruling A1').
-            symbol_occurrence_id TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT NOT NULL,
-            target TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            line INTEGER,
-            FOREIGN KEY (source) REFERENCES nodes(id) ON DELETE CASCADE,
-            FOREIGN KEY (target) REFERENCES nodes(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS files (
-            path TEXT PRIMARY KEY,
-            content_hash TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            modified_at INTEGER NOT NULL,
-            indexed_at INTEGER NOT NULL,
-            node_count INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS unresolved_refs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_node_id TEXT NOT NULL,
-            reference_name TEXT NOT NULL,
-            reference_kind TEXT NOT NULL,
-            line INTEGER NOT NULL,
-            col INTEGER NOT NULL,
-            file_path TEXT NOT NULL,
-            FOREIGN KEY (from_node_id) REFERENCES nodes(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS metadata (
+        "CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-            name, qualified_name, docstring, signature,
-            content='nodes', content_rowid='rowid'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS nodes_fts_insert AFTER INSERT ON nodes BEGIN
-            INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
-            VALUES (NEW.rowid, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS nodes_fts_delete AFTER DELETE ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, docstring, signature)
-            VALUES ('delete', OLD.rowid, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
-        END;
-
-        -- Scoped to the four columns `nodes_fts` actually indexes. An UPDATE
-        -- that touches only bookkeeping columns (`parent_id`,
-        -- `symbol_occurrence_id`) changes nothing the index contains, and
-        -- re-writing every full-text row for it would make the per-generation
-        -- occurrence rebind cost one FTS delete+insert per node. Any UPDATE
-        -- that does name a searchable column still reindexes the row.
-        CREATE TRIGGER IF NOT EXISTS nodes_fts_update
-        AFTER UPDATE OF name, qualified_name, docstring, signature ON nodes BEGIN
-            INSERT INTO nodes_fts(nodes_fts, rowid, name, qualified_name, docstring, signature)
-            VALUES ('delete', OLD.rowid, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
-            INSERT INTO nodes_fts(rowid, name, qualified_name, docstring, signature)
-            VALUES (NEW.rowid, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
-        END;
-
-        CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
-        CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
-        CREATE INDEX IF NOT EXISTS idx_nodes_qualified_name ON nodes(qualified_name);
-        CREATE INDEX IF NOT EXISTS idx_nodes_file_path ON nodes(file_path);
-        CREATE INDEX IF NOT EXISTS idx_nodes_file_path_start_line ON nodes(file_path, start_line);
-
-        CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source, kind);
-        CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
-        CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique
-            ON edges(source, target, kind, COALESCE(line, -1));
-
-        CREATE INDEX IF NOT EXISTS idx_unresolved_refs_from_node_id ON unresolved_refs(from_node_id);
-        CREATE INDEX IF NOT EXISTS idx_unresolved_refs_reference_name ON unresolved_refs(reference_name);
-        CREATE INDEX IF NOT EXISTS idx_unresolved_refs_file_path ON unresolved_refs(file_path);
-
-        CREATE INDEX IF NOT EXISTS idx_nodes_lower_name ON nodes(lower(name));
-        CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id);
-
-        -- One node row per symbol occurrence, enforced by the store rather than
-        -- by the writer's diligence: two rows claiming the same occurrence is
-        -- exactly the silently-picked winner the ruling forbids, so the
-        -- second write fails instead of making the join ambiguous. SQLite
-        -- treats NULLs as distinct, so unbound rows are unconstrained.
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_symbol_occurrence_id
-            ON nodes(symbol_occurrence_id);
-
-        CREATE TABLE IF NOT EXISTS node_fingerprints (
-            node_id TEXT PRIMARY KEY,
-            ast_hash TEXT NOT NULL,
-            cfg_hash TEXT NOT NULL,
-            call_seq_hash TEXT NOT NULL,
-            shingles TEXT NOT NULL,
-            body_tokens INTEGER NOT NULL,
-            source_hash TEXT NOT NULL,
-            FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_node_fingerprints_ast ON node_fingerprints(ast_hash);
-        CREATE INDEX IF NOT EXISTS idx_node_fingerprints_size ON node_fingerprints(body_tokens);
 
         CREATE TABLE IF NOT EXISTS read_cache (
             project_id   TEXT NOT NULL,
@@ -291,14 +142,6 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
         operation: "create_schema".to_string(),
     })?;
 
-    conn.execute_batch(REDUNDANCY_PAIRS_SCHEMA)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create redundancy_pairs schema: {e}"),
-            operation: "create_schema".to_string(),
-        })?;
-
-    create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
@@ -344,9 +187,52 @@ async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
         .is_some())
 }
 
+async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<Option<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT name FROM sqlite_master
+             WHERE type IN ('table', 'view', 'trigger')
+               AND (
+                   name IN (
+                       'nodes', 'edges', 'files', 'unresolved_refs',
+                       'node_fingerprints', 'redundancy_pairs',
+                       'memory_facts', 'memory_entities',
+                       'memory_fact_entities', 'memory_feedback_events',
+                       'memory_oplog', 'memory_fact_relations'
+                   )
+                   OR name GLOB 'nodes_fts*'
+                   OR name GLOB 'memory_facts_fts*'
+               )
+             ORDER BY name
+             LIMIT 1",
+            (),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to probe for retired SQLite projection objects: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read retired SQLite projection object probe: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })?
+    else {
+        return Ok(None);
+    };
+    row.get::<String>(0)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to decode retired SQLite projection object name: {error}"),
+            operation: "ensure_schema_current".to_owned(),
+        })
+}
+
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
-        "graph store",
+        "SQLite store",
         format!(
             "database schema v{current} is not the v{SCHEMA_VERSION} shape this binary creates; \
              this store was created by an incompatible binary and cannot be upgraded in place. \
@@ -368,203 +254,22 @@ pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()>
 pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Result<()> {
     let current = get_version(conn).await?;
     if current == SCHEMA_VERSION {
+        if let Some(object) = retired_sqlite_projection_object(conn).await? {
+            return Err(TraceDecayError::reset_required(
+                "SQLite store",
+                format!(
+                    "database schema v{current} still contains retired SQLite projection object \
+                     '{object}'; remove the store directory and let this binary create the exact \
+                     relational shape"
+                ),
+            ));
+        }
         return Ok(());
     }
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
     Err(unsupported_schema_version(current))
-}
-
-async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_fact_relations (
-            source_fact_id INTEGER NOT NULL,
-            target_fact_id INTEGER NOT NULL,
-            relation TEXT NOT NULL CHECK (
-                relation IN ('supports', 'contradicts', 'supersedes', 'derived_from')
-            ),
-            confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
-            source TEXT NOT NULL,
-            metadata TEXT NOT NULL DEFAULT '{}',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (source_fact_id, target_fact_id, relation),
-            CHECK (source_fact_id != target_fact_id),
-            FOREIGN KEY (source_fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE,
-            FOREIGN KEY (target_fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_source
-            ON memory_fact_relations(source_fact_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_target
-            ON memory_fact_relations(target_fact_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_kind
-            ON memory_fact_relations(relation);",
-    )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("{operation}: failed to create memory fact relations: {e}"),
-        operation: operation.to_string(),
-    })?;
-    Ok(())
-}
-
-/// Freshness-validated cache of `tracedecay_redundancy` duplicate pairs,
-/// installed by the schema-creation path.
-const REDUNDANCY_PAIRS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS redundancy_pairs (
-        node_a_id TEXT NOT NULL,
-        node_b_id TEXT NOT NULL,
-        source_hash_a TEXT NOT NULL,
-        source_hash_b TEXT NOT NULL,
-        ranking_score REAL NOT NULL,
-        similarity REAL NOT NULL,
-        vector_cosine REAL NOT NULL,
-        overlap_kind TEXT NOT NULL,
-        severity TEXT NOT NULL,
-        generic_helper_downranked INTEGER NOT NULL,
-        computed_at INTEGER NOT NULL,
-        PRIMARY KEY (node_a_id, node_b_id),
-        FOREIGN KEY (node_a_id) REFERENCES nodes(id) ON DELETE CASCADE,
-        FOREIGN KEY (node_b_id) REFERENCES nodes(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_redundancy_pairs_node_b ON redundancy_pairs(node_b_id);";
-
-/// Append-only audit log of memory mutations (add/update/remove/feedback and
-/// curation applies). `detail_json` never carries fact content beyond what
-/// the op needs — deletes record a content hash, not the content.
-const MEMORY_OPLOG_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_oplog (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts INTEGER NOT NULL DEFAULT 0,
-        op TEXT NOT NULL,
-        fact_id INTEGER,
-        detail_json TEXT NOT NULL DEFAULT '{}'
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_memory_oplog_ts ON memory_oplog(ts);";
-
-// ---------------------------------------------------------------------------
-// Migration V1: initial schema
-// ---------------------------------------------------------------------------
-
-async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS memory_facts (
-            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            -- Canonical memory_v2 fact identity for this holographic mirror row.
-            -- Nullable only between the mirror insert and the same-transaction
-            -- canonical link write; every committed fact row carries it.
-            canonical_fact_id TEXT UNIQUE,
-            content TEXT NOT NULL UNIQUE,
-            category TEXT NOT NULL DEFAULT 'general',
-            tags TEXT NOT NULL DEFAULT '[]',
-            trust_score REAL NOT NULL DEFAULT 0.5,
-            retrieval_count INTEGER NOT NULL DEFAULT 0,
-            access_count INTEGER NOT NULL DEFAULT 0,
-            helpful_count INTEGER NOT NULL DEFAULT 0,
-            unhelpful_count INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0,
-            last_retrieved_at INTEGER,
-            last_recalled_at INTEGER,
-            last_feedback_at INTEGER,
-            source TEXT NOT NULL DEFAULT 'manual',
-            metadata TEXT NOT NULL DEFAULT '{}',
-            hrr_vector BLOB,
-            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
-            hrr_dim INTEGER NOT NULL DEFAULT 2048,
-            hrr_precision TEXT NOT NULL DEFAULT 'f32'
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_entities (
-            entity_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            normalized_name TEXT NOT NULL UNIQUE,
-            entity_type TEXT NOT NULL DEFAULT 'unknown',
-            aliases TEXT NOT NULL DEFAULT '[]',
-            created_at INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_fact_entities (
-            fact_id INTEGER NOT NULL,
-            entity_id INTEGER NOT NULL,
-            PRIMARY KEY (fact_id, entity_id),
-            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE,
-            FOREIGN KEY (entity_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_feedback_events (
-            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fact_id INTEGER NOT NULL,
-            action TEXT NOT NULL CHECK (action IN ('helpful', 'unhelpful')),
-            trust_delta REAL NOT NULL,
-            old_trust REAL NOT NULL,
-            new_trust REAL NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT 'mcp',
-            note TEXT,
-            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_memory_facts_category
-            ON memory_facts(category);
-        CREATE INDEX IF NOT EXISTS idx_memory_facts_updated_at
-            ON memory_facts(updated_at);
-        CREATE INDEX IF NOT EXISTS idx_memory_facts_trust_score
-            ON memory_facts(trust_score);
-        CREATE INDEX IF NOT EXISTS idx_memory_facts_source
-            ON memory_facts(source);
-        CREATE INDEX IF NOT EXISTS idx_memory_entities_type
-            ON memory_entities(entity_type);
-        CREATE INDEX IF NOT EXISTS idx_memory_fact_entities_entity_id
-            ON memory_fact_entities(entity_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_fact_id
-            ON memory_feedback_events(fact_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_created_at
-            ON memory_feedback_events(created_at);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
-            content, tags,
-            content='memory_facts', content_rowid='rowid'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_insert
-            AFTER INSERT ON memory_facts BEGIN
-                INSERT INTO memory_facts_fts(rowid, content, tags)
-                VALUES (NEW.rowid, NEW.content, NEW.tags);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_delete
-            AFTER DELETE ON memory_facts BEGIN
-                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
-                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
-            END;
-
-        CREATE TRIGGER IF NOT EXISTS memory_facts_fts_update
-            AFTER UPDATE OF content, tags ON memory_facts BEGIN
-                INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content, tags)
-                VALUES ('delete', OLD.rowid, OLD.content, OLD.tags);
-                INSERT INTO memory_facts_fts(rowid, content, tags)
-                VALUES (NEW.rowid, NEW.content, NEW.tags);
-            END;",
-    )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("{operation}: failed to create holographic memory schema: {e}"),
-        operation: operation.to_string(),
-    })?;
-
-    conn.execute_batch(MEMORY_OPLOG_SCHEMA)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to create memory oplog schema: {e}"),
-            operation: operation.to_string(),
-        })?;
-
-    create_memory_fact_relations_schema(conn, operation).await?;
-
-    Ok(())
 }
 
 #[cfg(test)]
