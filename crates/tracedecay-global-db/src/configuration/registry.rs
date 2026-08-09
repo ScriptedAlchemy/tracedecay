@@ -11,19 +11,20 @@ use tracedecay_domain::configuration::{
     ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1,
     INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
+    PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
+    SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
     SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
     USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    safe_work_topology_policy_v1,
+    USER_WORK_EXPERTISE_CONSENT_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
@@ -130,6 +131,18 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkExpertiseConsent,
+            default_value: ConfigurationValueV1::WorkExpertiseConsent(
+                WorkExpertiseConsentV1::disabled(),
+            ),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
@@ -327,6 +340,18 @@ pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 fn register_user_profile_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
+    registry.register(SettingDefinitionV1 {
+        key: setting_key(USER_WORK_EXPERTISE_CONSENT_SETTING_KEY)?,
+        schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+        value_kind: ConfigurationValueKindV1::WorkExpertiseConsent,
+        default_value: ConfigurationValueV1::WorkExpertiseConsent(
+            WorkExpertiseConsentV1::disabled(),
+        ),
+        sensitivity: SettingSensitivityV1::Sensitive,
+        scope: SettingScopeV1::UserProfile,
+        restart_requirement: RestartRequirementV1::None,
+        deprecation: DeprecationStateV1::Active,
+    })?;
     for (key, default_value, restart_requirement) in [
         (
             USER_UPLOAD_ENABLED_SETTING_KEY,
@@ -385,6 +410,7 @@ struct SyncDefaults {
     full_sync_escalation_files: usize,
     max_concurrent_syncs: usize,
     branch_gc_days: u64,
+    orphan_db_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
     auto_track_pr_poll_secs: u64,
@@ -405,6 +431,7 @@ impl Default for SyncDefaults {
             full_sync_escalation_files: 500,
             max_concurrent_syncs: 2,
             branch_gc_days: 14,
+            orphan_db_gc_days: 7,
             auto_init: true,
             auto_track_pr_branches: false,
             auto_track_pr_poll_secs: 300,
@@ -560,6 +587,12 @@ fn register_project_settings(
             RestartRequirementV1::DaemonRestart,
         ),
         (
+            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
+            SettingSensitivityV1::Public,
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
             SYNC_AUTO_INIT_SETTING_KEY,
             ConfigurationValueV1::Boolean(sync.auto_init),
             SettingSensitivityV1::Public,
@@ -710,6 +743,66 @@ mod automation_defaults_tests {
         assert!(settings.tasks.memory_curator.enabled);
         assert!(settings.tasks.session_reflector.enabled);
         assert!(settings.tasks.skill_writer.enabled);
+    }
+}
+
+#[cfg(test)]
+mod sync_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn orphan_database_retention_has_one_exact_project_default() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        let key = SettingKey::new(SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY).expect("setting key");
+        let definition = registry.definition(&key).expect("setting definition");
+
+        assert_eq!(definition.default_value, ConfigurationValueV1::Unsigned(7));
+        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
+        assert_eq!(definition.scope, SettingScopeV1::Project);
+        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+        assert_eq!(
+            definition.restart_requirement,
+            RestartRequirementV1::DaemonRestart
+        );
+        assert_eq!(
+            CONFIGURATION_SETTING_KEYS_V1
+                .iter()
+                .filter(|candidate| **candidate == SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod work_expertise_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn expertise_consent_defaults_are_disabled_at_both_required_scopes() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+
+        for (raw_key, expected_scope) in [
+            (
+                USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+                SettingScopeV1::UserProfile,
+            ),
+            (
+                PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
+                SettingScopeV1::Project,
+            ),
+        ] {
+            let definition = registry
+                .definition(&SettingKey::new(raw_key).expect("setting key"))
+                .expect("setting definition");
+            assert_eq!(definition.scope, expected_scope);
+            assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
+            assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
+            assert_eq!(
+                definition.default_value,
+                ConfigurationValueV1::WorkExpertiseConsent(WorkExpertiseConsentV1::disabled())
+            );
+        }
     }
 }
 

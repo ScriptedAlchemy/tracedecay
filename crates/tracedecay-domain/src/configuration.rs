@@ -67,6 +67,7 @@ pub const SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY: &str = "sync.backstop_interva
 pub const SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY: &str = "sync.full_sync_escalation_files.v1";
 pub const SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY: &str = "sync.max_concurrent_syncs.v1";
 pub const SYNC_BRANCH_GC_DAYS_SETTING_KEY: &str = "sync.branch_gc_days.v1";
+pub const SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY: &str = "sync.orphan_db_gc_days.v1";
 pub const SYNC_AUTO_INIT_SETTING_KEY: &str = "sync.auto_init.v1";
 pub const SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY: &str = "sync.auto_track_pr_branches.v1";
 pub const SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY: &str = "sync.auto_track_pr_poll_secs.v1";
@@ -108,6 +109,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY,
+    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
