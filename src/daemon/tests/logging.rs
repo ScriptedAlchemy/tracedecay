@@ -14,7 +14,6 @@ fn daemon_log_line_formats_stable_key_value_fields() {
         "[tracedecay] event=scheduler_task task=memory_curator outcome=\"not due yet\" project=\"/tmp/example project\""
     );
 }
-
 #[test]
 fn daemon_log_line_escapes_quotes_and_backslashes() {
     let line = super::super::format_daemon_log_line(
@@ -48,7 +47,7 @@ fn scheduler_task_start_log_uses_task_key_and_project() {
         "scheduler_task",
         &super::super::scheduler_task_log_fields(
             std::path::Path::new("/tmp/project with spaces"),
-            crate::automation::backend::AgentTaskKind::SkillWriter,
+            tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
             "start",
         ),
     );
@@ -62,11 +61,11 @@ fn scheduler_task_start_log_uses_task_key_and_project() {
 #[cfg(unix)]
 #[test]
 fn scheduler_record_log_preserves_skipped_status_and_reason() {
-    let record = crate::automation::run_ledger::AutomationRunLedgerRecord {
+    let record = tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord {
         schema_version: 2,
         run_id: "run-123".to_string(),
-        trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
-        task: crate::automation::backend::AgentTaskKind::MemoryCurator,
+        trigger: tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler,
+        task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
         task_key: Some("memory_curator".to_string()),
         backend: "codex_app_server".to_string(),
         host_mode: Some("standalone".to_string()),
@@ -74,7 +73,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         response_schema: None,
         strict_json: None,
         model: None,
-        status: crate::automation::run_ledger::AutomationRunStatus::Skipped,
+        status: tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped,
         evidence_hash: None,
         input_hash: None,
         output_hash: None,
@@ -106,47 +105,5 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
     assert_eq!(
         line,
         "[tracedecay] event=scheduler_task project=/tmp/project task=memory_curator outcome=skipped run_id=run-123 reason=scheduler_interval_not_elapsed"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn automation_staged_log_line_is_stable() {
-    let line = super::super::format_daemon_log_line(
-        "automation_staged",
-        &super::super::automation_staged_log_fields(
-            std::path::Path::new("/tmp/project"),
-            &crate::automation::staged_notice::AutomationPendingCounts {
-                fact_proposals: crate::automation::staged_notice::PendingReviewCount::Counted(2),
-                skills: crate::automation::staged_notice::PendingReviewCount::Counted(1),
-            },
-        ),
-    );
-
-    assert_eq!(
-        line,
-        "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=1"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn automation_staged_log_line_marks_an_unreadable_queue() {
-    let line = super::super::format_daemon_log_line(
-        "automation_staged",
-        &super::super::automation_staged_log_fields(
-            std::path::Path::new("/tmp/project"),
-            &crate::automation::staged_notice::AutomationPendingCounts {
-                fact_proposals: crate::automation::staged_notice::PendingReviewCount::Counted(2),
-                skills: crate::automation::staged_notice::PendingReviewCount::unreadable(
-                    "profile root missing",
-                ),
-            },
-        ),
-    );
-
-    assert_eq!(
-        line,
-        "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=unreadable"
     );
 }
