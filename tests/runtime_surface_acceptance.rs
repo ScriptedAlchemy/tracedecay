@@ -12,16 +12,6 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application::ProjectSourceAccessSnapshot;
-use tracedecay::application::feedback::concrete::open_feedback_runtime;
-use tracedecay::application::feedback::owner::{
-    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
-};
-use tracedecay::application::operation_stream::{
-    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
-    OperationKind, OperationStreamConfig,
-};
-use tracedecay::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 use tracedecay::application_output::json::json_line as canonical_json_line;
 use tracedecay::application_output::markdown::render as render_markdown;
 use tracedecay::application_output::view::CanonicalHumanView;
@@ -67,6 +57,16 @@ use tracedecay_domain::{
 };
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
+use tracedecay_usecases::feedback::owner::{
+    FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
+};
+use tracedecay_usecases::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationKind, OperationStreamConfig,
+};
+use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 
 static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -128,6 +128,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
         // Keep TraceDecay state under the isolated home while allowing a rustup
         // proxy on PATH to resolve the host's already-installed analyzer.
+        command.stderr(Stdio::inherit());
         if let Some(rustup_home) = host_rustup_home {
             command.env("RUSTUP_HOME", rustup_home);
             if let Some(rustup_toolchain) = host_rustup_toolchain {
@@ -2531,6 +2532,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
     let other_project = TempDir::new().expect("cross-scope project");
     initialize_project(fixture.home(), other_project.path());
+    let other_storage = run_storage_status(fixture.home(), other_project.path(), true);
+    assert_command_success("open cross-scope LSP project", &other_storage);
     let other_root_uri = url::Url::from_directory_path(other_project.path())
         .expect("cross-scope project root URI")
         .to_string();
@@ -2612,6 +2615,25 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         );
     }
     shutdown_lsp(&mut cross_scope, 603).await;
+
+    let unregistered_project = TempDir::new().expect("unregistered workspace project");
+    let unregistered_root_uri = url::Url::from_directory_path(unregistered_project.path())
+        .expect("unregistered workspace root URI")
+        .to_string();
+    let (deadline, cancellation) = lsp_control();
+    let denied = DaemonLspSessionClient::open(
+        fixture.client.clone(),
+        "3.17",
+        Some(root_uri.clone()),
+        vec![root_uri.clone(), unregistered_root_uri],
+        deadline,
+        cancellation,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(tracedecay_application::InvocationError::Denied)),
+        "an unregistered workspace root must fail closed"
+    );
 
     let (deadline, cancellation) = lsp_control();
     session

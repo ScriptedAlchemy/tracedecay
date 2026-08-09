@@ -13,6 +13,7 @@ use super::*;
 use crate::daemon_contract::DaemonInvocationProblem;
 use service::invocation::semantic_evaluation::SemanticInvocationControlV1;
 use std::future::Future;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 fn semantic_invocation_interruption_response(
     request_id: &str,
@@ -86,6 +87,81 @@ async fn await_portable_project_open<Output>(
     await_project_open_with_semantic_control(control, project_open).await
 }
 
+async fn await_lsp_project_open_upgrade(
+    project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    route: &ProjectRouteKey,
+    deadline: &tracedecay_application::Deadline,
+    request_cancellation: &CancellationToken,
+) -> ProjectOpenWaitOutcome {
+    project_open_tasks(project_open_gates.as_ref())
+        .await
+        .wait_for_lsp_upgrade(route, deadline, request_cancellation)
+        .await
+}
+
+async fn await_lsp_route_rejoin<Output>(
+    deadline: &tracedecay_application::Deadline,
+    request_cancellation: &CancellationToken,
+    route_read: impl Future<Output = Output>,
+) -> std::result::Result<Output, tracedecay_application::ApplicationProblem> {
+    if request_cancellation.is_cancelled() {
+        return Err(tracedecay_application::ApplicationProblem::cancelled_before_admission());
+    }
+    let now = tracedecay_application::clock::now_micros();
+    let remaining_micros = deadline
+        .expires_at
+        .0
+        .checked_sub(now.0)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(tracedecay_application::ApplicationProblem::timed_out_before_admission)?;
+    let remaining_micros = u64::try_from(remaining_micros)
+        .map_err(|_| tracedecay_application::ApplicationProblem::timed_out_before_admission())?;
+    let sleep = tokio::time::sleep(Duration::from_micros(remaining_micros));
+    tokio::pin!(sleep);
+    tokio::pin!(route_read);
+    tokio::select! {
+        biased;
+        _ = request_cancellation.cancelled() => {
+            Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+        }
+        _ = &mut sleep => {
+            Err(tracedecay_application::ApplicationProblem::timed_out_before_admission())
+        }
+        output = &mut route_read => {
+            if request_cancellation.is_cancelled() {
+                Err(tracedecay_application::ApplicationProblem::cancelled_before_admission())
+            } else if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
+                Err(tracedecay_application::ApplicationProblem::timed_out_before_admission())
+            } else {
+                Ok(output)
+            }
+        }
+    }
+}
+
+fn lsp_project_open_wait_response(
+    request_id: &str,
+    outcome: ProjectOpenWaitOutcome,
+    workflow_application: bool,
+    git_operation: bool,
+) -> Option<DaemonInvocationResponse> {
+    match outcome {
+        ProjectOpenWaitOutcome::Completed | ProjectOpenWaitOutcome::NotTracked => None,
+        ProjectOpenWaitOutcome::Failed(error) => Some(DaemonInvocationResponse::problem(
+            request_id.to_owned(),
+            project_open_problem(&error, workflow_application, git_operation),
+        )),
+        ProjectOpenWaitOutcome::Cancelled => Some(DaemonInvocationResponse::application_problem(
+            request_id.to_owned(),
+            tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+        )),
+        ProjectOpenWaitOutcome::TimedOut => Some(DaemonInvocationResponse::application_problem(
+            request_id.to_owned(),
+            tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+        )),
+    }
+}
+
 /// Multi-root payloads are routed by `invoke_for_project`, which reaches the
 /// executor without passing through `DaemonInvocationService::invoke`'s own
 /// `validate` gate. Validating them here keeps a malformed multi-root request
@@ -130,6 +206,26 @@ pub(super) async fn execute_portable_daemon_invocation(
     {
         return response;
     }
+    let lsp_cancellation_lease =
+        if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
+            match crate::daemon::request_cancellation::register(&request_id) {
+                Some(lease) => Some(lease),
+                None => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::InvalidRequest,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+    let lsp_cancellation = lsp_cancellation_lease
+        .as_ref()
+        .map(crate::daemon::request_cancellation::Lease::token);
+    let lsp_project_open_gates = Arc::clone(&project_open_gates);
+    #[cfg(test)]
+    let lsp_project_open_attempts = project_open_attempts.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
@@ -137,15 +233,15 @@ pub(super) async fn execute_portable_daemon_invocation(
         let project_server = await_portable_project_open(
             semantic_control.as_ref(),
             Box::pin(portable_project_server_for_request(
-                lifecycle,
+                lifecycle.clone(),
                 store_administration.clone(),
                 project_open_gates,
                 invocation.clone(),
-                http_application_registry,
+                http_application_registry.clone(),
                 handshake,
                 ProjectServerRequirement::Core,
                 #[cfg(test)]
-                project_open_attempts,
+                project_open_attempts.clone(),
             )),
         )
         .await;
@@ -167,12 +263,70 @@ pub(super) async fn execute_portable_daemon_invocation(
         {
             return response;
         }
-        let Ok((resolved_project_path, _)) = project_route else {
+        let Ok((mut resolved_project_path, route)) = project_route else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        if let (Some((deadline, _)), Some(request_cancellation)) =
+            (request.lsp_open_control(), lsp_cancellation.as_ref())
+        {
+            let wait = await_lsp_project_open_upgrade(
+                &lsp_project_open_gates,
+                &route,
+                deadline,
+                request_cancellation,
+            )
+            .await;
+            if let Some(response) = lsp_project_open_wait_response(
+                &request_id,
+                wait,
+                workflow_application,
+                git_operation,
+            ) {
+                return response;
+            }
+
+            // Core publication may have been visible before the dependent LSP
+            // owner finished. Re-enter the canonical route lookup after the
+            // wait instead of carrying the pre-upgrade root/owner snapshot.
+            let project_server = await_lsp_route_rejoin(
+                deadline,
+                request_cancellation,
+                portable_project_server_for_request(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    lsp_project_open_gates,
+                    invocation.clone(),
+                    http_application_registry.clone(),
+                    handshake,
+                    ProjectServerRequirement::Core,
+                    #[cfg(test)]
+                    lsp_project_open_attempts,
+                ),
+            )
+            .await;
+            let project_server = match project_server {
+                Ok(project_server) => project_server,
+                Err(problem) => {
+                    return DaemonInvocationResponse::application_problem(request_id, problem);
+                }
+            };
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
+            let Ok((canonical_project_path, _)) = project_route_for_handshake(handshake) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            resolved_project_path = canonical_project_path;
+        }
         let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
         if let Some(response) =
             semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
@@ -188,7 +342,12 @@ pub(super) async fn execute_portable_daemon_invocation(
         project_path = Some(resolved_project_path);
     }
     invocation
-        .invoke_for_project(&store_administration, project_path.as_deref(), request)
+        .invoke_for_project(
+            &store_administration,
+            project_path.as_deref(),
+            request,
+            lsp_cancellation,
+        )
         .await
 }
 
@@ -334,6 +493,23 @@ pub(super) async fn execute_daemon_invocation(
     {
         return response;
     }
+    let lsp_cancellation_lease =
+        if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
+            match crate::daemon::request_cancellation::register(&request_id) {
+                Some(lease) => Some(lease),
+                None => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+    let lsp_cancellation = lsp_cancellation_lease
+        .as_ref()
+        .map(crate::daemon::request_cancellation::Lease::token);
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
@@ -361,12 +537,60 @@ pub(super) async fn execute_daemon_invocation(
         {
             return response;
         }
-        let Ok((resolved_project_path, _)) = project_route else {
+        let Ok((mut resolved_project_path, route)) = project_route else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        if let (Some((deadline, _)), Some(request_cancellation)) =
+            (request.lsp_open_control(), lsp_cancellation.as_ref())
+        {
+            let wait = await_lsp_project_open_upgrade(
+                &engine.project_open_gates,
+                &route,
+                deadline,
+                request_cancellation,
+            )
+            .await;
+            if let Some(response) = lsp_project_open_wait_response(
+                &request_id,
+                wait,
+                workflow_application,
+                git_operation,
+            ) {
+                return response;
+            }
+
+            // Core publication may have been visible before the dependent LSP
+            // owner finished. Re-enter the canonical route lookup after the
+            // wait instead of carrying the pre-upgrade root/owner snapshot.
+            let project_server = await_lsp_route_rejoin(
+                deadline,
+                request_cancellation,
+                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
+            )
+            .await;
+            let project_server = match project_server {
+                Ok(project_server) => project_server,
+                Err(problem) => {
+                    return DaemonInvocationResponse::application_problem(request_id, problem);
+                }
+            };
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
+            let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            resolved_project_path = canonical_project_path;
+        }
         let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
         if let Some(response) =
             semantic_invocation_interruption_response(&request_id, semantic_control.as_ref())
@@ -387,6 +611,7 @@ pub(super) async fn execute_daemon_invocation(
             &engine.store_administration,
             project_path.as_deref(),
             request,
+            lsp_cancellation,
         )
         .await
 }
