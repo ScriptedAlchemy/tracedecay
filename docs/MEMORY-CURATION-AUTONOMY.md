@@ -9,25 +9,31 @@ validated operations through TraceDecay curation contracts.
 
 The operating principle is conservative and autonomous: agents may mine,
 explain, cluster, score, validate, and apply accepted curation operations.
-Durable mutation is gated by evidence, risk tier, apply policy, logs, and
-telemetry rather than a dashboard preview/review form. Memory deletion is
-permanent by design. There is no archive, soft-delete state, restore flow, undo
-flow, or recycle-bin behavior.
+The curator/orchestrator automatically applies policy-valid results with
+durable evidence, receipts, and telemetry; validation and risk policy remain
+the mutation boundary, not a dashboard preview/review gate. Human CLI and UI
+review observes outcomes and can explicitly pause, disable, quarantine, or roll
+back a run, but never gates curation. Memory deletion is permanent by design.
+There is no archive, soft-delete state, restore flow, undo flow, or recycle-bin
+behavior.
 
 ## Current Curation Surfaces
 
 Destructive memory curation is automation-owned. Subagents may inspect,
-classify, and draft proposed actions within their assigned scope, but durable
-store mutation must flow through the configured automation/apply policy so runs
-produce ledger records, activity events, artifacts, and post-action telemetry.
+classify, and propose actions within their assigned scope, but the
+curator/orchestrator automatically applies only policy-valid operations through
+the configured curation contract so runs produce ledger records, activity
+events, artifacts, and post-action telemetry.
 
 
 Use existing TraceDecay surfaces before inventing a new plan format:
 
-- `tracedecay_fact_store`: direct fact get/search/list/probe/related/reason,
+- Exact `tracedecay_fact_store_*` tools: direct fact get/search/list/probe/related/reason,
   add, update, remove, and contradiction checks.
-- `tracedecay_memory_status`: memory health and vector/bank repair; use only
-  when health/counts are part of the task because it may mutate derived state.
+- `tracedecay_memory_status`: read-only memory authority and coverage health;
+  use only when health/counts are part of the task. Similarity and dedupe
+  evidence comes from the bounded verified Grafeo projection, not an alternate
+  derived structure.
 - Dashboard automation:
   `POST /api/automation/run/memory-curator` queues an autonomous app-server
   memory-curator run. Accepted operations are applied according to automation
@@ -126,7 +132,9 @@ ids outside the recomputed clusters and hygiene candidates.
 
 ## Apply Contract
 
-Use the generic apply contract only after review:
+Use the generic apply contract after validation. Scheduled curation submits
+policy-valid operations automatically; CLI and dashboard review is an
+observability surface or explicit override, not an approval prerequisite:
 
 ```json
 {
@@ -173,13 +181,16 @@ details carry hashes rather than deleted content.
    lower trust solely because a fact is old.
 7. **Produce a dry-run curation report.** Include every proposed operation,
    every skipped candidate, and the apply-policy state for any destructive action.
-8. **Gate mutation by risk tier.** Add/update/merge follow the configured apply
-   policy. Delete requires an explicit user request immediately before apply,
-   showing fact id, content/source summary, reason, and permanent-delete warning.
+8. **Apply policy-valid operations.** The curator/orchestrator submits
+   add/update/merge/delete operations only after fresh evidence and risk
+   validation. Record fact id, content/source summary, reason, permanent-delete
+   warning, and the resulting receipt; review may observe or override but does
+   not gate the run.
 9. **Apply narrowly.** Use fact-store add/update only for directly supported
    facts. Use `--llm-ops <file> --apply` or `/curate/apply` only for validated
    ops. Avoid `POST /curate {"dry_run": false}` unless the operator explicitly
-   requested the deterministic duplicate-deletion plan.
+   requested the deterministic duplicate-deletion plan; scheduled automation
+   uses the same validated apply contract without a review prerequisite.
 10. **Verify read-only.** Re-run targeted get/search/list/contradict checks and
     inspect apply results/oplog. Report changed, skipped, rejected, and still
     ambiguous facts.
@@ -189,7 +200,7 @@ details carry hashes rather than deleted content.
 Before any mutation, produce this compact report:
 
 - `scope`: project root, store/scope, tool/API used, dry-run timestamp, and
-  whether memory health repair or dashboard start/stop was invoked.
+  whether a memory health status read or dashboard start/stop was invoked.
 - `native_plan`: `mode`, `provider`, `coverage`, `counts`, `actions` count, and
   hygiene-candidate counts.
 - `adds`: durable candidate facts with source spans, category, entities, trust,
@@ -210,9 +221,9 @@ Before any mutation, produce this compact report:
 | --- | --- | --- |
 | Read-mostly | MCP context/search, fact get/contradict/search/list/probe/related/reason, dry-run preview | allowed |
 | Draft | propose add, update, merge, delete, retag-like notes, LLM review request | allowed |
-| Low-risk apply | add clearly durable facts with source links | auto-apply when `auto_apply_memory_ops=true` |
-| Medium-risk apply | update or merge facts with retained source evidence | policy-gated |
-| High-risk apply | hard-delete facts or merge losers | explicit user request only |
+| Low-risk apply | add clearly durable facts with source links | automatically apply after evidence and policy validation; record a durable receipt |
+| Medium-risk apply | update or merge facts with retained source evidence | automatically apply when policy-valid; retain provenance and rollback/quarantine controls |
+| High-risk apply | hard-delete facts or merge losers | automatically apply only when policy-valid; record the permanent effect and rollback/forward-recovery identity |
 
 Deletion and merge loser removal remain high risk because they remove rows from
 `memory_facts`; entity links cascade and FTS rows drop. There is no recovery
@@ -234,7 +245,8 @@ When subagents participate, give each one an explicit project selector and a non
 - **Telemetry Analyst**: measures hint uptake, accepted/rejected candidates,
   false positives, and audited net token deltas from real transcript data.
 - **Apply Operator**: the parent/operator role only. It invokes mutating APIs
-  after policy checks pass and any required explicit user request is present.
+  after policy checks pass and records the resulting receipt; review remains an
+  observability or explicit override surface.
 
 For multi-agent runs, each role owns separate notes or database rows. Writers
 do not share editable artifacts. The apply role consumes finalized plans only.
@@ -258,12 +270,12 @@ do not share editable artifacts. The apply role consumes finalized plans only.
 - Prefer update or merge-with-retained-provenance over delete when the old fact
   still carries useful history.
 - Treat hygiene candidates as evidence for review, not as automatic deletes.
-- Show content/source summaries before delete approval; avoid copying secrets
-  verbatim into reports.
-- Interactive/manual workflows require explicit approval immediately before
-  every hard delete or merge-loser removal. Configured automation may apply
-  validated operations only when its `auto_apply_memory_ops` policy is enabled,
-  and must record the applied result.
+- Show content/source summaries before applying or reporting a delete; avoid
+  copying secrets verbatim into reports.
+- The curation owner automatically applies policy-valid operations after fresh
+  evidence validation. CLI and dashboard review records outcomes and may issue
+  explicit pause, disable, quarantine, or rollback overrides, but never blocks
+  a valid apply. Every applied result must be recorded.
 - Record partial failures and do not retry in a way that hides uncertainty.
 - After apply, verify the resulting fact set and report any failed or skipped
   operation.
