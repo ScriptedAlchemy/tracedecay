@@ -443,35 +443,3 @@ pub(super) fn def_lcm_expand_query() -> ToolDefinition {
         }),
     )
 }
-
-pub(super) fn def_session_start() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_session_start".to_string(),
-        description: "Deprecated compatibility wrapper. Use tracedecay_health_delta without before_cursor to pin current health.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {}
-        }),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "Session Start (Deprecated)"
-        })),
-        meta: None,
-    }
-}
-
-pub(super) fn def_session_end() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_session_end".to_string(),
-        description: "Deprecated compatibility wrapper. Use tracedecay_health_delta with the prior after_cursor.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {}
-        }),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "Session End (Deprecated)"
-        })),
-        meta: None,
-    }
-}

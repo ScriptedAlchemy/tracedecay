@@ -589,8 +589,6 @@ pub(super) fn get_maximal_tool_definitions()
         def_runtime(),
         def_dsm(),
         def_test_risk(),
-        def_session_start(),
-        def_session_end(),
         def_body(),
         def_todos(),
         def_callers_for(),
@@ -862,8 +860,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_health",
     "tracedecay_runtime",
     "tracedecay_test_risk",
-    "tracedecay_session_start",
-    "tracedecay_session_end",
     // redundancy
     "tracedecay_redundancy",
     // memory
@@ -983,6 +979,7 @@ mod tests {
             );
         }
     }
+
 
     #[test]
     fn test_explore_call_budget_tiers() {

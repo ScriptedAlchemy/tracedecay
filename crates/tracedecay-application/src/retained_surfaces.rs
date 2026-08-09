@@ -6,17 +6,17 @@
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingDeprecation, BindingId, BindingStatus,
-    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, CodecBindingKey, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
-    ExecutableBindingRegistryV1, ExecutableBindingV1, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
-    ProtocolRevisionRange, ReceiptContract, ReconciliationContract, RevalidationContract,
-    RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension,
-    ScopeRequirement, ServiceId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey,
+    ContributionId, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
+    PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RouteExposureV1,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ServiceId,
+    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
@@ -67,16 +67,13 @@ pub enum RetainedSurfaceOperation {
     LcmDescribe,
     LcmExpand,
     LcmExpandQuery,
-    SessionStart,
-    SessionEnd,
 }
 
 impl RetainedSurfaceOperation {
-    /// Canonical catalog operations, including the two deprecated lifecycle
-    /// aliases that remain disclosed for already-installed MCP/CLI hosts.
-    /// Broad `fact_store` and `session_refresh` are translator names, not
-    /// catalog operations, and intentionally do not appear here.
-    pub const ALL: [Self; 27] = [
+    /// Canonical catalog operations. Broad `fact_store` and `session_refresh`
+    /// are translator names, not catalog operations, and intentionally do not
+    /// appear here.
+    pub const ALL: [Self; 25] = [
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -101,15 +98,11 @@ impl RetainedSurfaceOperation {
         Self::LcmDescribe,
         Self::LcmExpand,
         Self::LcmExpandQuery,
-        Self::SessionStart,
-        Self::SessionEnd,
         Self::Workflows,
     ];
 
-    /// Operations with a current callable transport. The legacy session
-    /// lifecycle names remain in [`Self::ALL`] solely so the catalog can
-    /// disclose their deprecated MCP/CLI bindings. Daemon grants, HTTP routes,
-    /// and the SDK all derive from this exact mounted set.
+    /// Operations with a current callable transport. Daemon grants, HTTP
+    /// routes, and the SDK all derive from this exact mounted set.
     pub const CALLABLE: [Self; 25] = [
         Self::FactStoreAdd,
         Self::FactStoreSearch,
@@ -170,10 +163,7 @@ impl RetainedSurfaceOperation {
     ];
 
     pub const fn is_callable(self) -> bool {
-        !matches!(
-            self,
-            Self::FactStore | Self::SessionRefresh | Self::SessionStart | Self::SessionEnd
-        )
+        !matches!(self, Self::FactStore | Self::SessionRefresh)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -205,8 +195,6 @@ impl RetainedSurfaceOperation {
             Self::LcmDescribe => "lcm_describe",
             Self::LcmExpand => "lcm_expand",
             Self::LcmExpandQuery => "lcm_expand_query",
-            Self::SessionStart => "session_start",
-            Self::SessionEnd => "session_end",
         }
     }
 
@@ -252,8 +240,6 @@ pub(super) const CURRENT_SURFACES: &[BindingSurface] = &[
     BindingSurface::Cli,
     BindingSurface::Mcp,
 ];
-pub(super) const LEGACY_SURFACES: &[BindingSurface] = &[BindingSurface::Cli, BindingSurface::Mcp];
-
 pub fn retained_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let specs = surface_specs();
@@ -276,16 +262,7 @@ pub fn retained_surface_catalog_contribution()
                 operation: SurfaceOperationName::new(spec.operation.as_str())?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
-                status: if matches!(
-                    spec.operation,
-                    RetainedSurfaceOperation::SessionStart | RetainedSurfaceOperation::SessionEnd
-                ) {
-                    BindingStatus::Deprecated {
-                        deprecation: BindingDeprecation::new(2)?,
-                    }
-                } else {
-                    BindingStatus::Current
-                },
+                status: BindingStatus::Current,
                 alias_of: None,
             })?);
             binding_ids.push(binding_id);

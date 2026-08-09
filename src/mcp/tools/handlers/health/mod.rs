@@ -7,13 +7,11 @@
 mod dsm;
 mod reports;
 mod runtime;
-mod session;
 mod test_map;
 
 pub(super) use dsm::handle_dsm;
 pub(super) use reports::{handle_dependency_depth, handle_gini, handle_health};
 pub(super) use runtime::handle_runtime;
-pub(super) use session::{handle_session_end, handle_session_start};
 pub(super) use test_map::{handle_test_map, handle_test_risk};
 
 use std::collections::{HashMap, HashSet};

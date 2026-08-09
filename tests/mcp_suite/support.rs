@@ -336,16 +336,12 @@ pub(crate) async fn handle_tool_call(
     //
     // Always mount the retained project session runtime for these tools. Falling
     // through when `sessions.db` is not yet a regular file left
-    // `active_project_session_db` unset, so session_start/end failed closed with
-    // "health-delta observation authority is unavailable" even though the test
-    // graph still retained a registered session authority (production mounts
-    // that authority before dispatching the same tools).
+    // `active_project_session_db` unset, so message-search and LCM reads failed
+    // closed even though the test graph still retained a registered session
+    // authority (production mounts that authority before dispatching the same
+    // tools).
     #[cfg(feature = "test-transport")]
-    if matches!(
-        tool_name,
-        "tracedecay_message_search" | "tracedecay_session_start" | "tracedecay_session_end"
-    ) || tool_name.starts_with("tracedecay_lcm_")
-    {
+    if tool_name == "tracedecay_message_search" || tool_name.starts_with("tracedecay_lcm_") {
         let runtime = open_active_project_scoped_runtime(cg).await;
         let server = McpServer::new_with_host_admission_test_runtime_for_test(
             TraceDecay::open(cg.project_root()).await?,

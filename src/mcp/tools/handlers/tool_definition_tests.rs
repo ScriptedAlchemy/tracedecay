@@ -94,8 +94,8 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_runtime"));
     assert!(tool_names.contains(&"tracedecay_dsm"));
     assert!(tool_names.contains(&"tracedecay_test_risk"));
-    assert!(tool_names.contains(&"tracedecay_session_start"));
-    assert!(tool_names.contains(&"tracedecay_session_end"));
+    assert!(!tool_names.contains(&"tracedecay_session_start"));
+    assert!(!tool_names.contains(&"tracedecay_session_end"));
     assert!(tool_names.contains(&"tracedecay_body"));
     assert!(tool_names.contains(&"tracedecay_todos"));
     assert!(tool_names.contains(&"tracedecay_fact_store"));
@@ -316,8 +316,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_apply_native_integration",
         "tracedecay_cancel_native_integration",
         "tracedecay_run_affected_tests",
-        "tracedecay_session_start",
-        "tracedecay_session_end",
         "tracedecay_fact_store",
         "tracedecay_fact_feedback",
         "tracedecay_memory_status",

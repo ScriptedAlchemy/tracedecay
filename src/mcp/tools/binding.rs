@@ -244,10 +244,8 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_lcm_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_module_api", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_qualified_name", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_end", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_lookup", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_session_refresh", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_start", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_sessions_for", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_body", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_lines", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -309,9 +307,7 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_feedback"
         | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
-        | "tracedecay_run_affected_tests"
-        | "tracedecay_session_start"
-        | "tracedecay_session_end" => EffectClass::Administrative,
+        | "tracedecay_run_affected_tests" => EffectClass::Administrative,
         _ => EffectClass::Read,
     }
 }
@@ -482,8 +478,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_configuration_rollback_apply"
             | "tracedecay_context_scout_pause"
             | "tracedecay_context_scout_resume"
-            | "tracedecay_session_start"
-            | "tracedecay_session_end"
             | "tracedecay_str_replace"
             | "tracedecay_multi_str_replace"
             | "tracedecay_insert_at"
@@ -527,9 +521,6 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
             },
             "tracedecay_fact_store" => McpInverseContract::SameTool {
                 action: "remove".to_owned(),
-            },
-            "tracedecay_session_start" => McpInverseContract::Tool {
-                tool_name: "tracedecay_session_end".to_owned(),
             },
             _ => McpInverseContract::Unavailable {
                 reason: McpInverseUnavailableReason::NoVerifiedInverse,

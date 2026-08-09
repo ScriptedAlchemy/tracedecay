@@ -110,8 +110,6 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "dsm",
 ];
 const SESSION_TOOLS: &[&str] = &[
-    "session_start",
-    "session_end",
     "message_search",
     "sessions_for",
     "workflows",

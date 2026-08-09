@@ -692,8 +692,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
     } else if n == "tracedecay_fact_store"
         || n == "tracedecay_fact_feedback"
         || n == "tracedecay_memory_status"
-        || n == "tracedecay_session_start"
-        || n == "tracedecay_session_end"
     {
         "memory & session"
     } else if n == "tracedecay_health"

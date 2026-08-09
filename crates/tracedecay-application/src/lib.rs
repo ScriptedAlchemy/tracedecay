@@ -236,8 +236,14 @@ pub use result::{
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
 };
 pub use retained_surfaces::{
-    RetainedSurfaceOperation, retained_surface_application_operation,
-    retained_surface_catalog_contribution, retained_surface_handler_descriptors,
+    RetainedLcmExecutionPortV1, RetainedLcmRequestV1, RetainedMemoryExecutionPortV1,
+    RetainedMemoryRequestV1, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
+    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    RetainedSurfaceExecutionFutureV1, RetainedSurfaceOperation, RetainedSurfacePortsV1,
+    RetainedSurfaceServiceV1, retained_surface_application_operation,
+    retained_surface_catalog_contribution, retained_surface_executable_binding_registry,
+    retained_surface_execution_problem, retained_surface_handler_descriptors,
+    retained_surface_operation_is_effect,
 };
 pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
@@ -273,13 +279,9 @@ pub use settings_preview::{
     validate_project_settings_patch,
 };
 pub use source_edit::{
-    RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
-    RenameImpactV1, RenamePreviewAcceptanceV1, RenamePreviewNodeV1, RenamePreviewResultV1,
-    RenamePreviewSurfaceRequestV1, RenameProtectedValueCategoryV1, RenameProtectedValueV1,
-    RenameResult, RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
-    RenameSymbolSurfaceRequestV1, SourceEditAuthorizationAdmissionV1,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditDiagnosticV1,
-    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
+    RenameFileEditV1, RenameResult, RenameSymbolBindingV1, RenameTextOnlyMatchV1,
+    SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
+    SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
     SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,

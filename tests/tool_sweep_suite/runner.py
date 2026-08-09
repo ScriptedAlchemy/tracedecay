@@ -28,7 +28,6 @@ from outcomes import (
     expected_state,
     fact_id_with_content,
     first_value,
-    has_status,
     has_success_framed_not_found,
     has_true,
     objects as _objects,
@@ -915,12 +914,7 @@ def missing_effect_journey_row(policy: ToolPolicy) -> dict[str, Any]:
 def _journey_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
     response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
     row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
-    if row["verdict"] != "PASS" and not (
-        tool == "tracedecay_session_end"
-        and not (set(arguments) - {"format"})
-        and row["problem_code"] == "tool_sweep.success_framed_not_found"
-        and has_status(response, "no_baseline")
-    ):
+    if row["verdict"] != "PASS":
         raise SweepError(f"{tool} journey call failed: {row['problem_code'] or row['note']}")
     if duration_us(response) is None:
         raise SweepError(f"{tool} journey call omitted the enabled _meta.duration_us receipt")

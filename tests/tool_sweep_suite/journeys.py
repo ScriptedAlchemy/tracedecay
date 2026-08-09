@@ -33,10 +33,6 @@ class PreparedJourney:
     cleanup: Callable[[dict[str, Any]], str]
 
 
-def _completed_session_end(response: dict[str, Any]) -> bool:
-    return first_value(response, {"before_watermark", "signal_before"}) is not None
-
-
 def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
     """Read the exact fact's trust score from a fact_store get response."""
     for value in objects(response):
@@ -605,50 +601,6 @@ def prepare(
             return "durable refresh start/cancel receipt verified terminal"
 
         return PreparedJourney({"action": "start", **selectors}, cleanup)
-    if name == "tracedecay_session_start":
-        def cleanup(response: dict[str, Any]) -> str:
-            if not has_status(response, "baseline_saved"):
-                raise JourneyError("session producer did not save its baseline")
-            ended = call(
-                "tracedecay_session_end",
-                {"format": "json"},
-                deadline("tracedecay_session_end"),
-            )
-            if not _completed_session_end(ended):
-                raise JourneyError("session end did not consume the saved baseline")
-            absent = call(
-                "tracedecay_session_end",
-                {"format": "json"},
-                deadline("tracedecay_session_end"),
-            )
-            if not has_status(absent, "no_baseline"):
-                raise JourneyError("session rollback did not verify baseline absence")
-            return "session baseline rollback verified"
-        return PreparedJourney({"format": "json"}, cleanup)
-    if name == "tracedecay_session_end":
-        started = call(
-            "tracedecay_session_start",
-            {"format": "json"},
-            deadline("tracedecay_session_start"),
-        )
-        if not has_status(started, "baseline_saved"):
-            raise JourneyError("session-start producer did not save a baseline")
-        def cleanup(response: dict[str, Any]) -> str:
-            if not _completed_session_end(response):
-                call(
-                    "tracedecay_session_end",
-                    {"format": "json"},
-                    deadline("tracedecay_session_end"),
-                )
-            absent = call(
-                "tracedecay_session_end",
-                {"format": "json"},
-                deadline("tracedecay_session_end"),
-            )
-            if not has_status(absent, "no_baseline"):
-                raise JourneyError("session rollback did not verify baseline absence")
-            return "session baseline rollback verified"
-        return PreparedJourney({"format": "json"}, cleanup)
     if name == "tracedecay_source_edit_rollback":
         return _journaled_rollback(fixture, call, deadline)
     return _source_edit(name, fixture, call, deadline)

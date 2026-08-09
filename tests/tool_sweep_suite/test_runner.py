@@ -150,24 +150,6 @@ class ProblemCodeTests(unittest.TestCase):
             ("effect.source-edit.fixture", "sha256:" + "a" * 64, "fixture-key"),
         )
 
-    def test_only_documented_session_absence_can_pass_a_journey_call(self) -> None:
-        """The session rollback has an explicit absence state; generic not-found remains failure."""
-        runner = load_runner()
-
-        class Client:
-            def call_tool(self, _name: str, _arguments: dict[str, object], _deadline_ms: int):
-                return {
-                    "result": {
-                        "_meta": {"duration_us": 1},
-                        "content": [{"type": "text", "text": "**status:** no_baseline\n**message:** No session baseline found."}],
-                    }
-                }, 1
-
-        runner._journey_call(Client(), "tracedecay_session_end", {}, 1_000)
-        with self.assertRaises(runner.SweepError):
-            runner._journey_call(Client(), "tracedecay_node", {}, 1_000)
-
-
 class ExpectedHermeticDenialTests(unittest.TestCase):
     @staticmethod
     def policy(runner, name):

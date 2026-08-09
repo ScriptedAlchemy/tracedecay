@@ -1,21 +1,40 @@
 use tracedecay_tool_catalog::{EffectClass, ScopeDimension};
 
-use super::{RetainedSurfaceOperation, RetainedSurfaceSpec};
+use super::{CURRENT_SURFACES, RetainedSurfaceOperation, RetainedSurfaceSpec};
 
 const SESSION_SCOPE: &[ScopeDimension] = &[ScopeDimension::Session, ScopeDimension::Resource];
 const PROJECT_SCOPE: &[ScopeDimension] = &[ScopeDimension::Project];
-const PROJECT_SESSION_SCOPE: &[ScopeDimension] =
-    &[ScopeDimension::Project, ScopeDimension::Session];
 
 pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
     RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::SessionRefresh,
-        summary: "Control session refresh",
-        description: "Start, inspect, resume, or cancel the exact daemon-owned session refresh.",
+        operation: RetainedSurfaceOperation::SessionRefreshStatus,
+        summary: "Inspect session refresh status",
+        description: "Inspect the exact daemon-owned session refresh.",
         example: "Inspect this session refresh",
+        effect: EffectClass::Read,
+        scope: SESSION_SCOPE,
+        paginated: false,
+        surfaces: CURRENT_SURFACES,
+    },
+    RetainedSurfaceSpec {
+        operation: RetainedSurfaceOperation::SessionRefreshCancel,
+        summary: "Cancel a session refresh",
+        description: "Cancel the exact daemon-owned session refresh.",
+        example: "Cancel this session refresh",
         effect: EffectClass::Administrative,
         scope: SESSION_SCOPE,
         paginated: false,
+        surfaces: CURRENT_SURFACES,
+    },
+    RetainedSurfaceSpec {
+        operation: RetainedSurfaceOperation::SessionRefreshBegin,
+        summary: "Begin a session refresh",
+        description: "Begin or resume the exact daemon-owned session refresh.",
+        example: "Begin this session refresh",
+        effect: EffectClass::Administrative,
+        scope: SESSION_SCOPE,
+        paginated: false,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::MessageSearch,
@@ -25,6 +44,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::SessionsFor,
@@ -34,6 +54,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: PROJECT_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmStatus,
@@ -43,6 +64,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: false,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmDoctor,
@@ -52,6 +74,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: false,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmLoadSession,
@@ -61,6 +84,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmGrep,
@@ -70,6 +94,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmDescribe,
@@ -79,6 +104,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmExpand,
@@ -88,6 +114,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
+        surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmExpandQuery,
@@ -97,23 +124,6 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
         paginated: true,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::SessionStart,
-        summary: "Start retained session accounting",
-        description: "Record a project-scoped session start through the retained owner.",
-        example: "Start accounting for this session",
-        effect: EffectClass::Administrative,
-        scope: PROJECT_SESSION_SCOPE,
-        paginated: false,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::SessionEnd,
-        summary: "End retained session accounting",
-        description: "Record a project-scoped session end through the retained owner.",
-        example: "End accounting for this session",
-        effect: EffectClass::Administrative,
-        scope: PROJECT_SESSION_SCOPE,
-        paginated: false,
+        surfaces: CURRENT_SURFACES,
     },
 ];

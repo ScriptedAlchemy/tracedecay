@@ -78,10 +78,8 @@ and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Guardrails
 
-- Discovery/analysis tools are read-only and parallel-safe.
-  The compatibility wrappers `tracedecay_session_start` /
-  `tracedecay_session_end` write/remove the mutable baseline file; prefer
-  `tracedecay_health_delta` for generation-bound evidence.
+- Discovery/analysis tools are read-only and parallel-safe. Use
+  `tracedecay_health_delta` for generation-bound health evidence.
   `tracedecay_dashboard` starts/stops a local server — use it only when relevant
   and respect Cursor approval/run-mode.
 - `tracedecay_redundancy` is computed lazily and cached; the first call on a

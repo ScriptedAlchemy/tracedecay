@@ -1,6 +1,6 @@
 use tracedecay_tool_catalog::{EffectClass, ScopeDimension};
 
-use super::{RetainedSurfaceOperation, RetainedSurfaceSpec};
+use super::{CURRENT_SURFACES, RetainedSurfaceOperation, RetainedSurfaceSpec};
 
 const PROJECT_SESSION_SCOPE: &[ScopeDimension] =
     &[ScopeDimension::Project, ScopeDimension::Session];
@@ -13,4 +13,5 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 1] = [RetainedSurfaceSpec {
     effect: EffectClass::Read,
     scope: PROJECT_SESSION_SCOPE,
     paginated: true,
+    surfaces: CURRENT_SURFACES,
 }];
