@@ -162,50 +162,6 @@ pub struct MoveResult {
     pub message: String,
 }
 
-/// One file a rename touched (or would touch), with how many bound
-/// whole-identifier occurrences were rewritten in it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RenameFileEditV1 {
-    pub file: String,
-    pub replaced_count: usize,
-}
-
-/// Literal identifier occurrences of the old name in a touched file that are
-/// NOT backed by graph evidence. A rename never rewrites these; they are
-/// reported for manual review, exactly like the read-only preview does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RenameTextOnlyMatchV1 {
-    pub file: String,
-    pub text_only_count: usize,
-}
-
-/// Result of an apply-grade symbol rename (or its dry run).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct RenameResult {
-    pub success: bool,
-    /// Qualified name of the renamed symbol at plan time.
-    pub symbol: String,
-    pub old_name: String,
-    pub new_name: String,
-    /// Every file the rename touched (or would touch), with per-file counts.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<RenameFileEditV1>,
-    /// Graph reference sites bound into the rename (excluding the declaration).
-    pub reference_count: usize,
-    /// Old-name occurrences left untouched because no graph edge attests them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub text_only_matches: Vec<RenameTextOnlyMatchV1>,
-    /// True when this was a dry run: sites were bound and the resulting
-    /// content computed, but nothing was written to disk.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub dry_run: bool,
-    /// Bounded preview diff across every touched file. Populated only on a
-    /// successful dry run; `None` for real edits and for failures.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<String>,
-    pub message: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceEditKind {
@@ -245,6 +201,8 @@ pub struct RenameSymbolBindingV1 {
     pub kind: String,
     pub file: String,
     pub old_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_preview: Option<RenamePreviewAcceptanceV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +320,7 @@ impl SourceEditRequest {
 
 mod effect_authorization;
 mod output;
+mod rename;
 mod surface_request;
 
 pub use effect_authorization::{
@@ -374,11 +333,18 @@ pub use output::{
     SourceEditFailedResultV1, SourceEditReconciledResultV1, SourceEditSurfaceOutcomeV1,
     SourceEditSurfaceResultV1, SourceEditTimedOutResultV1,
 };
+pub use rename::{
+    RenameDispositionCountsV1, RenameFileEditV1, RenameHazardKindV1, RenameHazardV1,
+    RenameImpactV1, RenamePreviewAcceptanceV1, RenamePreviewNodeV1, RenamePreviewResultV1,
+    RenameProtectedValueCategoryV1, RenameProtectedValueV1, RenameResult, RenameSiteDispositionV1,
+    RenameSiteKindV1, RenameSiteV1,
+};
 pub use surface_request::{
     AstGrepRewriteSurfaceRequestV1, InsertAtSurfaceRequestV1, InsertAtSymbolSurfaceRequestV1,
-    MoveSymbolSurfaceRequestV1, MultiStrReplaceSurfaceRequestV1, RenameSymbolSurfaceRequestV1,
-    ReplaceSymbolSurfaceRequestV1, SourceEditApplyControlV1, SourceEditReconcileSurfaceRequestV1,
-    SourceEditRollbackSurfaceRequestV1, StrReplaceSurfaceRequestV1,
+    MoveSymbolSurfaceRequestV1, MultiStrReplaceSurfaceRequestV1, RenamePreviewSurfaceRequestV1,
+    RenameSymbolSurfaceRequestV1, ReplaceSymbolSurfaceRequestV1, SourceEditApplyControlV1,
+    SourceEditReconcileSurfaceRequestV1, SourceEditRollbackSurfaceRequestV1,
+    StrReplaceSurfaceRequestV1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
