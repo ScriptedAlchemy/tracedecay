@@ -273,7 +273,11 @@ fn resolve_identity(
     Identity {
         provider,
         model,
-        source: MetricSourceV1::ProviderUsageObservation,
+        source: if candidates.is_empty() {
+            MetricSourceV1::ObservabilityEnvelope
+        } else {
+            MetricSourceV1::ProviderUsageObservation
+        },
         unavailable_reason: (!identity_complete).then_some(UNKNOWN_IDENTITY_REASON),
     }
 }
@@ -685,6 +689,7 @@ mod tests {
         let identity = resolve_identity(SCOPE_REF, Some("request-1"), &aggregate, &usage_horizon());
         assert_eq!(identity.provider, None);
         assert_eq!(identity.model, None);
+        assert_eq!(identity.source, MetricSourceV1::ObservabilityEnvelope);
         assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
     }
 
