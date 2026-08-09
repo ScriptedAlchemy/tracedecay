@@ -414,4 +414,3 @@ mod tests {
         assert_eq!(binding.validate_context(&context), Ok(()));
     }
 }
-

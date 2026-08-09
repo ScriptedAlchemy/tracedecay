@@ -816,4 +816,3 @@ pub(super) fn expand_retrieval_outcome(
         }
     }
 }
-

@@ -241,4 +241,3 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
         }
     ));
 }
-

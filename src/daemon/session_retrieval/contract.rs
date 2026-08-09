@@ -664,4 +664,3 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     BudgetExhausted,
     Cancelled,
 }
-

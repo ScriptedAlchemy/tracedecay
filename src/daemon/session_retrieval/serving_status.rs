@@ -76,4 +76,3 @@ fn worker_status(status: &SessionProjectionServingStatus) -> SessionRetrievalWor
         }),
     }
 }
-
