@@ -2,13 +2,20 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+#[path = "claude_observation_benchmark/artifact.rs"]
 mod artifact;
+#[path = "claude_observation_benchmark/baseline.rs"]
 mod baseline;
+#[path = "claude_observation_benchmark/manifest.rs"]
 mod manifest;
+#[path = "claude_observation_benchmark/metrics.rs"]
 mod metrics;
+#[path = "claude_observation_benchmark/model.rs"]
 mod model;
+#[path = "claude_observation_benchmark/runner.rs"]
 mod runner;
 #[cfg(test)]
+#[path = "claude_observation_benchmark/tests.rs"]
 mod tests;
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
