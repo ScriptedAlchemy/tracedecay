@@ -1,15 +1,15 @@
 //! `DaemonInvocationState`: daemon-generation-local state for the closed
 //! invocation protocol, shared by the Unix and portable brokers.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
-//! signatures, or behavior changed. `use super::*` re-exposes every name the
-//! parent `daemon` module had in scope (including the `multi_root_family_allows`
-//! kill-switch call target) so the moved code resolves unchanged.
+//! `use super::*` re-exposes the daemon authorities needed by this state (including
+//! the `multi_root_family_allows` kill-switch call target) while request
+//! cancellation remains threaded through the invocation boundary explicitly.
 
 use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
 };
@@ -640,6 +640,7 @@ impl DaemonInvocationState {
                         deadline,
                         cancellation,
                     ),
+                    None,
                 ))
                 .await;
                 let service::invocation::DaemonInvocationOutcome::WorkApplication {
@@ -706,6 +707,7 @@ impl DaemonInvocationState {
         store_administration: &StoreAdministration,
         project_path: Option<&Path>,
         request: DaemonInvocationRequest,
+        request_cancellation: Option<CancellationToken>,
     ) -> DaemonInvocationResponse {
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
@@ -901,17 +903,16 @@ impl DaemonInvocationState {
             }
             _ => None,
         };
-        let response = self
-            .service
-            .invoke(
-                &self.lsp_session_registry,
-                request_project_path,
-                lsp_workspace,
-                git_service,
-                native_integration_service,
-                request,
-            )
-            .await;
+        let response = Box::pin(self.service.invoke_with_cancellation(
+            &self.lsp_session_registry,
+            request_project_path,
+            lsp_workspace,
+            git_service,
+            native_integration_service,
+            request,
+            request_cancellation,
+        ))
+        .await;
         // A client frame may have parsed a fenced workspace-folder change; the
         // daemon settles it here because only this layer can resolve and
         // authorize the next root set.

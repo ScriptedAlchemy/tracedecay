@@ -1,6 +1,7 @@
 //! The daemon invocation dispatcher: `DaemonInvocationService::invoke`.
 
 use super::*;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
 ///
@@ -29,15 +30,53 @@ impl DaemonInvocationService {
         native_integration_service: Option<DaemonNativeIntegrationOwner>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
+        Box::pin(self.invoke_with_cancellation(
+            lsp_registry,
+            project_root,
+            lsp_workspace,
+            git_service,
+            native_integration_service,
+            request,
+            None,
+        ))
+        .await
+    }
+
+    /// Executes a request with a cancellation lease that was admitted before a
+    /// route-local project-open wait. The ordinary `invoke` entry point keeps
+    /// owning registration for callers that do not need a pre-admission wait.
+    pub(crate) async fn invoke_with_cancellation(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        project_root: Option<&Path>,
+        lsp_workspace: Option<AuthorizedLspWorkspace>,
+        git_service: Option<DaemonGitInvocationOwner>,
+        native_integration_service: Option<DaemonNativeIntegrationOwner>,
+        request: DaemonInvocationRequest,
+        admitted_cancellation: Option<CancellationToken>,
+    ) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
-        let Some(cancellation_lease) = crate::daemon::request_cancellation::register(&request_id)
-        else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::InvalidRequest,
-            );
+        let cancellation_lease = if admitted_cancellation.is_none() {
+            let Some(lease) = crate::daemon::request_cancellation::register(&request_id) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            Some(lease)
+        } else {
+            None
         };
-        let request_cancellation = cancellation_lease.token();
+        let request_cancellation = match (admitted_cancellation, cancellation_lease.as_ref()) {
+            (Some(token), _) => token,
+            (None, Some(lease)) => lease.token(),
+            (None, None) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+        };
         let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass

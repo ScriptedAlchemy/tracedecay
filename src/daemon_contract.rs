@@ -1765,6 +1765,17 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn lsp_open_control(&self) -> Option<(&Deadline, &CancellationContext)> {
+        match &self.payload {
+            DaemonInvocationPayload::LspOpen {
+                deadline,
+                cancellation,
+                ..
+            } => Some((deadline, cancellation)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn operation(&self) -> DaemonInvocationOperation {
         match self.payload {
             DaemonInvocationPayload::GitRead {

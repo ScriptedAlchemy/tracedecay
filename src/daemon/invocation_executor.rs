@@ -226,6 +226,7 @@ impl InProcessDaemonInvocationExecutor {
                 &self.store_administration,
                 Some(&self.project_path),
                 request,
+                None,
             )
             .await
     }
