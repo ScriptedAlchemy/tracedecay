@@ -266,14 +266,16 @@ transcripts"), so Codex sessions also feed reflection.
 
 ### 3.5 Host skill inventory and deployment
 
-`tracedecay_hermes_skill_bridge` provides a read-only inventory of skills,
-pending approvals, usage, and archives from the standard `~/.hermes` install.
-It accepts no alternate home or profile selector. Skill deployment to agents
-goes through the managed-skill overlay
-(`managed_skills.rs`, `skill_targets.rs`, `install_*_managed_skill_overlay`)
-so agent-authored skills land in the `agent-managed/` directory of each
-installed plugin. This is the template for "TraceDecay materializes generated
-content into agent surfaces on a schedule," which design D reuses for memory.
+Managed-skill inventory and lifecycle now run through the daemon-owned
+automation surfaces: the `skill_writer` scheduler creates drafts, the CLI
+(`tracedecay automation skills list`, `... view <id>`, `... approve <id>`,
+`... disable <id>`, `... archive <id>`, and `... restore <id>`) and dashboard
+expose inspection and lifecycle controls, and
+`tracedecay automation skills install --target <host> --output <path>` exports
+approved `SKILL.md` packages through the host overlay. Hosts load those
+materialized files; Hermes profile skills remain Hermes-owned. This is the
+current path for TraceDecay to materialize generated content into agent
+surfaces on a schedule.
 
 ---
 
