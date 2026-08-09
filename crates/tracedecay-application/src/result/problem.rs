@@ -216,6 +216,10 @@ impl ApplicationProblem {
         self.kind().terminality()
     }
 
+    pub const fn is_admitted_terminal(&self) -> bool {
+        self.kind().is_admitted_terminal()
+    }
+
     pub fn not_found_or_not_authorized(retry: RetryDirective) -> Self {
         Self::NotFoundOrNotAuthorized {
             retry,
@@ -367,6 +371,7 @@ mod tests {
         assert_eq!(problem.retry(), RetryDirective::Never);
         assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
         assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
+        assert!(problem.is_admitted_terminal());
         assert!(problem.committed_receipt().is_none());
 
         let wire = serde_json::to_value(&problem).expect("problem serializes");
