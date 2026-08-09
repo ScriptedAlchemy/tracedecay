@@ -61,28 +61,36 @@ async fn memory_curator_runner_skips_when_automation_is_disabled() {
 }
 
 #[tokio::test]
-async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
+async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
-    let backend = JsonBackend::new(json!({
-        "ops": [
-            {
+    let backend = SequentialJsonBackend::new(vec![
+        json!({
+            "ops": [{
                 "cluster_id": "cluster-0000",
                 "op": "delete",
                 "fact_id": facts.loser_id,
                 "confidence": 0.98,
                 "reason": format!("near duplicate of fact {}", facts.winner_id)
-            },
-            {
+            }, {
                 "cluster_id": "cluster-0000",
                 "op": "delete",
-                "fact_id": 999,
+                "fact_id": "fact.missing",
                 "confidence": 0.98,
                 "reason": "hallucinated id should be rejected"
-            }
-        ]
-    }));
+            }]
+        }),
+        json!({
+            "ops": [{
+                "cluster_id": "cluster-0000",
+                "op": "delete",
+                "fact_id": facts.loser_id,
+                "confidence": 0.98,
+                "reason": format!("near duplicate of fact {}", facts.winner_id)
+            }]
+        }),
+    ]);
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -112,7 +120,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.schema_version, 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(
@@ -124,14 +132,14 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         Some("memory_curator:v1")
     );
     assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 1);
-    assert_eq!(run.ledger_record.reviewed_count, 2);
+    assert_eq!(run.ledger_record.rejected_count, 0);
+    assert_eq!(run.ledger_record.reviewed_count, 1);
     assert_eq!(run.ledger_record.skipped_count, 0);
     assert_eq!(run.ledger_record.backend, "codex_app_server");
     assert_eq!(run.ledger_record.host_mode.as_deref(), Some("standalone"));
     assert_eq!(run.ledger_record.model.as_deref(), Some("fixture-model"));
-    assert_eq!(run.ledger_record.backend_attempt_count, 1);
-    assert_eq!(run.ledger_record.backend_attempts.len(), 1);
+    assert_eq!(run.ledger_record.backend_attempt_count, 2);
+    assert_eq!(run.ledger_record.backend_attempts.len(), 2);
     assert!(run.ledger_record.backend_attempts[0].succeeded);
     assert!(
         run.ledger_record
@@ -155,9 +163,10 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         run.ledger_record.applied_ops.as_ref().unwrap()[0]["fact_id"],
         json!(facts.loser_id)
     );
+    assert_eq!(run.ledger_record.rejected_ops.as_ref().unwrap(), &json!([]));
     assert_eq!(
-        run.ledger_record.rejected_ops.as_ref().unwrap()[0]["rejected_reason"],
-        json!("fact_id 999 was not in reviewed evidence")
+        run.ledger_record.validation_report.as_ref().unwrap()["validation_repairs"][0]["attempt"],
+        json!(1)
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["clusters_reviewed"],
@@ -181,12 +190,8 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert!(!fact_exists(&cg, facts.loser_id).await);
     assert_eq!(
-        run.report["automation_apply_policy"]["require_dashboard_approval"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["approval_required"],
-        json!(false)
+        run.report["automation_apply_policy"]["memory_apply_policy"],
+        json!("validate_then_apply")
     );
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
@@ -224,12 +229,12 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     .unwrap();
     assert_eq!(
         validation_payload["task_validation"]["decision"],
-        json!("passed_with_rejections")
+        json!("passed")
     );
     assert_eq!(validation_payload["loop_stage"], json!("validation_gate"));
     assert_eq!(
         validation_payload["improvement_gate"]["decision"],
-        json!("ready_for_optimizer_review")
+        json!("ready_for_handoff")
     );
     assert_eq!(
         validation_payload["improvement_gate"]["feedback_status"],
@@ -260,7 +265,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         validation_payload["improvement_gate"]["optimizer_status"],
-        json!("ready_for_optimizer_review")
+        json!("ready_for_handoff")
     );
     assert!(
         validation_payload["improvement_gate"]["artifact_refs"]
@@ -289,8 +294,8 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(feedback_payload["loop_stage"], json!("feedback"));
     assert_eq!(feedback_payload["source_refs"][0]["kind"], json!("traces"));
     assert_eq!(feedback_payload["summary"]["accepted_count"], json!(1));
-    assert_eq!(feedback_payload["summary"]["rejected_count"], json!(1));
-    assert_eq!(feedback_payload["summary"]["reviewed_count"], json!(2));
+    assert_eq!(feedback_payload["summary"]["rejected_count"], json!(0));
+    assert_eq!(feedback_payload["summary"]["reviewed_count"], json!(1));
     assert_eq!(feedback_payload["human"], json!([]));
     assert!(
         feedback_payload["artifact_refs"]
@@ -302,21 +307,13 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
                     .as_str()
                     .is_some_and(|hash| hash.starts_with("sha256:")))
     );
-    assert_eq!(feedback_payload["model"].as_array().unwrap().len(), 2);
+    assert_eq!(feedback_payload["model"].as_array().unwrap().len(), 1);
     assert!(
         feedback_payload["model"]
             .as_array()
             .unwrap()
             .iter()
             .any(|entry| entry["outcome"] == json!("accepted"))
-    );
-    assert!(
-        feedback_payload["model"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["outcome"] == json!("rejected")
-                && entry["reason"] == json!("fact_id 999 was not in reviewed evidence"))
     );
 
     let eval_artifact = run
@@ -339,7 +336,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(eval_payload["source_refs"][1]["kind"], json!("feedback"));
     assert_eq!(
         eval_payload["eval_definitions"].as_array().unwrap().len(),
-        2
+        1
     );
     assert_eq!(
         eval_payload["format"],
@@ -349,7 +346,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(
         eval_payload["runner"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test memory_curator_runner_validates_backend_ops_and_records_ledger -- --nocapture"
+            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
         )
     );
     assert_eq!(
@@ -365,7 +362,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         eval_payload["runner"]["inputs"]["expected_eval_count"],
-        json!(2)
+        json!(1)
     );
     assert!(
         eval_payload["runner"]["inputs"]["validation_report_hash"]
@@ -418,20 +415,6 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
                 && entry["source_feedback"]["feedback_id"] == json!("accepted:0")
                 && entry["assertions"][0]["type"] == json!("outcome_equals"))
     );
-    assert!(
-        eval_payload["eval_definitions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["expected_outcome"] == json!("rejected")
-                && entry["eval_id"] == json!("memory_curator:rejected:0")
-                && entry["source_feedback_ref"] == json!("rejected:0")
-                && entry["source_feedback"]["outcome"] == json!("rejected")
-                && entry["expected"]["reason"]
-                    == json!("fact_id 999 was not in reviewed evidence")
-                && entry["input"]["evidence_hash"] == json!(run.ledger_record.evidence_hash)
-                && entry["input"]["input_hash"] == json!(run.ledger_record.input_hash))
-    );
     assert_eq!(
         eval_payload["result_refs"][0]["kind"],
         json!("validation_report")
@@ -456,11 +439,11 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         json!("optimizer_diagnosis")
     );
     assert_eq!(optimizer_payload["signals"]["accepted_count"], json!(1));
-    assert_eq!(optimizer_payload["signals"]["rejected_count"], json!(1));
-    assert_eq!(optimizer_payload["signals"]["reviewed_count"], json!(2));
+    assert_eq!(optimizer_payload["signals"]["rejected_count"], json!(0));
+    assert_eq!(optimizer_payload["signals"]["reviewed_count"], json!(1));
     assert_eq!(
         optimizer_payload["signals"]["validation_gate_decision"],
-        json!("ready_for_optimizer_review")
+        json!("ready_for_handoff")
     );
     assert!(
         optimizer_payload["artifact_refs"]
@@ -482,11 +465,11 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(optimizer_payload["blockers"], json!([]));
     assert_eq!(
         optimizer_payload["recommendations"][0]["id"],
-        json!("review_rejections")
+        json!("review_accepted_changes")
     );
     assert_eq!(
         optimizer_payload["ranked_changes"][0]["priority"],
-        json!("high")
+        json!("medium")
     );
     assert_eq!(
         optimizer_payload["ranked_changes"][0]["ready_for_codex_handoff"],
@@ -510,9 +493,9 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(handoff_payload["status"], json!("ready_for_review"));
     assert_eq!(
         handoff_payload["readiness"]["validation_gate_decision"],
-        json!("ready_for_optimizer_review")
+        json!("ready_for_handoff")
     );
-    assert_eq!(handoff_payload["readiness"]["eval_count"], json!(2));
+    assert_eq!(handoff_payload["readiness"]["eval_count"], json!(1));
     assert_eq!(
         handoff_payload["readiness"]["auto_apply_allowed"],
         json!(true)
@@ -520,10 +503,6 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(
         handoff_payload["machine_summary"]["next_stage"],
         json!("codex_review")
-    );
-    assert_eq!(
-        handoff_payload["validation_requirements"]["must_not_auto_apply"],
-        json!(false)
     );
     assert_eq!(
         handoff_payload["source_refs"][0]["kind"],
@@ -557,7 +536,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(
         handoff_payload["eval_replay"]["commands"][0],
         json!(
-            "cargo test --test automation_runner_test memory_curator_runner_validates_backend_ops_and_records_ledger -- --nocapture"
+            "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture"
         )
     );
     assert!(
@@ -569,9 +548,10 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
         run.report["llm_apply"]["ops"][0]["fact_id"],
         json!(facts.loser_id)
     );
+    assert_eq!(run.report["llm_apply"]["rejected_ops"], json!([]));
     assert_eq!(
-        run.report["llm_apply"]["rejected_ops"][0]["rejected_reason"],
-        json!("fact_id 999 was not in reviewed evidence")
+        run.report["llm_apply"]["validation_repairs"][0]["attempt"],
+        json!(1)
     );
 
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -580,7 +560,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 1);
-    assert_eq!(records[0].rejected_count, 1);
+    assert_eq!(records[0].rejected_count, 0);
     assert_eq!(records[0].artifacts.len(), 6);
     assert_eq!(records[0].artifacts, run.ledger_record.artifacts);
     assert!(
@@ -646,7 +626,7 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
 }
 
 #[tokio::test]
-async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_setting() {
+async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
@@ -660,7 +640,6 @@ async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_s
         }]
     }));
     let mut config = scheduler_config(None, None);
-    config.auto_apply_memory_ops = false;
     config.tasks.memory_curator.interval_secs = Some(1);
 
     let run = run_memory_curator_with_backend(
@@ -683,8 +662,8 @@ async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_s
         json!("auto_apply_allowed")
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["validated_before_apply"],
-        json!(true)
+        run.report["automation_apply_policy"]["memory_apply_policy"],
+        json!("validate_then_apply")
     );
     assert!(!fact_exists(&cg, facts.loser_id).await);
 }
@@ -866,7 +845,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
 }
 
 #[tokio::test]
-async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
+async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
@@ -883,7 +862,6 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -915,8 +893,8 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
         json!("auto_apply_allowed")
     );
     assert_eq!(
-        run.report["automation_apply_policy"]["auto_apply_memory_ops"],
-        json!(true)
+        run.report["automation_apply_policy"]["memory_apply_policy"],
+        json!("validate_then_apply")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],
@@ -926,14 +904,6 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
         json!(true)
     );
-    assert_eq!(
-        run.report["automation_apply_policy"]["require_dashboard_approval"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["approval_required"],
-        json!(false)
-    );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert!(
         !fact_exists(&cg, facts.loser_id).await,
@@ -942,11 +912,11 @@ async fn memory_curator_runner_auto_apply_is_blocked_by_dashboard_approval() {
 }
 
 #[tokio::test]
-async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zero_ops() {
+async fn memory_curator_quarantines_output_after_bounded_repair_exhaustion() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
-    let backend = JsonBackend::new(json!({
+    let invalid = json!({
         "ops": [
             {
                 "cluster_id": "cluster-0000",
@@ -957,12 +927,12 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
                 "reason": "valid dry-run ids but invalid duplicate loser ids at apply"
             }
         ]
-    }));
+    });
+    let backend = SequentialJsonBackend::new(vec![invalid.clone(), invalid]);
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -974,7 +944,7 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let error = run_memory_curator_with_backend(
         &cg,
         &config,
         &backend,
@@ -986,71 +956,30 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(run.report["llm_apply"]["applied"], json!(0));
-    assert_eq!(
-        run.report["llm_apply"]["results"][0]["status"],
-        json!("error")
+    assert_eq!(backend.calls(), 2);
+    assert!(error.to_string().contains("repair budget exhausted"));
+    assert!(fact_exists(&cg, facts.winner_id).await);
+    assert!(
+        fact_exists(&cg, facts.loser_id).await,
+        "quarantined validation failures must not mutate memory"
     );
-    assert_eq!(
-        run.report["automation_apply_policy"]["accepted_count"],
-        json!(1)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["applied_count"],
-        json!(0)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["fully_applied"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["decision"],
-        json!("apply_incomplete")
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["mutates_store"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["autonomous_memory_apply"],
-        json!(false)
-    );
-    assert_eq!(
-        run.report["automation_apply_policy"]["approval_required"],
-        json!(false)
-    );
-
-    let validation_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "validation_gate").await;
-    assert_eq!(
-        validation_payload["task_validation"]["approval_required"],
-        json!(false)
-    );
-    assert_eq!(
-        validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
-        json!(false)
-    );
-
-    let handoff_payload =
-        read_artifact(&cg, &run.run_id, &run.ledger_record, "codex_handoff").await;
-    assert_eq!(
-        handoff_payload["readiness"]["approval_required"],
-        json!(false)
-    );
-    assert_eq!(
-        handoff_payload["readiness"]["auto_apply_allowed"],
-        json!(false)
-    );
-    assert_eq!(
-        handoff_payload["validation_requirements"]["must_not_auto_apply"],
-        json!(true)
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, AutomationRunStatus::Failed);
+    assert!(
+        records[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("output quarantined"))
     );
 }
 
 #[tokio::test]
-async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required() {
+async fn memory_curator_runner_auto_applies_validated_operations() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
@@ -1067,7 +996,6 @@ async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required()
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
-        auto_apply_memory_ops: true,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -1104,12 +1032,12 @@ async fn memory_curator_runner_auto_applies_only_when_approval_is_not_required()
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert_eq!(
-        run.report["llm_apply"]["results"][0]["status"],
+        run.report["llm_apply"]["receipts"][0]["status"],
         json!("deleted")
     );
     assert!(
         !fact_exists(&cg, facts.loser_id).await,
-        "explicit no-approval auto-apply policy should delete accepted fact"
+        "automatic validation policy should delete accepted fact"
     );
 }
 

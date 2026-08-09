@@ -37,6 +37,7 @@ use super::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus, Automati
 use super::scheduler::AutomationTaskLock;
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
+    validate_skill_proposals,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
@@ -367,7 +368,7 @@ async fn run_skill_writer_for_store(
     );
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
-    let (response, retry_report) = match finalizer
+    let (mut response, mut retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
     {
@@ -385,7 +386,7 @@ async fn run_skill_writer_for_store(
             });
         }
     };
-    let (proposed_ops, proposals) = finalizer
+    let (mut proposed_ops, mut proposals) = finalizer
         .response_output_array(
             &response,
             evidence_hash.clone(),
@@ -394,9 +395,87 @@ async fn run_skill_writer_for_store(
             "skill writer output must include a skills array",
         )
         .await?;
+    let mut validation_repairs = Vec::new();
+    for attempt in 1..=2 {
+        let validation_errors =
+            validate_skill_proposals(&profile_root, &run.run_id, &proposals).await?;
+        if validation_errors.is_empty() {
+            break;
+        }
+        validation_repairs.push(json!({
+            "attempt": attempt,
+            "errors": validation_errors,
+        }));
+        if attempt == 2 {
+            let error = TraceDecayError::Config {
+                message: "skill proposal validation repair budget exhausted; output quarantined"
+                    .to_string(),
+            };
+            finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(proposed_ops),
+                    error.to_string(),
+                    &retry_report,
+                )
+                .await?;
+            return Err(error);
+        }
+        let repair_request = AgentTaskRequest::new(
+            run.run_id.clone(),
+            AgentTaskKind::SkillWriter,
+            format!(
+                "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
+                serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))?
+            ),
+            evidence_hash.clone(),
+            json!({
+                "previous_output": proposed_ops.clone(),
+                "validation_errors": validation_repairs.last(),
+                "activation_policy": activation_policy,
+            }),
+        );
+        let repair_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+        let mut repair_retry_report = AgentTaskRetryReport::default();
+        response = match run_agent_task_with_retry_report(
+            backend,
+            &repair_request,
+            &repair_policy,
+            &mut repair_retry_report,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                retry_report.extend(&repair_retry_report);
+                finalizer
+                    .append_failed_record(
+                        None,
+                        evidence_hash,
+                        Some(proposed_ops),
+                        error.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                return Err(error);
+            }
+        };
+        retry_report.extend(&repair_retry_report);
+        (proposed_ops, proposals) = finalizer
+            .response_output_array(
+                &response,
+                evidence_hash.clone(),
+                &retry_report,
+                "skills",
+                "skill writer repair output must include a skills array",
+            )
+            .await?;
+    }
     let (report, record) = match finalize_skill_writer_success(
         &finalizer,
         &profile_root,
+        analytics_project_root,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
@@ -406,6 +485,7 @@ async fn run_skill_writer_for_store(
             proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
+        &validation_repairs,
     )
     .await
     {
@@ -440,8 +520,10 @@ async fn run_skill_writer_for_store(
 async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
+    project_root: Option<&std::path::Path>,
     activation_policy: &'static str,
     output: ProposedAgentOutput<'_>,
+    validation_repairs: &[Value],
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let ProposedAgentOutput {
         response,
@@ -453,7 +535,7 @@ async fn finalize_skill_writer_success(
     } = output;
     let run_id = finalizer.run_id();
     let proposal_outcome =
-        validate_and_apply_skill_proposals(profile_root, run_id, proposals).await?;
+        validate_and_apply_skill_proposals(profile_root, project_root, run_id, proposals).await?;
     let accepted_count = proposal_outcome.created.len()
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
@@ -469,6 +551,7 @@ async fn finalize_skill_writer_success(
         "applied_consolidations": proposal_outcome.consolidations,
         "rejected_skills": proposal_outcome.rejected,
         "deployment": proposal_outcome.deployment,
+        "validation_repairs": validation_repairs,
         "skill_improvement_recommendations": evidence
             .get("skill_improvement_recommendations")
             .cloned()
@@ -504,6 +587,7 @@ async fn finalize_skill_writer_success(
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
+        "validation_repairs": validation_repairs,
     }));
     Ok((report, record))
 }
@@ -948,6 +1032,7 @@ async fn run_combined_review_for_retrieval(
     let (skill_report, skill_record) = match finalize_skill_writer_success(
         &skill_finalizer,
         &skill_bundle.profile_root,
+        Some(cg.store_layout().project_root.as_path()),
         activation_policy,
         ProposedAgentOutput {
             response: &response,
@@ -957,6 +1042,7 @@ async fn run_combined_review_for_retrieval(
             proposed_ops: &output,
             proposals: &skills,
         },
+        &[],
     )
     .await
     {

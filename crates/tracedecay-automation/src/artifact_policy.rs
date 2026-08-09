@@ -34,17 +34,17 @@ impl TaskArtifactPolicy {
 pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
     match task {
         AgentTaskKind::MemoryCurator => TaskArtifactPolicy {
-            optimizer_action: "update memory curation evidence or apply policy",
+            optimizer_action: "update memory curation evidence or validation repair",
             accepted_next_actions: &[
-                "inspect accepted memory curation outcomes and the apply-policy receipt",
-                "apply explicitly only when the receipt reports proposal-only behavior",
+                "inspect autonomously applied memory curation outcomes",
+                "restore or roll back through administrative controls if needed",
             ],
             rejected_next_actions: &[
-                "review rejected curation reasons",
-                "collect more evidence before applying changes",
+                "inspect quarantined validation failures",
+                "collect stronger evidence before rerunning curation",
             ],
             handoff_test: "cargo test --test automation_runner_test memory_curator",
-            eval_replay_command: "cargo test --test automation_runner_test memory_curator_runner_validates_backend_ops_and_records_ledger -- --nocapture",
+            eval_replay_command: "cargo test --test automation_runner_test memory_curator_repairs_then_applies_validated_ops_and_records_ledger -- --nocapture",
         },
         AgentTaskKind::SessionReflector => TaskArtifactPolicy {
             optimizer_action: "update fact proposal evidence or dedupe policy",
@@ -75,7 +75,7 @@ pub fn artifact_policy(task: AgentTaskKind) -> TaskArtifactPolicy {
         AgentTaskKind::CombinedReview => TaskArtifactPolicy {
             optimizer_action: "update combined review evidence or per-task validation",
             accepted_next_actions: &[
-                "inspect fact automation outcomes and managed skill drafts",
+                "inspect applied fact outcomes and activated managed skills",
                 "confirm the atomic commit receipt before consuming either proposal set",
             ],
             rejected_next_actions: &[

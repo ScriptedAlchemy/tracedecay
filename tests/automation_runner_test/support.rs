@@ -2,6 +2,7 @@
 
 pub(crate) use std::fs;
 pub(crate) use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) use serde_json::{Value, json};
@@ -19,7 +20,7 @@ pub(crate) use tracedecay::automation::fact_proposals::{
 };
 pub(crate) use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, approve_managed_skill, create_managed_skill_draft, load_managed_skill,
+    ManagedSupportFile, create_managed_skill, load_managed_skill,
 };
 pub(crate) use tracedecay::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
@@ -35,9 +36,9 @@ pub(crate) use tracedecay::automation::runner::{
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
-pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
+pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -60,7 +61,7 @@ impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay::application::session::SessionTemporalQuery,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -68,15 +69,15 @@ impl AutomationSessionRetrieval for FixtureAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move {
             let provider = query.provider().unwrap_or("cursor").to_string();
             let session_id = match query.retrieval_scope() {
-                tracedecay::application::session::SessionRetrievalScope::Session(session_id) => {
+                tracedecay_usecases::session::SessionRetrievalScope::Session(session_id) => {
                     session_id.as_str().to_string()
                 }
-                tracedecay::application::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
+                tracedecay_usecases::session::SessionRetrievalScope::AllSessionsInAuthorizedRoot => {
                     "session-reflect-1".to_string()
                 }
             };
@@ -165,7 +166,7 @@ impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay::application::session::SessionTemporalQuery,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -173,7 +174,7 @@ impl AutomationSessionRetrieval for StaticAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move {
             AutomationTemporalRetrieval::Complete(AutomationTemporalEvidence {
@@ -213,7 +214,7 @@ impl AutomationSessionRetrieval for EmptyAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        _query: tracedecay::application::session::SessionTemporalQuery,
+        _query: tracedecay_usecases::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         Box::pin(async { AutomationTemporalRetrieval::CompleteZero })
     }
@@ -235,7 +236,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
 
     fn retrieve<'a>(
         &'a self,
-        query: tracedecay::application::session::SessionTemporalQuery,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'a> {
         assert_eq!(
             query.temporal_mode(),
@@ -243,7 +244,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
         );
         assert_eq!(
             query.freshness_policy(),
-            tracedecay::application::session::SessionFreshnessPolicy::RequireFresh
+            tracedecay_usecases::session::SessionFreshnessPolicy::RequireFresh
         );
         Box::pin(async move { AutomationTemporalRetrieval::Rejected(self.reason) })
     }
@@ -335,12 +336,17 @@ impl AgentTaskBackend for JsonBackend {
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
         assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
         assert!(
-            request.prompt.contains("TraceDecay memory curation review"),
+            request.prompt.contains("generation-bound memory pairs"),
             "runner should build a task prompt from the curation messages"
         );
         assert_eq!(
             request.context["llm_review"]["status"],
             json!("needs_llm_review")
+        );
+        assert_eq!(request.context["apply"], json!(true));
+        assert_eq!(
+            request.context["memory_apply_policy"],
+            json!("validate_then_apply")
         );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
@@ -363,7 +369,50 @@ pub(crate) struct SessionJsonBackend {
 pub(crate) struct SkillJsonBackend {
     calls: AtomicUsize,
     output: Value,
-    expected_activation_policy: &'static str,
+}
+
+pub(crate) struct SequentialJsonBackend {
+    calls: AtomicUsize,
+    outputs: Mutex<std::collections::VecDeque<Value>>,
+}
+
+impl SequentialJsonBackend {
+    pub(crate) fn new(outputs: Vec<Value>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            outputs: Mutex::new(outputs.into()),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentTaskBackend for SequentialJsonBackend {
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let output = self
+            .outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("sequential backend output");
+        Ok(AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: output.to_string(),
+            output_json: Some(output),
+            model: Some("fixture-model".to_string()),
+            provider: Some("fixture".to_string()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        })
+    }
 }
 
 pub(crate) struct SkillTextBackend {
@@ -389,17 +438,9 @@ pub(crate) struct MalformedTextBackend {
 
 impl SkillJsonBackend {
     pub(crate) fn new(output: Value) -> Self {
-        Self::with_activation_policy(output, "pending_approval_only")
-    }
-
-    pub(crate) fn with_activation_policy(
-        output: Value,
-        expected_activation_policy: &'static str,
-    ) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             output,
-            expected_activation_policy,
         }
     }
 
@@ -418,10 +459,10 @@ impl AgentTaskBackend for SkillJsonBackend {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         assert!(request.prompt.contains("managed skill creates or updates"));
-        assert_eq!(request.context["apply"], json!(false));
+        assert_eq!(request.context["apply"], json!(true));
         assert_eq!(
             request.context["activation_policy"],
-            json!(self.expected_activation_policy)
+            json!("validate_then_activate")
         );
         assert!(
             request.context["skill_writer_evidence"]["hits"]
@@ -1249,9 +1290,9 @@ pub(crate) struct SeededDuplicateFacts {
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
-    use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
     use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
 
     let owner = project_memory_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
@@ -1264,7 +1305,7 @@ pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFact
     .enumerate()
     {
         let outcome = memory
-            .add_fact_v1(
+            .add_fact(
                 AddFactRequest {
                     content: content.to_string(),
                     category: MemoryCategory::Project,

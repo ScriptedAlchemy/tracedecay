@@ -15,16 +15,16 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
         actor: "skill_writer".to_string(),
         run_id: Some("run_seed".to_string()),
     };
-    create_managed_skill_draft(
+    let target = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
-            summary: "Review automation run ledgers before approving changes.".to_string(),
+            summary: "Review automation run ledgers before applying changes.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
-                "Check run ledger counts, rejected proposals, and pending approval state before applying automation changes."
+                "Check run ledger counts, rejected proposals, and validation evidence before applying automation changes."
                     .to_string(),
             support_files: Vec::new(),
             provenance: automation_provenance(),
@@ -32,16 +32,16 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     )
     .await
     .unwrap();
-    create_managed_skill_draft(
+    let source = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "automation-run-checks".to_string(),
             title: "Automation run checks".to_string(),
-            summary: "Review automation run ledgers and approval gates.".to_string(),
+            summary: "Review automation run ledgers and validation gates.".to_string(),
             category: "workflow".to_string(),
             targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
             body_markdown:
-                "Check run ledger counts, rejected proposals, and approval gates before applying automation changes."
+                "Check run ledger counts, rejected proposals, and validation gates before applying automation changes."
                     .to_string(),
             support_files: Vec::new(),
             provenance: automation_provenance(),
@@ -49,7 +49,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     )
     .await
     .unwrap();
-    create_managed_skill_draft(
+    let pinned = create_managed_skill(
         &profile_root,
         ManagedSkillDraft {
             id: "pinned-automation-guide".to_string(),
@@ -65,15 +65,6 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     )
     .await
     .unwrap();
-    let target = approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
-    let source = approve_managed_skill(&profile_root, "automation-run-checks")
-        .await
-        .unwrap();
-    let pinned = approve_managed_skill(&profile_root, "pinned-automation-guide")
-        .await
-        .unwrap();
     tracedecay::automation::managed_skills::set_managed_skill_pinned(
         &profile_root,
         &pinned.metadata.id,
@@ -82,32 +73,39 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     .await
     .unwrap();
 
-    let backend = SkillJsonBackend::with_activation_policy(
+    let backend = SequentialJsonBackend::new(vec![
         json!({
             "skills": [
-                {
-                    "action": "merge",
-                    "id": "automation-run-review",
-                    "base_checksum": target.metadata.checksum,
-                    "source_skill_id": "automation-run-checks",
-                    "source_base_checksum": source.metadata.checksum,
-                    "body_markdown": "Check run ledger counts, rejected proposals, approval gates, and pending approval state before applying automation changes.",
-                    "reason": "The two run-review skills overlap almost completely."
-                },
-                {
-                    "action": "archive",
-                    "id": "pinned-automation-guide",
-                    "base_checksum": pinned.metadata.checksum,
-                    "reason": "Pinned skills must be rejected."
-                }
+            {
+                "action": "merge",
+                "id": "automation-run-review",
+                "base_checksum": target.metadata.checksum.clone(),
+                "source_skill_id": "automation-run-checks",
+                "source_base_checksum": source.metadata.checksum.clone(),
+                "body_markdown": "Check run ledger counts, rejected proposals, validation gates, and evidence receipts before applying automation changes.",
+                "reason": "The two run-review skills overlap almost completely."
+            },
+            {
+                "action": "archive",
+                "id": "pinned-automation-guide",
+                "base_checksum": pinned.metadata.checksum.clone(),
+                "reason": "Pinned skills must be rejected."
+            }
             ]
         }),
-        "auto_enable_after_validation",
-    );
-    let config = AutomationConfig {
-        auto_enable_skills: true,
-        ..enabled_skill_writer_config()
-    };
+        json!({
+            "skills": [{
+                "action": "merge",
+                "id": "automation-run-review",
+                "base_checksum": target.metadata.checksum.clone(),
+                "source_skill_id": "automation-run-checks",
+                "source_base_checksum": source.metadata.checksum.clone(),
+                "body_markdown": "Check run ledger counts, rejected proposals, validation gates, and evidence receipts before applying automation changes.",
+                "reason": "The two run-review skills overlap almost completely."
+            }]
+        }),
+    ]);
+    let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
         &cg,
@@ -118,14 +116,16 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 1);
+    assert_eq!(run.ledger_record.rejected_count, 0);
+    assert_eq!(run.report["status"], json!("applied"));
+    assert_eq!(run.report["validation_repairs"][0]["attempt"], json!(1));
 
-    let consolidation = &run.report["staged_consolidations"][0];
+    let consolidation = &run.report["applied_consolidations"][0];
     assert_eq!(consolidation["action"], json!("merge"));
-    assert_eq!(consolidation["approval_status"], json!("auto_applied"));
+    assert_eq!(consolidation["activation_status"], json!("applied"));
     assert_eq!(
         consolidation["target_skill_id"],
         json!("automation-run-review")
@@ -139,12 +139,8 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
         json!("automation-run-checks")
     );
     assert_eq!(consolidation["resulting_state"], json!("archived"));
-    assert_eq!(consolidation["target_update_staged"], json!(false));
-    assert!(
-        run.report["rejected_skills"][0]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("pinned"))
-    );
+    assert_eq!(consolidation["target_update_applied"], json!(true));
+    assert_eq!(run.report["rejected_skills"], json!([]));
 
     assert!(
         run.report["skill_improvement_recommendations"]
@@ -157,33 +153,34 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
             )
     );
 
-    let staged_source = load_managed_skill(&profile_root, "automation-run-checks")
+    let archived_source = load_managed_skill(&profile_root, "automation-run-checks")
         .await
         .unwrap();
-    assert_eq!(staged_source.metadata.state, ManagedSkillState::Archived);
+    assert_eq!(archived_source.metadata.state, ManagedSkillState::Archived);
     assert_eq!(
-        staged_source.metadata.absorbed_into.as_deref(),
+        archived_source.metadata.absorbed_into.as_deref(),
         Some("automation-run-review")
     );
     assert!(
-        staged_source
+        archived_source
             .metadata
             .archived_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("overlap"))
     );
-    let staged_target = load_managed_skill(&profile_root, "automation-run-review")
+    let updated_target = load_managed_skill(&profile_root, "automation-run-review")
         .await
         .unwrap();
-    assert_eq!(staged_target.metadata.state, ManagedSkillState::Active);
-    assert_ne!(staged_target.metadata.checksum, target.metadata.checksum);
-    assert!(staged_target.pending_update.is_none());
+    assert_eq!(updated_target.metadata.state, ManagedSkillState::Active);
+    assert_ne!(updated_target.metadata.checksum, target.metadata.checksum);
     let untouched_pinned = load_managed_skill(&profile_root, "pinned-automation-guide")
         .await
         .unwrap();
     assert_eq!(untouched_pinned.metadata.state, ManagedSkillState::Active);
-    assert!(untouched_pinned.pending_update.is_none());
 
-    assert_eq!(staged_source.body_markdown, source.body_markdown);
-    assert!(staged_target.body_markdown.contains("approval gates"));
+    assert_eq!(archived_source.body_markdown, source.body_markdown);
+    assert_eq!(
+        updated_target.body_markdown,
+        "Check run ledger counts, rejected proposals, validation gates, and evidence receipts before applying automation changes."
+    );
 }

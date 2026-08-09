@@ -1,11 +1,11 @@
 //! Host-loadable materialization of managed skills (Hermes skill-directory
 //! analogue).
 //!
-//! Managed skills live in the `TraceDecay` profile store and are surfaced to
-//! prompt-index hosts through a marker block that points at the
-//! `tracedecay_skill_view` MCP tool (see [`crate::automation::skill_targets`]).
-//! That is discoverable but never *natively loaded*: the host does not treat a
-//! managed skill as one of its own skills.
+//! Managed skills live in the `TraceDecay` profile store. Prompt-index hosts
+//! resolve their complete body through the `tracedecay automation skills view`
+//! CLI journey (see [`crate::automation::skill_targets`]); that is
+//! discoverable but never *natively loaded*: the host does not treat a managed
+//! skill as one of its own skills.
 //!
 //! This module closes that gap the way Hermes does — by writing each active
 //! managed skill as a real, host-loadable `SKILL.md` into the host's own skills
@@ -21,7 +21,7 @@
 //! and [`doctor_scope`] reports the drift.
 //!
 //! Lifecycle:
-//! - **activate** (`skills approve` → Active, or auto-enable) → materialize.
+//! - **activate** (validated create/update → Active) → materialize.
 //! - **deactivate/archive/disable/remove** → the skill drops out of the active
 //!   set and the reconciler removes its materialized file (fork-protected).
 //! - **body update** → re-materialize (hash changes, file rewritten).
@@ -140,7 +140,8 @@ impl MaterializationScope {
 }
 
 /// Outcome of materializing one skill into one scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MaterializeAction {
     /// The file was created or rewritten to match the active skill.
     Written,
@@ -165,7 +166,8 @@ impl MaterializeAction {
 }
 
 /// Outcome of removing one materialized skill from one scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RemoveAction {
     /// The managed file was deleted.
     Removed,
@@ -189,7 +191,7 @@ impl RemoveAction {
 }
 
 /// A single materialize result within a reconcile report.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MaterializeEntry {
     pub skill_id: String,
     pub path: PathBuf,
@@ -197,7 +199,7 @@ pub struct MaterializeEntry {
 }
 
 /// A single removal result within a reconcile report.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RemoveEntry {
     pub skill_id: String,
     pub path: PathBuf,
@@ -205,7 +207,7 @@ pub struct RemoveEntry {
 }
 
 /// Result of reconciling one scope against the active managed-skill set.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ReconcileReport {
     pub materialized: Vec<MaterializeEntry>,
     pub removed: Vec<RemoveEntry>,
@@ -554,7 +556,7 @@ pub fn installation_id(profile_root: &Path) -> String {
         Err(_) => format!(
             "pid-{}-{}",
             std::process::id(),
-            crate::tracedecay::current_timestamp()
+            tracedecay_runtime_core::tracedecay::current_timestamp()
         ),
     };
     if fs::create_dir_all(profile_root).is_ok() {
@@ -594,7 +596,7 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
 
 /// Inter-process lock held for the duration of a single package's
 /// materialize/remove transaction. Serializes concurrent `tracedecay update` /
-/// `skills approve` / background auto-enable runs (and multiple worktrees
+/// automatic validated activation runs (and multiple worktrees
 /// sharing a global scope) so the TOCTOU pending-file window cannot interleave
 /// two transactions and wedge a package as forked. The lock file lives outside
 /// the tracked skills tree (OS temp dir, keyed by the package path) so it never
@@ -1671,7 +1673,7 @@ fn skills_for_host(skills: &[ManagedSkill], host: MaterializationHost) -> Vec<Ma
 
 /// Skills that should materialize into a given scope. Every active host skill
 /// materializes into the user's global scope; only skills explicitly marked
-/// project-scoped also materialize into project checkouts, so a single approval
+/// project-scoped also materialize into project checkouts, so an automatic activation
 /// never pours untracked `.claude/skills/**` files into every repo the user
 /// runs from (and hosts never load duplicate global+project copies).
 fn skills_for_scope(skills: &[ManagedSkill], scope: &MaterializationScope) -> Vec<ManagedSkill> {
@@ -1763,7 +1765,7 @@ pub fn resolve_project_root(start: &Path) -> PathBuf {
         .unwrap_or_else(|| start.to_path_buf())
 }
 
-/// Non-fatal reconcile for lifecycle call sites (approve, auto-enable, install,
+/// Non-fatal reconcile for lifecycle call sites (activate, install,
 /// update): resolves the profile root from the process environment, reconciles
 /// every detected host+scope, and logs (rather than propagates) failures so a
 /// materialization problem never breaks an activation or install.

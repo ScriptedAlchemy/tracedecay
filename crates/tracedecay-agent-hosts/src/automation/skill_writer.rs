@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::artifacts::sha256_bytes;
@@ -28,17 +29,89 @@ use consolidation::{
 
 /// Outcome of validating and applying one batch of `skill_writer` proposals.
 /// `consolidations` holds automatically applied merge/archive records.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SkillProposalOutcome {
     pub created: Vec<Value>,
     pub updated: Vec<Value>,
     pub consolidations: Vec<Value>,
     pub rejected: Vec<Value>,
-    pub deployment: Value,
+    pub deployment: ManagedSkillDeploymentReceipt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedSkillDeploymentStatus {
+    Complete,
+    PartialFailure,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedSkillMaterializationReceipt {
+    pub scope: String,
+    #[serde(flatten)]
+    pub report: super::skill_materialization::ReconcileReport,
+}
+
+/// Typed receipt for the host export and native materialization performed
+/// after an autonomous managed-skill lifecycle mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagedSkillDeploymentReceipt {
+    pub status: ManagedSkillDeploymentStatus,
+    pub exports: Vec<crate::agents::ManagedSkillExportReport>,
+    pub materialization_scopes: Vec<ManagedSkillMaterializationReceipt>,
+    pub errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub retry_required: bool,
+}
+
+pub(crate) async fn validate_skill_proposals(
+    profile_root: &Path,
+    run_id: &str,
+    proposals: &[Value],
+) -> Result<Vec<Value>> {
+    let existing_skills = list_managed_skills(profile_root)
+        .await?
+        .into_iter()
+        .map(|skill| (skill.metadata.id.clone(), skill))
+        .collect::<BTreeMap<_, _>>();
+    let mut existing_ids = existing_skills.keys().cloned().collect::<BTreeSet<_>>();
+    let mut rejected = Vec::new();
+    for proposal in proposals {
+        let result = match skill_proposal_action(proposal) {
+            Ok(SkillProposalAction::Create) => {
+                skill_draft_from_proposal(proposal, run_id, &existing_ids).map(|draft| {
+                    existing_ids.insert(draft.id);
+                })
+            }
+            Ok(SkillProposalAction::Update) => {
+                skill_update_from_proposal(proposal, &existing_skills).map(|_| ())
+            }
+            Ok(SkillProposalAction::Archive) => {
+                skill_archive_from_proposal(proposal, &existing_skills).and_then(|archive| {
+                    ensure_skill_not_referenced_by_scheduled_job(profile_root, &archive.skill_id)
+                })
+            }
+            Ok(SkillProposalAction::Merge) => skill_merge_from_proposal(proposal, &existing_skills)
+                .and_then(|merge| {
+                    ensure_skill_not_referenced_by_scheduled_job(
+                        profile_root,
+                        &merge.source_skill_id,
+                    )
+                }),
+            Err(reason) => Err(reason),
+        };
+        if let Err(reason) = result {
+            rejected.push(rejected_skill(proposal, &reason));
+        }
+    }
+    Ok(rejected)
 }
 
 pub(crate) async fn validate_and_apply_skill_proposals(
     profile_root: &Path,
+    project_root: Option<&Path>,
     run_id: &str,
     proposals: &[Value],
 ) -> Result<SkillProposalOutcome> {
@@ -166,7 +239,7 @@ pub(crate) async fn validate_and_apply_skill_proposals(
             Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
         }
     }
-    let deployment = deploy_managed_skills(profile_root);
+    let deployment = deploy_managed_skills(profile_root, project_root);
     Ok(SkillProposalOutcome {
         created,
         updated,
@@ -236,44 +309,57 @@ fn ensure_skill_not_referenced_by_scheduled_job(
     }
 }
 
-fn deploy_managed_skills(profile_root: &Path) -> Value {
+pub fn deploy_managed_skills_to_project(
+    profile_root: &Path,
+    project_root: &Path,
+) -> ManagedSkillDeploymentReceipt {
+    deploy_managed_skills(profile_root, Some(project_root))
+}
+
+pub fn deploy_managed_skills_globally(profile_root: &Path) -> ManagedSkillDeploymentReceipt {
+    deploy_managed_skills(profile_root, None)
+}
+
+fn deploy_managed_skills(
+    profile_root: &Path,
+    project_root: Option<&Path>,
+) -> ManagedSkillDeploymentReceipt {
     let Some(home) = crate::agents::home_dir() else {
-        return json!({"status": "unavailable", "reason": "home_directory_unavailable"});
+        return ManagedSkillDeploymentReceipt {
+            status: ManagedSkillDeploymentStatus::Unavailable,
+            exports: Vec::new(),
+            materialization_scopes: Vec::new(),
+            errors: Vec::new(),
+            reason: Some("home_directory_unavailable".to_string()),
+            retry_required: true,
+        };
     };
-    let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
-    let project_root = super::skill_materialization::resolve_project_root(&start);
+    let project_root = project_root.unwrap_or(home.as_path());
     let exports =
-        crate::agents::export_managed_skills_to_agent_hosts(&home, &project_root, profile_root);
+        crate::agents::export_managed_skills_to_agent_hosts(&home, project_root, profile_root);
     let (scopes, errors) =
-        super::skill_materialization::reconcile_detected_scopes(profile_root, &home, &project_root);
+        super::skill_materialization::reconcile_detected_scopes(profile_root, &home, project_root);
     let materialization_scopes = scopes
         .into_iter()
-        .map(|result| {
-            json!({
-                "scope": result.scope.describe(),
-                "materialized": result.report.materialized.into_iter().map(|entry| json!({
-                    "skill_id": entry.skill_id,
-                    "path": entry.path,
-                    "action": entry.action.as_str(),
-                })).collect::<Vec<_>>(),
-                "removed": result.report.removed.into_iter().map(|entry| json!({
-                    "skill_id": entry.skill_id,
-                    "path": entry.path,
-                    "action": entry.action.as_str(),
-                })).collect::<Vec<_>>(),
-                "errors": result.report.errors,
-            })
+        .map(|result| ManagedSkillMaterializationReceipt {
+            scope: result.scope.describe(),
+            report: result.report,
         })
         .collect::<Vec<_>>();
     let export_failed = exports.iter().any(|report| report.error.is_some());
     let retry_required = export_failed || !errors.is_empty();
-    json!({
-        "status": if retry_required { "partial_failure" } else { "complete" },
-        "exports": exports,
-        "materialization_scopes": materialization_scopes,
-        "errors": errors,
-        "retry_required": retry_required,
-    })
+    ManagedSkillDeploymentReceipt {
+        status: if retry_required {
+            ManagedSkillDeploymentStatus::PartialFailure
+        } else {
+            ManagedSkillDeploymentStatus::Complete
+        },
+        exports,
+        materialization_scopes,
+        errors,
+        reason: None,
+        retry_required,
+    }
 }
 
 pub(crate) const fn activation_policy() -> &'static str {
