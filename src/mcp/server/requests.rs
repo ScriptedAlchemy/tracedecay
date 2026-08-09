@@ -1362,12 +1362,9 @@ impl McpServer {
         );
     }
 
-    async fn append_version_and_automation_notices(
-        &self,
-        cg: &TraceDecay,
-        result: &mut ToolResult,
-    ) {
-        // Prepend version-update warning + queue logging notification.
+    async fn append_version_notice(&self, result: &mut ToolResult) {
+        // Prepend the version-update warning and queue the corresponding
+        // protocol notification.
         if let Some(warning) = self.check_version_update().await {
             if let Some(content) = result
                 .value
@@ -1385,19 +1382,6 @@ impl McpServer {
                     "data": warning
                 }
             }));
-        }
-
-        // Staged-automation nudge (Hermes parity R5): when automation
-        // runs have queued skill drafts for review, append a one-line
-        // notice so the approval queue doesn't grow silently. Fact
-        // proposal counts stay telemetry-only in `staged_notice`.
-        if let Some(notice) = self.maybe_automation_staged_notice(cg).await
-            && let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-        {
-            content.push(json!({"type": "text", "text": format!("\n{notice}")}));
         }
     }
 
@@ -1591,8 +1575,7 @@ impl McpServer {
                     )
                     .await;
                 }
-                self.append_version_and_automation_notices(&cg, &mut result)
-                    .await;
+                self.append_version_notice(&mut result).await;
                 self.append_per_file_staleness_notice(&cg, &mut result)
                     .await;
                 self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)

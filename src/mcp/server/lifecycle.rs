@@ -320,8 +320,8 @@ impl ProjectServerResponseLifecycle {
     }
 }
 
-/// Shared compare-and-swap cooldown gate for the lazy staleness check,
-/// background read refresh, and automation-notice check below. Each
+/// Shared compare-and-swap cooldown gate for the lazy staleness check and
+/// background read refresh. Each
 /// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
 /// single-flights concurrent callers off that stamp so at most one
 /// caller per window proceeds.
@@ -744,34 +744,6 @@ impl McpServer {
             }
             done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
         });
-    }
-
-    /// Returns a compact one-line notice when automation runs have staged
-    /// managed-skill output awaiting review that the user hasn't been told
-    /// about yet. Fact proposal counts remain telemetry-only.
-    ///
-    /// Cheap by construction: a 60 s `compare_exchange` cooldown gates the
-    /// check, and the underlying dedupe state
-    /// ([`crate::automation::staged_notice`]) fires at most once per new
-    /// batch (latest run id or pending-count change), so dropping this into
-    /// every `tools/call` response is safe.
-    pub(crate) async fn maybe_automation_staged_notice(&self, cg: &TraceDecay) -> Option<String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if !CooldownGate.try_claim(&self.last_automation_notice_check_at, now, 60) {
-            return None;
-        }
-        let profile_root = crate::storage::default_profile_root().ok()?;
-        let owner = cg.project_memory_owner().ok()?;
-        let memory = crate::tracedecay::facts::memory_application_for_db(owner, cg.db()).ok()?;
-        crate::automation::staged_notice::maybe_automation_staged_notice(
-            &memory,
-            &cg.store_layout().dashboard_root,
-            &profile_root,
-        )
-        .await
     }
 
     /// Returns a version-update warning if a newer release is available.

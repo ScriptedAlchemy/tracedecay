@@ -405,12 +405,6 @@ pub struct McpServer {
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
     /// tool calls don't pile on the same walk.
     last_staleness_check_at: AtomicI64,
-    /// UNIX timestamp (secs) of the most recent staged-automation notice
-    /// check. Same `compare_exchange` cooldown pattern as
-    /// [`last_staleness_check_at`](Self::last_staleness_check_at) so the
-    /// pending-review stores are re-read at most once per window no matter
-    /// how many tool calls fire.
-    last_automation_notice_check_at: AtomicI64,
     /// Cached worktree-vs-index mismatch detection for this session. `None`
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
@@ -1012,7 +1006,6 @@ impl McpServer {
             shutdown: connection::McpShutdownCompletion::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
-            last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
             background_refresh_running: Arc::new(AtomicBool::new(false)),
