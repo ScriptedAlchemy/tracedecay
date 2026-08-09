@@ -32,8 +32,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AttemptId, RunId, TaskId, UtcMicros, WorkAuthority, WorkRunControlAuthorityV1,
-    WorkRunControlContractError, WorkRunControlReasonV1, WorkRunControlV1,
+    AttemptId, RunId, TaskId, UtcMicros, WorkAuthority, WorkBlockedIntervalCauseV1,
+    WorkBlockedIntervalClosureV1, WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1,
+    WorkRunControlAuthorityV1, WorkRunControlContractError, WorkRunControlReasonV1,
+    WorkRunControlV1, WorkflowStepId,
 };
 
 use crate::work::work_authority;
@@ -68,9 +70,55 @@ pub struct WorkRunAdmissionV1 {
     pub total_attempts: u32,
 }
 
+/// One live attempt the run-control authority may fence.
+///
+/// `step_id` comes from the canonical workflow journal fan-out binding. It is
+/// intentionally required: a provider operation name is not interchangeable
+/// with a workflow step, and an interval without that binding cannot become
+/// product observability evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkRunLiveAttemptV1 {
+    pub attempt_id: AttemptId,
+    /// `None` is an ordinary Work attempt outside a workflow journal. It
+    /// remains controllable, but cannot fabricate a workflow-step interval.
+    pub step_id: Option<WorkflowStepId>,
+}
+
+/// Exact durable evidence a run-control transition was prepared from.
+///
+/// Storage must acquire this snapshot from one read transaction and compare it
+/// again inside the write transaction that publishes the transition. That
+/// closes the gap where an attempt could become terminal (or a new attempt
+/// could be admitted) after pause selected its frontier but before the control
+/// row and blocked intervals committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkRunControlFrontierV1 {
+    pub admission: WorkRunAdmissionV1,
+    pub control: Option<WorkRunControlV1>,
+    pub open_blocked_intervals: Vec<WorkBlockedIntervalReceiptV1>,
+}
+
+/// One control transition together with the interval receipts committed in
+/// its same storage transaction. The returned receipts are the only facts a
+/// transport may offer to observability; a command input is never evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkRunControlTransitionReceiptV1 {
+    pub control: WorkRunControlV1,
+    pub blocked_intervals: Vec<WorkBlockedIntervalReceiptV1>,
+}
+
 /// The durable run-control rows and the attempt evidence they are derived
 /// from.
 pub trait WorkRunControlStoragePort: Send + Sync {
+    /// Reads all mutable evidence needed by a pause or resume from one storage
+    /// snapshot. `None` means the run has no durable attempt.
+    fn run_control_frontier(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError>;
+
     /// The admitted deadline and live attempt frontier for one run, or `None`
     /// when the run holds no durable attempt at all.
     fn run_admission(
@@ -79,6 +127,16 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError>;
+
+    /// Resolves the canonical workflow journal binding for every durable
+    /// attempt of one run. Journal replay happens only while a pause is about
+    /// to create interval evidence, never on ordinary reads or reservations.
+    fn workflow_bound_live_attempts(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError>;
 
     /// The published control row for one run, or `None` when the run has never
     /// been controlled.
@@ -96,6 +154,49 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         authority: &WorkAuthority,
         expected: Option<WorkRunControlAuthorityV1>,
         next: &WorkRunControlV1,
+        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+    ) -> Result<(), WorkRunControlStorageError>;
+
+    /// Publishes only while the complete mutable frontier is still identical
+    /// to `expected`. Implementations must perform the comparison and control
+    /// CAS in the same write transaction.
+    fn publish_run_control_at_frontier(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkRunControlFrontierV1,
+        next: &WorkRunControlV1,
+        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+    ) -> Result<(), WorkRunControlStorageError>;
+
+    /// The still-open receipts for one exact run. Resume closes precisely these
+    /// rows under the same control compare-and-swap; it does not reconstruct
+    /// an interval from a current clock or current live-attempt query.
+    fn open_blocked_intervals(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, WorkRunControlStorageError>;
+
+    /// The next bounded, cyclic recovery page of settled receipts.
+    ///
+    /// A page advances an independent durable scan cursor before retained
+    /// recovery tries the producer. It is not itself delivery acknowledgement:
+    /// only the exact receipt whose owner fact was durably claimed leaves
+    /// later cycles; every unmarked receipt remains eligible after wraparound.
+    fn next_settled_blocked_intervals_for_observation(
+        &self,
+        authority: &WorkAuthority,
+        limit: u32,
+    ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, WorkRunControlStorageError>;
+
+    /// Marks one exact receipt only after the retained producer path has
+    /// durably claimed the matching owner fact. A synchronous enqueue is not
+    /// sufficient evidence for this transition.
+    fn mark_settled_blocked_interval_durable(
+        &self,
+        authority: &WorkAuthority,
+        receipt: &WorkBlockedIntervalReceiptV1,
     ) -> Result<(), WorkRunControlStorageError>;
 }
 
@@ -189,27 +290,43 @@ where
         context: &RequestContext,
         command: PauseWorkRunCommand,
     ) -> Result<WorkRunControlV1, ApplicationProblem> {
+        self.pause_with_receipt(context, command)
+            .map(|receipt| receipt.control)
+    }
+
+    /// Fences new reservations and returns the exact interval receipts that
+    /// committed with the run-control compare-and-swap.
+    pub fn pause_with_receipt(
+        &self,
+        context: &RequestContext,
+        command: PauseWorkRunCommand,
+    ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         admit(context, command.occurred_at)?;
         let authority = work_authority(context)?;
-        let admission = self.require_admission(&authority, &command.task_id, &command.run_id)?;
-        let existing = self
+        let frontier = self
             .storage
-            .load_run_control(&authority, &command.task_id, &command.run_id)
-            .map_err(storage_problem)?;
+            .run_control_frontier(&authority, &command.task_id, &command.run_id)
+            .map_err(storage_problem)?
+            .ok_or_else(not_found_problem)?;
         check_expected(
-            existing.as_ref(),
+            frontier.control.as_ref(),
             expected_authority(command.expected_authority_version)?,
         )?;
 
         // The compare-and-swap expectation is what storage currently holds,
         // which `check_expected` has just proved is what the caller read.
-        let published = existing.as_ref().map(WorkRunControlV1::authority);
-        let current = match existing {
+        let workflow_attempts = self
+            .storage
+            .workflow_bound_live_attempts(&authority, &command.task_id, &command.run_id)
+            .map_err(storage_problem)?;
+        let workflow_steps =
+            workflow_steps_for_live_attempts(&frontier.admission.live_attempts, workflow_attempts)?;
+        let current = match frontier.control.clone() {
             Some(control) => control,
             None => WorkRunControlV1::admitted(
                 command.task_id.clone(),
                 command.run_id.clone(),
-                admission.deadline,
+                frontier.admission.deadline,
                 command.occurred_at,
             )
             .map_err(contract_problem)?,
@@ -218,12 +335,37 @@ where
         // directly; writing an intermediate `Running` row first would claim a
         // transition that never happened.
         let next = current
-            .pause(command.reason, command.occurred_at, admission.live_attempts)
+            .pause(
+                command.reason,
+                command.occurred_at,
+                frontier.admission.live_attempts.clone(),
+            )
+            .map_err(contract_problem)?;
+        let cause = WorkBlockedIntervalCauseV1::new(command.reason, next.authority());
+        let blocked_intervals = workflow_steps
+            .into_iter()
+            .filter_map(|attempt| {
+                let step_id = attempt.step_id?;
+                Some(WorkBlockedIntervalReceiptV1::opened(
+                    WorkBlockedIntervalIdentityV1::new(
+                        command.task_id.clone(),
+                        command.run_id.clone(),
+                        attempt.attempt_id,
+                        step_id,
+                    ),
+                    cause,
+                    command.occurred_at,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(contract_problem)?;
         self.storage
-            .publish_run_control(&authority, published, &next)
+            .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
             .map_err(storage_problem)?;
-        Ok(next)
+        Ok(WorkRunControlTransitionReceiptV1 {
+            control: next,
+            blocked_intervals,
+        })
     }
 
     /// Readmits reservations for one paused run.
@@ -232,21 +374,32 @@ where
         context: &RequestContext,
         command: ResumeWorkRunCommand,
     ) -> Result<WorkRunControlV1, ApplicationProblem> {
+        self.resume_with_receipt(context, command)
+            .map(|receipt| receipt.control)
+    }
+
+    /// Readmits reservations and returns the settled receipts that committed
+    /// with the authority transition.
+    pub fn resume_with_receipt(
+        &self,
+        context: &RequestContext,
+        command: ResumeWorkRunCommand,
+    ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         admit(context, command.occurred_at)?;
         let authority = work_authority(context)?;
-        self.require_admission(&authority, &command.task_id, &command.run_id)?;
-        let current = self
+        let frontier = self
             .storage
-            .load_run_control(&authority, &command.task_id, &command.run_id)
+            .run_control_frontier(&authority, &command.task_id, &command.run_id)
             .map_err(storage_problem)?
-            .ok_or_else(|| {
-                // A run that was never paused has nothing to resume, and
-                // answering "resumed" would be a false receipt.
-                conflict_problem(
-                    "application.work-run-control.not-paused",
-                    "The Work run has no published control state to resume.",
-                )
-            })?;
+            .ok_or_else(not_found_problem)?;
+        let current = frontier.control.clone().ok_or_else(|| {
+            // A run that was never paused has nothing to resume, and
+            // answering "resumed" would be a false receipt.
+            conflict_problem(
+                "application.work-run-control.not-paused",
+                "The Work run has no published control state to resume.",
+            )
+        })?;
         let expected = WorkRunControlAuthorityV1::new(command.expected_authority_version)
             .map_err(contract_problem)?;
         if current.authority() != expected {
@@ -255,10 +408,28 @@ where
         let next = current
             .resume(command.reason, command.occurred_at)
             .map_err(contract_problem)?;
+        let blocked_intervals = frontier
+            .open_blocked_intervals
+            .iter()
+            .cloned()
+            .map(|receipt| {
+                receipt.close(
+                    command.occurred_at,
+                    WorkBlockedIntervalClosureV1::Resumed {
+                        reason: command.reason,
+                        authority: next.authority(),
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(contract_problem)?;
         self.storage
-            .publish_run_control(&authority, Some(expected), &next)
+            .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
             .map_err(storage_problem)?;
-        Ok(next)
+        Ok(WorkRunControlTransitionReceiptV1 {
+            control: next,
+            blocked_intervals,
+        })
     }
 
     /// Reads the published control state for one run.
@@ -310,6 +481,40 @@ where
             )),
             Some(_) | None => Ok(()),
         }
+    }
+
+    /// Reads the next bounded, cyclic recovery page of settled interval
+    /// receipts. It skips only receipts whose exact owner fact was durably
+    /// claimed by the retained producer; ordinary bounded queue offers leave
+    /// the source receipt eligible for recovery.
+    pub fn next_settled_blocked_intervals_for_observation(
+        &self,
+        context: &RequestContext,
+        limit: u32,
+    ) -> Result<Vec<WorkBlockedIntervalReceiptV1>, ApplicationProblem> {
+        if limit == 0 || limit > 128 {
+            return Err(invalid_pending_interval_limit_problem());
+        }
+        let authority = work_authority(context)?;
+        self.storage
+            .next_settled_blocked_intervals_for_observation(&authority, limit)
+            .map_err(storage_problem)
+    }
+
+    /// Commits the durable-delivery marker after the retained producer claimed
+    /// this exact receipt. Public request paths intentionally never call it.
+    pub fn mark_settled_blocked_interval_durable(
+        &self,
+        context: &RequestContext,
+        receipt: &WorkBlockedIntervalReceiptV1,
+    ) -> Result<(), ApplicationProblem> {
+        if !receipt.is_settled() {
+            return Err(invalid_open_interval_durable_problem());
+        }
+        let authority = work_authority(context)?;
+        self.storage
+            .mark_settled_blocked_interval_durable(&authority, receipt)
+            .map_err(storage_problem)
     }
 
     fn require_admission(
@@ -385,7 +590,9 @@ fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
         | WorkRunControlContractError::AuthorityVersionOverflow
         | WorkRunControlContractError::InvalidDeadlineCheckpoint
         | WorkRunControlContractError::TooManyFencedAttempts
-        | WorkRunControlContractError::DuplicateFencedAttempt => {
+        | WorkRunControlContractError::DuplicateFencedAttempt
+        | WorkRunControlContractError::InvalidBlockedIntervalRevision
+        | WorkRunControlContractError::InvalidBlockedIntervalClosure => {
             ApplicationProblem::InvalidRequest {
                 diagnostic: SafeDiagnostic {
                     code: "application.work-run-control.invalid-transition".to_owned(),
@@ -395,6 +602,53 @@ fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
                 legal_actions: vec![LegalAction::CorrectRequest],
             }
         }
+    }
+}
+
+fn invalid_pending_interval_limit_problem() -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "application.work-run-control.invalid-pending-interval-limit".to_owned(),
+            message: "The Work blocked-interval recovery page limit must be between 1 and 128."
+                .to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
+    }
+}
+
+fn workflow_steps_for_live_attempts(
+    live_attempts: &[AttemptId],
+    workflow_attempts: Vec<WorkRunLiveAttemptV1>,
+) -> Result<Vec<WorkRunLiveAttemptV1>, ApplicationProblem> {
+    let mut by_attempt = std::collections::BTreeMap::new();
+    for attempt in workflow_attempts {
+        if by_attempt
+            .insert(attempt.attempt_id.clone(), attempt)
+            .is_some()
+        {
+            return Err(storage_problem(WorkRunControlStorageError::Unavailable));
+        }
+    }
+    live_attempts
+        .iter()
+        .map(|attempt_id| {
+            by_attempt
+                .remove(attempt_id)
+                .ok_or_else(|| storage_problem(WorkRunControlStorageError::AuthorityConflict))
+        })
+        .collect()
+}
+
+fn invalid_open_interval_durable_problem() -> ApplicationProblem {
+    ApplicationProblem::InvalidRequest {
+        diagnostic: SafeDiagnostic {
+            code: "application.work-run-control.open-interval-durable".to_owned(),
+            message: "Only a settled Work blocked interval can be marked durably delivered."
+                .to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
     }
 }
 

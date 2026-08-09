@@ -1,16 +1,18 @@
 use tracedecay_application::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutRequest,
-    WorkflowFanOutRuntimeError, WorkflowProviderAdmission, prepare_workflow_fan_out,
+    WorkflowFanOutRuntimeError, WorkflowProviderAdmission, durable_workflow_fan_out_plan,
+    prepare_workflow_fan_out,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProviderId, RunId, UtcMicros, WorkApprovalPolicy, WorkEffectStateV1,
-    WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkflowDefinition,
-    WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStep, WorkflowStepId,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProviderId, RepositoryId, RunId, UtcMicros, WorkApprovalPolicy, WorkAuthority,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
+    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
+    WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy,
+    WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStep,
+    WorkflowStepId, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -23,6 +25,17 @@ where
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+}
+
+fn authority() -> WorkAuthority {
+    WorkAuthority::new(
+        id("project.workflow.runtime"),
+        id::<RepositoryId>("repository.workflow.runtime"),
+        id::<WorktreeId>("worktree.workflow.runtime"),
+        id::<ActorId>("actor.workflow.runtime"),
+        digest('9'),
+    )
+    .unwrap()
 }
 
 fn execution_snapshot(model: &str) -> WorkExecutionSnapshot {
@@ -134,6 +147,138 @@ fn planner_separates_fan_out_width_from_parallelism() {
         plan.children
             .iter()
             .all(|child| child.task_id.as_str().starts_with("workflow-child:"))
+    );
+}
+
+#[test]
+fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
+    let request = request(&["a", "b", "c"], 3, 2);
+    let planned = prepare_workflow_fan_out(&request).unwrap();
+    let durable = durable_workflow_fan_out_plan(&planned, &request.provider, authority()).unwrap();
+    let admitted = tracedecay_domain::WorkflowRunEvent::admitted_with_fan_out(
+        request.run_id.clone(),
+        request.definition,
+        request.provider.topology_digest,
+        request.provider.provider_registry_digest,
+        vec![durable.clone()],
+        tracedecay_domain::WorkflowRunEventContext {
+            command_id: id("workflow.fan-out.admit"),
+            input_digest: digest('f'),
+            occurred_at: request.admitted_at,
+        },
+    )
+    .unwrap();
+    let projection =
+        tracedecay_domain::WorkflowRunProjection::rebuild(&[admitted.clone()]).unwrap();
+    let released = durable
+        .children
+        .iter()
+        .take(2)
+        .map(|child| child.attempt_identity.clone())
+        .collect::<Vec<_>>();
+    let event = projection
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
+                step_id: durable.step_id,
+                attempts: released.clone(),
+            },
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: id("workflow.fan-out.release"),
+                input_digest: digest('0'),
+                occurred_at: UtcMicros(101),
+            },
+        )
+        .unwrap();
+    let rebuilt = tracedecay_domain::WorkflowRunProjection::rebuild(&[admitted, event]).unwrap();
+    assert_eq!(
+        rebuilt
+            .released_fan_out_attempts()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        released
+    );
+
+    let third = durable.children[2].attempt_identity.clone();
+    assert_eq!(
+        rebuilt
+            .next_event(
+                tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
+                    step_id: durable.step_id.clone(),
+                    attempts: vec![third.clone()],
+                },
+                tracedecay_domain::WorkflowRunEventContext {
+                    command_id: id("workflow.fan-out.over-capacity"),
+                    input_digest: digest('1'),
+                    occurred_at: UtcMicros(102),
+                },
+            )
+            .unwrap_err(),
+        tracedecay_domain::WorkflowRunStateError::InvalidTransition
+    );
+    let settled = rebuilt
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::SettleFanOutChildren {
+                step_id: durable.step_id.clone(),
+                attempts: vec![released[0].clone()],
+            },
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: id("workflow.fan-out.settle"),
+                input_digest: digest('2'),
+                occurred_at: UtcMicros(103),
+            },
+        )
+        .unwrap();
+    let after_settlement = rebuilt.apply(&settled).unwrap();
+    let next_release = after_settlement
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
+                step_id: durable.step_id,
+                attempts: vec![third.clone()],
+            },
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: id("workflow.fan-out.next-release"),
+                input_digest: digest('3'),
+                occurred_at: UtcMicros(104),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        next_release.event(),
+        tracedecay_domain::WorkflowRunEventKind::FanOutChildrenReleased { attempts, .. }
+            if attempts == &[third]
+    ));
+
+    let cancelling = after_settlement
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::RequestCancellation,
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: id("workflow.fan-out.cancel"),
+                input_digest: digest('4'),
+                occurred_at: UtcMicros(105),
+            },
+        )
+        .and_then(|event| after_settlement.apply(&event))
+        .unwrap();
+    assert_eq!(
+        cancelling.status(),
+        tracedecay_domain::WorkflowRunStatus::Cancelling
+    );
+    assert_eq!(
+        cancelling
+            .next_event(
+                tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
+                    step_id: durable.step_id.clone(),
+                    attempts: vec![third],
+                },
+                tracedecay_domain::WorkflowRunEventContext {
+                    command_id: id("workflow.fan-out.release-after-cancel"),
+                    input_digest: digest('5'),
+                    occurred_at: UtcMicros(106),
+                },
+            )
+            .unwrap_err(),
+        tracedecay_domain::WorkflowRunStateError::InvalidTransition
     );
 }
 

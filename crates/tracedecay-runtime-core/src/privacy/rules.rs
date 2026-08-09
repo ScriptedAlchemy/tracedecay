@@ -734,6 +734,12 @@ fn credential_assignment_ranges<'a>(
             .position(|byte| matches!(*byte, b'\r' | b'\n'))
             .map_or(limit, |offset| value_start + offset);
 
+        if assignment_uses_colon(&matched)
+            && is_obvious_rust_non_secret_value(text, matched.start(), value_start, line_end)
+        {
+            return None;
+        }
+
         if let Some(raw) = rust_raw_string(bytes, value_start, limit) {
             let mut cursor = raw.content_start;
             while cursor < limit {
@@ -813,6 +819,127 @@ fn credential_assignment_ranges<'a>(
         let end = cursor + usize::from(closed);
         Some(matched.start()..end)
     })
+}
+
+/// A bare `key: value` prefix also appears in Rust field and parameter syntax.
+/// Only reject a value when it is plainly a type or a call expression without a
+/// literal: neither form carries credential bytes in the indexed source.
+fn assignment_uses_colon(matched: &Match<'_>) -> bool {
+    matched.as_str().trim_end().ends_with(':')
+}
+
+fn is_obvious_rust_non_secret_value(
+    text: &str,
+    assignment_start: usize,
+    value_start: usize,
+    line_end: usize,
+) -> bool {
+    let value = &text[value_start..line_end];
+    (has_rust_declaration_context(text, assignment_start) && looks_like_rust_type_annotation(value))
+        || looks_like_non_literal_call_expression(value)
+}
+
+fn has_rust_declaration_context(text: &str, assignment_start: usize) -> bool {
+    let line_start = text[..assignment_start]
+        .rfind(['\r', '\n'])
+        .map_or(0, |newline| newline + 1);
+    let prefix = text[line_start..assignment_start].trim_end();
+    prefix.ends_with("pub")
+        || prefix.starts_with("pub(")
+        || prefix.ends_with(['(', '{', ','])
+        || prefix.ends_with("let")
+        || prefix.ends_with("let mut")
+}
+
+fn looks_like_rust_type_annotation(value: &str) -> bool {
+    let Some((candidate, terminator)) = value
+        .char_indices()
+        .find(|(_, character)| matches!(character, ',' | ')' | '=' | ';'))
+        .map(|(index, terminator)| (&value[..index], terminator))
+    else {
+        return false;
+    };
+    if !matches!(terminator, ',' | ')' | '=') {
+        return false;
+    }
+
+    let candidate = candidate.trim();
+    if candidate.is_empty()
+        || !candidate.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '&' | '*' | ':' | '<' | '>' | '[' | ']' | '\'' | ' ' | '\t'
+                )
+        })
+    {
+        return false;
+    }
+
+    let type_name = candidate
+        .trim_start_matches(|character| matches!(character, '&' | '*' | '\'' | ' ' | '\t'))
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .find(|name| !name.is_empty());
+    type_name.is_some_and(|name| {
+        matches!(
+            name,
+            "String"
+                | "str"
+                | "bool"
+                | "char"
+                | "usize"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "f32"
+                | "f64"
+                | "Vec"
+                | "Option"
+                | "Result"
+        ) || name.chars().next().is_some_and(char::is_uppercase)
+    })
+}
+
+fn looks_like_non_literal_call_expression(value: &str) -> bool {
+    let value = value
+        .trim()
+        .trim_end_matches(|character| matches!(character, ';' | ',' | '}'))
+        .trim_end();
+    if !value.contains('(')
+        || !value.ends_with(')')
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | ':' | '.' | '(' | ')' | '&' | '*' | '<' | '>' | ' ' | '\t'
+                )
+        })
+    {
+        return false;
+    }
+
+    let mut depth = 0usize;
+    for character in value.chars() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
+            }
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 /// Source formatters may put an assigned value on the next indented line. This
@@ -1160,5 +1287,27 @@ mod tests {
         assert_eq!(line_containing("alpha\nbeta\ngamma", 6), "beta");
         assert_eq!(line_containing("alpha", 0), "alpha");
         assert_eq!(line_containing("alpha\nbeta", 9), "beta");
+    }
+
+    #[test]
+    fn credential_assignments_do_not_claim_rust_type_annotations_or_expressions() {
+        let compiled = patterns(CredentialPatternProfile::Observation);
+        let assignment = rule(&compiled, "tracedecay-credential-assignment-observation");
+
+        for ordinary_source in [
+            "pub token: String,",
+            "fn authenticate(token: String) {}",
+            "Config { token: String::new() }",
+        ] {
+            assert!(
+                assignment.ranges(ordinary_source).is_empty(),
+                "ordinary Rust source must not be redacted: {ordinary_source}"
+            );
+        }
+
+        assert!(assignment.is_match(r#"token: "actual-secret""#));
+        assert!(assignment.is_match("token: actual-secret"));
+        assert!(assignment.is_match(r#"token: Some("actual-secret")"#));
+        assert!(assignment.is_match("token: ActualSecret,"));
     }
 }

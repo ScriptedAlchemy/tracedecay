@@ -344,7 +344,6 @@ fn fact_write_rejects_stored_identity_mismatch() {
         vec![],
         vec![],
         None,
-        None,
     )
     .unwrap()
     .with_identity_material(requested_identity)
@@ -410,17 +409,8 @@ fn fact_executor_does_not_claim_replay_without_writer_ledger() {
             ],
         )
         .unwrap();
-    let batch = FactWriteBatch::new(
-        fact_id,
-        owner,
-        None,
-        vec![event],
-        vec![],
-        vec![],
-        None,
-        None,
-    )
-    .unwrap();
+    let batch =
+        FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
     let savepoint = connection.savepoint().unwrap();
 
     let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
@@ -480,7 +470,6 @@ fn purge_access_transition_clears_active_assertion() {
             vec![event],
             vec![],
             vec![],
-            None,
             None,
         )
         .unwrap();
@@ -567,7 +556,6 @@ fn stale_projection_transitions_are_rejected() {
             vec![],
             vec![],
             None,
-            None,
         )
         .unwrap();
         let savepoint = connection.savepoint().unwrap();
@@ -605,11 +593,6 @@ fn current_read_omits_fact_without_active_assertion() {
                     owner_kind TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL
-                 );
-                 CREATE TABLE memory_facts (
-                    fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_fact_id TEXT UNIQUE,
-                    created_at INTEGER NOT NULL DEFAULT 0
                  );",
         )
         .unwrap();

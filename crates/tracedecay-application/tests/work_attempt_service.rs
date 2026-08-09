@@ -6,24 +6,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind,
-    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationContext,
-    CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass, GenerateProposalRequest,
-    MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId, ResolvedScope,
-    ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome,
-    WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1,
+    AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind, CancelWorkAttemptCommand,
+    CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
+    GenerateProposalRequest, MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId,
+    ResolvedScope, ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand,
+    WorkAppendOutcome, WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptCapacityScopeV1,
+    WorkAttemptCapacityV1, WorkAttemptCapacityVerdictV1, WorkAttemptEvidenceRecordV1,
     WorkAttemptInsertOutcome, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
     WorkAttemptListPageV1, WorkAttemptListRequestV1, WorkAttemptListV1,
     WorkAttemptProviderOutcomeV1, WorkAttemptService, WorkAttemptStatusRequestV1,
     WorkAttemptStorageError, WorkAttemptStoragePort, WorkAttemptTopologyBindingV1,
-    WorkAttemptTopologyStateV1, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
+    WorkAttemptTopologyStateV1, WorkProjectionPortError, WorkProjectionReadPort,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
     WorkStorageError, WorkStoragePort,
 };
+use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
     ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryId, RuntimeEvidenceRef, TaskId, UtcMicros,
-    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkEffectStateV1, WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
+    ProjectionGenerationId, ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy,
+    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkEffectStateV1,
+    WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
     WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
     WorkLeaseFenceV1, WorkProjection, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
     WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
@@ -136,19 +138,21 @@ impl WorkStoragePort for TestStore {
         history.push(request.event.clone());
         Ok(WorkAppendOutcome::Appended(rebuild(history)?))
     }
+}
 
-    /// This double holds Work history only and declares no routing state, so
-    /// the honest answer for a task it holds is the empty snapshot, and a task
-    /// it does not hold is refused exactly the way `load` refuses it.
+struct EmptyProposalRouting;
+
+impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
     fn routing_snapshot(
         &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<tracedecay_application::WorkRoutingSnapshotV1, WorkStorageError> {
-        self.load(authority, task_id)?;
-        Ok(tracedecay_application::WorkRoutingSnapshotV1::default())
+        _context: &RequestContext,
+        _task_id: &TaskId,
+    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
+        Ok(WorkRoutingSnapshotV1::default())
     }
 }
+
+const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
 
 fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
     WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
@@ -232,6 +236,40 @@ fn attempt_key(authority: &WorkAuthority, identity: &WorkAttemptIdentityV1) -> A
     )
 }
 
+fn attempt_capacity(
+    inner: &AttemptRows,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+    concurrency: &TopologyConcurrencyPolicyV1,
+) -> Result<WorkAttemptCapacityV1, WorkAttemptStorageError> {
+    let mut global_active = 0_u64;
+    let mut repository_active = 0_u64;
+    let mut task_active = 0_u64;
+    for ((row_authority, _), payload) in &inner.rows {
+        if row_authority.project_id() != authority.project_id() {
+            continue;
+        }
+        let existing: WorkAttemptV1 =
+            serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        if existing.is_terminal() {
+            continue;
+        }
+        global_active += 1;
+        if row_authority.repository_id() == authority.repository_id() {
+            repository_active += 1;
+            if existing.identity().task_id() == task_id {
+                task_active += 1;
+            }
+        }
+    }
+    Ok(WorkAttemptCapacityV1::new(
+        global_active,
+        repository_active,
+        task_active,
+        concurrency.clone(),
+    ))
+}
+
 impl WorkAttemptStoragePort for AttemptStore {
     fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
         let mut inner = self.inner.lock().unwrap();
@@ -266,8 +304,7 @@ impl WorkAttemptStoragePort for AttemptStore {
         &self,
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
-        maximum_active_per_repository: std::num::NonZeroU16,
-        maximum_parallel_per_task: std::num::NonZeroU16,
+        concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
         let payload =
             serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -282,31 +319,32 @@ impl WorkAttemptStoragePort for AttemptStore {
                 Err(WorkAttemptStorageError::AttemptConflict)
             };
         }
-        let mut repository_active = 0usize;
-        let mut task_active = 0usize;
-        for ((row_authority, _), payload) in &inner.rows {
-            if row_authority.project_id() != authority.project_id()
-                || row_authority.repository_id() != authority.repository_id()
-            {
-                continue;
-            }
-            let existing: WorkAttemptV1 =
-                serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            if existing.is_terminal() {
-                continue;
-            }
-            repository_active += 1;
-            if existing.identity().task_id() == attempt.identity().task_id() {
-                task_active += 1;
-            }
-        }
-        if repository_active >= usize::from(maximum_active_per_repository.get())
-            || task_active >= usize::from(maximum_parallel_per_task.get())
-        {
+        if matches!(
+            attempt_capacity(&inner, authority, attempt.identity().task_id(), concurrency)?
+                .verdict(),
+            WorkAttemptCapacityVerdictV1::Exhausted(_)
+        ) {
             return Err(WorkAttemptStorageError::CapacityExceeded);
         }
         inner.rows.insert(key, payload);
         Ok(WorkAttemptInsertOutcome::Inserted)
+    }
+
+    fn admission_capacities(
+        &self,
+        authority: &WorkAuthority,
+        task_ids: &[TaskId],
+        concurrency: &TopologyConcurrencyPolicyV1,
+    ) -> Result<BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError> {
+        let inner = self.inner.lock().unwrap();
+        task_ids
+            .iter()
+            .cloned()
+            .map(|task_id| {
+                attempt_capacity(&inner, authority, &task_id, concurrency)
+                    .map(|capacity| (task_id, capacity))
+            })
+            .collect()
     }
 
     fn load(
@@ -488,6 +526,7 @@ fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &st
         .generate_proposal(
             context,
             digest('b'),
+            &EMPTY_PROPOSAL_ROUTING,
             GenerateProposalRequest {
                 task_id: task_id.clone(),
                 proposal_id: id(&format!("proposal.{task}")),
@@ -608,6 +647,40 @@ fn registered_topology_saturates_parallel_attempt_admission() {
     let first = attempts
         .start_against_registered_topology(&context, &topology, start_command(task, "attempt.1"))
         .unwrap();
+    let capacity = attempts
+        .admission_capacity_against_registered_topology(&context, &id::<TaskId>(task), &topology)
+        .unwrap();
+    assert_eq!(capacity.global_active(), 1);
+    assert_eq!(capacity.repository_active(), 1);
+    assert_eq!(capacity.task_active(), 1);
+    assert_eq!(
+        capacity.verdict(),
+        WorkAttemptCapacityVerdictV1::Exhausted(BTreeSet::from([
+            WorkAttemptCapacityScopeV1::Global,
+            WorkAttemptCapacityScopeV1::Repository,
+            WorkAttemptCapacityScopeV1::Task,
+        ]))
+    );
+    let peer_task = id::<TaskId>("task.attempt.topology-peer");
+    let task_ids = [id::<TaskId>(task), peer_task.clone()];
+    let batch = attempts
+        .admission_capacities_against_registered_topology(&context, &task_ids, &topology)
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[&task_ids[0]].global_active(), 1);
+    assert_eq!(batch[&task_ids[0]].repository_active(), 1);
+    assert_eq!(batch[&task_ids[0]].task_active(), 1);
+    assert_eq!(batch[&peer_task].global_active(), 1);
+    assert_eq!(batch[&peer_task].repository_active(), 1);
+    assert_eq!(batch[&peer_task].task_active(), 0);
+    let invalid = attempts
+        .admission_capacities_against_registered_topology(
+            &context,
+            &[peer_task.clone(), peer_task],
+            &topology,
+        )
+        .unwrap_err();
+    assert_eq!(invalid.kind(), ApplicationProblemKind::InvalidRequest);
 
     let saturated = attempts
         .start_against_registered_topology(&context, &topology, start_command(task, "attempt.2"))
@@ -662,20 +735,24 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
     let leased = attempts.start(&context, command.clone()).unwrap();
     let admitted_binding = leased.projection_binding().clone();
 
-    // Exactly the append the attempt's own terminal settle performs.
-    let moved = work
-        .attach_runtime_evidence(
-            &context,
-            AttachRuntimeEvidenceCommand {
-                task_id: id("task.attempt.replay"),
-                evidence: RuntimeEvidenceRef::new(id("run.task.attempt.replay"), digest('e'), true)
-                    .unwrap(),
-                expected_version: WorkVersion::new(3).unwrap(),
-                command_id: id("command.attempt.replay.evidence"),
-                occurred_at: UtcMicros(50),
-            },
-        )
+    attempts
+        .mark_running(&context, leased.identity(), requested_route())
         .unwrap();
+    let evidence = WorkAttemptEvidenceRecordV1 {
+        identity: leased.identity().clone(),
+        requested_route: leased.requested_route().clone(),
+        actual_route: Some(requested_route()),
+        outcome: WorkAttemptProviderOutcomeV1::Exited { code: 1 },
+        stdout: None,
+        stderr: None,
+        provider_session_id: None,
+        provider_fallback: None,
+        observed_at: UtcMicros(50),
+    };
+    let settled = attempts
+        .settle(&context, leased.identity(), &evidence)
+        .unwrap();
+    let moved = work.load(&context, leased.identity().task_id()).unwrap();
     assert_eq!(
         moved.version(),
         WorkVersion::new(4).unwrap(),
@@ -684,7 +761,7 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
 
     let replayed = attempts.start(&context, command).unwrap();
     assert_eq!(
-        replayed, leased,
+        replayed, settled,
         "an identical admission must replay the durable attempt, not conflict"
     );
     assert_eq!(
@@ -707,19 +784,23 @@ fn start_refuses_a_divergent_admission_after_the_projection_moves() {
     let command = start_command("task.attempt.divergent", "attempt.1");
     let leased = attempts.start(&context, command.clone()).unwrap();
 
-    // Exactly the append the attempt's own terminal settle performs.
-    work.attach_runtime_evidence(
-        &context,
-        AttachRuntimeEvidenceCommand {
-            task_id: id("task.attempt.divergent"),
-            evidence: RuntimeEvidenceRef::new(id("run.task.attempt.divergent"), digest('e'), true)
-                .unwrap(),
-            expected_version: WorkVersion::new(3).unwrap(),
-            command_id: id("command.attempt.divergent.evidence"),
-            occurred_at: UtcMicros(50),
-        },
-    )
-    .unwrap();
+    attempts
+        .mark_running(&context, leased.identity(), requested_route())
+        .unwrap();
+    let evidence = WorkAttemptEvidenceRecordV1 {
+        identity: leased.identity().clone(),
+        requested_route: leased.requested_route().clone(),
+        actual_route: Some(requested_route()),
+        outcome: WorkAttemptProviderOutcomeV1::Exited { code: 1 },
+        stdout: None,
+        stderr: None,
+        provider_session_id: None,
+        provider_fallback: None,
+        observed_at: UtcMicros(50),
+    };
+    let settled = attempts
+        .settle(&context, leased.identity(), &evidence)
+        .unwrap();
 
     let mut divergent = command;
     divergent.instructions = "Execute a different provider step.".to_owned();
@@ -741,7 +822,7 @@ fn start_refuses_a_divergent_admission_after_the_projection_moves() {
             },
         )
         .unwrap();
-    assert_eq!(status, leased);
+    assert_eq!(status, settled);
 }
 
 #[test]
@@ -752,21 +833,6 @@ fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
         .start(&context, start_command("task.attempt.cancel", "attempt.1"))
         .unwrap();
     let identity = leased.identity().clone();
-    // Cancellation before the provider runs is a typed conflict.
-    let premature = attempts
-        .request_cancellation(
-            &context,
-            CancelWorkAttemptCommand {
-                task_id: identity.task_id().clone(),
-                run_id: identity.run_id().clone(),
-                attempt_id: identity.attempt_id().clone(),
-                request_id: id("cancellation.attempt.premature"),
-                occurred_at: UtcMicros(50),
-            },
-        )
-        .unwrap_err();
-    assert_eq!(premature.kind(), ApplicationProblemKind::Conflict);
-
     attempts
         .mark_running(&context, &identity, requested_route())
         .unwrap();
@@ -816,6 +882,7 @@ fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
         outcome: WorkAttemptProviderOutcomeV1::Cancelled,
         stdout: None,
         stderr: None,
+        provider_session_id: None,
         provider_fallback: None,
         observed_at: UtcMicros(90),
     };
@@ -830,6 +897,51 @@ fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
         *projection.runtime_evidence()[0].evidence_digest(),
         evidence.digest().unwrap()
     );
+}
+
+#[test]
+fn leased_attempt_can_be_cancelled_without_a_provider_route() {
+    let (attempts, work, context) = fixture("project.attempt.cancel-before-start");
+    admit_work(&work, &context, "task.attempt.cancel-before-start");
+    let leased = attempts
+        .start(
+            &context,
+            start_command("task.attempt.cancel-before-start", "attempt.1"),
+        )
+        .unwrap();
+    let requested = attempts
+        .request_cancellation(
+            &context,
+            CancelWorkAttemptCommand {
+                task_id: leased.identity().task_id().clone(),
+                run_id: leased.identity().run_id().clone(),
+                attempt_id: leased.identity().attempt_id().clone(),
+                request_id: id("cancellation.attempt.before-start"),
+                occurred_at: UtcMicros(50),
+            },
+        )
+        .unwrap();
+    assert_eq!(requested.state(), WorkAttemptStateV1::CancellationRequested);
+    assert!(requested.actual_route().is_none());
+    let acknowledged = attempts
+        .acknowledge_cancellation(&context, leased.identity(), UtcMicros(60))
+        .unwrap();
+    let evidence = WorkAttemptEvidenceRecordV1 {
+        identity: leased.identity().clone(),
+        requested_route: leased.requested_route().clone(),
+        actual_route: None,
+        outcome: WorkAttemptProviderOutcomeV1::Cancelled,
+        stdout: None,
+        stderr: None,
+        provider_session_id: None,
+        provider_fallback: None,
+        observed_at: UtcMicros(70),
+    };
+    let cancelled = attempts
+        .settle(&context, acknowledged.identity(), &evidence)
+        .unwrap();
+    assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
+    assert!(cancelled.actual_route().is_none());
 }
 
 #[test]
@@ -912,6 +1024,7 @@ fn resume_fences_open_attempts_and_completes_lost_cancellations() {
                 outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
                 stdout: None,
                 stderr: None,
+                provider_session_id: None,
                 provider_fallback: None,
                 observed_at: UtcMicros(110),
             },
@@ -950,6 +1063,7 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
         },
         stdout: None,
         stderr: None,
+        provider_session_id: None,
         provider_fallback: None,
         observed_at: UtcMicros(120),
     };

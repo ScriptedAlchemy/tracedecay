@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, TaskId, WorkAuthority, WorkEvent, WorkProjection, canonical_sha256,
+    ManifestDigest, TaskId, WorkAuthority, WorkEvent, WorkProjection, WorkTopologyGenerationRefV1,
+    canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
@@ -311,6 +312,21 @@ impl WorkTopologyStore {
     /// generation is published.
     pub const fn generation(&self) -> &GraphGenerationId {
         &self.generation
+    }
+
+    /// Authority-bound evidence for the exact mounted topology projection and
+    /// verified graph generation. The graph store remains the generation
+    /// authority; callers receive only this opaque digest for later staleness
+    /// checks.
+    pub fn evidence_ref(&self) -> Result<WorkTopologyGenerationRefV1, WorkTopologyError> {
+        let digest = canonical_sha256(&(
+            "tracedecay.work-topology-generation-evidence.v1",
+            &self.projection,
+            &self.generation,
+        ))
+        .map_err(|error| WorkTopologyError::Contract(error.to_string()))?;
+        WorkTopologyGenerationRefV1::new(digest.as_str().to_owned())
+            .map_err(|error| WorkTopologyError::Contract(error.to_string()))
     }
 
     /// The number of tasks in the verified topology.

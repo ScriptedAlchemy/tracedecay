@@ -136,8 +136,8 @@ fn schema_has_no_materialized_work_projection_tables() {
     });
     // Every Work table is an immutable journal, a monotonic cursor or fence, a
     // durable attempt row, a version-checked run-control or placement
-    // authority, a publication outbox, or the index of verified graph
-    // versions. None is a materialized projection: a projection is always
+    // authority, or the index of verified graph versions. None is a
+    // materialized projection: a projection is always
     // rebuilt by folding the journal, so no stored table can ever disagree with
     // the events that produced it. `work/projection.rs` holds to that: every
     // read there replays the authority events and rebuilds, storing nothing.
@@ -149,7 +149,6 @@ fn schema_has_no_materialized_work_projection_tables() {
             "work_events_v1".to_owned(),
             "work_owner_cursors_v1".to_owned(),
             "work_placements_v1".to_owned(),
-            "work_product_event_outbox_v1".to_owned(),
             "work_product_events_v1".to_owned(),
             "work_product_graph_versions_v1".to_owned(),
             "work_run_controls_v1".to_owned(),

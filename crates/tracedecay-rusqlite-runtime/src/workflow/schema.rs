@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:5bb8241c0964fa921f40ed8c4cc44887572bc3e2295fdee93622e1039e9e3bcd";
+    "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkflowColumnContractV1 {
@@ -70,6 +70,45 @@ const WORKFLOW_RUN_JOURNAL_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     WorkflowColumnContractV1 {
         name: "event_digest",
         sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+];
+
+const WORKFLOW_FAN_OUT_CENSUS_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+    WorkflowColumnContractV1 {
+        name: "run_id",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 1,
+    },
+    WorkflowColumnContractV1 {
+        name: "workflow_sequence",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 2,
+    },
+    WorkflowColumnContractV1 {
+        name: "observed_at",
+        sql_type: "INTEGER",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "census_payload",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "census_digest",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "observability_settled",
+        sql_type: "INTEGER",
         not_null: 1,
         primary_key: 0,
     },
@@ -345,6 +384,18 @@ const WORKFLOW_RUN_JOURNAL_SQL_V1: &str = "CREATE TABLE workflow_run_journal (
     UNIQUE (run_id, command_id)
 ) STRICT";
 
+const WORKFLOW_FAN_OUT_CENSUS_SQL_V1: &str = "CREATE TABLE workflow_fan_out_census_journal (
+    run_id TEXT NOT NULL,
+    workflow_sequence INTEGER NOT NULL CHECK (workflow_sequence > 0),
+    observed_at INTEGER NOT NULL,
+    census_payload TEXT NOT NULL,
+    census_digest TEXT NOT NULL,
+    observability_settled INTEGER NOT NULL CHECK (observability_settled IN (0, 1)),
+    PRIMARY KEY (run_id, workflow_sequence),
+    FOREIGN KEY (run_id, workflow_sequence)
+        REFERENCES workflow_run_journal (run_id, sequence)
+) STRICT";
+
 const WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1: &str =
     "CREATE TABLE workflow_definition_source_journal (
     definition_id TEXT NOT NULL,
@@ -421,7 +472,7 @@ pub const WORKFLOW_SCHEMA_IDENTITY_V1: &str =
 VALUES (
     1,
     1,
-    'sha256:5bb8241c0964fa921f40ed8c4cc44887572bc3e2295fdee93622e1039e9e3bcd'
+    'sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be'
 )";
 
 pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
@@ -449,6 +500,11 @@ pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
         name: "workflow_effect_journal",
         sql: WORKFLOW_EFFECT_JOURNAL_SQL_V1,
         columns: WORKFLOW_EFFECT_COLUMNS_V1,
+    },
+    WorkflowTableContractV1 {
+        name: "workflow_fan_out_census_journal",
+        sql: WORKFLOW_FAN_OUT_CENSUS_SQL_V1,
+        columns: WORKFLOW_FAN_OUT_CENSUS_COLUMNS_V1,
     },
     WorkflowTableContractV1 {
         name: "workflow_handoffs",

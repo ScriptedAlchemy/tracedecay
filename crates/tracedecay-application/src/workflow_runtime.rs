@@ -104,6 +104,22 @@ pub struct WorkflowFanOutRequest {
     pub inputs: Vec<WorkflowFanOutInput>,
 }
 
+/// Caller input required to durably plan the entry fan-out of a workflow run.
+/// Daemon-owned registration and topology digests are resolved at admission.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowFanOutStartV1 {
+    pub fence: WorkflowExecutionFence,
+    #[schemars(range(min = 1))]
+    pub max_parallel: u32,
+    pub failure_policy: WorkflowFailurePolicy,
+    pub execution_snapshot: WorkExecutionSnapshot,
+    pub reference: Option<RefId>,
+    pub commit: CommitId,
+    pub effect_state: WorkEffectStateV1,
+    pub inputs: Vec<WorkflowFanOutInput>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowPlannedChild {
@@ -124,6 +140,7 @@ pub struct WorkflowPlannedChild {
 pub struct WorkflowFanOutPlan {
     pub identity: WorkflowExecutionIdentity,
     pub operation: WorkflowOperationRef,
+    pub admitted_at: UtcMicros,
     pub max_parallel: u32,
     pub failure_policy: WorkflowFailurePolicy,
     pub plan_digest: ManifestDigest,
@@ -331,10 +348,62 @@ pub fn prepare_workflow_fan_out(
     Ok(WorkflowFanOutPlan {
         identity,
         operation: step.operation.clone(),
+        admitted_at: request.admitted_at,
         max_parallel: request.max_parallel,
         failure_policy: request.failure_policy,
         plan_digest,
         children,
+    })
+}
+
+pub fn durable_workflow_fan_out_plan(
+    plan: &WorkflowFanOutPlan,
+    provider: &WorkflowProviderAdmission,
+    authority: tracedecay_domain::WorkAuthority,
+) -> Result<tracedecay_domain::WorkflowFanOutPlanV1, WorkflowFanOutRuntimeError> {
+    let maximum_parallel = u16::try_from(plan.max_parallel)
+        .ok()
+        .and_then(std::num::NonZeroU16::new)
+        .ok_or(WorkflowFanOutRuntimeError::InvalidParallelism)?;
+    let failure_policy = match plan.failure_policy {
+        WorkflowFailurePolicy::FailFast => {
+            tracedecay_domain::WorkflowFanOutFailurePolicyV1::FailFast
+        }
+        WorkflowFailurePolicy::Collect => tracedecay_domain::WorkflowFanOutFailurePolicyV1::Collect,
+        WorkflowFailurePolicy::RequireAtLeast { successes } => {
+            let successes = u16::try_from(successes)
+                .ok()
+                .and_then(std::num::NonZeroU16::new)
+                .ok_or(WorkflowFanOutRuntimeError::InvalidFailurePolicy)?;
+            tracedecay_domain::WorkflowFanOutFailurePolicyV1::RequireAtLeast { successes }
+        }
+    };
+    Ok(tracedecay_domain::WorkflowFanOutPlanV1 {
+        authority,
+        step_id: plan.identity.step_id.clone(),
+        operation: plan.operation.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        admitted_at: plan.admitted_at,
+        maximum_parallel,
+        failure_policy,
+        execution_snapshot: provider.execution_snapshot.clone(),
+        reference: provider.reference.clone(),
+        commit: provider.commit.clone(),
+        effect_state: provider.effect_state,
+        children: plan
+            .children
+            .iter()
+            .map(|child| tracedecay_domain::WorkflowFanOutChildPlanV1 {
+                task_id: child.task_id.clone(),
+                attempt_identity: child.attempt_identity.clone(),
+                create_command_id: child.create_command_id.clone(),
+                proposal_command_id: child.proposal_command_id.clone(),
+                admit_command_id: child.admit_command_id.clone(),
+                proposal_id: child.proposal_id.clone(),
+                proposal_digest: child.proposal_digest.clone(),
+                instructions: child.input.identity.clone(),
+            })
+            .collect(),
     })
 }
 
