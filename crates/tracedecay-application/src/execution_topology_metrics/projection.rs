@@ -17,6 +17,7 @@ use tracedecay_domain::{
     GitHubStackCapabilityV1, IntegrationOperationKindV1, IntegrationPhaseV1, IntegrationResultV1,
     IntervalStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, RerunCauseV1, RerunSourceV1,
     StackDriftKindV1, WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1, canonical_sha256,
+    validate_local_ref,
 };
 
 use crate::observability::ObservabilityHorizonV1;
@@ -137,7 +138,10 @@ pub(super) fn duplicate_receipt_key_parts(key: &str) -> Option<(&str, u64)> {
         .strip_prefix(':')?
         .parse::<u64>()
         .ok()?;
-    if revision == 0 || duplicate_receipt_key(reference, revision) != key {
+    if revision == 0
+        || validate_local_ref(reference).is_err()
+        || duplicate_receipt_key(reference, revision) != key
+    {
         return None;
     }
     Some((reference, revision))
@@ -537,6 +541,18 @@ mod aggregation_tests {
             duplicate_receipt_key_parts(&key),
             Some(("receipt:duplicate:fixture", 7))
         );
+    }
+
+    #[test]
+    fn duplicate_receipt_keys_reject_noncanonical_references() {
+        let oversized_reference = "a".repeat(129);
+        for key in [
+            "0::1".to_owned(),
+            "3:ABC:1".to_owned(),
+            duplicate_receipt_key(&oversized_reference, 1),
+        ] {
+            assert_eq!(duplicate_receipt_key_parts(&key), None, "key={key}");
+        }
     }
 
     fn duplicate(

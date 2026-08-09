@@ -575,7 +575,8 @@ pub(super) fn validate_anchors(anchors: &[String]) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub(super) fn validate_local_ref(value: &str) -> Result<(), &'static str> {
+/// Validates a canonical local receipt or evidence reference.
+pub fn validate_local_ref(value: &str) -> Result<(), &'static str> {
     if !crate::canonical_text::is_canonical_text_within(value, 128)
         || !value.starts_with(|character: char| character.is_ascii_lowercase())
         || !value
