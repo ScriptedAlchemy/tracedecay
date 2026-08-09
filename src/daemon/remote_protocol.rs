@@ -32,10 +32,6 @@ use tracedecay_application::remote::protocol::{
     remote_replay_result_contract_v1,
 };
 use tracedecay_application::remote::protocol_owner::RemoteProtocolOwnerV1;
-use tracedecay_application::remote::query::{
-    RemoteExactObservationQueryProtocolAdapterV1, RemoteExactObservationQueryServiceV1,
-    RemoteQueryRequestV1, RemoteQueryResultV1,
-};
 use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
@@ -69,9 +65,14 @@ use tracedecay_rusqlite_runtime::remote::{
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::SchemaId;
 
-use crate::daemon::remote_query::DaemonRemoteExactObservationQueryPortV1;
 use crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
+use crate::daemon::service::invocation::DaemonInvocationService;
 use crate::errors::{Result, TraceDecayError};
+
+mod observability;
+
+#[cfg(test)]
+pub(super) use observability::remote_query_result_observation;
 
 const MAX_REGISTERED_REMOTE_NODES: usize = 128;
 const MAX_REGISTERED_REMOTE_CREDENTIALS: usize = 8_192;
@@ -886,50 +887,6 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolP
     }
 }
 
-struct DaemonRemoteQueryProtocolPortV1 {
-    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
-    targets: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
-}
-
-impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPortV1 {
-    type Output = RemoteQueryResultV1;
-
-    fn execute(
-        &self,
-        request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
-        credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let registered = match self
-            .credentials
-            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
-        {
-            Ok(registered) => registered,
-            Err(_) => {
-                return unavailable_response(
-                    request_id,
-                    observed_at,
-                    tracedecay_application::remote::query::
-                        remote_exact_observation_query_result_contract_v1(),
-                );
-            }
-        };
-        let storage = Arc::new(registered.storage);
-        RemoteExactObservationQueryProtocolAdapterV1::new(
-            RemoteExactObservationQueryServiceV1::new(
-                storage.clone(),
-                storage.clone(),
-                Arc::new(DaemonRemoteExactObservationQueryPortV1::new(
-                    storage,
-                    Arc::clone(&self.targets),
-                )),
-            ),
-        )
-        .execute(request, credential)
-    }
-}
-
 struct DaemonRemoteRecoveryControlV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     cancellation: CancellationSignal,
@@ -1058,6 +1015,7 @@ macro_rules! impl_daemon_remote_recovery_protocol {
 pub(crate) fn build_daemon_remote_protocol_router(
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
+    invocation: DaemonInvocationService,
 ) -> Result<Router> {
     let recovery = Arc::new(DaemonRemoteRecoveryProtocolPortV1 {
         credentials: Arc::clone(&credentials),
@@ -1079,10 +1037,11 @@ pub(crate) fn build_daemon_remote_protocol_router(
         Arc::new(DaemonRemoteFrameTransferProtocolPortV1 {
             credentials: Arc::clone(&credentials),
         }),
-        Arc::new(DaemonRemoteQueryProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-            targets: transaction,
-        }),
+        Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
+            Arc::clone(&credentials),
+            transaction,
+            invocation,
+        )),
         recovery.clone(),
         recovery.clone(),
         recovery,

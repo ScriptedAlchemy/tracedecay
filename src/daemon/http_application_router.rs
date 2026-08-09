@@ -94,12 +94,14 @@ pub(super) fn install_http_application_cold_resolver(
 pub(super) async fn install_remote_http_application_router(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: &StoreAdministration,
+    invocation: &DaemonInvocationState,
 ) -> Result<()> {
     let runtime = store_administration.registered_runtime_registry().await?;
     let credentials = runtime.remote_credential_authority();
     let router = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
+        invocation.service.clone(),
     )?;
     registry.install_remote(router, credentials, Some(runtime))
 }

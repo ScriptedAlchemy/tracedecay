@@ -746,6 +746,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     let remote = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
+        super::service::invocation::DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     let registry = DaemonHttpApplicationRegistry::default();
@@ -802,6 +803,7 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
     let router = super::remote_protocol::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
+        super::service::invocation::DaemonInvocationService::default(),
     )
     .expect("remote protocol router");
     registry

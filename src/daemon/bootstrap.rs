@@ -73,8 +73,12 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         invocation.clone(),
         Arc::clone(&project_open_gates),
     )?;
-    install_remote_http_application_router(&http_application_registry, &store_administration)
-        .await?;
+    install_remote_http_application_router(
+        &http_application_registry,
+        &store_administration,
+        &invocation,
+    )
+    .await?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
         http_application_registry.clone(),
         authority.auth_token(),
@@ -371,6 +375,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     install_remote_http_application_router(
         &http_application_registry,
         &engine.store_administration,
+        &engine.invocation,
     )
     .await?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
