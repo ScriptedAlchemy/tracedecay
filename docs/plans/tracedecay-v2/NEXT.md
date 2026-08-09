@@ -22,6 +22,14 @@ current branch; do not reconstruct intent from commit subjects alone.
   `e8dad46d599088b26847371cc8da96c6579b95ba` in both `HEAD` and the worktree.
 - No repository file was mounted or marked immutable at wind-down. An earlier
   filename-focused BPF deletion monitor was stopped cleanly.
+- Cargo build artifacts were reclaimed after wind-down with direct
+  `cargo-reclaim cleanup --all --delete-target --yes /fast /home/zack /tmp`.
+  It deleted 408 freshly revalidated target directories totaling
+  611,153,508,016 bytes with zero failures, skips, or stale entries. The
+  execution report is
+  `/home/zack/.local/state/cargo-reclaim/reports/1786301785763-cleanup-execution-sha256-0cc2a4bff51ec62149b4ebea73acbdd1d9c7512f75c6f2230850703bcd4799ab.json`.
+  All Rust verification after reboot is therefore a cold build; do not infer a
+  regression merely from the first build's duration.
 - The shared Git index is stale relative to temporary-index commits. After all
   agents are confirmed stopped, reconcile only the index against `HEAD`; never
   use that reconciliation to modify the worktree.
@@ -200,6 +208,50 @@ the commit as attribution evidence.
 - Run execution-topology metrics, rollup, compaction, retry, cancellation, and
   restart journeys rather than contract inventories.
 
+### Additional wound-down lane handoffs
+
+- LSP readiness is implemented in `70b5ae3355`, `5be0d4ddbe`, and
+  `8f32c4576e`: dispatch waits/rejoins project-open upgrades and cancellation is
+  threaded before admission. Re-run the complete 13-test production LSP
+  surface after TaskSession, retained, topology, and memory callers compile;
+  the last pre-fix run was 12/13 and the post-fix run never reached execution.
+- Grafeo memory relations are mounted in `f0708a7fda` with profile/project
+  identity, CAS projection, hydration, and dashboard consumption. The full
+  daemon restart/isolation journey was terminated before execution and remains
+  required; do not replace it with the already-passing narrow registry test.
+- Finish and checkpoint the exact-route Hermes plugin, unit, and stock changes
+  described by the host lane, then build a fresh binary. `c635423a56` contains
+  the retained Hermes surface, but the stale binary still emitted the old
+  broad fact-store tool during the eight-check stock run.
+- Finish the uncommitted provider decoding/materialization work in
+  `github_runtime/stack.rs` using the restored V3 coordinator. Re-run the
+  saturation, restart delivery, identity tamper, authorization, drift,
+  preflight cancellation/bounds, circuit transition, and anchored corpus
+  journeys after the central compile is green.
+- Re-run the production daemon dispatch journey for pinned proposal routing in
+  `782486f988`. Its domain and planner tests passed, but daemon compilation was
+  terminated before the mounted route executed.
+- Checkpoint the canonical-parent cutover that removes remaining
+  `crate::application` facade imports from daemon, project runtime, session
+  sync/registry, MCP session retrieval, and root composition. Complete the
+  in-place removal of unreleased compatibility modules and aliases; do not
+  create replacement facades.
+- Semantic configuration table ownership and activation reconciliation are
+  implemented, but the real accepted-profile/Linux evaluation and a live
+  profile activation journey remain. Exact, lexical, graph, and ordinary
+  session retrieval must stay available while semantic activation is pending
+  or unavailable.
+- Re-run the doctor authority-audit journey and a clean Cursor agents/in-
+  composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
+  drift versus ownership-conflict distinctions and do not add Cursor Cloud.
+- Re-run the full Grafeo, feedback SDK, workflow-metadata privacy, structured
+  privacy, Costs accounting, LSP, and application final-surface suites in the
+  aggregate matrix even where their focused review lanes approved. Their
+  approval proves the scoped change, not current-tree RC integration.
+- Exercise incremental indexing through save, rename, delete, ref switch,
+  overflow, cancellation, and restart. Preserve serve-during-refresh and exact
+  identity; only complete compatible semantic generations may publish.
+
 ### Dashboard, SDK, hosts, and release
 
 - Freeze Rust source first, then run the canonical contract generator and
@@ -240,13 +292,15 @@ the commit as attribution evidence.
 1. Confirm no agent/build process is active; inspect `git status`, the shared
    index, mounts, immutable attributes, `HEAD`, and the coordinator hash.
 2. Reconcile the stale shared index to `HEAD` without touching the worktree.
-3. Audit `4e4715c09a`, `7913905113`, `9f34595b4e`, and `b9b200eb10` by exact
+3. Build `dashboard/app-dist` before the cold Rust build where `build.rs`
+   requires it; all Cargo target directories were intentionally reclaimed.
+4. Audit `4e4715c09a`, `7913905113`, `9f34595b4e`, and `b9b200eb10` by exact
    paths and patch IDs. Normalize their ownership in additive corrective
    commits; do not reset published history or blanket-revert peer work.
-4. Compile `tracedecay-rusqlite-runtime`, then application, query, global-db,
+5. Compile `tracedecay-rusqlite-runtime`, then application, query, global-db,
    and usecases. Fix only the first real source failure before regenerating
    contracts.
-5. Resume the Work/TaskSession daemon journey and retained owner restoration in
+6. Resume the Work/TaskSession daemon journey and retained owner restoration in
    disjoint lanes, followed by terminal propagation, native topology, source
    edit, automation adapters, observability/delivery, generated contracts, and
    the full verification matrix.
