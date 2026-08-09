@@ -739,6 +739,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    static APP_SERVER_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn prompt_contains_source_messages_and_no_tool_instruction() {
         let request = LcmSummaryRequest {
@@ -843,6 +845,27 @@ mod tests {
     }
 
     #[test]
+    fn turn_summary_rejects_missing_provider_turn_identity() {
+        let (tx, rx) = mpsc::channel();
+        assert!(
+            tx.send(Ok(json!({
+                "method": "turn/completed",
+                "params": {"threadId": "summary-thread"}
+            })
+            .to_string()))
+            .is_ok()
+        );
+
+        let error = wait_for_turn_summary(
+            &rx,
+            Instant::now() + Duration::from_secs(1),
+            "summary-thread".to_owned(),
+        )
+        .expect_err("provider turn identity is required");
+        assert!(error.to_string().contains("lacked a provider turn id"));
+    }
+
+    #[test]
     fn summary_thread_start_params_are_ephemeral_and_identified() {
         let params =
             build_ephemeral_thread_start_params(Some("gpt-5.5-codex"), "tracedecay_codex_summary");
@@ -855,6 +878,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn work_app_server_child_receives_only_admitted_environment() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temporary = tempfile::tempdir().expect("temporary app-server directory");
         let marker = temporary.path().join("environment");
         let executable = temporary.path().join("fake-codex");
@@ -929,9 +955,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn work_app_server_spawn_failure_does_not_claim_a_launch() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temporary = tempfile::tempdir().expect("temporary app-server directory");
+        let config = CodexAppServerSummaryConfig {
+            codex_bin: temporary
+                .path()
+                .join("missing-codex")
+                .to_string_lossy()
+                .into_owned(),
+            model: None,
+            timeout: Duration::from_secs(1),
+        };
+        let launch_receipt = CodexAppServerLaunchReceipt::default();
+        let result = run_work_with_codex_app_server(
+            "This process cannot start.",
+            &config,
+            "tracedecay_work_attempt",
+            &CodexAppServerCancellation::default(),
+            temporary.path(),
+            Duration::from_secs(1),
+            &BTreeMap::new(),
+            &launch_receipt,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(launch_receipt.started_at(), None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn shutdown_guard_terminates_active_child_and_rejects_new_spawns() {
+        let _process_guard = APP_SERVER_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe extern "C" {
             fn kill(pid: i32, signal: i32) -> i32;
         }
