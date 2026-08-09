@@ -40,12 +40,14 @@ use tracedecay_domain::{
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, registered_work_query};
 
+mod attempt_admission;
 mod authorization;
 mod events;
 mod evidence;
 mod history;
 mod publication;
 mod read;
+mod rooted_evidence;
 
 /// The digest domain separator for a recovered Work product graph.
 pub(crate) const WORK_PRODUCT_GRAPH_DIGEST_DOMAIN: &str =

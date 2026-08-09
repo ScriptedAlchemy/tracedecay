@@ -115,7 +115,7 @@ impl WorkRuntimeProjectionV1 {
         let accepted = graph
             .items()
             .iter()
-            .flat_map(|item| item.accepted_attempts().keys())
+            .flat_map(|item| item.accepted_attempts().iter())
             .cloned()
             .collect::<BTreeSet<_>>();
         let observed = self

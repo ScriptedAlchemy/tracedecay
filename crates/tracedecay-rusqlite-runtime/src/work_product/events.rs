@@ -2,8 +2,8 @@
 //! publication outbox one append enqueues.
 
 use tracedecay_application::{
-    WorkProductEventAppendOutcomeV1, WorkProductEventDraftV1, WorkProductEventPortErrorV1,
-    WorkProductEventPortV1, WorkProductPortContextV1,
+    WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1, WorkProductEventDraftV1,
+    WorkProductEventPortErrorV1, WorkProductEventPortV1, WorkProductPortContextV1,
 };
 use tracedecay_domain::{
     ManifestDigest, WorkCommandId, WorkProductEventId, WorkProductEventInputV1,
@@ -22,7 +22,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         context: &WorkProductPortContextV1,
         command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
-    ) -> Result<Option<WorkProductEventV1>, PortError> {
+    ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
         let scope = context.authorized_scope();
         let rows = registered_work_query(
             &self.handle,
@@ -52,93 +52,94 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         if !selection_covers(scope.selection(), &event) {
             return Err(PortError::NotFoundOrNotAuthorized);
         }
-        Ok(Some(event))
+        let published = super::load_published_versions(&self.handle, scope)
+            .ok_or(PortError::Unavailable)?
+            .into_iter()
+            .find(|published| published.event_sequence == event.sequence())
+            .ok_or(PortError::Unavailable)?;
+        let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
+        WorkProductEventCommitV1::new(event, verified)
+            .map(Some)
+            .map_err(|_| PortError::Unavailable)
     }
 
-    fn append_with_outbox(
+    fn append_atomically(
         &self,
         context: &WorkProductPortContextV1,
         draft: &WorkProductEventDraftV1,
-    ) -> Result<WorkProductEventAppendOutcomeV1, PortError> {
-        let scope = context.authorized_scope();
-        // The draft carries the owner scope the caller believes it is writing
-        // for. It must be the scope the authorization port actually resolved,
-        // or the append would attribute a change to a profile the request never
-        // proved it owns.
-        if draft.owner_scope.brain_id != *scope.owner_brain_id()
-            || draft.owner_scope.profile_id != *scope.owner_profile_id()
-        {
-            return Err(PortError::NotFoundOrNotAuthorized);
-        }
-
+    ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
         let transaction = self
             .handle
             .begin_immediate()
             .map_err(|_| PortError::Unavailable)?;
-
-        let replayed = replay_in_transaction(&transaction, context, draft);
-        match replayed {
-            Ok(Some(event)) => {
-                let _ = transaction.rollback();
-                return Ok(WorkProductEventAppendOutcomeV1::Replayed(event));
+        let outcome = append_in_transaction(&transaction, context, draft);
+        match outcome {
+            Ok(WorkProductEventCommitOutcomeV1::Appended(commit)) => {
+                transaction.commit().map_err(|_| PortError::Unavailable)?;
+                Ok(WorkProductEventCommitOutcomeV1::Appended(commit))
             }
-            Ok(None) => {}
+            Ok(WorkProductEventCommitOutcomeV1::Replayed(commit)) => {
+                transaction.rollback().map_err(|_| PortError::Unavailable)?;
+                Ok(WorkProductEventCommitOutcomeV1::Replayed(commit))
+            }
             Err(error) => {
                 let _ = transaction.rollback();
-                return Err(error);
+                Err(error)
             }
         }
-
-        let tail = match load_journal_tail(&transaction, scope) {
-            Some(tail) => tail,
-            None => {
-                let _ = transaction.rollback();
-                return Err(PortError::Unavailable);
-            }
-        };
-        // The journal is the compare-and-swap authority: the draft's expected
-        // version must be exactly the tail it claims to extend. A first event
-        // expects no prior graph; every later one expects the stored tail.
-        let expected_matches = match (&tail, draft.expected_graph_version) {
-            (None, None) => true,
-            (Some((_, stored)), Some(expected)) => *stored == expected,
-            _ => false,
-        };
-        if !expected_matches {
-            let _ = transaction.rollback();
-            return Err(PortError::VersionConflict);
-        }
-
-        let next_sequence = tail
-            .map_or(Some(1), |(sequence, _)| sequence.get().checked_add(1))
-            .and_then(|next| WorkProductEventSequenceV1::new(next).ok());
-        let Some(sequence) = next_sequence else {
-            let _ = transaction.rollback();
-            return Err(PortError::Unavailable);
-        };
-
-        let event = match mint_event(draft, sequence) {
-            Some(event) => event,
-            None => {
-                let _ = transaction.rollback();
-                // A draft that cannot form a canonical event is the caller's
-                // contract violation, surfaced as the version-progression
-                // refusal the domain itself raised.
-                return Err(PortError::VersionConflict);
-            }
-        };
-
-        if let Err(error) = insert_event(&transaction, context, &event, sequence) {
-            let _ = transaction.rollback();
-            return Err(error);
-        }
-        if let Err(error) = enqueue_outbox(&transaction, context, sequence) {
-            let _ = transaction.rollback();
-            return Err(error);
-        }
-        transaction.commit().map_err(|_| PortError::Unavailable)?;
-        Ok(WorkProductEventAppendOutcomeV1::Appended(event))
     }
+}
+
+pub(super) fn append_in_transaction(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    context: &WorkProductPortContextV1,
+    draft: &WorkProductEventDraftV1,
+) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
+    let scope = context.authorized_scope();
+    if draft.owner_scope.brain_id != *scope.owner_brain_id()
+        || draft.owner_scope.profile_id != *scope.owner_profile_id()
+    {
+        return Err(PortError::NotFoundOrNotAuthorized);
+    }
+    if let Some(event) = replay_in_transaction(transaction, context, draft)? {
+        let published = super::load_published_versions(transaction, scope)
+            .ok_or(PortError::Unavailable)?
+            .into_iter()
+            .find(|published| published.event_sequence == event.sequence())
+            .ok_or(PortError::Unavailable)?;
+        let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
+        return WorkProductEventCommitV1::new(event, verified)
+            .map(WorkProductEventCommitOutcomeV1::Replayed)
+            .map_err(|_| PortError::Unavailable);
+    }
+    let tail = load_journal_tail(transaction, scope).ok_or(PortError::Unavailable)?;
+    let expected_matches = match (&tail, draft.expected_graph_version) {
+        (None, None) => true,
+        (Some((_, stored)), Some(expected)) => *stored == expected,
+        _ => false,
+    };
+    if !expected_matches {
+        return Err(PortError::VersionConflict);
+    }
+    let sequence = tail
+        .map_or(Some(1), |(sequence, _)| sequence.get().checked_add(1))
+        .and_then(|next| WorkProductEventSequenceV1::new(next).ok())
+        .ok_or(PortError::Unavailable)?;
+    let event = mint_event(draft, sequence).ok_or(PortError::VersionConflict)?;
+    insert_event(transaction, context, &event, sequence)?;
+    enqueue_outbox(transaction, context, sequence)?;
+    let verified = super::publication::publish_in_transaction(transaction, context, &event)
+        .map_err(|error| match error {
+            tracedecay_application::WorkGraphPublishPortErrorV1::VersionConflict => {
+                PortError::VersionConflict
+            }
+            tracedecay_application::WorkGraphPublishPortErrorV1::Unavailable => {
+                PortError::Unavailable
+            }
+        })?;
+    WorkProductEventCommitV1::new(event, verified)
+        .map(WorkProductEventCommitOutcomeV1::Appended)
+        .map_err(|_| PortError::Unavailable)
 }
 
 fn replay_in_transaction(

@@ -56,7 +56,7 @@ impl WorkGraphPublishPortV1 for WorkSqliteStorage {
     }
 }
 
-fn publish_in_transaction(
+pub(super) fn publish_in_transaction(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     context: &WorkProductPortContextV1,
     event: &WorkProductEventV1,

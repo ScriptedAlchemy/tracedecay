@@ -155,8 +155,6 @@ pub struct RegisteredWorkApplicationServicesV1 {
     topology: RegisteredWorkTopologyV1,
     attempts: tracedecay_application::WorkAttemptService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
     run_control: tracedecay_application::WorkRunControlService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
@@ -168,17 +166,6 @@ pub struct RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
     duplicate_adjudications: tracedecay_application::WorkDuplicateAdjudicationServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    retry: tracedecay_application::WorkRetryServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_application::CompositeWorkRetryEvidenceV1<
-            tracedecay_application::RuntimeWorkRetryEvidenceV1,
-            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        >,
-    >,
-    retry_test_bindings: tracedecay_application::WorkRetryTestBindingTokenServiceV1<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
 }
@@ -200,6 +187,16 @@ pub struct RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    attempts: tracedecay_application::WorkProductAttemptServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    synthesis: tracedecay_application::WorkProductSynthesisAttemptServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    retry: tracedecay_application::WorkProductRetryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_application::RuntimeWorkRetryEvidenceV1,
+    >,
 }
 
 impl RegisteredWorkProductServicesV1 {
@@ -220,6 +217,31 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.mutations
+    }
+
+    pub const fn attempts(
+        &self,
+    ) -> &tracedecay_application::WorkProductAttemptServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.attempts
+    }
+
+    pub const fn synthesis(
+        &self,
+    ) -> &tracedecay_application::WorkProductSynthesisAttemptServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.synthesis
+    }
+
+    pub const fn retry(
+        &self,
+    ) -> &tracedecay_application::WorkProductRetryServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_application::RuntimeWorkRetryEvidenceV1,
+    > {
+        &self.retry
     }
 }
 
@@ -246,8 +268,6 @@ impl RegisteredWorkApplicationServicesV1 {
     pub fn attempts(
         &self,
     ) -> &tracedecay_application::WorkAttemptService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.attempts
@@ -291,27 +311,6 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.duplicate_adjudications
-    }
-
-    pub const fn retry(
-        &self,
-    ) -> &tracedecay_application::WorkRetryServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        tracedecay_application::CompositeWorkRetryEvidenceV1<
-            tracedecay_application::RuntimeWorkRetryEvidenceV1,
-            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        >,
-    > {
-        &self.retry
-    }
-
-    pub const fn retry_test_bindings(
-        &self,
-    ) -> &tracedecay_application::WorkRetryTestBindingTokenServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.retry_test_bindings
     }
 }
 
@@ -746,11 +745,7 @@ impl RegisteredGlobalDb {
         Ok(RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_application::WorkService::new(storage.clone()),
             projections: tracedecay_application::WorkProjectionReadService::new(storage.clone()),
-            attempts: tracedecay_application::WorkAttemptService::new(
-                storage.clone(),
-                storage.clone(),
-                tracedecay_application::WorkService::new(storage.clone()),
-            ),
+            attempts: tracedecay_application::WorkAttemptService::new(storage.clone()),
             run_control: tracedecay_application::WorkRunControlService::new(storage.clone()),
             placement: tracedecay_application::WorkPlacementService::new(storage.clone()),
             artifact_hydration: tracedecay_application::WorkArtifactHydrationService::new(
@@ -758,17 +753,6 @@ impl RegisteredGlobalDb {
             ),
             duplicate_adjudications:
                 tracedecay_application::WorkDuplicateAdjudicationServiceV1::new(storage.clone()),
-            retry: tracedecay_application::WorkRetryServiceV1::new(
-                storage.clone(),
-                storage.clone(),
-                tracedecay_application::CompositeWorkRetryEvidenceV1::new(
-                    tracedecay_application::RuntimeWorkRetryEvidenceV1,
-                    storage.clone(),
-                ),
-            ),
-            retry_test_bindings: tracedecay_application::WorkRetryTestBindingTokenServiceV1::new(
-                storage.clone(),
-            ),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,
@@ -802,7 +786,15 @@ impl RegisteredGlobalDb {
             mutations: tracedecay_application::WorkProductMutationServiceV1::new(
                 storage.clone(),
                 storage.clone(),
+                storage.clone(),
+            ),
+            attempts: tracedecay_application::WorkProductAttemptServiceV1::new(storage.clone()),
+            synthesis: tracedecay_application::WorkProductSynthesisAttemptServiceV1::new(
+                storage.clone(),
+            ),
+            retry: tracedecay_application::WorkProductRetryServiceV1::new(
                 storage,
+                tracedecay_application::RuntimeWorkRetryEvidenceV1,
             ),
         })
     }
