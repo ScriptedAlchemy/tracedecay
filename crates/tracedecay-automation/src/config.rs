@@ -149,6 +149,7 @@ pub fn default_user_automation_config() -> AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        combine_due_tasks: false,
         model_id: Some("gpt-5.6-mini".to_owned()),
         tasks: AutomationTaskSet {
             memory_curator: task(3_600),
