@@ -39,6 +39,9 @@ use tracedecay_domain::{
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
 };
 use tracedecay_store::NativeIntegrationStore;
+use tracedecay_usecases::observability::{
+    BoundedObservabilityProducerV1, record_native_integration_transition,
+};
 use tracedecay_usecases::stack_coordinator::StackCoordinatorErrorV1;
 
 use crate::application_surface::NativeIntegrationSurfaceRequest;
@@ -59,6 +62,7 @@ pub(super) async fn execute_native_integration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     owner: Option<DaemonNativeIntegrationOwner>,
+    observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
     request: NativeIntegrationSurfaceRequest,
     observed_at: UtcMicros,
@@ -86,12 +90,15 @@ pub(super) async fn execute_native_integration(
         Err(problem) => return application_problem(wire_request_id, problem),
     };
 
-    let result = match owner {
+    let owner_mounted = owner.is_some();
+    let execution = match owner {
         // No native-integration runtime authority is mounted for this
         // project. The result is read-only and truthful; it advances nothing
         // and authorizes nothing.
-        None => NativeIntegrationSurfaceResultV1::unavailable(
-            NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted,
+        None => NativeIntegrationExecutionV1::without_preview(
+            NativeIntegrationSurfaceResultV1::unavailable(
+                NativeIntegrationSurfaceUnavailableV1::AuthorityUnmounted,
+            ),
         ),
         Some(owner) => {
             let signal = match live_cancellation_signal(&cancellation, observed_at) {
@@ -108,13 +115,21 @@ pub(super) async fn execute_native_integration(
             )
             .await;
             match executed {
-                Ok(result) => result,
+                Ok(execution) => execution,
                 Err(problem) => return application_problem(wire_request_id, problem),
             }
         }
     };
+    let _ = record_native_integration_transition(
+        registered.scope.project_id.as_str(),
+        observability_producer.as_deref(),
+        surface_operation.as_str(),
+        owner_mounted,
+        &execution.result,
+        execution.owner_preview.as_ref(),
+    );
 
-    let Ok(payload) = serde_json::to_value(&result) else {
+    let Ok(payload) = serde_json::to_value(&execution.result) else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
             DaemonInvocationProblem::Unavailable,
@@ -133,6 +148,30 @@ pub(super) async fn execute_native_integration(
     }
 }
 
+struct NativeIntegrationExecutionV1 {
+    result: NativeIntegrationSurfaceResultV1,
+    owner_preview: Option<tracedecay_domain::NativeIntegrationPreviewV1>,
+}
+
+impl NativeIntegrationExecutionV1 {
+    const fn without_preview(result: NativeIntegrationSurfaceResultV1) -> Self {
+        Self {
+            result,
+            owner_preview: None,
+        }
+    }
+
+    const fn with_preview(
+        result: NativeIntegrationSurfaceResultV1,
+        owner_preview: tracedecay_domain::NativeIntegrationPreviewV1,
+    ) -> Self {
+        Self {
+            result,
+            owner_preview: Some(owner_preview),
+        }
+    }
+}
+
 /// Runs one operation against the mounted per-project owner.
 ///
 /// The kernel and its store bridge are synchronous (native Git plus a bounded
@@ -146,7 +185,7 @@ async fn execute_with_owner(
     request: NativeIntegrationSurfaceRequest,
     observed_at: UtcMicros,
     signal: CancellationSignal,
-) -> Result<NativeIntegrationSurfaceResultV1, ApplicationProblem> {
+) -> Result<NativeIntegrationExecutionV1, ApplicationProblem> {
     let invalid = invalid_native_integration_request;
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
@@ -158,8 +197,10 @@ async fn execute_with_owner(
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(outcome) => NativeIntegrationSurfaceResultV1::from_stack_resolution(&outcome)
+                    .map(NativeIntegrationExecutionV1::without_preview)
                     .map_err(|_| invalid()),
-                Err(error) => surface_result_from_contract_error(error),
+                Err(error) => surface_result_from_contract_error(error)
+                    .map(NativeIntegrationExecutionV1::without_preview),
             }
         }
         NativeIntegrationSurfaceRequest::Preflight(preflight) => {
@@ -207,9 +248,22 @@ async fn execute_with_owner(
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(outcome) => NativeIntegrationSurfaceResultV1::from_preflight(&outcome)
-                    .map_err(|_| invalid()),
-                Err(error) => surface_result_from_contract_error(error),
+                Ok(outcome) => {
+                    let owner_preview = match &outcome {
+                        NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
+                            Some(preview.clone())
+                        }
+                        _ => None,
+                    };
+                    NativeIntegrationSurfaceResultV1::from_preflight(&outcome)
+                        .map(|result| NativeIntegrationExecutionV1 {
+                            result,
+                            owner_preview,
+                        })
+                        .map_err(|_| invalid())
+                }
+                Err(error) => surface_result_from_contract_error(error)
+                    .map(NativeIntegrationExecutionV1::without_preview),
             }
         }
         NativeIntegrationSurfaceRequest::Approve(approve) => {
@@ -297,6 +351,7 @@ async fn execute_with_owner(
             })
             .await
             .map_err(|_| unavailable_native_integration())?
+            .map(NativeIntegrationExecutionV1::without_preview)
         }
         NativeIntegrationSurfaceRequest::Apply(apply) => {
             let stack_runtime = owner
@@ -313,8 +368,10 @@ async fn execute_with_owner(
                 let preview = match store.read_preview(&apply.preview_id) {
                     Ok(Some(preview)) if preview.preview_digest == apply.preview_digest => preview,
                     Ok(_) => {
-                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                            NativeIntegrationSurfaceUnavailableV1::Denied,
+                        return Ok(NativeIntegrationExecutionV1::without_preview(
+                            NativeIntegrationSurfaceResultV1::unavailable(
+                                NativeIntegrationSurfaceUnavailableV1::Denied,
+                            ),
                         ));
                     }
                     Err(_) => return Err(unavailable_native_integration()),
@@ -324,8 +381,10 @@ async fn execute_with_owner(
                         approval
                     }
                     Ok(_) => {
-                        return Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                            NativeIntegrationSurfaceUnavailableV1::Denied,
+                        return Ok(NativeIntegrationExecutionV1::without_preview(
+                            NativeIntegrationSurfaceResultV1::unavailable(
+                                NativeIntegrationSurfaceUnavailableV1::Denied,
+                            ),
                         ));
                     }
                     Err(_) => return Err(unavailable_native_integration()),
@@ -356,9 +415,13 @@ async fn execute_with_owner(
                         }
                         NativeIntegrationReceiptProjectionV1::project(&receipt)
                             .map(NativeIntegrationSurfaceResultV1::Receipt)
+                            .map(|result| {
+                                NativeIntegrationExecutionV1::with_preview(result, signal_preview)
+                            })
                             .map_err(|_| invalid_native_integration_request())
                     }
-                    Err(error) => surface_result_from_contract_error(error),
+                    Err(error) => surface_result_from_contract_error(error)
+                        .map(NativeIntegrationExecutionV1::without_preview),
                 }
             })
             .await
@@ -373,13 +436,18 @@ async fn execute_with_owner(
                     .await
                     .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(Some(status)) => Ok(NativeIntegrationSurfaceResultV1::Status(
-                    NativeIntegrationStatusProjectionV1::from(&status),
+                Ok(Some(status)) => Ok(NativeIntegrationExecutionV1::without_preview(
+                    NativeIntegrationSurfaceResultV1::Status(
+                        NativeIntegrationStatusProjectionV1::from(&status),
+                    ),
                 )),
-                Ok(None) => Ok(NativeIntegrationSurfaceResultV1::unavailable(
-                    NativeIntegrationSurfaceUnavailableV1::UnknownTransaction,
+                Ok(None) => Ok(NativeIntegrationExecutionV1::without_preview(
+                    NativeIntegrationSurfaceResultV1::unavailable(
+                        NativeIntegrationSurfaceUnavailableV1::UnknownTransaction,
+                    ),
                 )),
-                Err(error) => surface_result_from_contract_error(error),
+                Err(error) => surface_result_from_contract_error(error)
+                    .map(NativeIntegrationExecutionV1::without_preview),
             }
         }
         NativeIntegrationSurfaceRequest::Cancel(cancel) => {
@@ -392,8 +460,11 @@ async fn execute_with_owner(
                     .await
                     .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(disposition) => Ok(NativeIntegrationSurfaceResultV1::from_cancel(disposition)),
-                Err(error) => surface_result_from_contract_error(error),
+                Ok(disposition) => Ok(NativeIntegrationExecutionV1::without_preview(
+                    NativeIntegrationSurfaceResultV1::from_cancel(disposition),
+                )),
+                Err(error) => surface_result_from_contract_error(error)
+                    .map(NativeIntegrationExecutionV1::without_preview),
             }
         }
     }

@@ -215,10 +215,12 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
+                let observability_producer = self.observability_producer(project_root).await;
                 Box::pin(execute_native_integration(
                     request_id,
                     configuration_runtime.clone(),
                     native_integration_service,
+                    observability_producer,
                     surface_operation,
                     request,
                     observed_at,
