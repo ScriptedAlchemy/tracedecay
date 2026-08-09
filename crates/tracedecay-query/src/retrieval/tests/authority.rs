@@ -3,8 +3,9 @@ use std::sync::Arc;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision,
     EphemeralSanitizedQueryViewV1, GitOidV1, PrincipalId, PublicRetrieverStatus, QueryMac,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
+    QueryNormalizationRevision, RefId, RepositoryId, RetrievalCursorKeyId, RetrievalFailure,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
+    TemporalModeV1,
 };
 
 use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
@@ -235,6 +236,110 @@ fn federated_authority_rejects_missing_or_duplicate_lanes() {
     assert_eq!(
         authority.compose_federated(&request, &query, duplicate, 8, None),
         Err(QueryAuthorityErrorV1::LaneSetMismatch)
+    );
+}
+
+#[test]
+fn federated_authority_rejects_missing_task_session_calibration_or_weight() {
+    for missing_weight in [false, true] {
+        let mut profile = profile();
+        profile.calibrations = RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| {
+                (
+                    lane,
+                    id::<CalibrationProfileId>(&format!("calibration.{}.v1", lane.as_str())),
+                )
+            })
+            .collect();
+        profile.score_domain_calibrations = RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| {
+                let score_domain = id::<ScoreDomainId>(&format!("score.{}.v1", lane.as_str()));
+                (
+                    score_domain.clone(),
+                    ScoreDomainCalibrationV1 {
+                        calibration_profile_id: id(&format!("calibration.{}.v1", lane.as_str())),
+                        score_domain,
+                        raw_min_micros: 0,
+                        raw_max_micros: 1_000_000,
+                    },
+                )
+            })
+            .collect();
+        profile.weights_micros = RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| (lane, 100_000))
+            .collect();
+        if missing_weight {
+            profile.weights_micros.remove(&RetrieverKind::TaskSession);
+        } else {
+            profile.calibrations.remove(&RetrieverKind::TaskSession);
+        }
+        let request = request();
+        let result = QueryAuthorityV1::new_federated(
+            profile,
+            no_caps(),
+            id("ranking.authority.v1"),
+            RetrievalCursorKeyringV1::new(
+                request.scope.privacy_domain,
+                id("retrieval-key.authority.v1"),
+                1,
+                vec![7_u8; 32],
+                1_000_000,
+            )
+            .expect("keyring"),
+        );
+        assert!(matches!(
+            result,
+            Err(QueryAuthorityErrorV1::InvalidAuthority(_))
+        ));
+    }
+}
+
+#[test]
+fn disabling_task_session_removes_only_its_ranked_evidence() {
+    let authority = federated_authority();
+    let request = request();
+    let query = query_view();
+    let mut enabled = empty_federated_lanes();
+    enabled
+        .iter_mut()
+        .find(|lane| lane.lane == RetrieverKind::TaskSession)
+        .expect("task/session lane")
+        .outcome = RetrieverOutcome::Complete(batch(
+        vec![candidate(
+            RetrieverKind::TaskSession,
+            "task-session",
+            900_000,
+            0,
+        )],
+        (),
+    ));
+    let enabled = authority
+        .compose_federated(&request, &query, enabled, 8, None)
+        .expect("enabled composition");
+
+    let mut disabled = empty_federated_lanes();
+    disabled
+        .iter_mut()
+        .find(|lane| lane.lane == RetrieverKind::TaskSession)
+        .expect("task/session lane")
+        .outcome = RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+        detail: "task/session lane disabled".to_owned(),
+    });
+    let disabled = authority
+        .compose_federated(&request, &query, disabled, 8, None)
+        .expect("disabled composition");
+
+    assert_eq!(enabled.page.ranked_candidates.len(), 1);
+    assert_eq!(disabled.page.ranked_candidates.len(), 0);
+    assert_eq!(
+        disabled
+            .composition
+            .public_lane_statuses
+            .get(&RetrieverKind::TaskSession),
+        Some(&PublicRetrieverStatus::Unavailable),
     );
 }
 

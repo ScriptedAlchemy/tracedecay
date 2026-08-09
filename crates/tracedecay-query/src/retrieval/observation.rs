@@ -73,6 +73,7 @@ pub const fn retriever_lane_label(lane: RetrieverKind) -> &'static str {
         RetrieverKind::Semantic => "semantic",
         RetrieverKind::Graph => "graph",
         RetrieverKind::Temporal => "temporal",
+        RetrieverKind::TaskSession => "task_session",
         RetrieverKind::Diagnostic => "diagnostic",
     }
 }
@@ -87,6 +88,7 @@ pub const fn retriever_source_kind(lane: RetrieverKind) -> &'static str {
         | RetrieverKind::Semantic
         | RetrieverKind::Graph => "code",
         RetrieverKind::Temporal => "git",
+        RetrieverKind::TaskSession => "session",
         RetrieverKind::Diagnostic => "diagnostic",
     }
 }

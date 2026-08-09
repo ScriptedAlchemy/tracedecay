@@ -440,19 +440,10 @@ fn fact_request(operation: &str, key: &str, digest_byte: char) -> RuntimeSubmitR
         None,
     )
     .unwrap();
-    let batch = FactWriteBatch::new(
-        fact_id,
-        owner,
-        None,
-        vec![event],
-        vec![],
-        vec![],
-        None,
-        None,
-    )
-    .unwrap()
-    .with_identity_material(identity)
-    .unwrap();
+    let batch = FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None)
+        .unwrap()
+        .with_identity_material(identity)
+        .unwrap();
     let transaction_scope = scope(&metadata);
     let control = request(metadata.clone()).control().clone();
     RuntimeSubmitRequestV1::new(

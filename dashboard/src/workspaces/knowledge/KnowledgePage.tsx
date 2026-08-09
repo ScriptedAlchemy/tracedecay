@@ -1,25 +1,19 @@
-import {
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type RefObject,
-} from "react";
-import type { EChartsOption } from "echarts";
+import { useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import type { EChartsOption } from 'echarts';
 import {
   DataRow,
   ExplorerSplit,
   InspectorPanel,
   KeyValueTree,
-} from "../../ui/archetypes/ExplorerSplit.tsx";
-import { ReadSection, envelopeReadState } from "../../ui/ReadSection.tsx";
-import { FigureRail, Meter, Readout } from "../../ui/instrument.tsx";
-import { SearchField } from "../../ui/search/SearchField.tsx";
-import { Chart } from "../../viz/chart/Chart.tsx";
-import { VirtualList } from "../../ui/VirtualList.tsx";
-import { formatCount, splitCount } from "../../ui/format.ts";
-import { cn } from "../../ui/cn";
-import { envelopePayload, useEnvelope } from "../../data/query/useEnvelope.ts";
+} from '../../ui/archetypes/ExplorerSplit.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
+import { FigureRail, Meter, Readout } from '../../ui/instrument.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
+import { Chart } from '../../viz/chart/Chart.tsx';
+import { VirtualList } from '../../ui/VirtualList.tsx';
+import { formatCount, splitCount } from '../../ui/format.ts';
+import { cn } from '../../ui/cn';
+import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   type MemoryCategoryCountV1,
   MemoryFactDetailPayloadV1Schema,
@@ -27,11 +21,12 @@ import {
   type MemoryHrrCoverageV1,
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
-} from "../../contracts/generated.ts";
-import { CurationConsole } from "./CurationConsole.tsx";
-import { FactTrustHistory } from "./FactTrustHistory.tsx";
-import { MemoryGeometry } from "./MemoryGeometry.tsx";
-import { MemoryOplog } from "./MemoryOplog.tsx";
+} from '../../contracts/generated.ts';
+import { KnowledgeCuration } from './KnowledgeCuration.tsx';
+import { CurationConsole } from './CurationConsole.tsx';
+import { FactTrustHistory } from './FactTrustHistory.tsx';
+import { MemoryGeometry } from './MemoryGeometry.tsx';
+import { MemoryOplog } from './MemoryOplog.tsx';
 import {
   KNOWLEDGE_PANEL_ID,
   KnowledgeViewSwitcher,
@@ -39,7 +34,7 @@ import {
   knowledgeViewNote,
   useKnowledgeView,
   type KnowledgeViewKind,
-} from "./KnowledgeViews.tsx";
+} from './KnowledgeViews.tsx';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -49,23 +44,23 @@ import {
   trustSourceNote,
   type LoadedTrust,
   type TrustDistribution,
-} from "./trust.ts";
+} from './trust.ts';
 
-const BASE = "/api/plugins/holographic";
+const BASE = '/api/plugins/holographic';
 
 /**
  * Knowledge — channel seven.
  *
  * Four camera positions over one memory store, in the order a reader descends
- * through it: the facts explorer, the phase geometry those facts sit in, the
- * daemon's automatic curation outcomes and control, and the store's own record
- * of what changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads,
+ * through it: the facts explorer, the phase geometry those facts sit in, what
+ * the curator has done and is configured to do, and the store's own record of
+ * what changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads,
  * so a position is paid for only when it is looked at.
  *
  * Everything the daemon mounts for holographic memory is now consumed here.
  * Three of those routes are contracted (`/`, `/status`, `/fact/{id}`) and read
  * through the generated schemas; the rest answer bare JSON and are read through
- * the house payload ladder with schemas written against their handlers — see
+ * the house legacy ladder with schemas written against their handlers — see
  * `data/query/memory.ts`, which explains why that split exists and what it
  * obliges.
  */
@@ -74,18 +69,16 @@ export function KnowledgePage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* `flex-wrap`, because the note under the camera is prose and the
-       * switcher is four 44px targets: held on one row they laid the note
-       * past the right edge at 320 CSS px and at 400% zoom. */}
+        * switcher is four 44px targets: held on one row they laid the note
+        * past the right edge at 320 CSS px and at 400% zoom. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge-subtle bg-surface-1 px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Knowledge</h1>
         <KnowledgeViewSwitcher active={view} onSelect={selectView} />
-        <p className="min-w-0 text-2xs text-text-muted">
-          {knowledgeViewNote(view)}
-        </p>
+        <p className="min-w-0 text-2xs text-text-muted">{knowledgeViewNote(view)}</p>
       </div>
       {/* The element `aria-controls` names, present for as long as the switcher
-       * is — a reference to an element that was never drawn is an invalid one,
-       * which is what the accessibility gate reads it as. */}
+        * is — a reference to an element that was never drawn is an invalid one,
+        * which is what the accessibility gate reads it as. */}
       <div
         id={KNOWLEDGE_PANEL_ID}
         role="tabpanel"
@@ -102,13 +95,13 @@ export function KnowledgePage() {
  * left without something to draw. */
 function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
   switch (kind) {
-    case "facts":
+    case 'facts':
       return <KnowledgeFacts />;
-    case "geometry":
+    case 'geometry':
       return <MemoryGeometry />;
-    case "curation":
+    case 'curation':
       return <CurationConsole />;
-    case "oplog":
+    case 'oplog':
       return <MemoryOplog />;
     default: {
       const unhandled: never = kind;
@@ -121,22 +114,18 @@ function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
  * entity summary, and fact drill-down. The semantic WebGL map is the phase-2
  * canvas per the visualization catalog. */
 function KnowledgeFacts() {
-  const [query, setQuery] = useState("");
-  const [applied, setApplied] = useState("");
+  const [query, setQuery] = useState('');
+  const [applied, setApplied] = useState('');
   const overview = useEnvelope(
-    ["memory", "overview", applied],
-    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ""}`,
+    ['memory', 'overview', applied],
+    `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
     MemoryOverviewPayloadV1Schema,
   );
   // The overview's own `trust_histogram` comes back all-zero against a real
   // store (see trust.ts). This route reports the same distribution in four
   // coarser bands and is correct, so it is read as the fallback source rather
   // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
-  const status = useEnvelope(
-    ["memory", "status"],
-    `${BASE}/status`,
-    MemoryStatusPayloadV1Schema,
-  );
+  const status = useEnvelope(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadV1Schema);
   const statusBands = envelopePayload(status.data)?.memory;
   const overviewData = envelopePayload(overview.data);
   // One distribution for the two plates that draw it.
@@ -154,8 +143,8 @@ function KnowledgeFacts() {
   );
   const [selected, setSelected] = useState<MemoryFactRowV1 | null>(null);
   const detail = useEnvelope(
-    ["memory", "fact", String(selected?.fact_id ?? "")],
-    `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ""))}`,
+    ['memory', 'fact', String(selected?.fact_id ?? '')],
+    `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ''))}`,
     MemoryFactDetailPayloadV1Schema,
     { enabled: selected != null },
   );
@@ -165,115 +154,110 @@ function KnowledgeFacts() {
     <ExplorerSplit
       filters={
         <>
-          <ReadSection
-            title="Memory"
-            state={envelopeReadState(overview.isPending, overview.data, {
-              loading: "loading memory overview",
-              unknown: "memory overview has not answered",
-            })}
-            chrome="centered"
-          >
-            {(envelope) => {
-              const data = envelope.payload;
-              const stats = data.holographic.overview;
-              // Ranked by count so the rail's length is a real ordering, not an
-              // accident of whatever order the producer emitted rows in.
-              const categories = [...(stats?.categories ?? [])].sort(
-                (a, b) => b.count - a.count,
-              );
-              const categoryCeiling = categories.reduce(
-                (max, row) => Math.max(max, row.count),
-                0,
-              );
-              const factCount = splitCount(stats?.facts);
-              const entityCount = splitCount(stats?.entities);
-              const growth = stats?.growth ?? [];
-              return (
-                <div className="flex flex-col gap-3">
-                  <SearchField
-                    value={query}
-                    onChange={setQuery}
-                    onSubmit={() => setApplied(query.trim())}
-                    onClear={() => {
-                      setQuery("");
-                      setApplied("");
-                    }}
-                    label="Search facts"
-                    placeholder="Search facts"
-                    hint="press / to focus, Esc to clear"
-                    submitted={applied}
-                  />
-                  {/* The rail used to be a 2×1 grid of equal tiles whose 26px
-                   * numerals overflowed their own cells — 41,204 facts rendered
-                   * as the string "41…". Facts is the quantity this workspace
-                   * exists to report, so it takes the display tier and the whole
-                   * rail width in the compact magnitude language; the supporting
-                   * counts sit under it on one shared bezel. */}
-                  <div className="flex flex-col">
-                    <div className="td-raised border border-edge-subtle px-3 py-3">
+        <ReadSection
+          title="Memory"
+          state={envelopeReadState(overview.isPending, overview.data, {
+            loading: 'loading memory overview',
+            unknown: 'memory overview has not answered',
+          })}
+          chrome="centered"
+        >
+          {(envelope) => {
+            const data = envelope.payload;
+            const stats = data.holographic.overview;
+            // Ranked by count so the rail's length is a real ordering, not an
+            // accident of whatever order the producer emitted rows in.
+            const categories = [...(stats?.categories ?? [])].sort(
+              (a, b) => b.count - a.count,
+            );
+            const categoryCeiling = categories.reduce(
+              (max, row) => Math.max(max, row.count),
+              0,
+            );
+            const factCount = splitCount(stats?.facts);
+            const entityCount = splitCount(stats?.entities);
+            const growth = stats?.growth ?? [];
+            return (
+              <div className="flex flex-col gap-3">
+                <SearchField
+                  value={query}
+                  onChange={setQuery}
+                  onSubmit={() => setApplied(query.trim())}
+                  onClear={() => {
+                    setQuery('');
+                    setApplied('');
+                  }}
+                  label="Search facts"
+                  placeholder="Search facts"
+                  hint="press / to focus, Esc to clear"
+                  submitted={applied}
+                />
+                {/* The rail used to be a 2×1 grid of equal tiles whose 26px
+                 * numerals overflowed their own cells — 41,204 facts rendered
+                 * as the string "41…". Facts is the quantity this workspace
+                 * exists to report, so it takes the display tier and the whole
+                 * rail width in the compact magnitude language; the supporting
+                 * counts sit under it on one shared bezel. */}
+                <div className="flex flex-col">
+                  <div className="td-raised border border-edge-subtle px-3 py-3">
+                    <Readout
+                      label="facts"
+                      size="xl"
+                      value={factCount.value}
+                      unit={factCount.unit}
+                      note={
+                        stats?.facts != null
+                          ? `${stats.facts.toLocaleString()} recorded`
+                          : undefined
+                      }
+                    />
+                  </div>
+                  <div className="flex border-x border-b border-edge-subtle bg-surface-1">
+                    <div className="min-w-0 flex-1 px-3 py-2">
                       <Readout
-                        label="facts"
-                        size="xl"
-                        value={factCount.value}
-                        unit={factCount.unit}
-                        note={
-                          stats?.facts != null
-                            ? `${stats.facts.toLocaleString()} recorded`
-                            : undefined
-                        }
+                        label="entities"
+                        size="sm"
+                        value={entityCount.value}
+                        unit={entityCount.unit}
                       />
                     </div>
-                    <div className="flex border-x border-b border-edge-subtle bg-surface-1">
-                      <div className="min-w-0 flex-1 px-3 py-2">
-                        <Readout
-                          label="entities"
-                          size="sm"
-                          value={entityCount.value}
-                          unit={entityCount.unit}
-                        />
+                    {stats?.banks != null ? (
+                      <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
+                        <Readout label="banks" size="sm" value={stats.banks} />
                       </div>
-                      {stats?.banks != null ? (
-                        <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
-                          <Readout
-                            label="banks"
-                            size="sm"
-                            value={stats.banks}
-                          />
-                        </div>
-                      ) : null}
-                    </div>
+                    ) : null}
                   </div>
-                  <TrustDistributionPlate distribution={trust} />
-                  {categories.length > 0 ? (
-                    <figure className="flex flex-col gap-2">
-                      <figcaption className="td-legend">
-                        facts by category
-                      </figcaption>
-                      <div className="flex flex-col gap-2">
-                        {categories.map((row) => (
-                          <CategoryBar
-                            key={row.category}
-                            row={row}
-                            ceiling={categoryCeiling}
-                          />
-                        ))}
-                      </div>
-                    </figure>
-                  ) : null}
-                  <HrrCoveragePlate rows={stats?.hrr_coverage ?? []} />
-                  {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
                 </div>
-              );
-            }}
-          </ReadSection>
+                <TrustDistributionPlate distribution={trust} />
+                {categories.length > 0 ? (
+                  <figure className="flex flex-col gap-2">
+                    <figcaption className="td-legend">facts by category</figcaption>
+                    <div className="flex flex-col gap-2">
+                      {categories.map((row) => (
+                        <CategoryBar
+                          key={row.category}
+                          row={row}
+                          ceiling={categoryCeiling}
+                        />
+                      ))}
+                    </div>
+                  </figure>
+                ) : null}
+                <HrrCoveragePlate rows={stats?.hrr_coverage ?? []} />
+                {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
+              </div>
+            );
+          }}
+        </ReadSection>
+        <KnowledgeCuration />
         </>
       }
       list={
         <ReadSection
           title="Facts"
           state={envelopeReadState(overview.isPending, overview.data, {
-            loading: "loading facts",
-            unknown: "memory facts have not answered",
+            loading: 'loading facts',
+            unknown: 'memory facts have not answered',
           })}
           chrome="centered"
         >
@@ -288,14 +272,11 @@ function KnowledgeFacts() {
                 </p>
               );
             }
-            if (factsRead?.state === "error") {
+            if (factsRead?.state === 'error') {
               return (
-                <p
-                  role="status"
-                  className="p-6 text-center text-sm text-state-error"
-                >
+                <p role="status" className="p-6 text-center text-sm text-state-error">
                   Fact list read failed
-                  {factsRead.error ? `: ${factsRead.error}` : "."}
+                  {factsRead.error ? `: ${factsRead.error}` : '.'}
                 </p>
               );
             }
@@ -307,10 +288,7 @@ function KnowledgeFacts() {
                   : null;
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
-                  {boundedQuery ??
-                    (applied
-                      ? `no loaded facts match “${applied}”`
-                      : "no facts recorded")}
+                  {boundedQuery ?? (applied ? `no loaded facts match “${applied}”` : 'no facts recorded')}
                 </p>
               );
             }
@@ -342,13 +320,10 @@ function KnowledgeFacts() {
           <InspectorPanel title="Fact" onClose={() => setSelected(null)}>
             <div className="flex flex-col gap-3">
               {detail.isPending ? (
-                <p className="text-2xs text-text-muted">
-                  Loading canonical fact detail…
-                </p>
-              ) : detail.data?.outcome !== "envelope" ? (
+                <p className="text-2xs text-text-muted">Loading canonical fact detail…</p>
+              ) : detail.data?.outcome !== 'envelope' ? (
                 <p className="text-2xs text-state-partial">
-                  Canonical detail is unavailable; this is the bounded overview
-                  row.
+                  Canonical detail is unavailable; this is the bounded overview row.
                 </p>
               ) : null}
               <TrustGauge score={selectedDetail.trust_score} />
@@ -363,15 +338,13 @@ function KnowledgeFacts() {
               />
               <KeyValueTree
                 value={Object.fromEntries(
-                  Object.entries(selectedDetail).filter(
-                    ([k]) => k !== "content",
-                  ),
+                  Object.entries(selectedDetail).filter(([k]) => k !== 'content'),
                 )}
               />
               {/* The gauge and the split above are terminal figures: where the
-               * score landed, not how. The audit says how, and it is the one
-               * reading on this inspector that can report its own
-               * incompleteness. */}
+                * score landed, not how. The audit says how, and it is the one
+                * reading on this inspector that can report its own
+                * incompleteness. */}
               <FactTrustHistory factId={selectedDetail.fact_id ?? null} />
             </div>
           </InspectorPanel>
@@ -389,16 +362,16 @@ function GrowthChart({
   const option = useMemo<EChartsOption>(
     () => ({
       xAxis: {
-        type: "category",
+        type: 'category',
         data: growth.map((point) => point.date),
         axisLabel: { show: false },
         axisTick: { show: false },
       },
-      yAxis: { type: "value", axisLabel: { show: false } },
+      yAxis: { type: 'value', axisLabel: { show: false } },
       grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
       series: [
         {
-          type: "line",
+          type: 'line',
           showSymbol: false,
           smooth: true,
           areaStyle: {},
@@ -462,18 +435,14 @@ function GrowthChart({
  * one full bar beside nine empty ones is the same non-information in a more
  * confident costume.
  */
-function TrustDistributionPlate({
-  distribution,
-}: {
-  distribution: TrustDistribution;
-}) {
-  if (distribution.source === "none") {
+function TrustDistributionPlate({ distribution }: { distribution: TrustDistribution }) {
+  if (distribution.source === 'none') {
     return (
       <figure className="flex flex-col gap-1">
         <figcaption className="td-legend">trust distribution</figcaption>
         <p className="text-2xs leading-relaxed text-text-muted">
-          The store reported no trust distribution — not a distribution of zero,
-          but no reading at all.
+          The store reported no trust distribution — not a distribution of zero, but
+          no reading at all.
         </p>
       </figure>
     );
@@ -485,20 +454,15 @@ function TrustDistributionPlate({
       <figure className="flex flex-col gap-1">
         <figcaption className="td-legend">trust distribution</figcaption>
         <p className="text-2xs leading-relaxed text-text-secondary">
-          All {distribution.total.toLocaleString()} facts sit in one band,{" "}
-          <span className="td-value text-text-primary">{only.label}</span>.
-          There is no spread to draw.
+          All {distribution.total.toLocaleString()} facts sit in one band,{' '}
+          <span className="td-value text-text-primary">{only.label}</span>. There is no
+          spread to draw.
         </p>
-        <p className="text-3xs text-text-muted">
-          {trustSourceNote(distribution.source)}
-        </p>
+        <p className="text-3xs text-text-muted">{trustSourceNote(distribution.source)}</p>
       </figure>
     );
   }
-  const ceiling = distribution.bands.reduce(
-    (max, band) => Math.max(max, band.count),
-    0,
-  );
+  const ceiling = distribution.bands.reduce((max, band) => Math.max(max, band.count), 0);
   return (
     <figure className="flex flex-col gap-1.5">
       <figcaption className="td-legend">trust distribution</figcaption>
@@ -514,12 +478,12 @@ function TrustDistributionPlate({
             <Meter
               fraction={ceiling > 0 ? band.count / ceiling : null}
               className="min-w-0 flex-1"
-              tone={band.count === 0 ? "bg-transparent" : undefined}
+              tone={band.count === 0 ? 'bg-transparent' : undefined}
             />
             <span
               className={cn(
-                "td-value w-8 shrink-0 text-right text-3xs",
-                band.count === 0 ? "text-text-muted" : "text-text-secondary",
+                'td-value w-8 shrink-0 text-right text-3xs',
+                band.count === 0 ? 'text-text-muted' : 'text-text-secondary',
               )}
               data-cell="numeric"
             >
@@ -529,12 +493,12 @@ function TrustDistributionPlate({
         ))}
       </div>
       {/* Bands with no facts keep their row and print their zero: an absent
-       * band drawn as a missing row would read as a narrower scale than the
-       * one actually measured. */}
+        * band drawn as a missing row would read as a narrower scale than the
+        * one actually measured. */}
       <figcaption className="text-3xs leading-relaxed text-text-muted">
-        {distribution.total.toLocaleString()} facts across{" "}
-        {distribution.bands.length} bands, {distribution.occupied} of them
-        occupied · {trustSourceNote(distribution.source)}
+        {distribution.total.toLocaleString()} facts across{' '}
+        {distribution.bands.length} bands, {distribution.occupied} of them occupied ·{' '}
+        {trustSourceNote(distribution.source)}
       </figcaption>
     </figure>
   );
@@ -554,16 +518,14 @@ function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverageV1[] }) {
   return (
     <figure className="flex flex-col gap-1.5">
       <figcaption className="td-legend">HRR vector coverage</figcaption>
-      <p className="text-2xs leading-relaxed text-text-secondary">
-        {summary.line}
-      </p>
+      <p className="text-2xs leading-relaxed text-text-secondary">{summary.line}</p>
       {summary.exceptions.length > 0 ? (
         <ul className="flex flex-col">
           {/* Two lines, not one. The longest status in the taxonomy is
-           * "missing vectors"; beside a coverage figure in a 224px filter
-           * rail it leaves under seventy pixels for the category name, which
-           * clipped "decision" to "dec…" — the one word on the row a reader
-           * actually needs. */}
+            * "missing vectors"; beside a coverage figure in a 224px filter
+            * rail it leaves under seventy pixels for the category name, which
+            * clipped "decision" to "dec…" — the one word on the row a reader
+            * actually needs. */}
           {summary.exceptions.map((row) => (
             <li
               key={row.category}
@@ -574,22 +536,21 @@ function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverageV1[] }) {
                   {row.category}
                 </span>
                 {/* missing_bank has no bank to measure against, so a percentage
-                 * would be a fabricated denominator; the status stands alone. */}
-                {row.status !== "missing_bank" ? (
+                  * would be a fabricated denominator; the status stands alone. */}
+                {row.status !== 'missing_bank' ? (
                   <span
                     className="td-value shrink-0 text-3xs text-text-muted"
                     data-cell="numeric"
                   >
-                    {Math.round(Math.max(0, Math.min(row.coverage, 1)) * 100)}%
-                    vectorized
+                    {Math.round(Math.max(0, Math.min(row.coverage, 1)) * 100)}% vectorized
                   </span>
                 ) : null}
               </span>
               {/* `--raw-state-stale` measures 4.39:1 against the light
-               * substrate at this 10px legend tier — under AA. The status is
-               * already the only thing on the row that is not a number, and
-               * only non-ready banks get a row at all, so the word carries the
-               * signal without a hue that cannot be read. */}
+                * substrate at this 10px legend tier — under AA. The status is
+                * already the only thing on the row that is not a number, and
+                * only non-ready banks get a row at all, so the word carries the
+                * signal without a hue that cannot be read. */}
               <span className="td-legend truncate text-text-primary">
                 {hrrStatusLabel(row.status)}
               </span>
@@ -626,7 +587,7 @@ function FactListHeader({
     <div className="flex flex-col gap-0.5 border-b border-edge-subtle px-3 py-2">
       <p className="td-legend">
         {loaded.count.toLocaleString()} facts loaded
-        {query ? ` · matching “${query}”` : ""}
+        {query ? ` · matching “${query}”` : ''}
       </p>
       <p className="text-2xs leading-relaxed text-text-muted">
         {sameEverywhere
@@ -634,7 +595,7 @@ function FactListHeader({
           : `Trust ${loaded.min.toFixed(2)}–${loaded.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${loaded.max.toFixed(2)}.`}
         {unreached != null && unreached > 0
           ? ` The store holds ${unreached.toLocaleString()} further facts below ${loaded.min.toFixed(2)} that this slice does not reach.`
-          : ""}
+          : ''}
       </p>
     </div>
   );
@@ -645,7 +606,7 @@ function FactListHeader({
  * ninety-character prefix of a nineteen-hundred-character fact. */
 export const FACT_ROW_HEIGHT = 56;
 
-const FACT_SUMMARY_CHARACTER_SAMPLE = "abcdefghijklmnopqrstuvwxyz";
+const FACT_SUMMARY_CHARACTER_SAMPLE = 'abcdefghijklmnopqrstuvwxyz';
 
 function FactList({
   facts,
@@ -679,10 +640,7 @@ function FactList({
         className="pointer-events-none invisible absolute inset-x-0 flex gap-3 px-3 pt-2"
       >
         <span className="w-14 shrink-0" />
-        <span
-          ref={summaryProbeRef}
-          className="min-w-0 flex-1 text-xs leading-snug"
-        >
+        <span ref={summaryProbeRef} className="min-w-0 flex-1 text-xs leading-snug">
           <span ref={characterProbeRef} className="whitespace-nowrap">
             {FACT_SUMMARY_CHARACTER_SAMPLE}
           </span>
@@ -696,11 +654,7 @@ function FactList({
         estimateHeight={FACT_ROW_HEIGHT}
         header={
           loaded ? (
-            <FactListHeader
-              loaded={loaded}
-              distribution={distribution}
-              query={query}
-            />
+            <FactListHeader loaded={loaded} distribution={distribution} query={query} />
           ) : null
         }
         renderItem={(fact) => (
@@ -757,7 +711,7 @@ function FactListRow({
   onSelect: () => void;
 }) {
   const content = fact.content ?? String(fact.fact_id);
-  const summary = useMemo(() => content.split("\n")[0] ?? "", [content]);
+  const summary = useMemo(() => content.split('\n')[0] ?? '', [content]);
   const clipped = characterLimit !== null && content.length > characterLimit;
   const trust = Math.max(0, Math.min(fact.trust_score, 1));
   const recalls = fact.retrieval_count ?? 0;
@@ -771,12 +725,12 @@ function FactListRow({
       <span className="flex w-14 shrink-0 flex-col gap-1">
         <span
           className={cn(
-            "td-value text-2xs leading-none",
+            'td-value text-2xs leading-none',
             trust >= 0.7
-              ? "text-text-primary"
+              ? 'text-text-primary'
               : trust >= 0.4
-                ? "text-text-secondary"
-                : "text-text-muted",
+                ? 'text-text-secondary'
+                : 'text-text-muted',
           )}
           data-cell="numeric"
         >
@@ -787,20 +741,13 @@ function FactListRow({
             fraction={trust}
             height="row"
             tone={
-              trust >= 0.7
-                ? "bg-accent"
-                : trust >= 0.4
-                  ? "bg-accent/60"
-                  : "bg-accent/30"
+              trust >= 0.7 ? 'bg-accent' : trust >= 0.4 ? 'bg-accent/60' : 'bg-accent/30'
             }
           />
         ) : null}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span
-          className="line-clamp-2 leading-snug text-text-primary"
-          title={content}
-        >
+        <span className="line-clamp-2 leading-snug text-text-primary" title={content}>
           {summary}
         </span>
         {clipped ? (
@@ -843,17 +790,14 @@ function useFactSummaryCharacterLimit(
     if (!scrollContainer || !summaryProbe || !characterProbe) return;
     const measure = () => {
       const characterWidth =
-        characterProbe.getBoundingClientRect().width /
-        FACT_SUMMARY_CHARACTER_SAMPLE.length;
+        characterProbe.getBoundingClientRect().width / FACT_SUMMARY_CHARACTER_SAMPLE.length;
       const charactersPerLine =
-        characterWidth > 0
-          ? Math.floor(summaryProbe.clientWidth / characterWidth)
-          : 0;
+        characterWidth > 0 ? Math.floor(summaryProbe.clientWidth / characterWidth) : 0;
       const next = charactersPerLine > 0 ? charactersPerLine * 2 : null;
       setCharacterLimit((previous) => (previous === next ? previous : next));
     };
     measure();
-    if (typeof ResizeObserver !== "function") return;
+    if (typeof ResizeObserver !== 'function') return;
     const observer = new ResizeObserver(measure);
     observer.observe(scrollContainer);
     return () => observer.disconnect();
@@ -869,10 +813,10 @@ function useFactSummaryCharacterLimit(
 function formatShortDate(iso: string): string {
   const date = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
   });
 }
 
@@ -881,13 +825,7 @@ function formatShortDate(iso: string): string {
  * category on screen for ranking. No fabricated denominator — the rail
  * measures against the largest category actually present, not an assumed
  * total. */
-function CategoryBar({
-  row,
-  ceiling,
-}: {
-  row: MemoryCategoryCountV1;
-  ceiling: number;
-}) {
+function CategoryBar({ row, ceiling }: { row: MemoryCategoryCountV1; ceiling: number }) {
   const fraction = ceiling > 0 ? row.count / ceiling : null;
   return (
     <div className="flex flex-col gap-1">
@@ -895,10 +833,7 @@ function CategoryBar({
         <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">
           {row.category}
         </span>
-        <span
-          className="td-value text-2xs text-text-primary"
-          data-cell="numeric"
-        >
+        <span className="td-value text-2xs text-text-primary" data-cell="numeric">
           {formatCount(row.count)}
         </span>
       </div>
@@ -914,14 +849,7 @@ function CategoryBar({
  * given the same length every other readout in the product uses. */
 function TrustGauge({ score }: { score: number }) {
   const clamped = Math.max(0, Math.min(score, 1));
-  return (
-    <Readout
-      label="trust"
-      size="lg"
-      value={clamped.toFixed(2)}
-      fraction={clamped}
-    />
-  );
+  return <Readout label="trust" size="lg" value={clamped.toFixed(2)} fraction={clamped} />;
 }
 
 /** Helpful vs unhelpful feedback as one proportional split bar. */
@@ -933,9 +861,7 @@ export function FeedbackSplit({
   unhelpful: number | null;
 }) {
   if (helpful === null || unhelpful === null) {
-    return (
-      <p className="text-2xs text-text-muted">feedback counts not reported</p>
-    );
+    return <p className="text-2xs text-text-muted">feedback counts not reported</p>;
   }
   const total = helpful + unhelpful;
   if (total === 0) {
@@ -944,14 +870,8 @@ export function FeedbackSplit({
   return (
     <figure className="flex flex-col gap-1">
       <div className="flex h-1.5 overflow-hidden rounded-full bg-surface-3">
-        <div
-          className="bg-accent"
-          style={{ width: `${(helpful / total) * 100}%` }}
-        />
-        <div
-          className="bg-state-stale"
-          style={{ width: `${(unhelpful / total) * 100}%` }}
-        />
+        <div className="bg-accent" style={{ width: `${(helpful / total) * 100}%` }} />
+        <div className="bg-state-stale" style={{ width: `${(unhelpful / total) * 100}%` }} />
       </div>
       <figcaption className="tabular text-2xs text-text-muted">
         {helpful} helpful · {unhelpful} unhelpful

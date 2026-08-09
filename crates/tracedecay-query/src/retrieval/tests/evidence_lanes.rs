@@ -3,20 +3,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use tracedecay_application::CancellationSignal;
+use tracedecay_application::{CancellationSignal, VerifiedWorkGraphVersionV1};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ContentDigest, CursorPayloadDigest,
+    AttemptId, CodeGenerationId, ComponentVersion, ContentDigest, CursorPayloadDigest,
     DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
     DiagnosticRecordStateV1, DiagnosticSeverityV1, FreshnessCompatibilityV1,
-    GenerationDiagnosticV1, ManifestDigest, ProviderId, RetrievalFailure, RetrieverBatch,
-    RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome, SourceSpan,
-    UtcMicros,
+    GenerationDiagnosticV1, ManifestDigest, ObservationSourceIdentityV1, ProviderId,
+    RetrievalFailure, RetrievalGrainV1, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, RunId, SessionId, SourceSpan, SourceStoreId, TaskId,
+    TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1,
+    WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
+use tracedecay_temporal_query::ports::{
+    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSnapshotRequest,
+    TemporalSourceAccess, TemporalWatermarks,
+};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
 use crate::retrieval::evidence_lanes::score_diagnostic;
 use crate::retrieval::evidence_lanes::{
     DiagnosticCandidateReadPortV1, DiagnosticLaneEvidenceV1, DiagnosticLaneRequestV1,
     DiagnosticLaneRetrieverV1, DiagnosticMatchReasonV1, EvidenceLaneExecutionControlV1,
+    TaskSessionBindingErrorV1, TaskSessionBindingV1, TaskSessionPlan23BindingV1,
     TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalCandidateExportPortV1,
     TemporalLaneEvidenceV1, TemporalLaneRequestV1, TemporalLaneRetrieverV1,
 };
@@ -187,10 +196,154 @@ fn deadline_and_cancellation_stop_mounted_evidence_lanes_before_source_reads() {
 #[test]
 fn canonical_evidence_lanes_are_independent_from_the_query_fallback_set() {
     assert_eq!(RetrieverKind::Temporal.as_str(), "temporal");
+    assert_eq!(RetrieverKind::TaskSession.as_str(), "task_session");
     assert_eq!(RetrieverKind::Diagnostic.as_str(), "diagnostic");
-    for lane in [RetrieverKind::Temporal, RetrieverKind::Diagnostic] {
+    for lane in [
+        RetrieverKind::Temporal,
+        RetrieverKind::TaskSession,
+        RetrieverKind::Diagnostic,
+    ] {
         assert!(!lane.is_query_fallback_lane());
     }
+}
+
+#[test]
+fn task_session_binding_seals_exact_task_graph_attempt_and_provider_source() {
+    let task = id::<TaskId>("task.fixture");
+    let accepted = WorkAttemptIdentityV1::new(
+        task.clone(),
+        id::<RunId>("run.fixture"),
+        id::<AttemptId>("attempt.fixture"),
+    )
+    .expect("attempt identity");
+    let verified = VerifiedWorkGraphVersionV1::new(
+        WorkGraphVersionV1::new(7).expect("graph version"),
+        WorkProductEventSequenceV1::new(11).expect("event sequence"),
+        WorkProductSourceWatermarkV1::new(BTreeMap::<SourceStoreId, u64>::new())
+            .expect("source watermark"),
+        id("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+    )
+    .expect("verified graph");
+    let source = ObservationSourceIdentityV1::for_provider(id("claude"), id("session.fixture"))
+        .expect("sealed source");
+
+    let binding = TaskSessionBindingV1::new(
+        task.clone(),
+        verified.clone(),
+        &BTreeSet::from([accepted.clone()]),
+        accepted.clone(),
+        source.clone(),
+    )
+    .expect("accepted binding");
+    assert_eq!(binding.task_id(), &task);
+    assert_eq!(binding.verified_version(), &verified);
+    assert_eq!(binding.accepted_attempt(), &accepted);
+    assert_eq!(binding.source(), &source);
+
+    let foreign_task_attempt =
+        WorkAttemptIdentityV1::new(id("task.foreign"), id("run.fixture"), id("attempt.fixture"))
+            .expect("foreign attempt");
+    assert_eq!(
+        TaskSessionBindingV1::new(
+            task.clone(),
+            verified.clone(),
+            &BTreeSet::from([foreign_task_attempt.clone()]),
+            foreign_task_attempt,
+            source.clone(),
+        ),
+        Err(TaskSessionBindingErrorV1::ForeignTask),
+    );
+    assert_eq!(
+        TaskSessionBindingV1::new(task, verified, &BTreeSet::new(), accepted, source,),
+        Err(TaskSessionBindingErrorV1::AttemptNotAccepted),
+    );
+}
+
+fn task_session_plan23(provider: &str) -> TaskSessionPlan23BindingV1 {
+    let snapshot_request = TemporalSnapshotRequest::new(
+        id::<SessionId>("session.fixture"),
+        format!("sha256:{}", "1".repeat(64)),
+        format!("sha256:{}", "2".repeat(64)),
+        format!("sha256:{}", "3".repeat(64)),
+        TemporalModeV1::Current,
+        RetrievalGrainV1::LogicalMessage,
+    )
+    .and_then(|request| request.with_provider_scope(Some(provider.to_owned())))
+    .expect("snapshot request");
+    let configuration =
+        BindingDigest::new("configuration_digest", format!("sha256:{}", "4".repeat(64)))
+            .expect("configuration digest");
+    let participant = TemporalParticipantGeneration::new(
+        id("session.fixture"),
+        provider,
+        TemporalWatermarks {
+            generation: 1,
+            source: 2,
+            projection: 2,
+            index: 2,
+            summary: 2,
+        },
+        2,
+        &configuration,
+        snapshot_request.access_digest(),
+        TemporalParticipantAuthorization::Authorized,
+        TemporalSourceAccess::Available,
+    )
+    .expect("participant");
+    let snapshot = TemporalExecutionSnapshot::new_authorized(
+        snapshot_request,
+        TemporalWatermarks {
+            generation: 1,
+            source: 2,
+            projection: 2,
+            index: 2,
+            summary: 2,
+        },
+        KernelVersions {
+            schema: 1,
+            ranking: 1,
+            configuration_digest: configuration,
+        },
+        None,
+        ValidatedAuthorization::Authorized,
+    )
+    .and_then(|snapshot| {
+        snapshot.with_participant_manifest(
+            TemporalParticipantManifest::new(vec![participant]).expect("manifest"),
+        )
+    })
+    .expect("authoritative snapshot");
+    TaskSessionPlan23BindingV1::new(snapshot, None).expect("Plan-23 binding")
+}
+
+#[test]
+fn task_session_plan23_binding_denies_provider_collision() {
+    let task = id::<TaskId>("task.fixture");
+    let attempt =
+        WorkAttemptIdentityV1::new(task.clone(), id("run.fixture"), id("attempt.fixture"))
+            .expect("attempt");
+    let binding = TaskSessionBindingV1::new(
+        task,
+        VerifiedWorkGraphVersionV1::new(
+            WorkGraphVersionV1::new(7).expect("version"),
+            WorkProductEventSequenceV1::new(11).expect("sequence"),
+            WorkProductSourceWatermarkV1::new(BTreeMap::<SourceStoreId, u64>::new())
+                .expect("watermark"),
+            id("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        )
+        .expect("verified graph"),
+        &BTreeSet::from([attempt.clone()]),
+        attempt,
+        ObservationSourceIdentityV1::for_provider(id("claude"), id("session.fixture"))
+            .expect("source"),
+    )
+    .expect("binding");
+
+    assert!(task_session_plan23("claude").matches(&binding));
+    assert!(
+        !task_session_plan23("codex").matches(&binding),
+        "same session id under a foreign provider must be denied",
+    );
 }
 
 #[test]

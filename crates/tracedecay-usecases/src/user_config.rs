@@ -348,8 +348,9 @@ fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// Parses `contents` (read from `path`) as `T`, returning the default and
 /// printing a one-time-per-path warning if the TOML is corrupt.
 ///
-/// Shared by [`UserConfig::load`] call sites so silently-defaulting readers
-/// agree on what "corrupt" means and on not spamming stderr.
+/// Shared by [`UserConfig::load`] and the daemon's per-client config loader
+/// (`user_config_for_client` in `src/daemon.rs`) so both silently-defaulting
+/// readers agree on what "corrupt" means and on not spamming stderr.
 pub fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
 where
     T: Default + serde::de::DeserializeOwned,

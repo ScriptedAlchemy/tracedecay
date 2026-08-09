@@ -588,7 +588,7 @@ Examples:
   tracedecay automation runs artifact run-123 codex_handoff --json
   tracedecay automation skills list              Managed skills
   tracedecay automation skills create --help     Direct lifecycle changes
-  tracedecay automation facts list               Fact application records
+  tracedecay automation facts list               Terminal automatic fact receipts
 
 Related: tracedecay install --agent codex --automation (enable at install),
 tracedecay dashboard (automation outcomes), tracedecay memory curate.";

@@ -1376,20 +1376,36 @@ function analyticsHintsPayload(): Record<string, unknown> {
 
 /* ==========================================================================
  * /api/automation/* (automation_scheduler_api.rs status, automation_jobs_api.rs
- * list, automation_skills_api.rs list, automatic_fact_receipts_api.rs list).
+ * list, automation_skills_api.rs list, automation_fact_proposals_api.rs list).
  * Consumed by AutomationsPage.
  * ========================================================================== */
 
-/** `AutomationSchedulerStatusV1` (automation_scheduler_api.rs). */
+/**
+ * `AutomationSchedulerStatusV1` (automation_scheduler_api.rs).
+ *
+ * `pending_review` is required and is the authority AutomationsPage reads; the
+ * flat `pending_*` fields are the pre-union mirrors the same handler still
+ * emits. This fixture carried only the mirrors, so a perfectly healthy 200
+ * failed the generated contract and the scheduler plate rendered
+ * `unsupported_schema` — including in every visual-audit screenshot of it.
+ * Both queues are `measured` here, which is the reading a mounted profile
+ * produces; the `unreadable` arm is exercised by the page's own DOM tests.
+ */
 function schedulerStatusPayload(): Record<string, unknown> {
   return {
     status: 'configured',
     paused: false,
     enabled: true,
     scheduler_tick_secs: 900,
+    pending_fact_proposals: 5,
+    pending_skills: 2,
+    pending_review: {
+      fact_proposals: { state: 'measured', count: 5, reason: null },
+      skills: { state: 'measured', count: 2, reason: null },
+    },
     now: nowSecs,
     last_session_activity: nowSecs - 1200,
-    configuration_revision_id: 'configuration.revision.automation.fixture',
+    project_config_path: '/fast/projects/tracedecay/.tracedecay/automation.toml',
     control_path: '/fast/projects/tracedecay/.tracedecay/automation.control.json',
     tasks: [
       { task: 'memory_curator', due: false, skip_reason: 'cooldown', last_scheduler_run: null },
@@ -1445,16 +1461,6 @@ function automationRunsPayload(): Record<string, unknown> {
       started_at: String(nowSecs - 2 * DAY),
       completed_at: String(nowSecs - 2 * DAY + 240),
       artifact_kinds: ['traces', 'feedback', 'validation_gate'],
-      activation_policy: 'validate_then_activate',
-      created_skills: [{ id: 'code-slop-cleanup' }],
-      validation_repairs: [{ field: 'summary', repaired: true }],
-      deployment: {
-        status: 'complete',
-        exports: [],
-        materialization_scopes: [],
-        errors: [],
-        retry_required: false,
-      },
     },
     {
       run_id: 'run-20260804-071133-skill-writing',
@@ -1480,7 +1486,7 @@ const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
   ['agent-hook-hint-quality-review', 'Agent Hook Hint Quality Review', 'active', 'automation'],
   ['cargo-build-cache-coordination', 'Cargo Build Cache Coordination', 'active', 'build'],
   ['code-slop-cleanup', 'Code Slop Cleanup', 'active', 'review'],
-  ['isolated-worktree-task-flow', 'Isolated Worktree Task Flow', 'disabled', 'workflow'],
+  ['isolated-worktree-task-flow', 'Isolated Worktree Task Flow', 'pending_approval', 'workflow'],
   ['mcp-tool-output-rendering-design', 'MCP Tool Output Rendering Design', 'active', 'design'],
   ['multi-agent-model-orchestration', 'Multi-Agent Model Orchestration', 'disabled', 'orchestration'],
 ];
@@ -1518,23 +1524,24 @@ function skillsPayload(): Record<string, unknown> {
   };
 }
 
-/** Wire-true automatic fact receipt rows. */
-function automaticFactReceiptsPayload(): Record<string, unknown> {
-  const receipts = Array.from({ length: 3 }, (_, i) => ({
+/** Wire-true FactProposalRecord rows (fact_proposals.rs): the fact text nests
+ * under `add_fact_request`, not a top-level `content`/`fact`/`summary`, so the
+ * Fact-proposals card labels rows by proposal_id — flagged in the report. */
+function factProposalsPayload(): Record<string, unknown> {
+  const proposals = Array.from({ length: 3 }, (_, i) => ({
     schema_version: 1,
-    apply_id: `apply-2026-07-${String(20 + i).padStart(2, '0')}-${i}`,
+    proposal_id: `fp-2026-07-${String(20 + i).padStart(2, '0')}-${i}`,
     run_id: `session-reflector-${i}`,
-    state: i === 2 ? 'quarantined' : 'applied',
+    state: i === 0 ? 'applying' : 'pending',
     add_fact_request: {
       content: FACT_CONTENTS[i % FACT_CONTENTS.length],
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
     },
-    quarantine_reason: i === 2 ? 'validation failed' : undefined,
-    applied_canonical_fact_id: i === 2 ? undefined : `fact.canonical.${i}`,
-    applied_fact_id: i === 2 ? null : 100 + i,
-    recorded_at: nowSecs - i * DAY,
+    created_at: nowSecs - i * DAY,
+    updated_at: nowSecs - i * 3600,
+    duplicate_count: i % 2,
   }));
-  return { receipts, count: receipts.length, limit: 50, error: '' };
+  return { proposals, count: proposals.length, limit: 50, error: '' };
 }
 
 /* ==========================================================================
@@ -2462,7 +2469,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/scheduler/status': schedulerStatusPayload(),
   '/api/automation/jobs': jobsPayload(),
   '/api/automation/skills': skillsPayload(),
-  '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
+  '/api/automation/fact-proposals': factProposalsPayload(),
   '/api/automation/runs': automationRunsPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric

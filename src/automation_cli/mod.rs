@@ -50,25 +50,25 @@ pub(crate) async fn handle_automation_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        facts::{fact_list_rpc_args, fact_view_rpc_args},
+        facts::{automatic_fact_receipt_list_rpc_args, automatic_fact_receipt_view_rpc_args},
         runs::*,
     };
     use crate::cli::AutomationRunAction;
-    use tracedecay::automation::config::AutomationConfigPatch;
+    use tracedecay_agent_hosts::automation::config::AutomationConfigPatch;
 
     #[test]
-    fn automation_rpc_requests_preserve_fact_and_manual_run_arguments() {
+    fn automation_rpc_requests_preserve_automatic_fact_receipt_and_manual_run_arguments() {
         assert_eq!(
-            fact_list_rpc_args(Some("applying"), 50),
+            automatic_fact_receipt_list_rpc_args(Some("applied"), 50),
             serde_json::json!({
-                "action": "fact_list",
-                "state": "applying",
+                "action": "automatic_fact_receipt_list",
+                "state": "applied",
                 "limit": 50,
             })
         );
         assert_eq!(
-            fact_view_rpc_args("fact-7"),
-            serde_json::json!({ "action": "fact_view", "id": "fact-7" })
+            automatic_fact_receipt_view_rpc_args("fact_7"),
+            serde_json::json!({ "action": "automatic_fact_receipt_view", "id": "fact_7" })
         );
 
         let (path, request) = automation_run_rpc_request(AutomationRunAction::MemoryCuration {

@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{FactOwnerV1, SessionId, TemporalCoverageCountsV1};
-use tracedecay_domain::configuration::UserProfileId;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
@@ -16,6 +15,7 @@ use crate::automation::backend::{
 };
 use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
+    effective_user_automation_config,
 };
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::memory::types::{AddFactRequest, MemoryCategory, MemoryGroomingOperation};
@@ -23,16 +23,11 @@ use crate::ports::project_runtime::{MemoryCurateOptions, ProfileRuntime, Runtime
 use crate::store::memory::DatabaseFactStore;
 
 struct FixtureProfileRuntime {
-    profile_id: UserProfileId,
     sessions: Arc<RegisteredGlobalDb>,
     memory: Database,
 }
 
 impl ProfileRuntime for FixtureProfileRuntime {
-    fn profile_id(&self) -> &UserProfileId {
-        &self.profile_id
-    }
-
     fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
         Box::pin(async { Ok(Arc::clone(&self.sessions)) })
     }
@@ -77,7 +72,6 @@ impl UserRuntimeHarness {
         .await
         .expect("registered profile memory");
         let registry: Arc<dyn ProfileRuntime> = Arc::new(FixtureProfileRuntime {
-            profile_id: UserProfileId::new("profile.automation.fixture").expect("profile id"),
             sessions: session_runtime.profile_database_arc(),
             memory,
         });
@@ -109,7 +103,7 @@ async fn fixture_user_memory_curate(
     )?;
     if options.llm {
         let facts = memory
-            .list_facts_untracked(None, None, 100)
+            .list_facts_untracked_v1(None, None, 100)
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("read profile memory fixture: {error}"),
@@ -200,7 +194,7 @@ async fn fixture_user_memory_curate(
                         .get("fact_id")
                         .and_then(Value::as_i64)
                         .expect("validated delete fixture");
-                    applied += usize::from(memory.remove_fact(fact_id, context).await.map_err(
+                    applied += usize::from(memory.remove_fact_v1(fact_id, context).await.map_err(
                         |error| TraceDecayError::Config {
                             message: format!("delete profile memory fixture fact: {error}"),
                         },
@@ -223,7 +217,7 @@ async fn fixture_user_memory_curate(
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     memory
-                        .dashboard_merge_fact_ids(winner_id, loser_ids, merged_content, context)
+                        .dashboard_merge_fact_ids_v1(winner_id, loser_ids, merged_content, context)
                         .await
                         .map_err(|error| TraceDecayError::Config {
                             message: format!("merge profile memory fixture facts: {error}"),
@@ -250,7 +244,7 @@ async fn fixture_user_memory_curate(
                 message: format!("create profile grooming fixture operation: {error}"),
             })?;
             let report = memory
-                .dashboard_apply_grooming(grooming, options.min_confidence, context)
+                .dashboard_apply_grooming_v1(grooming, options.min_confidence, context)
                 .await
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("groom profile memory fixture: {error}"),
@@ -395,6 +389,7 @@ fn enabled_user_config() -> AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        auto_apply_memory_ops: false,
         tasks: AutomationTaskSet {
             memory_curator: AutomationTaskConfig {
                 enabled: true,
@@ -417,7 +412,7 @@ fn enabled_user_config() -> AutomationConfig {
 }
 
 #[tokio::test]
-async fn projectless_reflection_uses_caller_supplied_automation_configuration() {
+async fn projectless_reflection_writes_registered_profile_memory() {
     let harness = UserRuntimeHarness::open("user-reflection").await;
     let backend = JsonBackend::new(
         AgentTaskKind::SessionReflector,
@@ -436,7 +431,13 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
             }]
         }),
     );
-    let config = enabled_user_config();
+    let config = effective_user_automation_config(
+        &harness.profile_root,
+        &AutomationConfig::default(),
+        false,
+    )
+    .await
+    .expect("effective user config");
     let retrieval = TestRetrieval::message(
         "hermes",
         "user-session-1",
@@ -465,7 +466,7 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
         .expect("profile memory authority");
     assert_eq!(
         memory
-            .list_facts_untracked(None, None, 10)
+            .list_facts_untracked_v1(None, None, 10)
             .await
             .expect("profile facts")
             .len(),
@@ -626,7 +627,7 @@ async fn projectless_memory_curator_applies_validated_delete() {
         .expect("profile memory authority");
     assert!(
         memory
-            .get_fact(seeded.loser_id)
+            .get_fact_v1(seeded.loser_id)
             .await
             .expect("deleted fact")
             .is_none()
@@ -666,7 +667,7 @@ async fn projectless_memory_curator_merges_and_updates_profile_memory() {
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
         .expect("profile memory authority");
     let facts = memory
-        .list_facts_untracked(None, None, 10)
+        .list_facts_untracked_v1(None, None, 10)
         .await
         .expect("profile facts");
     assert_eq!(facts.len(), 1);
@@ -710,7 +711,7 @@ async fn projectless_memory_curator_grooms_profile_memory() {
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
         .expect("profile memory authority");
     let fact = memory
-        .get_fact(seeded.winner_id)
+        .get_fact_v1(seeded.winner_id)
         .await
         .expect("groomed fact")
         .expect("fact remains");
@@ -736,7 +737,7 @@ async fn seed_user_duplicate_facts(database: &Database) -> SeededUserDuplicateFa
     .enumerate()
     {
         let outcome = memory
-            .add_fact(
+            .add_fact_v1(
                 AddFactRequest {
                     content: content.to_string(),
                     category: MemoryCategory::UserPref,

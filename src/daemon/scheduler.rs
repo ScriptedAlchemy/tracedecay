@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
+use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -14,23 +15,20 @@ use super::{
 
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: crate::automation::backend::AgentTaskKind,
     outcome: &str,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_string(),
+            crate::automation::backend::task_key(task).to_string(),
         ),
         ("outcome", outcome.to_string()),
     ]
 }
 
-fn log_scheduler_task_start(
-    project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-) {
+fn log_scheduler_task_start(project_path: &Path, task: crate::automation::backend::AgentTaskKind) {
     log_daemon_event(
         "scheduler_task",
         &scheduler_task_log_fields(project_path, task, "start"),
@@ -39,14 +37,14 @@ fn log_scheduler_task_start(
 
 fn scheduler_task_error_log_fields(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: crate::automation::backend::AgentTaskKind,
     error: &TraceDecayError,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
         (
             "task",
-            tracedecay_agent_hosts::automation::backend::task_key(task).to_string(),
+            crate::automation::backend::task_key(task).to_string(),
         ),
         ("error", error.to_string()),
     ]
@@ -54,7 +52,7 @@ fn scheduler_task_error_log_fields(
 
 fn log_scheduler_task_error(
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    task: crate::automation::backend::AgentTaskKind,
     error: &TraceDecayError,
 ) {
     log_daemon_event(
@@ -65,9 +63,9 @@ fn log_scheduler_task_error(
 
 fn scheduler_record_log_fields(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> Vec<(&'static str, String)> {
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
+    use crate::automation::run_ledger::AutomationRunStatus;
 
     let outcome = match record.status {
         AutomationRunStatus::Succeeded => "complete",
@@ -79,7 +77,7 @@ fn scheduler_record_log_fields(
     let task = record
         .task_key
         .as_deref()
-        .unwrap_or_else(|| tracedecay_agent_hosts::automation::backend::task_key(record.task))
+        .unwrap_or_else(|| crate::automation::backend::task_key(record.task))
         .to_string();
     let mut fields = vec![
         ("project", project_path.display().to_string()),
@@ -96,7 +94,7 @@ fn scheduler_record_log_fields(
 #[cfg(test)]
 pub(super) fn daemon_scheduler_record_log_line(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> String {
     super::format_daemon_log_line(
         "scheduler_task",
@@ -106,11 +104,58 @@ pub(super) fn daemon_scheduler_record_log_line(
 
 fn log_daemon_scheduler_record(
     project_path: &Path,
-    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
 ) {
     log_daemon_event(
         "scheduler_task",
         &scheduler_record_log_fields(project_path, record),
+    );
+}
+
+pub(super) fn automation_staged_log_fields(
+    project_path: &Path,
+    counts: &crate::automation::staged_notice::AutomationPendingCounts,
+) -> Vec<(&'static str, String)> {
+    // `unreadable` rather than `0`: this line is the operator's record of what
+    // was awaiting human review, and a failed read is not an empty queue.
+    let field = |count: &crate::automation::staged_notice::PendingReviewCount| {
+        count
+            .count()
+            .map_or_else(|| "unreadable".to_string(), |count| count.to_string())
+    };
+    vec![
+        ("project", project_path.display().to_string()),
+        ("pending_fact_proposals", field(&counts.fact_proposals)),
+        ("pending_skills", field(&counts.skills)),
+    ]
+}
+
+/// After a scheduler tick where at least one task completed, emit a stable
+/// `event=automation_staged` line with pending automation review counts.
+/// Silent only when every queue was read and every one is empty; a queue that
+/// could not be read is logged as `unreadable`, never omitted.
+async fn log_automation_staged_if_pending(project_path: &Path, cg: &TraceDecay) {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return;
+    };
+    let Ok(owner) = cg.project_memory_owner() else {
+        return;
+    };
+    let Ok(memory_db) = cg.open_project_store_db().await else {
+        return;
+    };
+    let Ok(memory) = crate::tracedecay::facts::memory_application_for_db(owner, &memory_db) else {
+        return;
+    };
+    let counts =
+        crate::automation::staged_notice::count_pending_automation_output(&memory, &profile_root)
+            .await;
+    if counts.is_verified_empty() {
+        return;
+    }
+    log_daemon_event(
+        "automation_staged",
+        &automation_staged_log_fields(project_path, &counts),
     );
 }
 
@@ -322,7 +367,8 @@ impl DaemonEngine {
         self.automation_config_probe_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let configured = match async {
-            let config = effective_automation_config_for_project(&cg).await?;
+            let config =
+                effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
             automation_scheduler_has_work(&cg, &config).await
         }
         .await
@@ -833,8 +879,7 @@ impl DaemonEngine {
             .lock()
             .await
             .clear();
-        let _child_shutdown =
-            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+        let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
@@ -882,9 +927,7 @@ const SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING: Duration = Duration::from_mins(5);
 
 /// Exponential backoff for repeated project-open failures, from one tick.
 fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
-    let base = Duration::from_secs(
-        tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-    );
+    let base = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
     let steps = consecutive_failures.saturating_sub(1).min(16);
     base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
         .min(SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING)
@@ -1078,17 +1121,17 @@ async fn run_automation_scheduler_loop(
 
 async fn automation_scheduler_has_work_for_project(
     cg: &TraceDecay,
-    _handshake: &DaemonHandshake,
+    handshake: &DaemonHandshake,
 ) -> Result<bool> {
-    let config = effective_automation_config_for_project(cg).await?;
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
     automation_scheduler_has_work(cg, &config).await
 }
 
 pub(super) async fn automation_scheduler_tick_secs_for_project(
     cg: &TraceDecay,
-    _handshake: &DaemonHandshake,
+    handshake: &DaemonHandshake,
 ) -> u64 {
-    match effective_automation_config_for_project(cg).await {
+    match effective_automation_config_for_project(cg, &handshake.client_identity).await {
         Ok(config) => config.scheduler_tick_secs,
         Err(e) => {
             log_daemon_event(
@@ -1099,7 +1142,7 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(
                     ("error", e.to_string()),
                 ],
             );
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS
+            crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
         }
     }
 }
@@ -1246,7 +1289,7 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
 /// housekeeping, so failures are logged and never abort a scheduler tick.
 async fn maybe_run_global_retention(
     database: &crate::global_db::RegisteredGlobalDb,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &crate::automation::config::AutomationConfig,
 ) {
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
@@ -1297,9 +1340,9 @@ pub(super) async fn run_automation_scheduler_tick(
     handshake: &DaemonHandshake,
     engine: &DaemonEngine,
 ) -> Result<()> {
-    use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, CodexAppServerBackend};
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
+    use crate::automation::run_ledger::AutomationTrigger;
+    use crate::automation::runner::{
         CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
         registered_project_automation_retrieval, run_combined_review_with_backend_and_retrieval,
@@ -1307,10 +1350,9 @@ pub(super) async fn run_automation_scheduler_tick(
         run_skill_writer_with_backend_and_retrieval,
     };
 
-    let control = tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(
-        &cg.store_layout().dashboard_root,
-    )
-    .await?;
+    let control =
+        crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
+            .await?;
     if control.paused {
         log_daemon_event(
             "scheduler_tick",
@@ -1322,7 +1364,7 @@ pub(super) async fn run_automation_scheduler_tick(
         );
         return Ok(());
     }
-    let config = effective_automation_config_for_project(cg).await?;
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
     if !automation_scheduler_has_work(cg, &config).await? {
         log_daemon_event(
             "scheduler_tick",
@@ -1365,6 +1407,7 @@ pub(super) async fn run_automation_scheduler_tick(
         registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
             .await?;
     let mut first_error: Option<TraceDecayError> = None;
+    let mut any_succeeded = false;
 
     log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
     match run_memory_curator_with_backend(
@@ -1378,7 +1421,11 @@ pub(super) async fn run_automation_scheduler_tick(
     )
     .await
     {
-        Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+        Ok(run) => {
+            any_succeeded |= run.ledger_record.status
+                == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+            log_daemon_scheduler_record(project_path, &run.ledger_record);
+        }
         Err(e) => {
             log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &e);
             first_error.get_or_insert(e);
@@ -1401,11 +1448,19 @@ pub(super) async fn run_automation_scheduler_tick(
         .await
         {
             Ok(CombinedReviewDispatch::Ran(run)) => {
+                any_succeeded |= run.session_reflector.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                any_succeeded |= run.skill_writer.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
                 log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
                 log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
                 combined_handled = true;
             }
             Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
+                any_succeeded |= run.session_reflector.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                any_succeeded |= run.skill_writer.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
                 log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
                 log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
                 log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
@@ -1442,7 +1497,11 @@ pub(super) async fn run_automation_scheduler_tick(
         )
         .await
         {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Ok(run) => {
+                any_succeeded |= run.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.ledger_record);
+            }
             Err(e) => {
                 log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
                 first_error.get_or_insert(e);
@@ -1461,12 +1520,19 @@ pub(super) async fn run_automation_scheduler_tick(
         )
         .await
         {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Ok(run) => {
+                any_succeeded |= run.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
+                log_daemon_scheduler_record(project_path, &run.ledger_record);
+            }
             Err(e) => {
                 log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
                 first_error.get_or_insert(e);
             }
         }
+    }
+    if any_succeeded {
+        log_automation_staged_if_pending(project_path, cg).await;
     }
     run_user_jobs_scheduler_pass(
         project_path,
@@ -1489,28 +1555,26 @@ async fn run_host_receipt_review(
     handshake: &DaemonHandshake,
     engine: &DaemonEngine,
 ) -> Result<()> {
-    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
+    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::run_ledger::AutomationTrigger;
+    use crate::automation::runner::{
         CombinedReviewAutomationOptions, CombinedReviewDispatch, SessionReflectorAutomationOptions,
         SkillWriterAutomationOptions, registered_project_automation_retrieval,
         run_combined_review_with_backend_and_retrieval,
     };
 
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let Some(ready) =
-        tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
-    else {
+    let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
         return Ok(());
     };
     let pending = ready.pending;
-    if tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(&dashboard_root)
+    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
         .await?
         .paused
     {
         return Ok(());
     }
-    let config = effective_automation_config_for_project(cg).await?;
+    let config = effective_automation_config_for_project(cg, &handshake.client_identity).await?;
     let session_id = pending
         .route
         .as_ref()
@@ -1591,11 +1655,11 @@ async fn run_host_receipt_review(
             log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
             log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
             if run.session_reflector.ledger_record.status
-                == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
+                == crate::automation::run_ledger::AutomationRunStatus::Succeeded
                 && run.skill_writer.ledger_record.status
-                    == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded
             {
-                tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+                crate::automation::host_receipts::mark_consumed(
                     &dashboard_root,
                     &pending.session_key,
                     pending.generation,
@@ -1624,29 +1688,42 @@ async fn run_host_receipt_review(
 
 async fn effective_automation_config_for_project(
     cg: &crate::tracedecay::TraceDecay,
-) -> Result<tracedecay_agent_hosts::automation::config::AutomationConfig> {
-    let configuration = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("automation configuration authority is unavailable: {error}"),
-        })?;
-    tracedecay_agent_hosts::automation::config::from_configuration_snapshot(&configuration.snapshot)
+    client_identity: &DaemonClientIdentity,
+) -> Result<crate::automation::config::AutomationConfig> {
+    use crate::automation::config::{effective_config, load_project_config};
+
+    let global = user_config_for_client(client_identity).automation;
+    let project = load_project_config(&cg.store_layout().dashboard_root).await?;
+    effective_config(&global, project.as_ref())
+}
+
+pub(super) fn user_config_for_client(
+    client_identity: &DaemonClientIdentity,
+) -> crate::user_config::UserConfig {
+    let path = client_identity.profile_root.join("config.toml");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return crate::user_config::UserConfig::default();
+    };
+    crate::user_config::parse_or_warn_default(&path, &contents)
 }
 
 pub(super) fn automation_scheduler_configured(
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &crate::automation::config::AutomationConfig,
 ) -> bool {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
-    use tracedecay_agent_hosts::automation::scheduler::{AutomationSchedule, parse_schedule};
+    use crate::automation::config::{AutomationBackend, AutomationHostMode};
+    use crate::automation::scheduler::{AutomationSchedule, parse_schedule};
 
     if !config.enabled
         || config.host_mode == AutomationHostMode::DelegatedHost
         || config.backend != AutomationBackend::CodexAppServer
     {
         return false;
+    }
+    if config.combine_due_tasks
+        && config.tasks.session_reflector.enabled
+        && config.tasks.skill_writer.enabled
+    {
+        return true;
     }
     [
         &config.tasks.memory_curator,
@@ -1670,9 +1747,9 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 async fn automation_scheduler_has_work(
     cg: &crate::tracedecay::TraceDecay,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &crate::automation::config::AutomationConfig,
 ) -> Result<bool> {
-    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
+    use crate::automation::config::{AutomationBackend, AutomationHostMode};
 
     if automation_scheduler_configured(config) {
         return Ok(true);
@@ -1683,10 +1760,7 @@ async fn automation_scheduler_has_work(
     {
         return Ok(false);
     }
-    tracedecay_agent_hosts::automation::jobs::jobs_configured_for_scheduler(
-        &cg.store_layout().dashboard_root,
-    )
-    .await
+    crate::automation::jobs::jobs_configured_for_scheduler(&cg.store_layout().dashboard_root).await
 }
 
 /// Ticks every schedulable user-defined job with the same lock/cooldown
@@ -1695,12 +1769,12 @@ async fn run_user_jobs_scheduler_pass(
     project_path: &Path,
     profile_root: &Path,
     cg: &crate::tracedecay::TraceDecay,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
-    backend: &tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
+    config: &crate::automation::config::AutomationConfig,
+    backend: &crate::automation::backend::CodexAppServerBackend,
     first_error: &mut Option<TraceDecayError>,
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs = match tracedecay_agent_hosts::automation::jobs::load_jobs(&dashboard_root).await {
+    let jobs = match crate::automation::jobs::load_jobs(&dashboard_root).await {
         Ok(jobs) => jobs,
         Err(e) => {
             log_daemon_event(
@@ -1717,23 +1791,22 @@ async fn run_user_jobs_scheduler_pass(
     };
     for job in jobs
         .iter()
-        .filter(|job| tracedecay_agent_hosts::automation::jobs::job_is_schedulable(job))
+        .filter(|job| crate::automation::jobs::job_is_schedulable(job))
     {
         log_scheduler_task_start(
             project_path,
-            tracedecay_agent_hosts::automation::backend::AgentTaskKind::UserJob,
+            crate::automation::backend::AgentTaskKind::UserJob,
         );
-        match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
+        match crate::automation::jobs::run_user_job_with_backend(
             &dashboard_root,
             config,
             backend,
             job,
-            tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
-                trigger:
-                    tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler,
+            crate::automation::jobs::UserJobRunOptions {
+                trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
                 profile_root: Some(profile_root.to_path_buf()),
                 project_root: Some(project_path.to_path_buf()),
-                ..tracedecay_agent_hosts::automation::jobs::UserJobRunOptions::default()
+                ..crate::automation::jobs::UserJobRunOptions::default()
             },
         )
         .await
@@ -1742,7 +1815,7 @@ async fn run_user_jobs_scheduler_pass(
             Err(e) => {
                 log_scheduler_task_error(
                     project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::UserJob,
+                    crate::automation::backend::AgentTaskKind::UserJob,
                     &e,
                 );
                 first_error.get_or_insert(e);
@@ -1761,9 +1834,7 @@ mod scheduler_project_open_backoff_tests {
 
     #[test]
     fn backoff_starts_at_one_tick_and_grows() {
-        let tick = Duration::from_secs(
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
+        let tick = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
         assert_eq!(scheduler_project_open_backoff(1), tick);
         assert_eq!(scheduler_project_open_backoff(2), tick * 2);
         assert_eq!(scheduler_project_open_backoff(3), tick * 4);
@@ -1792,9 +1863,7 @@ mod scheduler_project_open_backoff_tests {
         let total: Duration = (1..=SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION)
             .map(scheduler_project_open_backoff)
             .sum();
-        let tick = Duration::from_secs(
-            tracedecay_agent_hosts::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-        );
+        let tick = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
         assert!(
             total > tick,
             "escalation must allow more than one retry before exiting"

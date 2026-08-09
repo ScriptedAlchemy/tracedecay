@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 use super::DashboardState;
 use super::util::{JsonQuery, coerce_limit, http_detail};
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_agent_hosts::automation::fact_proposals::{
-    FactProposalRecord, FactProposalState, list_fact_proposals, load_fact_proposal,
+use tracedecay_agent_hosts::automation::automatic_facts::{
+    AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,
+    load_automatic_fact_receipt,
 };
 
 #[derive(Debug, Deserialize)]
@@ -21,8 +22,8 @@ pub async fn list(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<ListParams>,
 ) -> (StatusCode, Json<Value>) {
-    let proposal_state = match params.state.as_deref() {
-        Some(value) => match FactProposalState::parse(value) {
+    let receipt_state = match params.state.as_deref() {
+        Some(value) => match AutomaticFactState::parse(value) {
             Ok(state) => Some(state),
             Err(err) => return (StatusCode::BAD_REQUEST, Json(http_detail(&err.to_string()))),
         },
@@ -36,18 +37,18 @@ pub async fn list(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(http_detail(&format!(
-                    "Failed to initialize fact proposal authority: {err}"
+                    "Failed to initialize automatic fact receipt authority: {err}"
                 ))),
             );
         }
     };
-    match list_fact_proposals(&memory, proposal_state, limit).await {
-        Ok(proposals) => {
-            let count = proposals.len();
+    match list_automatic_fact_receipts(&memory, receipt_state, limit).await {
+        Ok(receipts) => {
+            let count = receipts.len();
             (
                 StatusCode::OK,
                 Json(json!({
-                    "proposals": proposals,
+                    "receipts": receipts,
                     "count": count,
                     "limit": limit,
                     "error": "",
@@ -57,7 +58,7 @@ pub async fn list(
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(http_detail(&format!(
-                "Failed to load fact proposals: {err}"
+                "Failed to load automatic fact receipts: {err}"
             ))),
         ),
     }
@@ -74,27 +75,31 @@ pub async fn view(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(http_detail(&format!(
-                    "Failed to initialize fact proposal authority: {err}"
+                    "Failed to initialize automatic fact receipt authority: {err}"
                 ))),
             );
         }
     };
-    match load_fact_proposal(&memory, &id).await {
-        Ok(Some(proposal)) => (StatusCode::OK, Json(proposal_payload(&proposal))),
+    match load_automatic_fact_receipt(&memory, &id).await {
+        Ok(Some(receipt)) => (StatusCode::OK, Json(receipt_payload(&receipt))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(http_detail(&format!("fact proposal not found: {id}"))),
+            Json(http_detail(&format!(
+                "automatic fact receipt not found: {id}"
+            ))),
         ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(http_detail(&format!("Failed to load fact proposal: {err}"))),
+            Json(http_detail(&format!(
+                "Failed to load automatic fact receipt: {err}"
+            ))),
         ),
     }
 }
 
-fn proposal_payload(proposal: &FactProposalRecord) -> Value {
+fn receipt_payload(receipt: &AutomaticFactReceipt) -> Value {
     json!({
-        "proposal": proposal,
+        "receipt": receipt,
         "error": "",
     })
 }
