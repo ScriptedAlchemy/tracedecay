@@ -1,8 +1,8 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RunHistory } from './RunHistory.tsx';
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RunHistory } from "./RunHistory.tsx";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -17,8 +17,8 @@ afterEach(() => {
  * ledger, an unread one is a blocked state, artifacts are fetched only when a
  * run is opened, and the integrity verdict is the server's word verbatim.
  */
-describe('RunHistory', () => {
-  it('reports an empty ledger as a ledger with no runs, not a blocked read', async () => {
+describe("RunHistory", () => {
+  it("reports an empty ledger as a ledger with no runs, not a blocked read", async () => {
     stubRuns({ runs: runsBody([]) });
     renderRunHistory();
     expect(
@@ -26,39 +26,71 @@ describe('RunHistory', () => {
     ).toBeTruthy();
   });
 
-  it('renders each run with its own status word and review tally', async () => {
+  it("renders each run with its own status word and automatic tally", async () => {
     stubRuns({
       runs: runsBody([
-        run('run-1', { task: 'memory_curator', status: 'succeeded', accepted: 3, reviewed: 4 }),
-        run('run-2', { task: 'skill_writing', status: 'failed', error: 'backend refused' }),
-      ]),
-    });
-    renderRunHistory();
-    await screen.findByText('memory_curator');
-
-    expect(screen.getByText('succeeded')).toBeTruthy();
-    expect(screen.getByText('3/4 accepted')).toBeTruthy();
-    expect(screen.getByText('failed')).toBeTruthy();
-    expect(screen.getByText('backend refused')).toBeTruthy();
-  });
-
-  it('fetches artifacts only when a run is opened, and prints the daemon integrity verdict', async () => {
-    const fetchMock = stubRuns({
-      runs: runsBody([
-        run('run-1', {
-          task: 'memory_curator',
-          status: 'succeeded',
-          artifactKinds: ['traces'],
+        run("run-1", {
+          task: "memory_curator",
+          status: "succeeded",
+          accepted: 3,
+          reviewed: 4,
+        }),
+        run("run-2", {
+          task: "skill_writing",
+          status: "failed",
+          error: "backend refused",
         }),
       ]),
-      artifacts: artifactsBody('run-1', 'ledger_publication_mismatch'),
     });
     renderRunHistory();
-    const row = await screen.findByRole('button', { name: /memory_curator/ });
+    await screen.findByText("memory_curator");
+
+    expect(screen.getByText("succeeded")).toBeTruthy();
+    expect(screen.getByText("3 applied · 0 quarantined")).toBeTruthy();
+    expect(screen.getByText("failed")).toBeTruthy();
+    expect(screen.getByText("backend refused")).toBeTruthy();
+  });
+
+  it("renders validation and deployment receipts when the daemon records them", async () => {
+    stubRuns({
+      runs: runsBody([
+        run("run-1", {
+          task: "memory_curator",
+          status: "completed",
+          validationRepairs: [{ field: "content" }],
+          deployment: {
+            status: "partial_failure",
+            exports: [],
+            materialization_scopes: [],
+            errors: ["host unavailable"],
+            retry_required: true,
+          },
+        }),
+      ]),
+    });
+    renderRunHistory();
+    expect(await screen.findByText(/1 validation repair/)).toBeTruthy();
+    expect(screen.getByText(/deployment: partial_failure/)).toBeTruthy();
+    expect(screen.getByText(/retry required/)).toBeTruthy();
+  });
+
+  it("fetches artifacts only when a run is opened, and prints the daemon integrity verdict", async () => {
+    const fetchMock = stubRuns({
+      runs: runsBody([
+        run("run-1", {
+          task: "memory_curator",
+          status: "succeeded",
+          artifactKinds: ["traces"],
+        }),
+      ]),
+      artifacts: artifactsBody("run-1", "ledger_publication_mismatch"),
+    });
+    renderRunHistory();
+    const row = await screen.findByRole("button", { name: /memory_curator/ });
 
     // No artifact request before the disclosure opens.
     expect(
-      fetchMock.mock.calls.some(([url]) => String(url).includes('/artifacts')),
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/artifacts")),
     ).toBe(false);
 
     await userEvent.click(row);
@@ -66,39 +98,45 @@ describe('RunHistory', () => {
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([url]) =>
-          String(url).endsWith('/api/automation/runs/run-1/artifacts'),
+          String(url).endsWith("/api/automation/runs/run-1/artifacts"),
         ),
       ).toBe(true),
     );
   });
 
-  it('says when an opened run recorded no artifacts instead of issuing a read', async () => {
+  it("says when an opened run recorded no artifacts instead of issuing a read", async () => {
     const fetchMock = stubRuns({
-      runs: runsBody([run('run-1', { task: 'session_reflection', status: 'completed' })]),
+      runs: runsBody([
+        run("run-1", { task: "session_reflection", status: "completed" }),
+      ]),
     });
     renderRunHistory();
-    await userEvent.click(await screen.findByRole('button', { name: /session_reflection/ }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /session_reflection/ }),
+    );
 
     expect(await screen.findByText(/recorded no artifacts/i)).toBeTruthy();
     expect(
-      fetchMock.mock.calls.some(([url]) => String(url).includes('/artifacts')),
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/artifacts")),
     ).toBe(false);
   });
 
-  it('marks a capped page as the newest slice rather than the whole ledger', async () => {
+  it("marks a capped page as the newest slice rather than the whole ledger", async () => {
     const rows = Array.from({ length: 50 }, (_, index) =>
-      run(`run-${index}`, { task: 'memory_curator', status: 'succeeded' }),
+      run(`run-${index}`, { task: "memory_curator", status: "succeeded" }),
     );
-    stubRuns({ runs: { runs: rows, count: 50, limit: 50, error: '' } });
+    stubRuns({ runs: { runs: rows, count: 50, limit: 50, error: "" } });
     renderRunHistory();
-    expect(await screen.findByText(/the newest 50 runs, the request cap/i)).toBeTruthy();
+    expect(
+      await screen.findByText(/the newest 50 runs, the request cap/i),
+    ).toBeTruthy();
   });
 });
 
 type Reply = unknown;
 
 function runsBody(rows: unknown[]) {
-  return { runs: rows, count: rows.length, limit: 50, error: '' };
+  return { runs: rows, count: rows.length, limit: 50, error: "" };
 }
 
 function run(
@@ -110,13 +148,15 @@ function run(
     reviewed?: number;
     error?: string;
     artifactKinds?: string[];
+    validationRepairs?: unknown[];
+    deployment?: unknown;
   },
 ) {
   return {
     run_id: id,
     task: options.task,
-    trigger: 'manual_cli',
-    backend: 'claude',
+    trigger: "manual_cli",
+    backend: "claude",
     model: null,
     status: options.status,
     reviewed_count: options.reviewed ?? 0,
@@ -124,9 +164,11 @@ function run(
     rejected_count: 0,
     skipped_count: 0,
     error: options.error ?? null,
-    started_at: '1754000000',
-    completed_at: '1754000060',
+    started_at: "1754000000",
+    completed_at: "1754000060",
     artifact_kinds: options.artifactKinds ?? [],
+    validation_repairs: options.validationRepairs,
+    deployment: options.deployment,
   };
 }
 
@@ -135,45 +177,47 @@ function artifactsBody(runId: string, integrity: string) {
     run_id: runId,
     artifacts: [
       {
-        kind: 'traces',
+        kind: "traces",
         path: `runs/${runId}/traces.json`,
-        sha256: 'a'.repeat(64),
-        created_at: '1754000060',
+        sha256: "a".repeat(64),
+        created_at: "1754000060",
       },
     ],
     artifact_chain: {
-      expected_kinds: ['traces', 'feedback'],
-      present_kinds: ['traces'],
+      expected_kinds: ["traces", "feedback"],
+      present_kinds: ["traces"],
       metadata_complete: false,
       complete: false,
       integrity_status: integrity,
     },
     count: 1,
-    error: '',
+    error: "",
   };
 }
 
 function stubRuns(replies: { runs: Reply; artifacts?: Reply }) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes('/artifacts')) {
+    if (url.includes("/artifacts")) {
       return jsonResponse(replies.artifacts ?? {});
     }
     return jsonResponse(replies.runs);
   });
-  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
     status: 200,
-    headers: { 'content-type': 'application/json' },
+    headers: { "content-type": "application/json" },
   });
 }
 
 function renderRunHistory() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
     <QueryClientProvider client={client}>
       <RunHistory />

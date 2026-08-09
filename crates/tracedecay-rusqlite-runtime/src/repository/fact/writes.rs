@@ -181,7 +181,8 @@ pub(super) fn publish_projection(
                     active = None;
                 }
             }
-            FactLineageEventKindV1::Curated { .. } => {}
+            FactLineageEventKindV1::Curated { .. }
+            | FactLineageEventKindV1::LegacyImported { .. } => {}
         }
     }
     let last = batch

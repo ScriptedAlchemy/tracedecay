@@ -1605,8 +1605,10 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn released_automation_tombstone_allows_one_eventual_replacement() {
-    use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
+    use tracedecay_agent_hosts::automation::scheduler::{
+        AutomationSchedulerControl, save_scheduler_control,
+    };
 
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");
@@ -1625,15 +1627,9 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open automation fixture through daemon authority");
+    let server = save_scheduled_automation(&engine, &handshake, true).await;
+    let cg = server.cg().await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    save_scheduled_automation(&dashboard_root, true).await;
     save_scheduler_control(
         &dashboard_root,
         &AutomationSchedulerControl { paused: true },
@@ -1643,19 +1639,12 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     let new = ProjectServerKey::from_open_project(&cg, &handshake).expect("new owner key");
     let mut old = new.clone();
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
 
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
     tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
         .await
         .expect("noncooperative owner start timed out")
         .expect("noncooperative owner start sender dropped");
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(new.clone(), server);
     engine
         .store_administration
         .automation_schedulers()
