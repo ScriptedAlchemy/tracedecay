@@ -7,20 +7,20 @@ use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::automation::managed_skills::{
+use tracedecay::mcp::McpServer;
+#[cfg(feature = "test-transport")]
+use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    approve_managed_skill, create_managed_skill_draft,
+    create_managed_skill,
 };
-use tracedecay::automation::run_ledger::{
+use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay::automation::skill_usage::{
+use tracedecay_agent_hosts::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
-#[cfg(feature = "test-transport")]
-use tracedecay::mcp::McpServer;
 
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
@@ -50,7 +50,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
-            task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+            task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_string()),
             backend: "codex_app_server".to_string(),
             host_mode: Some("standalone".to_string()),
@@ -154,21 +154,12 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let runtime = open_active_project_scoped_runtime(&cg).await;
     let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
 
-    create_managed_skill_draft(
-        &profile_root,
-        managed_skill_test_draft("pending-skill", "Pending skill"),
-    )
-    .await
-    .unwrap();
-    create_managed_skill_draft(
+    let active_skill = create_managed_skill(
         &profile_root,
         managed_skill_test_draft("active-skill", "Active skill"),
     )
     .await
     .unwrap();
-    let active_skill = approve_managed_skill(&profile_root, "active-skill")
-        .await
-        .unwrap();
     record_skill_usage(
         &profile_root,
         &active_skill,
@@ -240,7 +231,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     assert_eq!(payload["skills"][0]["usage_summary"]["use_count"], 1);
     assert_eq!(
         payload["skills"][0]["usage_summary"]["targets"],
-        json!(["codex", "cursor", "lifecycle", "mcp"])
+        json!(["codex", "cursor", "mcp"])
     );
     assert_eq!(
         payload["skills"][0]["stale_recommendation"]["skill_id"],
@@ -374,7 +365,8 @@ pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDra
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
+        ),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![
             ManagedSupportFile::new(

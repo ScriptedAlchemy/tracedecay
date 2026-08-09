@@ -1,11 +1,11 @@
 use tracedecay::agents::codex::export_codex_plugin_artifact;
 use tracedecay::agents::{export_managed_skills_to_agent_hosts, export_managed_skills_to_agents};
-use tracedecay::automation::managed_skills::{
+use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    approve_managed_skill, create_managed_skill_draft, default_managed_skill_targets,
-    disable_managed_skill, load_managed_skill, managed_skill_dir,
+    create_managed_skill, default_managed_skill_targets, disable_managed_skill, load_managed_skill,
+    managed_skill_dir,
 };
-use tracedecay::automation::skill_targets::{
+use tracedecay_agent_hosts::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };
@@ -23,7 +23,7 @@ fn draft(id: &str, title: &str) -> ManagedSkillDraft {
                 .unwrap(),
         ],
         provenance: ManagedSkillProvenance {
-            source: ManagedSkillSource::UserDraft,
+            source: ManagedSkillSource::User,
             actor: "test".to_string(),
             run_id: None,
         },
@@ -56,12 +56,12 @@ fn managed_skill_defaults_target_supported_hosts() {
 }
 
 #[tokio::test]
-async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespace() {
+async fn native_overlay_exports_automatically_active_skills_and_prunes_generated_namespace() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -71,15 +71,12 @@ async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespac
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
-            "pending-flow",
-            "Pending flow",
-            vec![SkillInstallTarget::Cursor],
+            "claude-flow",
+            "Claude flow",
+            vec![SkillInstallTarget::Claude],
         ),
     )
     .await
@@ -115,7 +112,7 @@ async fn native_overlay_exports_only_active_skills_and_prunes_generated_namespac
     );
     assert!(
         !plugin_root
-            .join("skills/agent-managed/pending-flow/SKILL.md")
+            .join("skills/agent-managed/claude-flow/SKILL.md")
             .exists()
     );
     assert!(
@@ -163,7 +160,7 @@ async fn codex_native_overlay_uses_agent_managed_namespace() {
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("codex-plugin");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -173,9 +170,6 @@ async fn codex_native_overlay_uses_agent_managed_namespace() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
 
     let summary =
         export_native_skill_overlay(&profile_root, SkillInstallTarget::Codex, &plugin_root)
@@ -194,16 +188,13 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("codex-plugin");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft("codex-only", "Codex only", vec![SkillInstallTarget::Codex]),
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "codex-only")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "cursor-only",
@@ -213,9 +204,6 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "cursor-only")
-        .await
-        .unwrap();
 
     let summary = export_codex_plugin_artifact(&profile_root, &plugin_root, "tracedecay-bin")
         .expect("Codex plugin artifact should export");
@@ -266,7 +254,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
         let profile_root = temp.path().join("profile");
         let plugin_root = temp.path().join("cursor-plugin");
 
-        create_managed_skill_draft(
+        create_managed_skill(
             &profile_root,
             targeted_draft(
                 "repo-hygiene",
@@ -276,9 +264,6 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
         )
         .await
         .unwrap();
-        approve_managed_skill(&profile_root, "repo-hygiene")
-            .await
-            .unwrap();
 
         let mut legacy = targeted_draft(
             legacy_id,
@@ -286,12 +271,7 @@ async fn native_overlay_sanitizes_legacy_native_frontmatter_without_blocking_pee
             vec![SkillInstallTarget::Cursor],
         );
         legacy.summary = "a".repeat(1020);
-        create_managed_skill_draft(&profile_root, legacy)
-            .await
-            .unwrap();
-        approve_managed_skill(&profile_root, legacy_id)
-            .await
-            .unwrap();
+        create_managed_skill(&profile_root, legacy).await.unwrap();
 
         let summary =
             export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root)
@@ -329,7 +309,7 @@ async fn exports_only_skills_targeted_to_requested_host() {
     let codex_plugin = temp.path().join("codex-plugin");
     let opencode_prompt = temp.path().join("opencode").join("AGENTS.md");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "cursor-only",
@@ -339,19 +319,13 @@ async fn exports_only_skills_targeted_to_requested_host() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "cursor-only")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft("codex-only", "Codex only", vec![SkillInstallTarget::Codex]),
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "codex-only")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "opencode-only",
@@ -361,9 +335,6 @@ async fn exports_only_skills_targeted_to_requested_host() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "opencode-only")
-        .await
-        .unwrap();
 
     let cursor =
         export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &cursor_plugin)
@@ -398,7 +369,7 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("AGENTS.md");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -408,16 +379,9 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
-        targeted_draft(
-            "pending-flow",
-            "Pending flow",
-            vec![SkillInstallTarget::Agents],
-        ),
+        targeted_draft("codex-flow", "Codex flow", vec![SkillInstallTarget::Codex]),
     )
     .await
     .unwrap();
@@ -433,7 +397,7 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     assert!(first.contains("TRACEDECAY MANAGED SKILLS START"));
     assert!(first.contains("`repo-hygiene`"));
     assert!(first.contains("tracedecay_skill_view"));
-    assert!(!first.contains("pending-flow"));
+    assert!(!first.contains("codex-flow"));
 
     let second =
         export_prompt_skill_index(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
@@ -451,7 +415,7 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("AGENTS.md");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -461,9 +425,6 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
     std::fs::write(&prompt_path, "# User rules\n\nKeep before.\n").unwrap();
     export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
 
@@ -494,7 +455,7 @@ fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `generated`: Generated.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "Keep after.\n",
@@ -521,7 +482,7 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
         "# User rules\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n",
+        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n",
     );
     std::fs::write(&prompt_path, contents).unwrap();
 
@@ -538,12 +499,12 @@ fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `legacy`: Legacy.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
         "## TraceDecay managed skills\n\n",
-        "This Claude index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This Claude index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `slugged`: Slugged.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
         "Keep after.\n",
@@ -567,12 +528,12 @@ fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This Claude index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This Claude index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `legacy`: Legacy.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `slugged`: Slugged.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n\n",
         "Keep after.\n",
@@ -594,7 +555,7 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
     let block = concat!(
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n",
     );
     let contents = format!("# User rules\n\n{block}\n{block}");
@@ -614,7 +575,7 @@ async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
     let profile_root = temp.path().join("profile");
     let agents_md = temp.path().join("AGENTS.md");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "opencode-only",
@@ -624,18 +585,12 @@ async fn prompt_index_keeps_separate_sections_for_shared_agents_md_hosts() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "opencode-only")
-        .await
-        .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft("kimi-only", "Kimi only", vec![SkillInstallTarget::Kimi]),
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "kimi-only")
-        .await
-        .unwrap();
 
     export_prompt_skill_index(&profile_root, SkillInstallTarget::OpenCode, &agents_md).unwrap();
     export_prompt_skill_index(&profile_root, SkillInstallTarget::Kimi, &agents_md).unwrap();
@@ -745,7 +700,7 @@ async fn native_overlay_keeps_previous_export_when_rebuild_fails() {
     let profile_root = temp.path().join("profile");
     let plugin_root = temp.path().join("cursor-plugin");
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -755,9 +710,6 @@ async fn native_overlay_keeps_previous_export_when_rebuild_fails() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
     export_native_skill_overlay(&profile_root, SkillInstallTarget::Cursor, &plugin_root).unwrap();
 
     let previous_skill = plugin_root.join("skills/agent-managed/repo-hygiene/SKILL.md");
@@ -823,7 +775,7 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
     let claude_md = install_fake_claude(&home);
     let cursor_plugin = install_fake_cursor_plugin(&home);
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -833,9 +785,6 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
 
     let reports = export_managed_skills_to_agents(&home, &profile_root);
     let agents: Vec<&str> = reports.iter().map(|report| report.agent.as_str()).collect();
@@ -885,7 +834,7 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
     std::fs::remove_file(&claude_md).unwrap();
     std::fs::create_dir_all(&claude_md).unwrap();
 
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         targeted_draft(
             "repo-hygiene",
@@ -895,9 +844,6 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
 
     let reports = export_managed_skills_to_agents(&home, &profile_root);
     let claude = reports
@@ -926,10 +872,7 @@ async fn lifecycle_export_sweep_skips_agents_without_installs() {
     let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
+    create_managed_skill(&profile_root, draft("repo-hygiene", "Repository hygiene"))
         .await
         .unwrap();
 
@@ -948,10 +891,7 @@ async fn lifecycle_export_sweep_skips_non_default_profiles() {
     let claude_md = install_fake_claude(&home);
     let original = std::fs::read_to_string(&claude_md).unwrap();
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
+    create_managed_skill(&profile_root, draft("repo-hygiene", "Repository hygiene"))
         .await
         .unwrap();
 
@@ -1022,10 +962,7 @@ command = "other"
     )
     .unwrap();
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
+    create_managed_skill(&profile_root, draft("repo-hygiene", "Repository hygiene"))
         .await
         .unwrap();
 
@@ -1057,10 +994,7 @@ async fn hermes_target_uses_native_plugin_overlay() {
     let prompt_path = temp.path().join("HERMES.md");
     let plugin_root = temp.path().join("plugin");
 
-    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
-        .await
-        .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
+    create_managed_skill(&profile_root, draft("repo-hygiene", "Repository hygiene"))
         .await
         .unwrap();
 

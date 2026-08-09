@@ -1,13 +1,11 @@
-use tracedecay::automation::managed_skills::{
+use tracedecay_agent_hosts::automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource,
     ManagedSkillState, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,
-    approve_managed_skill, archive_managed_skill, create_managed_skill_draft,
-    disable_managed_skill, discard_pending_managed_skill_update, list_managed_skills,
-    load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
-    set_managed_skill_pinned, set_managed_skill_state, stage_managed_skill_update,
-    update_managed_skill,
+    apply_managed_skill_update, archive_managed_skill, create_managed_skill, disable_managed_skill,
+    list_managed_skills, load_managed_skill, managed_skill_dir, restore_managed_skill,
+    save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
 };
-use tracedecay::automation::skill_usage::{
+use tracedecay_agent_hosts::automation::skill_usage::{
     AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
     load_skill_usage_records, record_skill_usage, record_skill_usage_event,
     skill_usage_ledger_path, summarize_skill_usage, summarize_skill_usage_for,
@@ -115,7 +113,7 @@ fn validates_minimum_metadata_and_renders_frontmatter() {
         r#"summary: "Keep repository maintenance guidance current.""#,
         "category: maintenance",
         "targets: [cursor, codex]",
-        "state: pending_approval",
+        "state: active",
         "pinned: false",
         "checksum: sha256:",
         "created_at: ",
@@ -212,24 +210,25 @@ fn checksum_is_deterministic_and_tracks_content_not_state_or_pin() {
 }
 
 #[test]
-fn state_and_pin_lifecycle_is_explicit() {
+fn state_and_pin_lifecycle_preserves_automatic_activation() {
     let mut skill = draft().materialize().unwrap();
     skill.metadata.updated_at = 1;
-    assert_eq!(skill.metadata.state, ManagedSkillState::PendingApproval);
+    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
     assert!(!skill.metadata.pinned);
 
-    skill.set_state(ManagedSkillState::Active);
-    assert!(skill.metadata.updated_at > 1);
-    skill.metadata.updated_at = 1;
-    skill.set_pinned(true);
-    assert!(skill.metadata.updated_at > 1);
-    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-    assert!(skill.metadata.pinned);
-
-    skill.metadata.updated_at = 1;
     skill.set_state(ManagedSkillState::Disabled);
     assert!(skill.metadata.updated_at > 1);
     assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
+    skill.metadata.updated_at = 1;
+    skill.set_pinned(true);
+    assert!(skill.metadata.updated_at > 1);
+    assert_eq!(skill.metadata.state, ManagedSkillState::Disabled);
+    assert!(skill.metadata.pinned);
+
+    skill.metadata.updated_at = 1;
+    skill.set_state(ManagedSkillState::Active);
+    assert!(skill.metadata.updated_at > 1);
+    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
     assert!(skill.metadata.pinned);
 }
 
@@ -237,12 +236,7 @@ fn state_and_pin_lifecycle_is_explicit() {
 async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_revision() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    let active = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
 
     let err = update_managed_skill(
         &profile_root,
@@ -262,9 +256,7 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.summary, active.metadata.summary);
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
-    assert!(reloaded.pending_update.is_none());
-
-    let err = stage_managed_skill_update(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
         &active.metadata.checksum,
@@ -288,13 +280,6 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.category, active.metadata.category);
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
-    assert!(reloaded.pending_update.is_none());
-    assert!(
-        !managed_skill_dir(&profile_root, "repo-hygiene")
-            .unwrap()
-            .join("pending_update.json")
-            .exists()
-    );
 
     let err = update_managed_skill(
         &profile_root,
@@ -315,9 +300,7 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
     assert_eq!(reloaded.metadata.targets, active.metadata.targets);
-    assert!(reloaded.pending_update.is_none());
-
-    let err = stage_managed_skill_update(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
         &active.metadata.checksum,
@@ -339,7 +322,6 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
         .await
         .unwrap();
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
-    assert!(reloaded.pending_update.is_none());
 }
 
 #[tokio::test]
@@ -347,10 +329,8 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
 
-    let skill = create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    assert_eq!(skill.metadata.state, ManagedSkillState::PendingApproval);
+    let skill = create_managed_skill(&profile_root, draft()).await.unwrap();
+    assert_eq!(skill.metadata.state, ManagedSkillState::Active);
     assert!(skill.metadata.created_at > 0);
     assert!(skill.metadata.updated_at >= skill.metadata.created_at);
     let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
@@ -358,12 +338,6 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
     assert!(skill_dir.join("SKILL.md").is_file());
     assert!(skill_dir.join("references/checklist.md").is_file());
 
-    let active = set_managed_skill_state(&profile_root, "repo-hygiene", ManagedSkillState::Active)
-        .await
-        .unwrap();
-    assert_eq!(active.metadata.state, ManagedSkillState::Active);
-    assert_eq!(active.metadata.created_at, skill.metadata.created_at);
-    assert!(active.metadata.updated_at >= skill.metadata.updated_at);
     let disabled =
         set_managed_skill_state(&profile_root, "repo-hygiene", ManagedSkillState::Disabled)
             .await
@@ -382,16 +356,13 @@ async fn managed_skill_store_persists_package_and_lifecycle() {
 }
 
 #[tokio::test]
-async fn managed_skill_store_updates_skill_markdown_on_state_change() {
+async fn managed_skill_store_renders_automatic_activation_in_markdown() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let mut skill = draft().materialize().unwrap();
     skill.set_pinned(true);
     save_managed_skill(&profile_root, &skill).await.unwrap();
 
-    set_managed_skill_state(&profile_root, "repo-hygiene", ManagedSkillState::Active)
-        .await
-        .unwrap();
     let skill_md = std::fs::read_to_string(
         managed_skill_dir(&profile_root, "repo-hygiene")
             .unwrap()
@@ -501,16 +472,10 @@ async fn managed_skill_load_backfills_missing_timestamps() {
 }
 
 #[tokio::test]
-async fn managed_skill_lifecycle_helpers_keep_activation_explicit() {
+async fn managed_skill_lifecycle_helpers_preserve_automatic_activation() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-
-    let active = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
     assert_eq!(active.metadata.state, ManagedSkillState::Active);
 
     let disabled = disable_managed_skill(&profile_root, "repo-hygiene")
@@ -526,44 +491,36 @@ async fn managed_skill_lifecycle_helpers_keep_activation_explicit() {
     let restored = restore_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    assert_eq!(restored.metadata.state, ManagedSkillState::PendingApproval);
+    assert_eq!(restored.metadata.state, ManagedSkillState::Active);
 }
 
 #[tokio::test]
 async fn concurrent_managed_skill_mutations_preserve_both_changes() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
+    create_managed_skill(&profile_root, draft()).await.unwrap();
 
     let pin_root = profile_root.clone();
-    let activate_root = profile_root.clone();
-    let (pinned, activated) = tokio::join!(
+    let state_root = profile_root.clone();
+    let (pinned, disabled) = tokio::join!(
         set_managed_skill_pinned(&pin_root, "repo-hygiene", true),
-        set_managed_skill_state(&activate_root, "repo-hygiene", ManagedSkillState::Active,)
+        set_managed_skill_state(&state_root, "repo-hygiene", ManagedSkillState::Disabled,)
     );
     pinned.unwrap();
-    activated.unwrap();
+    disabled.unwrap();
 
     let persisted = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
     assert!(persisted.metadata.pinned);
-    assert_eq!(persisted.metadata.state, ManagedSkillState::Active);
+    assert_eq!(persisted.metadata.state, ManagedSkillState::Disabled);
 }
 
 #[tokio::test]
 async fn managed_skill_save_syncs_usage_lifecycle_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-
-    let active = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
     let summary = summarize_skill_usage_for(&profile_root, &active)
         .await
         .unwrap();
@@ -587,9 +544,7 @@ async fn managed_skill_save_syncs_usage_lifecycle_metadata() {
 async fn skill_usage_ledger_records_direct_and_analytics_events() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
+    let skill = create_managed_skill(&profile_root, draft()).await.unwrap();
 
     record_skill_usage_event(
         &profile_root,
@@ -675,18 +630,10 @@ async fn skill_usage_ledger_records_direct_and_analytics_events() {
 }
 
 #[tokio::test]
-async fn managed_skill_update_restages_content_changes_for_approval() {
+async fn managed_skill_update_activates_content_changes_immediately() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    let before_update = load_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    let before_update = create_managed_skill(&profile_root, draft()).await.unwrap();
     let created_at = before_update.metadata.created_at;
 
     let updated = update_managed_skill(
@@ -704,7 +651,7 @@ async fn managed_skill_update_restages_content_changes_for_approval() {
     .await
     .unwrap();
 
-    assert_eq!(updated.metadata.state, ManagedSkillState::PendingApproval);
+    assert_eq!(updated.metadata.state, ManagedSkillState::Active);
     assert!(updated.metadata.pinned);
     assert_eq!(updated.metadata.created_at, created_at);
     assert!(updated.metadata.updated_at >= created_at);
@@ -716,35 +663,17 @@ async fn managed_skill_update_restages_content_changes_for_approval() {
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    assert_eq!(
-        reloaded.metadata.summary,
-        "Keep repository maintenance guidance current."
-    );
+    assert_eq!(reloaded.metadata.summary, updated.metadata.summary);
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
-    assert_ne!(reloaded.metadata.checksum, updated.metadata.checksum);
-    assert!(reloaded.pending_update.is_some());
-    assert_eq!(
-        reloaded.pending_update.as_ref().unwrap().metadata.summary,
-        "Updated summary from review evidence."
-    );
-    assert!(!reloaded.render_skill_markdown().contains("Updated summary"));
-
-    let approved = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    assert_eq!(approved.metadata.state, ManagedSkillState::Active);
-    assert_eq!(approved.metadata.summary, updated.metadata.summary);
-    assert_eq!(approved.metadata.checksum, updated.metadata.checksum);
-    assert!(approved.render_skill_markdown().contains("Updated summary"));
+    assert_eq!(reloaded.metadata.checksum, updated.metadata.checksum);
+    assert!(reloaded.render_skill_markdown().contains("Updated summary"));
 }
 
 #[tokio::test]
 async fn managed_skill_update_removes_stale_support_files() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
+    create_managed_skill(&profile_root, draft()).await.unwrap();
     let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
     assert!(skill_dir.join("references/checklist.md").is_file());
 
@@ -768,19 +697,14 @@ async fn managed_skill_update_removes_stale_support_files() {
 }
 
 #[tokio::test]
-async fn staged_managed_skill_update_preserves_active_revision_until_approval() {
+async fn automatic_managed_skill_update_replaces_the_active_revision_immediately() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    let active = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
     let base_checksum = active.metadata.checksum.clone();
     let skill_dir = managed_skill_dir(&profile_root, "repo-hygiene").unwrap();
 
-    let staged = stage_managed_skill_update(
+    let updated = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
         &base_checksum,
@@ -798,88 +722,33 @@ async fn staged_managed_skill_update_preserves_active_revision_until_approval() 
     .await
     .unwrap();
 
-    assert_eq!(staged.metadata.state, ManagedSkillState::PendingApproval);
+    assert_eq!(updated.metadata.state, ManagedSkillState::Active);
     assert_eq!(
-        staged.metadata.summary,
+        updated.metadata.summary,
         "Stage safer repository hygiene guidance."
     );
-    assert_ne!(staged.metadata.checksum, base_checksum);
-    assert!(skill_dir.join("pending_update.json").is_file());
-    assert!(skill_dir.join("references/checklist.md").is_file());
-    assert!(!skill_dir.join("templates/review.md").exists());
-
-    let active_with_pending = load_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
+    assert_ne!(updated.metadata.checksum, base_checksum);
     assert_eq!(
-        active_with_pending.metadata.state,
-        ManagedSkillState::Active
-    );
-    assert_eq!(
-        active_with_pending.metadata.summary,
-        "Keep repository maintenance guidance current."
-    );
-    assert_eq!(active_with_pending.metadata.checksum, base_checksum);
-    assert_eq!(
-        active_with_pending
-            .pending_update
-            .as_ref()
-            .unwrap()
-            .metadata
-            .summary,
+        updated.metadata.summary,
         "Stage safer repository hygiene guidance."
     );
-
-    let approved = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    assert_eq!(approved.metadata.state, ManagedSkillState::Active);
-    assert_eq!(
-        approved.metadata.summary,
-        "Stage safer repository hygiene guidance."
-    );
-    assert!(approved.pending_update.is_none());
-    assert!(!skill_dir.join("pending_update.json").exists());
     assert!(!skill_dir.join("references/checklist.md").exists());
     assert!(skill_dir.join("templates/review.md").is_file());
 
-    let second_base = approved.metadata.checksum.clone();
-    stage_managed_skill_update(
-        &profile_root,
-        "repo-hygiene",
-        &second_base,
-        ManagedSkillUpdate {
-            summary: Some("Discard this staged update.".to_string()),
-            ..ManagedSkillUpdate::default()
-        },
-    )
-    .await
-    .unwrap();
-    let discarded = discard_pending_managed_skill_update(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    assert!(discarded.pending_update.is_none());
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    assert_eq!(
-        reloaded.metadata.summary,
-        "Stage safer repository hygiene guidance."
-    );
-    assert_eq!(reloaded.metadata.checksum, second_base);
+    assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
+    assert_eq!(reloaded.metadata.summary, updated.metadata.summary);
+    assert_eq!(reloaded.metadata.checksum, updated.metadata.checksum);
 }
 
 #[tokio::test]
-async fn staged_managed_skill_update_rejects_no_op_patch() {
+async fn automatic_managed_skill_update_rejects_no_op_patch() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    let active = approve_managed_skill(&profile_root, "repo-hygiene")
-        .await
-        .unwrap();
-    let err = stage_managed_skill_update(
+    let active = create_managed_skill(&profile_root, draft()).await.unwrap();
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
         &active.metadata.checksum,
@@ -900,13 +769,7 @@ async fn staged_managed_skill_update_rejects_no_op_patch() {
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    assert!(reloaded.pending_update.is_none());
-    assert!(
-        !managed_skill_dir(&profile_root, "repo-hygiene")
-            .unwrap()
-            .join("pending_update.json")
-            .exists()
-    );
+    assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
 }
 
 #[tokio::test]
@@ -955,7 +818,7 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     let records = load_skill_usage_records(&profile_root, None).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].skill_id, "repo-hygiene");
-    assert_eq!(records[0].state, Some(ManagedSkillState::PendingApproval));
+    assert_eq!(records[0].state, Some(ManagedSkillState::Active));
     assert!(records[0].pinned);
     assert_eq!(records[0].view_count, 1);
     assert_eq!(records[0].use_count, 1);
@@ -975,13 +838,12 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
 }
 
 #[tokio::test]
-async fn approval_stamps_approved_at_and_usage_baselines() {
+async fn automatic_activation_stamps_activation_time_and_usage_baselines() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
-    assert!(skill.metadata.approved_at.is_none());
+    let skill = create_managed_skill(&profile_root, draft()).await.unwrap();
+    let activated_at = skill.metadata.activated_at.unwrap();
+    assert!(activated_at > 0);
 
     record_skill_usage(
         &profile_root,
@@ -995,21 +857,15 @@ async fn approval_stamps_approved_at_and_usage_baselines() {
     .await
     .unwrap();
 
-    let approved = approve_managed_skill(&profile_root, "repo-hygiene")
+    let summary = summarize_skill_usage_for(&profile_root, &skill)
         .await
         .unwrap();
-    let approved_at = approved.metadata.approved_at.unwrap();
-    assert!(approved_at > 0);
-
-    let summary = summarize_skill_usage_for(&profile_root, &approved)
-        .await
-        .unwrap();
-    assert_eq!(summary.approved_at, Some(approved_at));
-    assert_eq!(summary.view_count_at_approval, Some(1));
-    assert_eq!(summary.use_count_at_approval, Some(0));
+    assert_eq!(summary.activated_at, Some(activated_at));
+    assert_eq!(summary.view_count_at_activation, Some(0));
+    assert_eq!(summary.use_count_at_activation, Some(0));
 
     let reloaded = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    assert_eq!(reloaded.metadata.approved_at, Some(approved_at));
+    assert_eq!(reloaded.metadata.activated_at, Some(activated_at));
 }

@@ -6,13 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay::automation::managed_skills::{
+use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
-    ManagedSupportFile, create_managed_skill_draft, default_managed_skill_targets,
+    ManagedSupportFile, create_managed_skill, default_managed_skill_targets,
     set_managed_skill_state,
 };
-use tracedecay::automation::skill_frontmatter::parse_skill_frontmatter;
-use tracedecay::automation::skill_materialization::{
+use tracedecay_agent_hosts::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay_agent_hosts::automation::skill_materialization::{
     MaterializationHost, MaterializationScope, MaterializeAction, RemoveAction, SkillDrift,
     detect_scopes, doctor_detected_scopes, doctor_scope, materialize_skill,
     reconcile_detected_scopes, reconcile_scope, remove_materialized_skill, resolve_project_root,
@@ -61,14 +61,9 @@ fn draft(id: &str) -> ManagedSkillDraft {
     }
 }
 
-/// Drafts a skill in `profile_root` and flips it to `Active`.
+/// Creates an automatically active skill in `profile_root`.
 async fn activate_skill(profile_root: &Path, id: &str) {
-    create_managed_skill_draft(profile_root, draft(id))
-        .await
-        .unwrap();
-    set_managed_skill_state(profile_root, id, ManagedSkillState::Active)
-        .await
-        .unwrap();
+    create_managed_skill(profile_root, draft(id)).await.unwrap();
 }
 
 fn skill_md(scope: &MaterializationScope, slug: &str) -> PathBuf {
@@ -243,7 +238,7 @@ async fn body_update_re_materializes_the_file() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
-    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -273,7 +268,7 @@ async fn metadata_update_re_materializes_the_file() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -302,7 +297,7 @@ async fn support_update_removes_only_stale_owned_files() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -339,7 +334,7 @@ async fn user_edited_support_file_is_fork_protected() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let mut skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -367,7 +362,7 @@ async fn deactivation_removes_only_owned_artifacts() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -403,7 +398,7 @@ async fn package_symlink_is_rejected_before_materialization() {
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
     std::fs::create_dir_all(scope.skills_dir()).unwrap();
     symlink(&external, scope.skills_dir().join("code-slop-cleanup")).unwrap();
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -433,7 +428,7 @@ async fn nested_support_symlink_is_rejected_before_write() {
     let dir = scope.skills_dir().join("code-slop-cleanup");
     std::fs::create_dir_all(&dir).unwrap();
     symlink(&external, dir.join("references")).unwrap();
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -459,7 +454,7 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -493,7 +488,7 @@ async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -544,7 +539,7 @@ async fn foreign_file_is_never_touched_and_doctor_reports_conflict() {
     std::fs::write(dir.join("SKILL.md"), foreign).unwrap();
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -597,7 +592,7 @@ async fn doctor_reports_missing_and_orphan_drift() {
 
     // Materialize, then deactivate WITHOUT reconciling -> Orphan on disk.
     let scope = MaterializationScope::global(MaterializationHost::Claude, home.clone());
-    let skill = tracedecay::automation::managed_skills::load_managed_skill(
+    let skill = tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(
         &profile_root,
         "code-slop-cleanup",
     )
@@ -673,10 +668,10 @@ async fn reconcile_scope_removes_only_managed_orphans() {
 // Adversarial-review findings on #362/#366 (skill-materialization hardening).
 // ---------------------------------------------------------------------------
 
-use tracedecay::automation::managed_skills::ManagedSkill;
+use tracedecay_agent_hosts::automation::managed_skills::ManagedSkill;
 
 async fn load_skill(profile_root: &Path, id: &str) -> ManagedSkill {
-    tracedecay::automation::managed_skills::load_managed_skill(profile_root, id)
+    tracedecay_agent_hosts::automation::managed_skills::load_managed_skill(profile_root, id)
         .await
         .unwrap()
 }

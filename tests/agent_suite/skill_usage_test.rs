@@ -1,8 +1,8 @@
-use tracedecay::automation::managed_skills::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill_draft,
+use tracedecay_agent_hosts::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, create_managed_skill,
     default_managed_skill_targets,
 };
-use tracedecay::automation::skill_usage::{
+use tracedecay_agent_hosts::automation::skill_usage::{
     AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
     record_skill_usage, record_skill_usage_event, skill_improvement_recommendations,
     stale_skill_recommendations, summarize_skill_usage,
@@ -20,7 +20,7 @@ fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
         provenance: ManagedSkillProvenance {
             source,
             actor: match source {
-                ManagedSkillSource::UserDraft => "user".to_string(),
+                ManagedSkillSource::User => "user".to_string(),
                 _ => "tracedecay".to_string(),
             },
             run_id: Some("run_usage".to_string()),
@@ -32,7 +32,7 @@ fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
 async fn skill_usage_ledger_records_views_uses_patches_and_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill_draft(
+    let skill = create_managed_skill(
         &profile_root,
         draft("repo-hygiene", ManagedSkillSource::AutomationRun),
     )
@@ -175,10 +175,13 @@ async fn analytics_ingest_skips_failed_tracedecay_skill_view_rows() {
         .unwrap();
     assert!(touched.is_empty());
     assert!(
-        tracedecay::automation::skill_usage::load_skill_usage_record(&profile_root, "repo-hygiene")
-            .await
-            .unwrap()
-            .is_none()
+        tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+            &profile_root,
+            "repo-hygiene"
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -240,11 +243,13 @@ async fn analytics_ingest_dedupes_tracedecay_skill_view_by_request_id() {
         .unwrap();
     assert!(second.is_empty());
 
-    let record =
-        tracedecay::automation::skill_usage::load_skill_usage_record(&profile_root, "repo-hygiene")
-            .await
-            .unwrap()
-            .unwrap();
+    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+        &profile_root,
+        "repo-hygiene",
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(record.view_count, 1);
     assert_eq!(record.targets, vec!["codex"]);
 }
@@ -253,7 +258,7 @@ async fn analytics_ingest_dedupes_tracedecay_skill_view_by_request_id() {
 async fn direct_skill_view_marks_matching_analytics_request_imported() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill_draft(
+    let skill = create_managed_skill(
         &profile_root,
         draft("repo-hygiene", ManagedSkillSource::AutomationRun),
     )
@@ -300,11 +305,13 @@ async fn direct_skill_view_marks_matching_analytics_request_imported() {
     .unwrap();
 
     assert!(touched.is_empty());
-    let record =
-        tracedecay::automation::skill_usage::load_skill_usage_record(&profile_root, "repo-hygiene")
-            .await
-            .unwrap()
-            .unwrap();
+    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+        &profile_root,
+        "repo-hygiene",
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(record.view_count, 1);
     assert_eq!(record.targets, vec!["mcp"]);
 }
@@ -343,11 +350,13 @@ async fn analytics_ingest_is_idempotent_and_accepts_bare_skill_name_rows() {
     assert_eq!(first[0].skill_id, "repo-hygiene");
     assert_eq!(first[0].use_count, 1);
 
-    let record =
-        tracedecay::automation::skill_usage::load_skill_usage_record(&profile_root, "repo-hygiene")
-            .await
-            .unwrap()
-            .unwrap();
+    let record = tracedecay_agent_hosts::automation::skill_usage::load_skill_usage_record(
+        &profile_root,
+        "repo-hygiene",
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(record.use_count, 1);
     assert_eq!(record.targets, vec!["cursor"]);
 }
@@ -356,31 +365,29 @@ async fn analytics_ingest_is_idempotent_and_accepts_bare_skill_name_rows() {
 async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let stale_skill = create_managed_skill_draft(
+    let stale_skill = create_managed_skill(
         &profile_root,
         draft("stale-skill", ManagedSkillSource::AutomationRun),
     )
     .await
     .unwrap();
-    let pinned_skill = create_managed_skill_draft(
+    let pinned_skill = create_managed_skill(
         &profile_root,
         draft("pinned-skill", ManagedSkillSource::AutomationRun),
     )
     .await
     .unwrap();
-    let pinned = tracedecay::automation::managed_skills::set_managed_skill_pinned(
+    let pinned = tracedecay_agent_hosts::automation::managed_skills::set_managed_skill_pinned(
         &profile_root,
         &pinned_skill.metadata.id,
         true,
     )
     .await
     .unwrap();
-    let user_skill = create_managed_skill_draft(
-        &profile_root,
-        draft("user-skill", ManagedSkillSource::UserDraft),
-    )
-    .await
-    .unwrap();
+    let user_skill =
+        create_managed_skill(&profile_root, draft("user-skill", ManagedSkillSource::User))
+            .await
+            .unwrap();
 
     record_skill_usage_event(
         &profile_root,
@@ -433,7 +440,7 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
 async fn repeated_skill_patches_recommend_improvement_review() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let skill = create_managed_skill_draft(
+    let skill = create_managed_skill(
         &profile_root,
         draft("review-loop", ManagedSkillSource::AutomationRun),
     )

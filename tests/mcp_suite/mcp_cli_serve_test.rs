@@ -29,14 +29,6 @@ use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::sync::Mutex;
-use tracedecay::automation::managed_skills::{
-    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
-    approve_managed_skill, create_managed_skill_draft,
-};
-use tracedecay::automation::run_ledger::{
-    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    append_run_record, write_run_artifact,
-};
 #[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
@@ -46,6 +38,14 @@ use tracedecay::storage::{EnrollmentMarker, PrivateStoreIo, StorageMode, write_e
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
+use tracedecay_agent_hosts::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
+    create_managed_skill,
+};
+use tracedecay_agent_hosts::automation::run_ledger::{
+    AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
+    append_run_record, write_run_artifact,
+};
 
 #[cfg(unix)]
 static READ_ONLY_SERVE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -84,7 +84,8 @@ fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
         title: title.to_string(),
         summary: format!("{title} summary."),
         category: "maintenance".to_string(),
-        targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+        targets: tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets(
+        ),
         body_markdown: format!("Use {title} before applying repository changes."),
         support_files: vec![
             ManagedSupportFile::new(
@@ -270,21 +271,12 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     let project = init_project_with_file(home.path(), "pub fn skill_stdio_marker() {}\n").await;
     let profile_root = profile_root(home.path());
 
-    create_managed_skill_draft(
-        &profile_root,
-        managed_skill_stdio_draft("pending-stdio-skill", "Pending stdio skill"),
-    )
-    .await
-    .unwrap();
-    create_managed_skill_draft(
+    create_managed_skill(
         &profile_root,
         managed_skill_stdio_draft("active-stdio-skill", "Active stdio skill"),
     )
     .await
     .unwrap();
-    approve_managed_skill(&profile_root, "active-stdio-skill")
-        .await
-        .unwrap();
     let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
@@ -402,7 +394,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             schema_version: 2,
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
-            task: tracedecay::automation::backend::AgentTaskKind::MemoryCurator,
+            task: tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
             task_key: Some("memory_curator".to_string()),
             backend: "codex_app_server".to_string(),
             host_mode: Some("standalone".to_string()),
