@@ -22,6 +22,10 @@ use tracedecay_application::remote::{
         RemoteCapturePortV1, RemoteCaptureReceiptV1, RemoteWriterAuthorityV1,
     },
     replay::{RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1, canonical_remote_event_id_v1},
+    transfer::{
+        RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
+        RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
+    },
 };
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
@@ -53,6 +57,7 @@ mod replay_authority;
 mod replay_recovery;
 mod rows;
 mod schema;
+mod spool_limits;
 mod status;
 
 pub use credential_admission::{RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1};
@@ -620,26 +625,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         }
         validate_previous_frame(&transaction, command)?;
         let encrypted = self.encrypt_frame(&event_id, command)?;
-        let usage = transaction
-            .query(statement(
-                "SELECT COUNT(*), COALESCE(SUM(length(ciphertext)), 0)
-                 FROM remote_spool_frames
-                 WHERE state != 'garbage_collection_eligible'",
-                Vec::new(),
-            )?)
-            .map_err(map_persistence_error)?;
-        let usage = persistence_one_row(usage)?;
-        let event_count = row_u64(&usage, 0)?;
-        let ciphertext_bytes = row_u64(&usage, 1)?;
-        let new_ciphertext_bytes = u64::try_from(encrypted.ciphertext.len())
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
-        if event_count >= self.limits.maximum_events
-            || ciphertext_bytes
-                .checked_add(new_ciphertext_bytes)
-                .is_none_or(|bytes| bytes > self.limits.maximum_ciphertext_bytes)
-        {
-            return Err(RemoteCapturePersistenceErrorV1::Overflow);
-        }
+        spool_limits::enforce(&transaction, self.limits, encrypted.ciphertext.len())?;
         transaction
             .execute(statement(
                 "INSERT INTO remote_spool_frames (
@@ -668,6 +654,197 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
             sequence: command.sequence.sequence,
             disposition: RemoteCaptureDispositionV1::CapturedPending,
         })
+    }
+}
+
+impl RemoteSqliteStorageV1 {
+    /// Exports one locally encrypted frame for an authenticated reconnect
+    /// upload. The receiving node still decrypts and validates it with the
+    /// presented enrollment credential before it can enter that node's spool.
+    pub fn export_frame_transfer(
+        &self,
+        event_id: &str,
+        expires_at_micros: i64,
+    ) -> Result<RemoteFrameTransferRequestV1, RemoteSqliteStorageErrorV1> {
+        let frame = self
+            .load_replay_frame(event_id)
+            .map_err(RemoteSqliteStorageErrorV1::from)?;
+        let rows = query(
+            &self.handle,
+            "SELECT key_revision, nonce, ciphertext, frame_digest, state
+             FROM remote_spool_frames WHERE event_id = ?1",
+            vec![text(event_id)],
+        )?;
+        let row = one_row(rows)?;
+        let key_revision = row_u64(&row, 0).map_err(RemoteSqliteStorageErrorV1::from)?;
+        let nonce = row_blob(&row, 1).map_err(RemoteSqliteStorageErrorV1::from)?;
+        let nonce: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        let ciphertext = row_blob(&row, 2)
+            .map_err(RemoteSqliteStorageErrorV1::from)?
+            .to_vec();
+        let frame_digest = ManifestDigest::new(
+            row_text(&row, 3)
+                .map_err(RemoteSqliteStorageErrorV1::from)?
+                .to_owned(),
+        )
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        if row_text(&row, 4).map_err(RemoteSqliteStorageErrorV1::from)? != "pending" {
+            return Err(RemoteSqliteStorageErrorV1::Conflict);
+        }
+        let observed_authority_epoch = frame.capture.writer.authority.fence.authority_epoch.0;
+        Ok(RemoteFrameTransferRequestV1 {
+            event_id: event_id.to_owned(),
+            enrollment_id: frame.capture.enrollment_id,
+            enrollment_revision: frame.capture.enrollment_revision,
+            node_id: frame.capture.node_id,
+            writer: frame.capture.writer,
+            policy_revision: frame.capture.policy_revision,
+            sequence: frame.capture.sequence,
+            frame_digest,
+            key_revision,
+            nonce,
+            ciphertext,
+            observed_authority_epoch,
+            expires_at_micros,
+        })
+    }
+
+    fn transfer_pending_frame(
+        &self,
+        request: &RemoteFrameTransferRequestV1,
+    ) -> Result<RemoteFrameTransferReceiptV1, RemoteFrameTransferErrorV1> {
+        let capture = self
+            .decrypt_frame(
+                &request.event_id,
+                request.key_revision,
+                request.nonce,
+                request.ciphertext.clone(),
+            )
+            .map_err(map_transfer_persistence_error)?;
+        let digest =
+            canonical_sha256(&capture).map_err(|_| RemoteFrameTransferErrorV1::Corruption)?;
+        let canonical_event = canonical_remote_event_id_v1(&capture)
+            .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?;
+        if canonical_event != request.event_id
+            || digest != request.frame_digest
+            || capture.enrollment_id != request.enrollment_id
+            || capture.enrollment_revision != request.enrollment_revision
+            || capture.node_id != request.node_id
+            || capture.writer != request.writer
+            || capture.policy_revision != request.policy_revision
+            || capture.sequence != request.sequence
+        {
+            return Err(RemoteFrameTransferErrorV1::InvalidFrame);
+        }
+        let transaction = self
+            .handle
+            .begin_immediate()
+            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+        let existing = transaction
+            .query(
+                statement(
+                    "SELECT event_id, frame_digest FROM remote_spool_frames
+                     WHERE enrollment_id = ?1 AND sequence = ?2",
+                    vec![
+                        text(request.enrollment_id.as_str()),
+                        ExactSqlValue::Integer(
+                            i64::try_from(request.sequence.sequence)
+                                .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
+                        ),
+                    ],
+                )
+                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?,
+            )
+            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+        if let Some(row) = existing.rows.first() {
+            let event_id = row_text(row, 0).map_err(map_transfer_persistence_error)?;
+            let frame_digest = row_text(row, 1).map_err(map_transfer_persistence_error)?;
+            if event_id != request.event_id || frame_digest != request.frame_digest.as_str() {
+                transaction
+                    .rollback()
+                    .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+                return Err(RemoteFrameTransferErrorV1::Corruption);
+            }
+            transaction
+                .commit()
+                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+            return Ok(RemoteFrameTransferReceiptV1 {
+                event_id: request.event_id.clone(),
+                sequence: request.sequence.sequence,
+                disposition: RemoteFrameTransferDispositionV1::AlreadyTransferred,
+            });
+        }
+        validate_previous_frame(&transaction, &capture).map_err(|error| match error {
+            RemoteCapturePersistenceErrorV1::SequenceGap => RemoteFrameTransferErrorV1::SequenceGap,
+            _ => RemoteFrameTransferErrorV1::Corruption,
+        })?;
+        spool_limits::enforce(&transaction, self.limits, request.ciphertext.len())
+            .map_err(map_transfer_persistence_error)?;
+        transaction
+            .execute(
+                statement(
+                    "INSERT INTO remote_spool_frames (
+                        event_id, enrollment_id, sequence, previous_event_id, frame_digest,
+                        key_revision, nonce, ciphertext, state, captured_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                    vec![
+                        text(&request.event_id),
+                        text(request.enrollment_id.as_str()),
+                        ExactSqlValue::Integer(
+                            i64::try_from(request.sequence.sequence)
+                                .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
+                        ),
+                        optional_text(request.sequence.previous_event_id.as_deref()),
+                        text(request.frame_digest.as_str()),
+                        ExactSqlValue::Integer(
+                            i64::try_from(request.key_revision)
+                                .map_err(|_| RemoteFrameTransferErrorV1::Corruption)?,
+                        ),
+                        ExactSqlValue::Blob(request.nonce.to_vec()),
+                        ExactSqlValue::Blob(request.ciphertext.clone()),
+                        ExactSqlValue::Integer(capture.captured_at.0),
+                    ],
+                )
+                .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?,
+            )
+            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| RemoteFrameTransferErrorV1::Unavailable)?;
+        Ok(RemoteFrameTransferReceiptV1 {
+            event_id: request.event_id.clone(),
+            sequence: request.sequence.sequence,
+            disposition: RemoteFrameTransferDispositionV1::TransferredPending,
+        })
+    }
+}
+
+impl RemoteFrameTransferPortV1 for RemoteSqliteStorageV1 {
+    fn current_writer_authority(
+        &self,
+        writer: &RemoteWriterAuthorityV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+        <Self as RemoteCapturePortV1>::current_writer_authority(self, writer)
+    }
+
+    fn transfer_pending(
+        &self,
+        request: &RemoteFrameTransferRequestV1,
+    ) -> Result<RemoteFrameTransferReceiptV1, RemoteFrameTransferErrorV1> {
+        self.transfer_pending_frame(request)
+    }
+}
+
+fn map_transfer_persistence_error(
+    error: RemoteCapturePersistenceErrorV1,
+) -> RemoteFrameTransferErrorV1 {
+    match error {
+        RemoteCapturePersistenceErrorV1::SequenceGap => RemoteFrameTransferErrorV1::SequenceGap,
+        RemoteCapturePersistenceErrorV1::Corruption => RemoteFrameTransferErrorV1::Corruption,
+        RemoteCapturePersistenceErrorV1::Overflow => RemoteFrameTransferErrorV1::Overflow,
+        _ => RemoteFrameTransferErrorV1::Unavailable,
     }
 }
 

@@ -11,6 +11,7 @@ pub mod query;
 pub mod recovery;
 pub mod replay;
 pub mod status;
+pub mod transfer;
 
 #[cfg(test)]
 mod query_tests;

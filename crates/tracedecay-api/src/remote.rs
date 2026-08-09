@@ -37,6 +37,9 @@ use tracedecay_application::remote::recovery::{
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
 use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::transfer::{
+    RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
+};
 use tracedecay_application::{
     ApplicationProblemKind, CancellationSignal, RequestId, ResultContractRef,
 };
@@ -44,7 +47,10 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::SchemaId;
 
 const BEARER_PREFIX: &[u8] = b"Bearer ";
-const MAX_REMOTE_HTTP_BODY_BYTES: usize = 1024 * 1024;
+// One-mebibyte encrypted frames are represented as JSON byte arrays on this
+// versioned wire and can occupy nearly four times their binary size. The
+// application contract still enforces the exact one-mebibyte binary bound.
+const MAX_REMOTE_HTTP_BODY_BYTES: usize = 5 * 1024 * 1024;
 pub const REMOTE_ENROLLMENT_CREDENTIAL_HEADER: &str = "x-tracedecay-enrollment-credential";
 
 /// Parsed HTTP credential header. It cannot be cloned, serialized, or logged.
@@ -236,6 +242,7 @@ where
     Port: RemoteEnrollmentProtocolPortV1
         + RemoteProtocolPortV1<RemoteCaptureRequestV1, Output = RemoteCaptureReceiptV1>
         + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
+        + RemoteProtocolPortV1<RemoteFrameTransferRequestV1, Output = RemoteFrameTransferReceiptV1>
         + RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1>
         + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
         + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
@@ -258,6 +265,10 @@ where
         .route(
             "/replay",
             post(protocol_route::<Port, RemoteReplayRequestV1>),
+        )
+        .route(
+            "/frames/transfer",
+            post(protocol_route::<Port, RemoteFrameTransferRequestV1>),
         )
         .route("/query", post(protocol_route::<Port, RemoteQueryRequestV1>))
         .route("/backup", post(protocol_route::<Port, BackupRequestV1>))

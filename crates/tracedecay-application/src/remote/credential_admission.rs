@@ -20,6 +20,7 @@ use super::protocol::{EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolR
 use super::query::RemoteQueryRequestV1;
 use super::recovery::{BackupRequestV1, PromotionConfirmationV1, StagedRestoreConfirmationV1};
 use super::replay::RemoteReplayRequestV1;
+use super::transfer::RemoteFrameTransferRequestV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialClassV1 {
@@ -33,6 +34,7 @@ pub enum RemoteCredentialClassV1 {
 pub enum RemoteCredentialUseV1 {
     InitialEnrollment,
     CaptureOffline,
+    TransferFrame,
     Replay,
     Query,
     CreateBackup,
@@ -45,6 +47,7 @@ impl RemoteCredentialUseV1 {
         match self {
             Self::InitialEnrollment => RemoteCredentialClassV1::EnrollmentGrant,
             Self::CaptureOffline
+            | Self::TransferFrame
             | Self::Replay
             | Self::Query
             | Self::CreateBackup
@@ -57,6 +60,7 @@ impl RemoteCredentialUseV1 {
         match self {
             Self::InitialEnrollment => None,
             Self::CaptureOffline => Some(RemoteCapabilityV1::CaptureOffline),
+            Self::TransferFrame => Some(RemoteCapabilityV1::TransferFrame),
             Self::Replay => Some(RemoteCapabilityV1::Replay),
             Self::Query => Some(RemoteCapabilityV1::Query),
             Self::CreateBackup => Some(RemoteCapabilityV1::CreateBackup),
@@ -381,6 +385,30 @@ impl RemoteAuthenticatedSessionV1 {
         }
         Ok(())
     }
+
+    pub fn bind_frame_transfer(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        self.bind_protocol(request)?;
+        request
+            .body
+            .validate(request.sent_at.0)
+            .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)?;
+        let RemoteCredentialAuthorityRecordV1::Enrollment { enrollment, .. } = &self.record else {
+            return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
+        };
+        if self.use_case != RemoteCredentialUseV1::TransferFrame
+            || request.body.enrollment_id != enrollment.enrollment_id
+            || request.body.enrollment_revision != enrollment.revision
+            || request.body.node_id != enrollment.node_id
+            || request.body.writer.scope != enrollment.scope
+            || request.body.key_revision != enrollment.revision
+        {
+            return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
+        }
+        Ok(())
+    }
 }
 
 /// Application-owned binding between a route's typed body and the credential
@@ -436,6 +464,22 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
         request: &RemoteProtocolRequestV1<Self>,
     ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
         bind_protocol_body(session, request, Self::CREDENTIAL_USE)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for RemoteFrameTransferRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::TransferFrame;
+    const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn execution_expires_at(&self) -> Option<UtcMicros> {
+        Some(UtcMicros(self.expires_at_micros))
+    }
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        session.bind_frame_transfer(request)
     }
 }
 
@@ -605,7 +649,9 @@ where
     ) -> Result<RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1> {
         if !matches!(
             session.use_case,
-            RemoteCredentialUseV1::PublishRestore | RemoteCredentialUseV1::Promote
+            RemoteCredentialUseV1::PublishRestore
+                | RemoteCredentialUseV1::TransferFrame
+                | RemoteCredentialUseV1::Promote
         ) {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }

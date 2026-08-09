@@ -31,6 +31,9 @@ use tracedecay_application::remote::{
         RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
         RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
     },
+    transfer::{
+        RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
+    },
 };
 use tracedecay_application::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
@@ -49,6 +52,8 @@ use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
 };
+
+mod transfer;
 
 use crate::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -152,6 +157,16 @@ fn fixture() -> Fixture {
         handle,
         binding,
     }
+}
+
+fn spool_frame_count(fixture: &Fixture) -> u64 {
+    let rows = query(
+        &fixture.handle,
+        "SELECT COUNT(*) FROM remote_spool_frames",
+        Vec::new(),
+    )
+    .unwrap();
+    row_u64(&rows.rows[0], 0).unwrap()
 }
 
 struct TestKeyring(Arc<RemoteSpoolKeyV1>);

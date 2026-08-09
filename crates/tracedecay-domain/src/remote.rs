@@ -129,6 +129,7 @@ pub enum RemoteCapabilityV1 {
     DiscoverAuthority,
     RotateCredential,
     CaptureOffline,
+    TransferFrame,
     Replay,
     Query,
     RefreshReplica,

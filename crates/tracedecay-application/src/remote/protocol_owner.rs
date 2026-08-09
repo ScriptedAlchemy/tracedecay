@@ -22,12 +22,16 @@ use super::{
         StagedRestoreConfirmationV1, StagedRestoreProgressV1,
     },
     replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1},
+    transfer::{RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1},
 };
 
 pub type RemoteCaptureProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<RemoteCaptureRequestV1, Output = RemoteCaptureReceiptV1> + Send + Sync;
 pub type RemoteReplayProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1> + Send + Sync;
+pub type RemoteFrameTransferProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<RemoteFrameTransferRequestV1, Output = RemoteFrameTransferReceiptV1>
+    + Send
+    + Sync;
 pub type RemoteQueryProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1> + Send + Sync;
 pub type RemoteBackupProtocolOwnerPortV1 =
@@ -42,6 +46,7 @@ pub struct RemoteProtocolOwnerV1 {
     enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
     capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
     replay: Arc<RemoteReplayProtocolOwnerPortV1>,
+    frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
     query: Arc<RemoteQueryProtocolOwnerPortV1>,
     backup: Arc<RemoteBackupProtocolOwnerPortV1>,
     restore: Arc<RemoteRestoreProtocolOwnerPortV1>,
@@ -53,6 +58,7 @@ impl RemoteProtocolOwnerV1 {
         enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
         capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
         replay: Arc<RemoteReplayProtocolOwnerPortV1>,
+        frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
         query: Arc<RemoteQueryProtocolOwnerPortV1>,
         backup: Arc<RemoteBackupProtocolOwnerPortV1>,
         restore: Arc<RemoteRestoreProtocolOwnerPortV1>,
@@ -62,6 +68,7 @@ impl RemoteProtocolOwnerV1 {
             enrollment,
             capture,
             replay,
+            frame_transfer,
             query,
             backup,
             restore,
@@ -109,6 +116,11 @@ macro_rules! delegate_remote_operation {
 
 delegate_remote_operation!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1, capture);
 delegate_remote_operation!(RemoteReplayRequestV1, RemoteReplayOutcomeV1, replay);
+delegate_remote_operation!(
+    RemoteFrameTransferRequestV1,
+    RemoteFrameTransferReceiptV1,
+    frame_transfer
+);
 delegate_remote_operation!(RemoteQueryRequestV1, RemoteQueryResultV1, query);
 delegate_remote_operation!(BackupRequestV1, BackupOperationStateV1, backup);
 delegate_remote_operation!(
