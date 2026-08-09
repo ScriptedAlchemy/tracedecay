@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tracedecay_application::remote::recovery::RecoveryAuthorityExpectationV1;
-use tracedecay_domain::{ManifestDigest, ProjectId, RemoteWriterFenceV1, UtcMicros};
+use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{ShardWatermarkV1, StoreShardIdV1};
@@ -562,62 +562,9 @@ pub(super) fn sha256_file(path: &Path) -> Result<[u8; 32], RemoteRecoveryPhysica
     Ok(hasher.finalize().into())
 }
 
-pub(super) fn require_current_writer_fence(
-    current: Option<(RemoteWriterFenceV1, u64)>,
-    expected: &RemoteWriterFenceV1,
-) -> Result<u64, RemoteRecoveryPhysicalEffectErrorV1> {
-    match current {
-        Some((fence, frontier)) if fence == *expected => Ok(frontier),
-        Some((fence, _)) if fence.fences(expected) => {
-            Err(RemoteRecoveryPhysicalEffectErrorV1::StaleAuthority)
-        }
-        _ => Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn writer_fence(authority_epoch: u64, authority_node_id: &str) -> RemoteWriterFenceV1 {
-        serde_json::from_value(serde_json::json!({
-            "brain_id": "brain.remote",
-            "shard_id": "shard.remote",
-            "generation_id": "generation.remote",
-            "placement_revision": authority_epoch,
-            "authority_epoch": authority_epoch,
-            "authority_node_id": authority_node_id,
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn newer_same_lineage_authority_is_stale_not_corrupt() {
-        let expected = writer_fence(8, "node.old");
-        let current = writer_fence(9, "node.promoted");
-
-        assert_eq!(
-            require_current_writer_fence(Some((expected.clone(), 41)), &expected),
-            Ok(41)
-        );
-        assert_eq!(
-            require_current_writer_fence(Some((current, 42)), &expected),
-            Err(RemoteRecoveryPhysicalEffectErrorV1::StaleAuthority)
-        );
-        let unrelated: RemoteWriterFenceV1 = serde_json::from_value(serde_json::json!({
-            "brain_id": "brain.other",
-            "shard_id": "shard.remote",
-            "generation_id": "generation.remote",
-            "placement_revision": 9,
-            "authority_epoch": 9,
-            "authority_node_id": "node.other",
-        }))
-        .unwrap();
-        assert_eq!(
-            require_current_writer_fence(Some((unrelated, 43)), &expected),
-            Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption)
-        );
-    }
 
     fn project_database(path: &Path, marker: &str) {
         let connection = rusqlite::Connection::open(path).unwrap();

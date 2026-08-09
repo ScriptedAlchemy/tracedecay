@@ -39,8 +39,7 @@ mod artifacts;
 use artifacts::{
     BackupSnapshotV1, RemoteBackupManifestV1, classify_runtime_error, converge_interrupted_restore,
     digest_bytes, digest_from_bytes, read_json_manifest, replay_current_authority_state,
-    require_current_writer_fence, safe_digest_suffix, sha256_bytes, sha256_file,
-    validate_isolated_restore,
+    safe_digest_suffix, sha256_bytes, sha256_file, validate_isolated_restore,
 };
 
 #[derive(Clone)]
@@ -419,13 +418,16 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .cloned()
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let authority_key = authority_key(expected)?;
-        let frontier = require_current_writer_fence(
-            self.replay
-                .current_writer_fence(project_id, authority_key)
-                .map_err(classify_runtime_error)?,
-            &writer.authority.fence,
-        )?;
-        Ok((writer.authority, frontier))
+        match self
+            .replay
+            .current_writer_fence(project_id, authority_key)
+            .map_err(classify_runtime_error)?
+        {
+            Some((fence, frontier)) if fence == writer.authority.fence => {
+                Ok((writer.authority, frontier))
+            }
+            _ => Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption),
+        }
     }
 
     fn required_promotion_sink_ids(

@@ -46,12 +46,11 @@ where
         }
         if matches!(
             existing.state.as_str(),
-            "cancelled" | "timed_out" | "rolled_back" | "stale_authority"
+            "cancelled" | "timed_out" | "rolled_back"
         ) {
             return Err(match existing.state.as_str() {
                 "cancelled" => RemoteRecoveryOperationErrorV1::Cancelled,
                 "timed_out" => RemoteRecoveryOperationErrorV1::TimedOut,
-                "stale_authority" => RemoteRecoveryOperationErrorV1::StaleAuthority,
                 _ => RemoteRecoveryOperationErrorV1::RecoveryRequired,
             });
         }
@@ -376,7 +375,6 @@ pub(super) fn record_physical_failure(
         RemoteRecoveryPhysicalEffectErrorV1::RolledBack => "rolled_back",
         RemoteRecoveryPhysicalEffectErrorV1::Cancelled => "cancelled",
         RemoteRecoveryPhysicalEffectErrorV1::TimedOut => "timed_out",
-        RemoteRecoveryPhysicalEffectErrorV1::StaleAuthority => "stale_authority",
         RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired
         | RemoteRecoveryPhysicalEffectErrorV1::Unavailable
         | RemoteRecoveryPhysicalEffectErrorV1::Corruption => "forward_recovery_required",
