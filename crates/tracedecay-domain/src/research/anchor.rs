@@ -960,6 +960,32 @@ impl RetrievalAnchorRecordV2 {
         self.ingested_at
     }
 
+    /// Whether two records describe the same immutable retrieval evidence.
+    ///
+    /// `ingested_at` records the local attempt that first materialized the
+    /// anchor; it is not part of the owner-bound anchor identity. Concurrent
+    /// first writers may therefore observe different ingest clocks while
+    /// carrying exactly the same target and authority. Every other field must
+    /// remain byte-equivalent for the later writer to be an idempotent replay.
+    pub fn is_semantic_replay_of(&self, other: &Self) -> bool {
+        self.anchor_id == other.anchor_id
+            && self.target == other.target
+            && self.owner == other.owner
+            && self.aliases == other.aliases
+            && self.occurred_at == other.occurred_at
+            && self.evidence_class == other.evidence_class
+            && self.source_generation == other.source_generation
+            && self.projection_generation == other.projection_generation
+            && self.projection_watermark == other.projection_watermark
+            && self.coverage == other.coverage
+            && self.source_observations == other.source_observations
+            && self.source_anchors == other.source_anchors
+            && self.authorization == other.authorization
+            && self.payload_access == other.payload_access
+            && self.retention_class == other.retention_class
+            && self.durability == other.durability
+    }
+
     pub fn evidence_class(&self) -> EvidenceClass {
         self.evidence_class
     }
@@ -1133,6 +1159,29 @@ impl RetrievalAnchorRecordV3 {
 
     pub fn ingested_at(&self) -> UtcMicros {
         self.ingested_at
+    }
+
+    /// V3 owner/privacy binding is immutable; the local ingest clock is not.
+    /// Exact re-observation may therefore replay one anchor under a later
+    /// materialization timestamp while every authority-bearing field remains
+    /// byte-equivalent.
+    pub fn is_semantic_replay_of(&self, other: &Self) -> bool {
+        self.anchor_id == other.anchor_id
+            && self.target == other.target
+            && self.owner == other.owner
+            && self.aliases == other.aliases
+            && self.occurred_at == other.occurred_at
+            && self.evidence_class == other.evidence_class
+            && self.source_generation == other.source_generation
+            && self.projection_generation == other.projection_generation
+            && self.projection_watermark == other.projection_watermark
+            && self.coverage == other.coverage
+            && self.source_observations == other.source_observations
+            && self.source_anchors == other.source_anchors
+            && self.authorization == other.authorization
+            && self.payload_access == other.payload_access
+            && self.retention_class == other.retention_class
+            && self.durability == other.durability
     }
 
     pub fn evidence_class(&self) -> EvidenceClass {
@@ -1478,7 +1527,9 @@ fn derive_v3_anchor_id(
 
     owner.validate()?;
     target.validate()?;
-    if let Some(legacy) = target.as_v2() {
+    if !matches!(target, RetrievalAnchorTargetV3::GitTopology(_))
+        && let Some(legacy) = target.as_v2()
+    {
         return derive_anchor_id(&owner.observation_scope(), &legacy);
     }
     let digest = canonical_sha256(&Identity {
@@ -1487,6 +1538,19 @@ fn derive_v3_anchor_id(
         target,
     })?;
     RetrievalAnchorId::new(format!("retrieval.v3.{}", digest.as_str()))
+}
+
+/// Derives the exact profile/project/privacy-bound identity for a Git topology
+/// target before publication. Callers still must publish and resolve the full
+/// V3 record through the canonical retrieval-anchor authority.
+pub fn derive_git_topology_anchor_id_v3(
+    owner: &AnchorOwnerBindingV1,
+    target: &GitTopologyAnchorTargetV1,
+) -> Result<RetrievalAnchorId, DomainError> {
+    derive_v3_anchor_id(
+        owner,
+        &RetrievalAnchorTargetV3::GitTopology(Box::new(target.clone())),
+    )
 }
 
 fn validate_owner(owner: &ObservationScopeV1) -> Result<(), DomainError> {
