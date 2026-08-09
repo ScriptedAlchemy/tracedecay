@@ -1,45 +1,22 @@
 //! Kilo CLI agent integration.
 //!
-//! Handles registration of the tracedecay MCP server in Kilo CLI config files.
-//! Kilo uses the `mcp` key (not `mcpServers`) with entries having `type`,
-//! `command` (as array), and `enabled` fields.
+//! Owns the profile-wide Kilo CLI MCP registration lifecycle. Kilo uses the `mcp` key (not
+//! `mcpServers`) with entries having `type`, `command` (as array), and
+//! `enabled` fields.
 //!
-//! ## Why this host is not driven through its own CLI (verified 2026-08-08)
-//!
-//! The owner policy is CLI-first: a host's own command is the preferred
-//! install/uninstall mechanism and writing its config by hand is a fallback
-//! that must be justified. Kilo's `kilo mcp` surface was probed against its
-//! published reference and fails that bar on two independent counts:
-//!
-//! 1. **It cannot carry this registration.** `kilo mcp add` accepts only
-//!    `--url`, `--env`, and `--header`; there is no `--command`/`--args` flag,
-//!    so an arbitrary local stdio server — which is exactly what `tracedecay
-//!    serve` is — has no representation on the command line. `--env` only
-//!    decorates a server resolved some other way.
-//! 2. **There is no removal counterpart.** The documented subcommands are
-//!    `add | list | auth | logout | debug`. `logout` clears credentials, not a
-//!    registration, so an adopted install could never be uninstalled through
-//!    the same authority that created it.
-//!
-//! Adopting a command that can register a server we cannot describe and can
-//! never remove would be strictly worse than the config write below, which is
-//! ownership-marked, backed up, and reversible.
-//!
-//! Sources:
-//! - <https://kilo.ai/docs/code-with-ai/platforms/cli-reference> (flag set)
-//! - <https://kilo.ai/docs/automate/mcp/using-in-cli> (no remove/delete; the
-//!   documented way to stop a server is `enabled: false` in the config file)
-//! - <https://github.com/Kilo-Org/kilocode/issues/7079> (`kilo mcp add` writes
-//!   the OpenCode-derived config; closed "not planned")
-//!
-//! Re-open this decision if Kilo publishes a `--command`/`--args` form *and* a
-//! `mcp remove`; both are required, not either.
+//! Kilo documents local stdio servers directly in `kilo.jsonc`; its CLI does
+//! not expose an equivalent reversible local-server command. TraceDecay merges
+//! only `mcp.tracedecay` and removes only that key. Kilo plugins and hooks stay
+//! uninstalled until a real native fixture admits their protocol.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels,
-    doctor_check_mcp_registration, load_jsonc_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
+    install_mcp_server_entry, load_jsonc_file, load_jsonc_file_strict, uninstall_mcp_server_entry,
 };
 
 /// Kilo CLI agent.
@@ -62,10 +39,6 @@ impl AgentIntegration for KiloIntegration {
         "kilo"
     }
 
-    fn supports_local_install(&self) -> bool {
-        true
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKilo CLI integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
@@ -73,10 +46,14 @@ impl AgentIntegration for KiloIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
         use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return State::Missing;
+        }
 
         let path = kilo_config_path(&ctx.home);
         let Ok(bytes) = std::fs::read_to_string(path) else {
@@ -104,6 +81,56 @@ impl AgentIntegration for KiloIntegration {
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         Some(kilo_config_path(home))
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = kilo_config_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            install_mcp_server_entry(
+                &kilo_config_path(&ctx.home),
+                "mcp",
+                serde_json::json!({
+                    "type": "local",
+                    "command": [ctx.tracedecay_bin.clone(), "serve"],
+                    "enabled": true
+                }),
+                "Kilo",
+                load_jsonc_file_strict,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            uninstall_mcp_server_entry(
+                &kilo_config_path(&ctx.home),
+                "mcp",
+                load_jsonc_file,
+                McpUninstallPolicy::default(),
+            );
+        }
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {

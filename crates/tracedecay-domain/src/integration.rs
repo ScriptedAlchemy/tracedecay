@@ -165,8 +165,8 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         HostKindV1::CursorCloud => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
-            Unavailable(CheckedInEvidenceMissing),
-            Unavailable(HostRegistrationUnsupported),
+            Degraded(HostRegistrationUnsupported),
+            Degraded(HostRegistrationUnsupported),
             Unavailable(HostRegistrationUnsupported),
         ),
         HostKindV1::Codex | HostKindV1::Hermes => (
@@ -183,10 +183,30 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Supported,
             Supported,
         ),
-        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => (
+        HostKindV1::ClineFamily => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+            Unavailable(CheckedInEvidenceMissing),
+            Unavailable(CheckedInEvidenceMissing),
+        ),
+        // Cline's official hook protocol is documented, but the checked-in
+        // evidence packet records that no native runtime was available and no
+        // payload was captured. Its documented profile MCP document is a
+        // reversible managed-merge lifecycle independent of hook evidence.
+        HostKindV1::Cline => (
+            Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
+            Unavailable(NativeFixtureLimited),
+            Supported,
+            Supported,
+        ),
+        // Roo and Kilo have no admitted native hook protocol, but each has a
+        // documented local-stdio MCP config with an exact owned server key.
+        HostKindV1::RooCode | HostKindV1::Kilo => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
             Supported,
             Supported,
         ),

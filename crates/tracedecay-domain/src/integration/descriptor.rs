@@ -83,7 +83,6 @@ pub enum HostComponentV1 {
 pub enum HostAssetRenderPolicyV1 {
     ManagedEmbedded,
     StagedManualPlugin,
-    ConfigurationOnly,
     Unavailable,
 }
 
@@ -103,9 +102,6 @@ pub enum HostProjectRegistrationPathV1 {
     CodexProjectDirectory,
     HermesProjectDirectory,
     KiroProjectDirectory,
-    ClineProjectDirectory,
-    RooCodeProjectDirectory,
-    KiloProjectDirectory,
     KimiProjectDirectory,
     OpenCodeProjectDirectory,
     Unavailable,
@@ -119,9 +115,6 @@ impl HostProjectRegistrationPathV1 {
             Self::CodexProjectDirectory => Some(".codex"),
             Self::HermesProjectDirectory => Some(".hermes"),
             Self::KiroProjectDirectory => Some(".kiro"),
-            Self::ClineProjectDirectory => Some(".cline"),
-            Self::RooCodeProjectDirectory => Some(".roo"),
-            Self::KiloProjectDirectory => Some(".config/kilo"),
             Self::KimiProjectDirectory => Some(".kimi-code"),
             Self::OpenCodeProjectDirectory => Some(".config/opencode"),
             Self::Unavailable => None,
@@ -211,15 +204,13 @@ impl HostKindV1 {
 
 pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
     use HostActivationPolicyV1::{Managed, ManualHostInstall, Unsupported};
-    use HostAssetRenderPolicyV1::{
-        ConfigurationOnly, ManagedEmbedded, StagedManualPlugin, Unavailable,
-    };
+    use HostAssetRenderPolicyV1::{ManagedEmbedded, StagedManualPlugin, Unavailable};
     use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
     use HostHookMappingV1::{Native, NotApplicable};
     use HostProjectRegistrationPathV1::{
-        ClaudeProjectDirectory, ClineProjectDirectory, CodexProjectDirectory,
-        CursorProjectDirectory, HermesProjectDirectory, KiloProjectDirectory, KimiProjectDirectory,
-        KiroProjectDirectory, OpenCodeProjectDirectory, RooCodeProjectDirectory,
+        ClaudeProjectDirectory, CodexProjectDirectory, CursorProjectDirectory,
+        HermesProjectDirectory, KimiProjectDirectory, KiroProjectDirectory,
+        OpenCodeProjectDirectory,
     };
 
     let (cli_id, slug, hook, components, asset_render_policy, activation_policy, path) = match host
@@ -264,7 +255,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "hermes",
             "hermes",
             Native(NativeHostIdentityV1::Hermes),
-            vec![Core, ContextMcp, OperatorMcp],
+            vec![Core],
             ManagedEmbedded,
             Managed,
             HermesProjectDirectory,
@@ -291,34 +282,34 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "cline",
             "cline",
             HostHookMappingV1::Unavailable(NativeHostIdentityV1::Cline),
-            vec![ContextMcp, OperatorMcp],
-            ConfigurationOnly,
+            vec![ContextMcp],
+            ManagedEmbedded,
             Managed,
-            ClineProjectDirectory,
+            HostProjectRegistrationPathV1::Unavailable,
         ),
         HostKindV1::RooCode => (
             "roo-code",
             "roo-code",
             HostHookMappingV1::Unavailable(NativeHostIdentityV1::RooCode),
-            vec![ContextMcp, OperatorMcp],
-            ConfigurationOnly,
+            vec![ContextMcp],
+            ManagedEmbedded,
             Managed,
-            RooCodeProjectDirectory,
+            HostProjectRegistrationPathV1::Unavailable,
         ),
         HostKindV1::Kilo => (
             "kilo",
             "kilo",
             HostHookMappingV1::Unavailable(NativeHostIdentityV1::Kilo),
-            vec![ContextMcp, OperatorMcp],
-            ConfigurationOnly,
+            vec![ContextMcp],
+            ManagedEmbedded,
             Managed,
-            KiloProjectDirectory,
+            HostProjectRegistrationPathV1::Unavailable,
         ),
         HostKindV1::KimiCode => (
             "kimi",
             "kimi-code",
             Native(NativeHostIdentityV1::KimiCode),
-            vec![Core, ContextMcp, OperatorMcp],
+            vec![Core],
             StagedManualPlugin,
             ManualHostInstall,
             KimiProjectDirectory,
@@ -327,7 +318,7 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "opencode",
             "opencode",
             Native(NativeHostIdentityV1::OpenCode),
-            vec![Core, Agent, ContextMcp, OperatorMcp],
+            vec![Core, Agent, ContextMcp],
             ManagedEmbedded,
             Managed,
             OpenCodeProjectDirectory,

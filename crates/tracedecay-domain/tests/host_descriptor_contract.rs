@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use tracedecay_domain::integration::HostComponentV1;
 use tracedecay_domain::{
     HostActivationPolicyV1, HostAssetRenderPolicyV1, HostHookMappingV1, HostKindV1,
     HostProjectRegistrationPathV1, NativeHostIdentityV1, host_descriptors_v1,
@@ -130,6 +131,23 @@ fn activation_and_registration_never_invent_unsupported_routes() {
             HostProjectRegistrationPathV1::Unavailable
         );
         assert_eq!(descriptor.project_registration_path().relative_path(), None);
+    }
+
+    for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+        let descriptor = host.descriptor();
+        assert_eq!(descriptor.components(), &[HostComponentV1::ContextMcp]);
+        assert_eq!(
+            descriptor.asset_render_policy(),
+            HostAssetRenderPolicyV1::ManagedEmbedded
+        );
+        assert_eq!(
+            descriptor.activation_policy(),
+            HostActivationPolicyV1::Managed
+        );
+        assert_eq!(
+            descriptor.project_registration_path(),
+            HostProjectRegistrationPathV1::Unavailable
+        );
     }
 
     let kimi = HostKindV1::KimiCode.descriptor();

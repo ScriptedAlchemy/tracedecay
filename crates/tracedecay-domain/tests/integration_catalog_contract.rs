@@ -373,11 +373,19 @@ fn stock_host_capability_matrix_is_sole_capability_authority() {
 }
 
 #[test]
-fn cursor_cloud_remains_discoverable_only_as_unsupported() {
+fn cursor_cloud_reports_external_routes_without_claiming_install_authority() {
     let capabilities = stock_host_capabilities(HostKindV1::CursorCloud);
-    assert!(
-        capabilities
-            .iter()
-            .all(|record| { matches!(record.state, HostCapabilityStateV1::Unavailable(_)) })
-    );
+    for record in capabilities {
+        if matches!(
+            record.capability,
+            HostCapabilityV1::Hooks | HostCapabilityV1::Mcp
+        ) {
+            assert!(matches!(record.state, HostCapabilityStateV1::Degraded(_)));
+        } else {
+            assert!(matches!(
+                record.state,
+                HostCapabilityStateV1::Unavailable(_)
+            ));
+        }
+    }
 }

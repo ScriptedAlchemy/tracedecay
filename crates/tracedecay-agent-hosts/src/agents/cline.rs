@@ -1,43 +1,32 @@
 //! Cline agent integration.
 //!
-//! Handles registration of the tracedecay MCP server in Cline's
-//! `cline_mcp_settings.json` under the `mcpServers.tracedecay` key.
+//! Owns the profile-wide `~/.cline/mcp.json` MCP registration lifecycle.
 //!
-//! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
-//! policy is CLI-first, so this config write needs a justification. A
-//! standalone `cline` CLI does now exist and it does expose
-//! `cline mcp install <name> -- <cmd> <args>`, but its own README states that
-//! the command opens the add-server *wizard* and therefore **requires a TTY** —
-//! it cannot run inside a lifecycle. No remove or uninstall counterpart is
-//! documented either, so an adopted registration could not be undone by the
-//! authority that created it. See
-//! <https://github.com/cline/cline/blob/main/apps/cli/README.md> and
-//! <https://github.com/cline/cline/issues/9385>. Re-open this if a headless
-//! (non-TTY) form plus a removal command ship together.
+//! Cline documents this JSON registry as its MCP authority. TraceDecay merges
+//! only `mcpServers.tracedecay` and removes only that key, preserving sibling
+//! servers and settings. Native Cline hooks remain outside this integration
+//! until a real installed-runtime fixture proves their event contract.
 
-use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::errors::Result;
+
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels, load_json_file,
-    mcp_registration_entry, mcp_servers_registration_state, report_mcp_registration,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, config_backup_path, install_mcp_server_entry, load_json_file,
+    load_json_file_strict, mcp_registration_entry, mcp_servers_registration_state,
+    report_mcp_registration, uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
 pub struct ClineIntegration;
 
-fn cline_data_dir(home: &Path) -> PathBuf {
-    env::var_os("CLINE_DATA_DIR")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| home.join(".cline/data"), PathBuf::from)
-}
-
-/// Current Cline CLI/IDE user MCP settings path.
+/// Current Cline CLI/IDE user MCP settings path documented by Cline.
 fn cline_mcp_settings_path(home: &Path) -> PathBuf {
-    cline_data_dir(home).join("settings/cline_mcp_settings.json")
+    home.join(".cline/mcp.json")
 }
 
-/// Legacy VS Code extension storage path retained only for migration/removal.
+/// Legacy VS Code extension storage path retained only for migration diagnosis.
 fn legacy_cline_mcp_settings_path(home: &Path) -> PathBuf {
     super::vscode_data_dir(home)
         .join("User/globalStorage/saoudrizwan.claude-dev")
@@ -66,10 +55,6 @@ impl AgentIntegration for ClineIntegration {
         "cline"
     }
 
-    fn supports_local_install(&self) -> bool {
-        false
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mCline integration\x1b[0m");
         doctor_check_settings(dc, &ctx.home);
@@ -77,9 +62,12 @@ impl AgentIntegration for ClineIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+        }
         mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
     }
 
@@ -92,6 +80,58 @@ impl AgentIntegration for ClineIntegration {
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
         Some(cline_mcp_settings_path(home))
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<PathBuf> {
+        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+            let path = cline_mcp_settings_path(home);
+            vec![path.clone(), config_backup_path(&path)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn activate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            install_mcp_server_entry(
+                &cline_mcp_settings_path(&ctx.home),
+                "mcpServers",
+                serde_json::json!({
+                    "command": ctx.tracedecay_bin.clone(),
+                    "args": ["serve"],
+                    "env": {},
+                    "disabled": false,
+                    "autoApprove": []
+                }),
+                "Cline",
+                load_json_file_strict,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_deployed_host_component_registration(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+    ) -> Result<()> {
+        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+            uninstall_mcp_server_entry(
+                &cline_mcp_settings_path(&ctx.home),
+                "mcpServers",
+                load_json_file,
+                McpUninstallPolicy::default(),
+            );
+        }
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -118,7 +158,7 @@ fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
         let legacy_path = legacy_cline_mcp_settings_path(home);
         if settings_have_tracedecay(&legacy_path) {
             dc.warn(&format!(
-                "legacy Cline MCP registration found in {} — run `tracedecay install --agent cline` to repair",
+                "legacy Cline MCP registration found in {} — configure or remove it through Cline's supported flow",
                 legacy_path.display()
             ));
             return;

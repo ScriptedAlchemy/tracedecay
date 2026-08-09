@@ -79,13 +79,16 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
         ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
     };
 
+    let cli_state = match host {
+        HostKindV1::CursorCloud | HostKindV1::ClineFamily => {
+            Unavailable(HostRegistrationUnsupported)
+        }
+        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => Supported,
+        _ => Supported,
+    };
     let mut evidence = vec![HostRegistrationEvidenceV1 {
         route: Cli,
-        state: if host == HostKindV1::CursorCloud {
-            Unavailable(HostRegistrationUnsupported)
-        } else {
-            Supported
-        },
+        state: cli_state,
         evidence_ref: "src/tool_command.rs",
         starts_analyzer: false,
     }];
@@ -133,14 +136,14 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
         HostKindV1::CursorCloud => evidence.extend([
             HostRegistrationEvidenceV1 {
                 route: Hook,
-                state: Unavailable(CheckedInEvidenceMissing),
-                evidence_ref: "cursor_cloud_native_hook_fixture_absent_v1",
+                state: Degraded(HostRegistrationUnsupported),
+                evidence_ref: "https://cursor.com/changelog",
                 starts_analyzer: false,
             },
             HostRegistrationEvidenceV1 {
                 route: Mcp,
-                state: Unavailable(HostRegistrationUnsupported),
-                evidence_ref: "cursor_cloud_host_registration_absent_v1",
+                state: Degraded(HostRegistrationUnsupported),
+                evidence_ref: "https://cursor.com/en-US/cloud",
                 starts_analyzer: false,
             },
         ]),
@@ -195,33 +198,55 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
             },
             HostRegistrationEvidenceV1 {
                 route: Mcp,
-                state: Supported,
-                evidence_ref: "cline_user_mcp_settings_v1",
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
                 starts_analyzer: false,
             },
         ]),
-        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
-            let evidence_ref = match host {
-                HostKindV1::Cline => "src/agents/cline.rs",
-                HostKindV1::RooCode => "src/agents/roo_code.rs",
-                HostKindV1::Kilo => "src/agents/kilo.rs",
-                _ => unreachable!(),
-            };
+        HostKindV1::Cline => {
             evidence.extend([
                 HostRegistrationEvidenceV1 {
                     route: Hook,
-                    state: Unavailable(CheckedInEvidenceMissing),
-                    evidence_ref: "tests/fixtures/transcript_golden/cline_like/manifest.json",
+                    state: Unavailable(NativeFixtureLimited),
+                    evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
                     starts_analyzer: false,
                 },
                 HostRegistrationEvidenceV1 {
                     route: Mcp,
                     state: Supported,
-                    evidence_ref,
+                    evidence_ref: "https://docs.cline.bot/mcp/mcp-overview",
                     starts_analyzer: false,
                 },
             ]);
         }
+        HostKindV1::RooCode => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "https://roocodeinc.github.io/Roo-Code/features/mcp/using-mcp-in-roo/",
+                starts_analyzer: false,
+            },
+        ]),
+        HostKindV1::Kilo => evidence.extend([
+            HostRegistrationEvidenceV1 {
+                route: Hook,
+                state: Unavailable(CheckedInEvidenceMissing),
+                evidence_ref: "crates/tracedecay-hooks/fixtures/host_events/cline-family.json",
+                starts_analyzer: false,
+            },
+            HostRegistrationEvidenceV1 {
+                route: Mcp,
+                state: Supported,
+                evidence_ref: "https://kilo.ai/docs/automate/mcp/using-in-kilo-code",
+                starts_analyzer: false,
+            },
+        ]),
         HostKindV1::KimiCode => evidence.extend([
             HostRegistrationEvidenceV1 {
                 route: Hook,
@@ -332,6 +357,32 @@ pub struct HostNativeFixtureEvidenceV1 {
     pub stop: HostCapabilityStateV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostFeedbackBoundaryV1 {
+    SavedEdit,
+    Stop,
+}
+
+/// Truthful event-ingress evidence for one feedback boundary. A healthy MCP
+/// or CLI read route does not make an edit/stop event exist, so `route` is
+/// present only when checked-in native bytes prove that exact boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct HostFeedbackBoundaryEvidenceV1 {
+    pub boundary: HostFeedbackBoundaryV1,
+    pub state: HostCapabilityStateV1,
+    pub route: Option<HostRegistrationRouteV1>,
+    pub evidence_ref: &'static str,
+    pub native_fixture_digest: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HostEditStopConformanceEvidenceV1 {
+    pub host: HostKindV1,
+    pub edit: HostFeedbackBoundaryEvidenceV1,
+    pub stop: HostFeedbackBoundaryEvidenceV1,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClineFamilyProviderV1 {
@@ -341,12 +392,11 @@ pub enum ClineFamilyProviderV1 {
 }
 
 /// Admission recorded by the checked-in Cline-family evidence packet for one
-/// exact provider. Only `Verified` is a packaged-route claim; a documented
-/// protocol that was never captured locally stays unverified.
+/// exact provider. A documented protocol that was never captured locally
+/// stays unverified; the packet currently admits no packaged route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClineFamilyAdmissionV1 {
-    Verified,
     DocumentedUnverified,
     Unavailable,
 }
@@ -387,8 +437,8 @@ pub fn cline_family_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     provider: ClineFamilyProviderV1,
 ) -> Option<ClineFamilyEvidenceV1> {
-    use HostCapabilityStateV1::{Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
+    use HostCapabilityStateV1::Unavailable;
+    use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
 
     let packet_provider = match provider {
         ClineFamilyProviderV1::Cline => "cline",
@@ -402,16 +452,14 @@ pub fn cline_family_evidence_from_embedded_assets(
         .providers
         .into_iter()
         .find(|entry| entry.provider == packet_provider)?;
-    let verified = entry.host_hook_admission == ClineFamilyAdmissionV1::Verified;
-    let route_state = if verified {
-        Supported
-    } else {
-        Unavailable(CheckedInEvidenceMissing)
+    let route_state = match entry.host_hook_admission {
+        ClineFamilyAdmissionV1::DocumentedUnverified => Unavailable(NativeFixtureLimited),
+        ClineFamilyAdmissionV1::Unavailable => Unavailable(CheckedInEvidenceMissing),
     };
     Some(ClineFamilyEvidenceV1 {
         provider,
         registration: HostRegistrationEvidenceV1 {
-            route: HostRegistrationRouteV1::Mcp,
+            route: HostRegistrationRouteV1::Hook,
             state: route_state,
             evidence_ref: assets.cline_family_evidence_packet_path,
             starts_analyzer: false,
@@ -421,76 +469,68 @@ pub fn cline_family_evidence_from_embedded_assets(
         transcript_manifest_path: assets.cline_family_transcript_manifest_path,
         transcript_manifest_digest: Sha256::digest(assets.cline_family_transcript_manifest).into(),
         admission: entry.host_hook_admission,
-        unavailable_reason: (!verified).then(|| {
+        unavailable_reason: Some(
             entry
                 .reason
-                .unwrap_or_else(|| "no_reason_recorded_by_evidence_packet".to_string())
-        }),
+                .unwrap_or_else(|| "no_reason_recorded_by_evidence_packet".to_string()),
+        ),
         edit: route_state,
         stop: route_state,
     })
 }
 
 /// Consume root-composed authentic native fixture bytes. A documented but
-/// uncaptured declaration remains degraded rather than becoming capture
+/// uncaptured declaration remains unavailable rather than becoming capture
 /// evidence.
 pub fn stock_host_native_fixture_evidence_from_embedded_assets(
     assets: &EmbeddedHostIntegrationEvidenceV1,
     host: HostKindV1,
 ) -> Option<HostNativeFixtureEvidenceV1> {
-    use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
-    use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
+    use HostCapabilityStateV1::{Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::NativeFixtureLimited;
 
-    let unavailable = Unavailable(CheckedInEvidenceMissing);
-    let (provider, source_path, evidenced_event, edit, stop) = match host {
+    let (provider, source_path, evidenced_event, edit_identities) = match host {
         HostKindV1::ClaudeCode => (
             "claude",
             "crates/tracedecay-hooks/fixtures/host_events/claude.json",
             "PostToolUse,Stop",
-            Supported,
-            Supported,
+            &["saved_edit", "tool_completed"][..],
         ),
         HostKindV1::Codex => (
             "codex",
             "crates/tracedecay-hooks/fixtures/host_events/codex.json",
             "Stop",
-            unavailable,
-            Supported,
+            &["saved_edit"][..],
         ),
         HostKindV1::CursorDesktop => (
             "cursor",
             "crates/tracedecay-hooks/fixtures/host_events/cursor.json",
             "afterFileEdit",
-            Supported,
-            unavailable,
+            &["saved_edit"][..],
         ),
         HostKindV1::Hermes => (
             "hermes",
             "crates/tracedecay-hooks/fixtures/host_events/hermes.json",
             "post_tool_call,on_session_end",
-            Supported,
-            Supported,
+            &["saved_edit", "tool_completed"][..],
         ),
         HostKindV1::Kiro => (
             "kiro",
             "crates/tracedecay-hooks/fixtures/host_events/kiro.json",
             "userPromptSubmit",
-            unavailable,
-            unavailable,
+            &["saved_edit"][..],
         ),
         HostKindV1::KimiCode => (
             "kimi_code",
             "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json",
             "PostToolUse,Stop",
-            Supported,
-            Supported,
+            &["saved_edit", "post_tool_use_edit"][..],
         ),
         HostKindV1::OpenCode => (
             "opencode",
             "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
-            "file.edited,session.idle",
-            Degraded(NativeFixtureLimited),
-            Degraded(NativeFixtureLimited),
+            "file.edited,tool.execute.after,session.idle/session.status,lsp.updated",
+            &["saved_edit", "post_tool_use"][..],
         ),
         HostKindV1::CursorCloud
         | HostKindV1::ClineFamily
@@ -505,15 +545,90 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         .iter()
         .find(|fixture| fixture.host == host)?
         .bytes;
+    let event_state = |identities: &[&str]| {
+        if fixture_has_native_event(bytes, identities) {
+            Supported
+        } else {
+            Unavailable(NativeFixtureLimited)
+        }
+    };
     Some(HostNativeFixtureEvidenceV1 {
         host,
         provider,
         source_path,
         fixture_digest: Sha256::digest(bytes).into(),
         evidenced_event,
-        edit,
-        stop,
+        edit: event_state(edit_identities),
+        stop: event_state(&["stop"]),
     })
+}
+
+fn fixture_has_native_event(bytes: &[u8], identities: &[&str]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|document| {
+            document
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
+        .is_some_and(|events| {
+            events.iter().any(|event| {
+                event
+                    .get("identity")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|identity| {
+                        identities.contains(&identity)
+                            && event.get("support").and_then(serde_json::Value::as_str)
+                                == Some("native")
+                    })
+            })
+        })
+}
+
+/// Resolve edit and stop ingress independently. Explicit feedback reads remain
+/// described by [`stock_host_registration_evidence`]; they never upgrade an
+/// absent native boundary into an event the daemon can receive.
+pub fn host_edit_stop_conformance_evidence_from_embedded_assets(
+    assets: &EmbeddedHostIntegrationEvidenceV1,
+    host: HostKindV1,
+) -> HostEditStopConformanceEvidenceV1 {
+    use HostCapabilityStateV1::{Supported, Unavailable};
+    use HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing;
+
+    let native = stock_host_native_fixture_evidence_from_embedded_assets(assets, host);
+    let boundary = |boundary, state, absent_ref| {
+        let supported = state == Supported;
+        HostFeedbackBoundaryEvidenceV1 {
+            boundary,
+            state,
+            route: supported.then_some(HostRegistrationRouteV1::Hook),
+            evidence_ref: native
+                .as_ref()
+                .map_or(absent_ref, |evidence| evidence.source_path),
+            native_fixture_digest: native.as_ref().map(|evidence| evidence.fixture_digest),
+        }
+    };
+    let edit_state = native
+        .as_ref()
+        .map_or(Unavailable(CheckedInEvidenceMissing), |evidence| {
+            evidence.edit
+        });
+    let stop_state = native
+        .as_ref()
+        .map_or(Unavailable(CheckedInEvidenceMissing), |evidence| {
+            evidence.stop
+        });
+    let absent_ref = match host {
+        HostKindV1::Gemini => "gemini_native_edit_stop_fixture_absent_v1",
+        HostKindV1::Copilot => "copilot_native_event_surface_absent_v1",
+        _ => "native_edit_stop_fixture_absent_v1",
+    };
+    HostEditStopConformanceEvidenceV1 {
+        host,
+        edit: boundary(HostFeedbackBoundaryV1::SavedEdit, edit_state, absent_ref),
+        stop: boundary(HostFeedbackBoundaryV1::Stop, stop_state, absent_ref),
+    }
 }
 
 pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
@@ -1054,7 +1169,13 @@ mod tests {
         ]
     }"#;
     const TRANSCRIPT: &[u8] = br#"{"fixture": "cline"}"#;
-    const CODEX_FIXTURE: &[u8] = br#"{"event":"Stop"}"#;
+    const CODEX_FIXTURE: &[u8] = br#"{
+        "provider": "codex",
+        "events": [
+            {"identity":"saved_edit","support":"documented_unverified"},
+            {"identity":"stop","support":"native"}
+        ]
+    }"#;
     const NATIVE_FIXTURES: &[EmbeddedNativeHostFixtureV1] = &[EmbeddedNativeHostFixtureV1 {
         host: HostKindV1::Codex,
         bytes: CODEX_FIXTURE,
@@ -1077,9 +1198,50 @@ mod tests {
         assert_eq!(
             evidence.edit,
             HostCapabilityStateV1::Unavailable(
-                HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing
+                HostCapabilityUnavailableReasonV1::NativeFixtureLimited
             )
         );
+        assert_eq!(evidence.stop, HostCapabilityStateV1::Supported);
+    }
+
+    #[test]
+    fn edit_stop_conformance_does_not_promote_explicit_read_routes_to_events() {
+        let evidence =
+            host_edit_stop_conformance_evidence_from_embedded_assets(&ASSETS, HostKindV1::Codex);
+        assert_eq!(evidence.edit.route, None);
+        assert_eq!(
+            evidence.edit.state,
+            HostCapabilityStateV1::Unavailable(
+                HostCapabilityUnavailableReasonV1::NativeFixtureLimited
+            )
+        );
+        assert_eq!(evidence.stop.route, Some(HostRegistrationRouteV1::Hook));
+
+        let gemini =
+            host_edit_stop_conformance_evidence_from_embedded_assets(&ASSETS, HostKindV1::Gemini);
+        assert_eq!(gemini.edit.route, None);
+        assert_eq!(gemini.stop.route, None);
+        assert_eq!(gemini.edit.native_fixture_digest, None);
+    }
+
+    #[test]
+    fn cline_family_hooks_stay_unverified_while_exact_hosts_support_mcp() {
+        assert!(
+            stock_host_registration_evidence(HostKindV1::ClineFamily)
+                .iter()
+                .all(|evidence| matches!(evidence.state, HostCapabilityStateV1::Unavailable(_)))
+        );
+        for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+            let evidence = stock_host_registration_evidence(host);
+            assert!(evidence.iter().any(|record| {
+                record.route == HostRegistrationRouteV1::Mcp
+                    && record.state == HostCapabilityStateV1::Supported
+            }));
+            assert!(evidence.iter().any(|record| {
+                record.route == HostRegistrationRouteV1::Hook
+                    && matches!(record.state, HostCapabilityStateV1::Unavailable(_))
+            }));
+        }
     }
 
     #[test]

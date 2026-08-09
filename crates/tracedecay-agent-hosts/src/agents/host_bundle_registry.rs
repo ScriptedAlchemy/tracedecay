@@ -7,18 +7,35 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    HostCapabilityUnavailableReasonV1, TraceDecayProfileBindingV1, canonical_json_bytes,
-    host_integration_catalog_v1,
+    HostCapabilityUnavailableReasonV1, canonical_json_bytes, host_integration_catalog_v1,
 };
 
 use super::host_bundle_v2::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
     HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1, require_component_capabilities, validate_identifier,
+    HostComponentSetV1, HostKindV1, require_component_capabilities,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
 const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
+
+/// Canonical hosts whose first-party component lifecycle can publish durable
+/// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
+/// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 12] = [
+    HostKindV1::ClaudeCode,
+    HostKindV1::CursorDesktop,
+    HostKindV1::Codex,
+    HostKindV1::Hermes,
+    HostKindV1::Kiro,
+    HostKindV1::KimiCode,
+    HostKindV1::OpenCode,
+    HostKindV1::Gemini,
+    HostKindV1::Copilot,
+    HostKindV1::Cline,
+    HostKindV1::RooCode,
+    HostKindV1::Kilo,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedEmbeddedHostBundleV1 {
@@ -101,7 +118,12 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::Gemini
         // Copilot's registration is driven by `copilot mcp add|remove`, with
         // the receipt-owned component descriptor as its managed artifact.
-        | HostKindV1::Copilot => None,
+        | HostKindV1::Copilot
+        // These hosts publish a stable profile MCP document even though their
+        // native hook/plugin surfaces remain evidence-gated.
+        | HostKindV1::Cline
+        | HostKindV1::RooCode
+        | HostKindV1::Kilo => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -109,8 +131,8 @@ pub fn unsupported_host_component_set_reason(
         HostKindV1::CursorCloud => {
             Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
         }
-        // The Cline family has no checked-in evidence admitting a packaged route.
-        HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+        // The family alias has no concrete config authority to mutate.
+        HostKindV1::ClineFamily => {
             Some(HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing)
         }
     }
@@ -144,14 +166,15 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
         // Copilot is Kiro's shape exactly: `copilot mcp add` registers the MCP
         // server into the host's own registry, and no hook route exists to put
         // in a Core component.
-        HostKindV1::Kiro | HostKindV1::Gemini | HostKindV1::Copilot => {
-            vec![HostBundleComponentV1::ContextMcp]
-        }
-        HostKindV1::CursorCloud
-        | HostKindV1::ClineFamily
+        HostKindV1::Kiro
+        | HostKindV1::Gemini
+        | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => Vec::new(),
+        | HostKindV1::Kilo => {
+            vec![HostBundleComponentV1::ContextMcp]
+        }
+        HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
     }
 }
 
@@ -165,112 +188,6 @@ pub fn verified_embedded_default_host_component_set(
         return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
     }
     verified_embedded_host_component_set(host, &default_components(host), now_unix)
-}
-
-/// Project-local canonical set. Host-owned project configuration is handled by
-/// the registration authority; these receipt markers give every selected
-/// component an exact project-local ownership path under one transaction.
-pub fn verified_embedded_project_host_component_set(
-    host: HostKindV1,
-    agent_id: &str,
-    _now_unix: u64,
-) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
-    validate_identifier(agent_id).map_err(|_| HostBundleRegistryError::Incompatible)?;
-    if let Some(reason) = unsupported_host_component_set_reason(host) {
-        return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
-    }
-    let project_components = default_components(host);
-    if project_components.is_empty() {
-        return Err(HostBundleRegistryError::HostComponentSetUnavailable {
-            host,
-            reason: unsupported_host_component_set_reason(host)
-                .unwrap_or(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported),
-        });
-    }
-    let catalog = host_integration_catalog_v1();
-    let integration_manifest_digest = catalog
-        .host_capability_digest(host)
-        .map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let catalog_digest = catalog
-        .canonical_authority_digest()
-        .map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let mut manifest_digests = BTreeSet::new();
-    let mut entries = Vec::with_capacity(project_components.len());
-    for component in project_components {
-        let component_name = component_name(component);
-        let relative_path =
-            format!(".tracedecay/host-components/{agent_id}/{component_name}.v1.json");
-        let bytes = canonical_json_bytes(&EmbeddedProjectRegistrationMarkerV1 {
-            schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
-            registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
-            agent: agent_id,
-            component: component_name,
-            scope: "project",
-            profile_binding: TraceDecayProfileBindingV1::User,
-        })
-        .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        let artifacts = vec![HostBundleArtifactV1 {
-            relative_path: relative_path.clone(),
-            artifact_digest: Sha256::digest(&bytes).into(),
-            ownership_marker: format!(
-                "tracedecay.{}.{component_name}.v1",
-                host.descriptor().slug()
-            ),
-        }];
-        let manifest = HostBundleManifestV1 {
-            schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
-            host,
-            component,
-            integration_manifest_digest,
-            catalog_digest,
-            configuration_snapshot_id: format!("first-party.{}", crate::PRODUCT_VERSION),
-            effective_behavior_digest: embedded_bundle_identity(
-                "project_effective_behavior",
-                host,
-                component,
-                &artifacts,
-            )?,
-            resolution_provenance_digest: embedded_bundle_identity(
-                "project_resolution_provenance",
-                host,
-                component,
-                &artifacts,
-            )?,
-            protocol_min: 1,
-            protocol_max: 1,
-            artifacts,
-        };
-        manifest_digests.insert(
-            manifest
-                .canonical_digest()
-                .map_err(|_| HostBundleRegistryError::Incompatible)?,
-        );
-        entries.push(HostComponentSetEntryV1 {
-            manifest,
-            contents: vec![HostBundleArtifactContentV1 {
-                relative_path,
-                bytes,
-            }],
-        });
-    }
-    Ok(VerifiedEmbeddedHostComponentSetV1 {
-        registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
-        component_set: HostComponentSetV1 {
-            host,
-            components: entries,
-        },
-        manifest_digests,
-    })
-}
-
-#[derive(serde::Serialize)]
-struct EmbeddedProjectRegistrationMarkerV1<'a> {
-    schema_version: u16,
-    registry_version: u64,
-    agent: &'a str,
-    component: &'a str,
-    scope: &'static str,
-    profile_binding: TraceDecayProfileBindingV1,
 }
 
 /// Build a canonical one-or-more component set. A caller selecting
@@ -645,32 +562,32 @@ fn component_assets(
                 r#"{"host":"copilot","registration":"mcp-config.json","registrar":"copilot mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
+        (HostKindV1::Cline, HostBundleComponentV1::ContextMcp) => (
+            ".cline/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"cline","registration":"../mcp.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::RooCode, HostBundleComponentV1::ContextMcp) => (
+            ".roo/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"roo-code","registration":"VS Code globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json","registrar":"tracedecay managed merge","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
+            )],
+        ),
+        (HostKindV1::Kilo, HostBundleComponentV1::ContextMcp) => (
+            ".config/kilo/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
+            )],
+        ),
         (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
             ".kiro/tracedecay",
             vec![(
                 "component.json",
                 r#"{"host":"kiro","registration":"settings/mcp.json+agents/tracedecay.json","route":"hook+mcp","native_events":"userPromptSubmit,preToolUse,postToolUse","version_disposition":"session_workspace_prompt_boundaries_only"}"#,
-            )],
-        ),
-        (HostKindV1::Cline, HostBundleComponentV1::Core) => (
-            ".cline/data/settings/tracedecay",
-            vec![(
-                "component.json",
-                r#"{"host":"cline","registration":"settings/cline_mcp_settings.json","route":"mcp","version_disposition":"current_cli_and_ide_data_dir;legacy_vscode_path_migration_only"}"#,
-            )],
-        ),
-        (HostKindV1::RooCode, HostBundleComponentV1::Core) => (
-            ".roo/tracedecay",
-            vec![(
-                "component.json",
-                r#"{"host":"roo-code","registration":"settings/cline_mcp_settings.json","route":"mcp","version_disposition":"documented_roo_extension_storage_and_project_.roo/mcp.json"}"#,
-            )],
-        ),
-        (HostKindV1::Kilo, HostBundleComponentV1::Core) => (
-            ".config/kilo/tracedecay",
-            vec![(
-                "component.json",
-                r#"{"host":"kilo","registration":"kilo.jsonc","route":"mcp","version_disposition":"current_kilo_cli_jsonc_and_project_kilo.json"}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostBundleComponentV1::Agent) => (
@@ -1078,17 +995,7 @@ mod tests {
 
     #[test]
     fn default_component_sets_are_supported_and_path_disjoint() {
-        for host in [
-            HostKindV1::ClaudeCode,
-            HostKindV1::CursorDesktop,
-            HostKindV1::Codex,
-            HostKindV1::Hermes,
-            HostKindV1::Kiro,
-            HostKindV1::KimiCode,
-            HostKindV1::OpenCode,
-            HostKindV1::Gemini,
-            HostKindV1::Copilot,
-        ] {
+        for host in RECEIPT_BACKED_HOST_KINDS {
             let bundles = default_components(host)
                 .into_iter()
                 .map(|component| verified_embedded_host_bundle(host, component, 0).unwrap())
@@ -1137,6 +1044,8 @@ mod tests {
     #[test]
     fn shared_mcp_manifests_have_one_canonical_component_owner() {
         for (host, unsupported) in [
+            (HostKindV1::Hermes, HostBundleComponentV1::ContextMcp),
+            (HostKindV1::Hermes, HostBundleComponentV1::OperatorMcp),
             (HostKindV1::OpenCode, HostBundleComponentV1::OperatorMcp),
             (HostKindV1::KimiCode, HostBundleComponentV1::ContextMcp),
             (HostKindV1::KimiCode, HostBundleComponentV1::OperatorMcp),
@@ -1146,18 +1055,36 @@ mod tests {
                 Err(HostBundleRegistryError::Incompatible)
             );
         }
+        assert_eq!(
+            HostKindV1::Hermes.descriptor().components(),
+            &[tracedecay_domain::integration::HostComponentV1::Core]
+        );
+        assert_eq!(
+            HostKindV1::KimiCode.descriptor().components(),
+            &[tracedecay_domain::integration::HostComponentV1::Core]
+        );
+        assert_eq!(
+            HostKindV1::OpenCode.descriptor().components(),
+            &[
+                tracedecay_domain::integration::HostComponentV1::Core,
+                tracedecay_domain::integration::HostComponentV1::Agent,
+                tracedecay_domain::integration::HostComponentV1::ContextMcp,
+            ]
+        );
     }
 
     #[test]
-    fn cline_roo_and_kilo_refuse_components_without_native_evidence() {
+    fn cline_roo_and_kilo_package_only_documented_mcp_components() {
         for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
-            assert!(default_components(host).is_empty());
+            assert_eq!(
+                default_components(host),
+                vec![HostBundleComponentV1::ContextMcp]
+            );
+            assert_eq!(unsupported_host_component_set_reason(host), None);
+            assert!(verified_embedded_default_host_component_set(host, 0).is_ok());
             assert_eq!(
                 verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
-                Err(HostBundleRegistryError::HostComponentSetUnavailable {
-                    host,
-                    reason: HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing,
-                })
+                Err(HostBundleRegistryError::Incompatible)
             );
         }
     }
@@ -1360,7 +1287,6 @@ mod tests {
                 &[HostBundleComponentV1::Core],
                 0,
             ),
-            verified_embedded_project_host_component_set(HostKindV1::CursorCloud, "cursor", 0),
         ] {
             assert_eq!(
                 outcome,
@@ -1375,11 +1301,17 @@ mod tests {
 
     #[test]
     fn every_host_with_a_default_set_is_reported_supported() {
+        assert_eq!(RECEIPT_BACKED_HOST_KINDS.len(), 12);
         for host in HostKindV1::ALL {
             assert_eq!(
                 default_components(host).is_empty(),
                 unsupported_host_component_set_reason(host).is_some(),
                 "{host:?} must not disagree between its default set and its typed availability"
+            );
+            assert_eq!(
+                RECEIPT_BACKED_HOST_KINDS.contains(&host),
+                unsupported_host_component_set_reason(host).is_none(),
+                "{host:?} must not disagree with the canonical receipt-backed host set"
             );
         }
     }
@@ -1427,63 +1359,5 @@ mod tests {
             .unwrap();
         assert!(manifest.contains("hook-kimi-event"));
         assert!(manifest.contains("\"PostToolUse\""));
-    }
-
-    #[test]
-    fn project_local_sets_have_only_project_scoped_receipt_paths() {
-        let component_set =
-            verified_embedded_project_host_component_set(HostKindV1::OpenCode, "opencode", 0)
-                .unwrap();
-        assert!(
-            component_set
-                .component_set
-                .components
-                .iter()
-                .all(|component| {
-                    component.manifest.artifacts.iter().all(|artifact| {
-                        artifact
-                            .relative_path
-                            .starts_with(".tracedecay/host-components/opencode/")
-                    })
-                })
-        );
-        for component in &component_set.component_set.components {
-            component_set.verify_manifest(&component.manifest).unwrap();
-            let marker: serde_json::Value =
-                serde_json::from_slice(&component.contents[0].bytes).unwrap();
-            assert_eq!(marker["schema_version"], 1);
-            assert_eq!(marker["registry_version"], 1);
-            assert_eq!(marker["profile_binding"], "user");
-            assert_eq!(
-                component.manifest.effective_behavior_digest,
-                embedded_bundle_identity(
-                    "project_effective_behavior",
-                    component.manifest.host,
-                    component.manifest.component,
-                    &component.manifest.artifacts,
-                )
-                .unwrap()
-            );
-            assert_eq!(
-                component.manifest.resolution_provenance_digest,
-                embedded_bundle_identity(
-                    "project_resolution_provenance",
-                    component.manifest.host,
-                    component.manifest.component,
-                    &component.manifest.artifacts,
-                )
-                .unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn project_local_sets_reject_unsafe_agent_ids() {
-        for agent_id in ["", "../opencode", "opencode/other", "opencode\""] {
-            assert_eq!(
-                verified_embedded_project_host_component_set(HostKindV1::OpenCode, agent_id, 0),
-                Err(HostBundleRegistryError::Incompatible)
-            );
-        }
     }
 }

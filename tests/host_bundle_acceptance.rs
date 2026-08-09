@@ -5,21 +5,23 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay::agents::host_bundle_registry::{
-    HostBundleRegistryError, default_components, unsupported_host_component_set_reason,
-    verified_embedded_default_host_component_set, verified_embedded_host_bundle,
-    verified_embedded_host_component_set,
+    HostBundleRegistryError, RECEIPT_BACKED_HOST_KINDS, default_components,
+    unsupported_host_component_set_reason, verified_embedded_default_host_component_set,
+    verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
 use tracedecay::agents::host_bundle_v2::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
     HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,
     HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
-    HostBundleRollbackBoundaryV1, HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
-    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
-    cline_family_evidence, dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
+    HostBundleRollbackBoundaryV1, HostBundleWriterV1, HostCapabilityStateV1,
+    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
+    HostComponentSetTransactionV1, HostKindV1, HostRegistrationRouteV1, cline_family_evidence,
+    dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
+    supported_host_edit_stop_conformance_evidence,
 };
 use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay::agents::{
@@ -405,13 +407,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
 
 #[test]
 fn unsupported_host_components_are_not_advertised_or_constructible() {
-    for host in [
-        HostKindV1::CursorCloud,
-        HostKindV1::ClineFamily,
-        HostKindV1::Cline,
-        HostKindV1::RooCode,
-        HostKindV1::Kilo,
-    ] {
+    for host in [HostKindV1::CursorCloud, HostKindV1::ClineFamily] {
         assert!(
             default_components(host).is_empty(),
             "{host:?} must stay typed unavailable until its safety evidence is sufficient"
@@ -427,6 +423,22 @@ fn unsupported_host_components_are_not_advertised_or_constructible() {
             verified_embedded_default_host_component_set(host, 0),
             Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason }),
             "{host:?} must report a typed unavailable default set, never an empty one"
+        );
+    }
+    for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+        assert_eq!(
+            default_components(host),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        assert_eq!(unsupported_host_component_set_reason(host), None);
+        assert!(
+            verified_embedded_default_host_component_set(host, 0).is_ok(),
+            "{host:?} must package its documented MCP-only lifecycle"
+        );
+        assert_eq!(
+            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+            Err(HostBundleRegistryError::Incompatible),
+            "{host:?} Core must remain gated by missing native hook evidence"
         );
     }
 }
@@ -449,15 +461,138 @@ fn native_host_evidence_is_embedded_and_covers_every_advertised_native_route() {
         assert_ne!(record.fixture_digest, [0; 32]);
         assert!(!record.source_path.is_empty());
     }
+    let opencode = evidence
+        .iter()
+        .find(|record| record.host == HostKindV1::OpenCode)
+        .expect("OpenCode native evidence");
+    assert_eq!(opencode.edit, HostCapabilityStateV1::Supported);
+    assert_eq!(opencode.stop, HostCapabilityStateV1::Supported);
+
+    let codex = evidence
+        .iter()
+        .find(|record| record.host == HostKindV1::Codex)
+        .expect("Codex native evidence");
+    assert!(matches!(codex.edit, HostCapabilityStateV1::Unavailable(_)));
+    assert_eq!(codex.stop, HostCapabilityStateV1::Supported);
+
+    let cursor = evidence
+        .iter()
+        .find(|record| record.host == HostKindV1::CursorDesktop)
+        .expect("Cursor native evidence");
+    assert_eq!(cursor.edit, HostCapabilityStateV1::Supported);
+    assert!(matches!(cursor.stop, HostCapabilityStateV1::Unavailable(_)));
+}
+
+#[test]
+fn receipt_backed_hosts_report_edit_and_stop_without_promoting_read_routes() {
+    let evidence = supported_host_edit_stop_conformance_evidence();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|record| record.host)
+            .collect::<Vec<_>>(),
+        RECEIPT_BACKED_HOST_KINDS.to_vec()
+    );
+    for host in [
+        HostKindV1::Kiro,
+        HostKindV1::Gemini,
+        HostKindV1::Copilot,
+        HostKindV1::Cline,
+        HostKindV1::RooCode,
+        HostKindV1::Kilo,
+    ] {
+        let record = evidence
+            .iter()
+            .find(|record| record.host == host)
+            .unwrap_or_else(|| panic!("{host:?} conformance record"));
+        assert!(matches!(
+            record.edit.state,
+            HostCapabilityStateV1::Unavailable(_)
+        ));
+        assert!(matches!(
+            record.stop.state,
+            HostCapabilityStateV1::Unavailable(_)
+        ));
+        assert_eq!(record.edit.route, None);
+        assert_eq!(record.stop.route, None);
+    }
+    let kimi = evidence
+        .iter()
+        .find(|record| record.host == HostKindV1::KimiCode)
+        .expect("Kimi conformance record");
+    assert_eq!(kimi.edit.state, HostCapabilityStateV1::Supported);
+    assert_eq!(kimi.stop.state, HostCapabilityStateV1::Supported);
 }
 
 #[test]
 fn cursor_cloud_is_recognized_but_never_advertised_as_supported() {
+    let routes = stock_host_registration_evidence(HostKindV1::CursorCloud);
+    assert!(matches!(
+        routes[0].state,
+        HostCapabilityStateV1::Unavailable(_)
+    ));
     assert!(
-        stock_host_registration_evidence(HostKindV1::CursorCloud)
+        routes
             .iter()
-            .all(|record| matches!(record.state, HostCapabilityStateV1::Unavailable(_)))
+            .filter(|route| matches!(
+                route.route,
+                HostRegistrationRouteV1::Hook | HostRegistrationRouteV1::Mcp
+            ))
+            .all(|route| matches!(route.state, HostCapabilityStateV1::Degraded(_)))
     );
+    assert_eq!(
+        unsupported_host_component_set_reason(HostKindV1::CursorCloud),
+        Some(HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported)
+    );
+}
+
+#[test]
+fn cline_family_hook_evidence_stays_separate_from_mcp_lifecycle_support() {
+    let cline = cline_family_evidence(ClineFamilyProviderV1::Cline).unwrap();
+    assert_eq!(cline.registration.route, HostRegistrationRouteV1::Hook);
+    assert_eq!(
+        cline.registration.state,
+        HostCapabilityStateV1::Unavailable(HostCapabilityUnavailableReasonV1::NativeFixtureLimited)
+    );
+    assert_eq!(
+        cline.unavailable_reason.as_deref(),
+        Some("cline_sdk_runtime_not_installed")
+    );
+    for (provider, reason) in [
+        (
+            ClineFamilyProviderV1::RooCode,
+            "no_official_roo_protocol_admitted_by_this_evidence_packet",
+        ),
+        (
+            ClineFamilyProviderV1::Kilo,
+            "no_official_kilo_protocol_admitted_by_this_evidence_packet",
+        ),
+    ] {
+        let evidence = cline_family_evidence(provider).unwrap();
+        assert_eq!(
+            evidence.registration.state,
+            HostCapabilityStateV1::Unavailable(
+                HostCapabilityUnavailableReasonV1::CheckedInEvidenceMissing
+            )
+        );
+        assert_eq!(evidence.unavailable_reason.as_deref(), Some(reason));
+    }
+    for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+        assert_eq!(unsupported_host_component_set_reason(host), None);
+        assert_eq!(
+            default_components(host),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        let routes = stock_host_registration_evidence(host);
+        assert!(routes.iter().any(|route| {
+            route.route == HostRegistrationRouteV1::Mcp
+                && route.state == HostCapabilityStateV1::Supported
+        }));
+        assert!(routes.iter().any(|route| {
+            route.route == HostRegistrationRouteV1::Hook
+                && matches!(route.state, HostCapabilityStateV1::Unavailable(_))
+        }));
+    }
 }
 
 /// The official component-set dry run must supply conflict discovery to its
@@ -625,9 +760,8 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
     );
 }
 
-/// Cline-family support is whatever the checked-in evidence packet admits for
-/// that exact provider — never a source file, a shared configuration shape, or
-/// family branding.
+/// The checked-in Cline-family packet governs only native hook admission. The
+/// separately documented MCP registration does not promote packet evidence.
 #[test]
 fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
     let packet: Value = serde_json::from_str(include_str!(
@@ -658,11 +792,10 @@ fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
             evidence.registration.evidence_ref, evidence.evidence_packet_path,
             "the packet, not an adapter source file, is the registration evidence"
         );
-        assert_ne!(
+        assert!(matches!(
             evidence.admission,
-            ClineFamilyAdmissionV1::Verified,
-            "{packet_id} is not captured natively, so it must not claim a verified route"
-        );
+            ClineFamilyAdmissionV1::DocumentedUnverified | ClineFamilyAdmissionV1::Unavailable
+        ));
         assert_eq!(
             evidence.unavailable_reason.as_deref(),
             entry["reason"].as_str(),
@@ -671,7 +804,7 @@ fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
         for state in [evidence.registration.state, evidence.edit, evidence.stop] {
             assert!(
                 matches!(state, HostCapabilityStateV1::Unavailable(_)),
-                "{packet_id} must stay typed unavailable on every surface"
+                "{packet_id} native hook evidence must stay typed unavailable"
             );
         }
     }
@@ -695,6 +828,10 @@ fn doctor_reports_native_edit_stop_conformance_without_any_install() {
         native_host_edit_stop_conformance_evidence(),
         "an empty install must not read as an absence of host conformance evidence"
     );
+    assert_eq!(
+        report.supported_host_edit_stop_conformance,
+        supported_host_edit_stop_conformance_evidence(),
+    );
     assert!(
         report
             .native_edit_stop_conformance
@@ -705,14 +842,14 @@ fn doctor_reports_native_edit_stop_conformance_without_any_install() {
 
 #[test]
 fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
-    let mut covered_hosts = 0;
+    let mut covered_hosts = Vec::new();
     for host in stock_host_kinds() {
         let mut expected_components = default_components(host);
         if expected_components.is_empty() {
             continue;
         }
         expected_components.sort_unstable();
-        covered_hosts += 1;
+        covered_hosts.push(host);
         let artifacts = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = verified_embedded_default_host_component_set(host, 0).unwrap();
@@ -922,7 +1059,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 == HostBundleComponentDoctorStateV1::OrphanedRegistration)
         );
     }
-    assert!(covered_hosts > 0);
+    assert_eq!(covered_hosts, RECEIPT_BACKED_HOST_KINDS);
 }
 
 /// Cursor Core is the host that provoked this: its receipt-owned plugin bundle

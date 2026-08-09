@@ -89,6 +89,55 @@ const COPILOT_CONFIGS: &[(&str, &[u8])] = &[(
     br#"{"mcpServers":{"foreign":{"command":"foreign-bin","args":["serve"]}}}
 "#,
 )];
+const CLINE_CONFIGS: &[(&str, &[u8])] = &[(
+    ".cline/mcp.json",
+    br#"{
+  "mcpServers": {
+    "foreign": {
+      "args": [
+        "serve"
+      ],
+      "command": "foreign-bin"
+    }
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}
+"#,
+)];
+const ROO_CONFIGS: &[(&str, &[u8])] = &[(
+    ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
+    br#"{
+  "mcpServers": {
+    "foreign": {
+      "args": [
+        "serve"
+      ],
+      "command": "foreign-bin"
+    }
+  },
+  "ui": {
+    "theme": "dark"
+  }
+}
+"#,
+)];
+const KILO_CONFIGS: &[(&str, &[u8])] = &[(
+    ".config/kilo/kilo.jsonc",
+    br#"{
+  "mcp": {
+    "foreign": {
+      "command": [
+        "foreign-bin"
+      ],
+      "type": "local"
+    }
+  },
+  "theme": "dark"
+}
+"#,
+)];
 
 fn host_case(host: HostKindV1) -> HostCase {
     let configs = match host {
@@ -101,6 +150,9 @@ fn host_case(host: HostKindV1) -> HostCase {
         HostKindV1::OpenCode => OPENCODE_CONFIGS,
         HostKindV1::Gemini => GEMINI_CONFIGS,
         HostKindV1::Copilot => COPILOT_CONFIGS,
+        HostKindV1::Cline => CLINE_CONFIGS,
+        HostKindV1::RooCode => ROO_CONFIGS,
+        HostKindV1::Kilo => KILO_CONFIGS,
         unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
     };
     HostCase {
@@ -205,6 +257,56 @@ fn assert_success(host: &str, phase: &str, output: Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
+    let (relative, root) = match case.host {
+        HostKindV1::Cline => (".cline/mcp.json", "mcpServers"),
+        HostKindV1::RooCode => (
+            ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/cline_mcp_settings.json",
+            "mcpServers",
+        ),
+        HostKindV1::Kilo => (".config/kilo/kilo.jsonc", "mcp"),
+        _ => return,
+    };
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(cli.home.path().join(relative)).unwrap()).unwrap();
+    assert!(
+        config[root].get("foreign").is_some(),
+        "{} install discarded a sibling MCP server",
+        case.id
+    );
+    assert_eq!(config["theme"], "dark");
+    let entry = &config[root]["tracedecay"];
+    match case.host {
+        HostKindV1::Cline => {
+            assert_eq!(
+                entry["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(entry["args"], serde_json::json!(["serve"]));
+            assert_eq!(entry["disabled"], false);
+            assert_eq!(entry["autoApprove"], serde_json::json!([]));
+        }
+        HostKindV1::RooCode => {
+            assert_eq!(
+                entry["command"],
+                serde_json::json!(cli.bin_dir.join("tracedecay"))
+            );
+            assert_eq!(entry["args"], serde_json::json!(["serve"]));
+            assert_eq!(entry["disabled"], false);
+            assert_eq!(entry["alwaysAllow"], serde_json::json!([]));
+        }
+        HostKindV1::Kilo => {
+            assert_eq!(entry["type"], "local");
+            assert_eq!(
+                entry["command"],
+                serde_json::json!([cli.bin_dir.join("tracedecay"), "serve"])
+            );
+            assert_eq!(entry["enabled"], true);
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn seed_host(case: HostCase, cli: &IsolatedCli) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -413,10 +515,11 @@ fn packet_request(packet: &str, identity: &str) -> Vec<u8> {
     serde_json::to_vec(&request).unwrap()
 }
 
-fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
+fn native_feedback(case: HostCase) -> Vec<(&'static str, &'static str, Vec<u8>)> {
     match case.host {
-        HostKindV1::ClaudeCode => Some([
+        HostKindV1::ClaudeCode => vec![
             (
+                "edit",
                 "hook-claude-post-tool-use",
                 include_bytes!(
                     "../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
@@ -424,39 +527,31 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
                 .to_vec(),
             ),
             (
+                "stop",
                 "hook-stop",
                 include_bytes!("../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json")
                     .to_vec(),
             ),
-        ]),
+        ],
         HostKindV1::CursorDesktop => {
             let packet = include_str!("../crates/tracedecay-hooks/fixtures/host_events/cursor.json");
-            Some([
-                (
-                    "hook-cursor-after-file-edit",
-                    packet_request(packet, "saved_edit"),
-                ),
-                ("hook-cursor-stop", packet_request(packet, "stop")),
-            ])
+            vec![(
+                "edit",
+                "hook-cursor-after-file-edit",
+                packet_request(packet, "saved_edit"),
+            )]
         }
         HostKindV1::Codex => {
-            let packet = include_str!("../crates/tracedecay-hooks/fixtures/host_events/codex.json");
-            Some([
-                (
-                    "hook-codex-post-tool-use",
-                    packet_request(packet, "saved_edit"),
-                ),
-                (
-                    "hook-codex-stop",
-                    include_bytes!(
-                        "../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
-                    )
+            vec![(
+                "stop",
+                "hook-codex-stop",
+                include_bytes!("../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json")
                     .to_vec(),
-                ),
-            ])
+            )]
         }
-        HostKindV1::Hermes => Some([
+        HostKindV1::Hermes => vec![
             (
+                "edit",
                 "hook-hermes-terminal-receipt",
                 include_bytes!(
                     "../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
@@ -464,23 +559,50 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
                 .to_vec(),
             ),
             (
+                "stop",
                 "hook-hermes-terminal-receipt",
                 include_bytes!("../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json")
                     .to_vec(),
             ),
-        ]),
+        ],
+        HostKindV1::KimiCode => vec![
+            (
+                "edit",
+                "hook-kimi-event",
+                include_bytes!(
+                    "../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+                )
+                .to_vec(),
+            ),
+            (
+                "stop",
+                "hook-kimi-event",
+                include_bytes!("../crates/tracedecay-hooks/fixtures/host_events/kimi/stop.json")
+                    .to_vec(),
+            ),
+        ],
         HostKindV1::OpenCode => {
             let packet =
                 include_str!("../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json");
-            Some([
+            vec![
                 (
+                    "edit",
                     "hook-opencode-event",
                     packet_request(packet, "saved_edit"),
                 ),
-                ("hook-opencode-event", packet_request(packet, "stop")),
-            ])
+                (
+                    "stop",
+                    "hook-opencode-event",
+                    packet_request(packet, "stop"),
+                ),
+            ]
         }
-        HostKindV1::Kiro | HostKindV1::Gemini | HostKindV1::Copilot => None,
+        HostKindV1::Kiro
+        | HostKindV1::Gemini
+        | HostKindV1::Copilot
+        | HostKindV1::Cline
+        | HostKindV1::RooCode
+        | HostKindV1::Kilo => Vec::new(),
         _ => unreachable!("non-acceptance host"),
     }
 }
@@ -519,6 +641,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "install",
             cli.run(&["install", "--agent", case.id]),
         );
+        assert_documented_mcp_registration(case, &cli);
         let install_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &install_receipt);
 
@@ -526,10 +649,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         let update_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &update_receipt);
 
-        if let Some(events) = native_feedback(case) {
-            for (phase, (entrypoint, fixture)) in ["edit", "stop"].into_iter().zip(events) {
-                assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
-            }
+        for (phase, entrypoint, fixture) in native_feedback(case) {
+            assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
         }
 
         let repair_target = update_receipt
@@ -932,10 +1053,7 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         cli.run(&["update-plugin"]),
     );
     assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
-    for (phase, (entrypoint, fixture)) in ["edit", "stop"]
-        .into_iter()
-        .zip(native_feedback(case).unwrap())
-    {
+    for (phase, entrypoint, fixture) in native_feedback(case) {
         assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
     }
     assert_eq!(

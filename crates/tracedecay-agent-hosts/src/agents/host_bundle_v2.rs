@@ -32,6 +32,7 @@ pub use tracedecay_host_integration::{
     HostBundleVerificationAdapterV1, HostCapabilityRecordV1, HostCapabilityStateV1,
     HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetJournalComponentV1,
     HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
+    HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1, HostFeedbackBoundaryV1,
     HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1, HostRegistrationRouteV1,
     MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
     MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
@@ -39,6 +40,7 @@ pub use tracedecay_host_integration::{
 };
 use tracedecay_host_integration::{
     cline_family_evidence_from_embedded_assets,
+    host_edit_stop_conformance_evidence_from_embedded_assets,
     native_host_edit_stop_conformance_evidence_from_embedded_assets,
     stock_host_native_fixture_evidence_from_embedded_assets,
     stock_host_registration_evidence as stock_host_registration_evidence_from_contract,
@@ -144,6 +146,22 @@ pub fn native_host_edit_stop_conformance_evidence() -> Vec<HostNativeFixtureEvid
     native_host_edit_stop_conformance_evidence_from_embedded_assets(
         &embedded_host_integration_evidence(),
     )
+}
+
+/// Edit/stop ingress truth for every receipt-backed host. This is deliberately
+/// separate from the native-fixture inventory: Gemini and Copilot are present
+/// with typed unavailable boundaries, and Kiro remains MCP-only without a
+/// fabricated edit or stop callback.
+pub fn supported_host_edit_stop_conformance_evidence() -> Vec<HostEditStopConformanceEvidenceV1> {
+    super::host_bundle_registry::RECEIPT_BACKED_HOST_KINDS
+        .into_iter()
+        .map(|host| {
+            host_edit_stop_conformance_evidence_from_embedded_assets(
+                &embedded_host_integration_evidence(),
+                host,
+            )
+        })
+        .collect()
 }
 
 /// Verify embedded first-party catalog identity and content digests, then
@@ -302,14 +320,8 @@ pub fn require_component_capabilities(
             HostKindV1::Hermes | HostKindV1::Kiro | HostKindV1::KimiCode | HostKindV1::OpenCode,
             Core,
         ) => &[Hooks, Mcp],
-        (
-            HostKindV1::CursorCloud
-            | HostKindV1::ClineFamily
-            | HostKindV1::Cline
-            | HostKindV1::RooCode
-            | HostKindV1::Kilo,
-            Core,
-        ) => &[Mcp],
+        (HostKindV1::CursorCloud | HostKindV1::ClineFamily, Core) => &[Mcp],
+        (HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo, Core) => &[Hooks, Mcp],
         // Gemini's extension is its MCP registration and nothing else. A Core
         // component would install the hook surface, which this host neither
         // reports nor drives, so requiring `Hooks` refuses it against the same
@@ -337,23 +349,6 @@ pub fn require_component_capabilities(
         return Err(HostBundleError::UnsupportedCapability);
     }
 
-    let cline_provider = match host {
-        HostKindV1::Cline => Some(ClineFamilyProviderV1::Cline),
-        HostKindV1::RooCode => Some(ClineFamilyProviderV1::RooCode),
-        HostKindV1::Kilo => Some(ClineFamilyProviderV1::Kilo),
-        HostKindV1::ClineFamily => return Err(HostBundleError::UnsupportedCapability),
-        _ => None,
-    };
-    if let Some(provider) = cline_provider {
-        let evidence =
-            cline_family_evidence(provider).ok_or(HostBundleError::UnsupportedCapability)?;
-        if evidence.registration.state != HostCapabilityStateV1::Supported
-            || evidence.edit != HostCapabilityStateV1::Supported
-            || evidence.stop != HostCapabilityStateV1::Supported
-        {
-            return Err(HostBundleError::UnsupportedCapability);
-        }
-    }
     Ok(())
 }
 
@@ -797,6 +792,10 @@ pub struct HostBundleDoctorReportV1 {
     /// It is reported even when nothing is installed, so an empty component
     /// list never reads as "there was no host evidence to check".
     pub native_edit_stop_conformance: Vec<HostNativeFixtureEvidenceV1>,
+    /// Event-specific truth for the canonical receipt-backed host set. Read
+    /// routes remain independently available, but never stand in for a native
+    /// edit or stop event.
+    pub supported_host_edit_stop_conformance: Vec<HostEditStopConformanceEvidenceV1>,
 }
 
 impl Default for HostBundleDoctorReportV1 {
@@ -804,6 +803,7 @@ impl Default for HostBundleDoctorReportV1 {
         Self {
             components: Vec::new(),
             native_edit_stop_conformance: native_host_edit_stop_conformance_evidence(),
+            supported_host_edit_stop_conformance: supported_host_edit_stop_conformance_evidence(),
         }
     }
 }
