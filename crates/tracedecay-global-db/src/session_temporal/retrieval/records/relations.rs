@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
@@ -107,10 +108,30 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
     let mut summary_sources = Vec::new();
     let mut retained_summary_anchors = Vec::new();
     let mut relation_bytes = 0usize;
+    // One lookup table for the whole page: the frozen participant manifest is
+    // scanned once instead of linearly per candidate.
+    let participant_generations = snapshot.has_authoritative_participant_manifest().then(|| {
+        snapshot
+            .participant_manifest()
+            .entries()
+            .iter()
+            .map(|participant| {
+                (
+                    (participant.session_id().as_str(), participant.source_id()),
+                    (participant.generation(), participant.graph_watermark()),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    });
     for (local, candidate) in candidates.iter().enumerate() {
         control.checkpoint()?;
         let session_id = candidate_session_id(scope, candidate)?;
-        let generation = candidate_generation(snapshot, candidate, &session_id)?;
+        let generation = candidate_generation(
+            snapshot,
+            participant_generations.as_ref(),
+            candidate,
+            &session_id,
+        )?;
         if names_summary_record(candidate) {
             let candidate_index = candidate_offset.saturating_add(local);
             let summary_id = candidate.retriever_record_id.clone();
@@ -310,37 +331,34 @@ fn candidate_session_id(
 
 fn candidate_generation(
     snapshot: &TemporalExecutionSnapshot,
+    participants: Option<&HashMap<(&str, &str), (u64, u64)>>,
     candidate: &RankingCandidate,
     session_id: &SessionId,
 ) -> Result<u64, TemporalPortError> {
-    if !snapshot.has_authoritative_participant_manifest() {
+    let Some(participants) = participants else {
         return Ok(snapshot.watermarks().generation);
-    }
+    };
     let source = candidate
         .source
         .as_deref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| read_message(RECORD_OPERATION, "candidate provider is missing"))?;
-    let participant = snapshot
-        .participant_manifest()
-        .entries()
-        .iter()
-        .find(|participant| {
-            participant.session_id() == session_id && participant.source_id() == source
-        })
+    let (generation, graph_watermark) = participants
+        .get(&(session_id.as_str(), source))
+        .copied()
         .ok_or_else(|| {
-            read_message(
-                RECORD_OPERATION,
-                "candidate is absent from the frozen participant manifest",
-            )
-        })?;
-    if participant.graph_watermark() != participant.generation() {
+        read_message(
+            RECORD_OPERATION,
+            "candidate is absent from the frozen participant manifest",
+        )
+    })?;
+    if graph_watermark != generation {
         return Err(read_message(
             RECORD_OPERATION,
             "candidate graph watermark is stale for the frozen projection",
         ));
     }
-    Ok(participant.generation())
+    Ok(generation)
 }
 
 fn map_relation_error(

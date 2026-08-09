@@ -174,7 +174,8 @@ fn session_pattern_regex(pattern: &str) -> String {
                 regex.push_str("[^:]*");
             }
         } else {
-            regex.push_str(&regex::escape(&ch.to_string()));
+            let mut buffer = [0u8; 4];
+            regex.push_str(&regex::escape(ch.encode_utf8(&mut buffer)));
         }
     }
     regex.push('$');

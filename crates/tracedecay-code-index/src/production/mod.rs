@@ -1,7 +1,7 @@
 //! Production composition for immutable code-index generation publication.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -860,13 +860,19 @@ impl CodeIndexPublishedGenerationV1 {
                 "published generation repeats a file occurrence".to_owned(),
             ));
         }
+        let occurrences_by_id = self
+            .snapshot
+            .files
+            .iter()
+            .map(|candidate| (&candidate.file_occurrence_id, candidate))
+            .collect::<HashMap<_, _>>();
         for file in &files {
             file.artifacts
                 .validate()
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
-            let occurrence = self.snapshot.files.iter().find(|candidate| {
-                candidate.file_occurrence_id == file.artifacts.chunks.document.file_occurrence_id
-            });
+            let occurrence = occurrences_by_id
+                .get(&file.artifacts.chunks.document.file_occurrence_id)
+                .copied();
             if file.authority.project_id != self.manifest.project_id {
                 return Err(CodeIndexProductionErrorV1::Contract(
                     "published file authority project does not match the generation manifest"
