@@ -125,18 +125,12 @@ fn duplicate_event_for(
     )
 }
 
-fn leak_event(
-    sequence: u64,
-    event_time_micros: i64,
-    adjudication_revision: u64,
-) -> ObservabilityEnvelopeV1 {
+fn leak_event(sequence: u64, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
     envelope(
         sequence,
         event_time_micros,
         "trace.rollup-compaction-leak",
         ObservabilityPayloadV1::WorkExecutionLeak(WorkExecutionLeakObservedV1 {
-            adjudication_ref: "leak.rollup-compaction".to_owned(),
-            adjudication_revision,
             kind: WorkExecutionLeakKindV1::AttemptWithoutLiveOwner,
             detection_horizon_micros: 1_000,
             recovery: WorkExecutionLeakRecoveryV1::Pending,
@@ -237,7 +231,7 @@ fn post_retention_corrections_join_retained_bounded_evidence_exactly() {
         page(
             vec![
                 duplicate_event(1, 1_000_000, 1),
-                leak_event(2, 2_000_000, 1),
+                leak_event(2, 2_000_000),
                 blocked_event(3, 3_000_000, 1),
                 conflict_prediction_event(4, 4_000_000),
             ],
@@ -248,7 +242,7 @@ fn post_retention_corrections_join_retained_bounded_evidence_exactly() {
     let compacted = decode(&compact_json(&base, 31 * DAY_MICROS));
     let late_events = [
         duplicate_event(11, DAY_MICROS + 1_000_000, 2),
-        leak_event(12, DAY_MICROS + 2_000_000, 2),
+        leak_event(12, DAY_MICROS + 2_000_000),
         blocked_event(13, DAY_MICROS + 3_000_000, 2),
         conflict_outcome_event(14, DAY_MICROS + 4_000_000),
     ];

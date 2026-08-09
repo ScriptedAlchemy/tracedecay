@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use tracedecay_application::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutRequest,
     WorkflowFanOutRuntimeError, WorkflowProviderAdmission, durable_workflow_fan_out_plan,
@@ -5,12 +7,15 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProviderId, RepositoryId, RunId, UtcMicros, WorkApprovalPolicy, WorkAuthority,
-    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
-    WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
+    ManifestDigest, MilestoneId, ProjectId, ProposalId, ProviderId, RepositoryId, RunId, TaskId,
+    UtcMicros, WorkApprovalPolicy, WorkAuthority, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
+    WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProposalV1,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRouteDecisionV1, WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
     WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStep,
     WorkflowStepId, WorktreeId,
 };
@@ -25,6 +30,70 @@ where
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+}
+
+fn fan_out_input(identity: &str, input_digest: ManifestDigest) -> WorkflowFanOutInput {
+    let task_id = id::<TaskId>(&format!("task.workflow.runtime.{identity}"));
+    let initiative_id = id::<InitiativeId>(&format!("initiative.workflow.runtime.{identity}"));
+    let plan_id = id::<WorkPlanId>(&format!("plan.workflow.runtime.{identity}"));
+    let milestone_id = id::<MilestoneId>(&format!("milestone.workflow.runtime.{identity}"));
+    let created_at = UtcMicros(10);
+    let initiative = WorkInitiativeV1::new(
+        initiative_id.clone(),
+        format!("Initiative {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let plan = WorkPlanV1::new(
+        plan_id.clone(),
+        initiative_id.clone(),
+        format!("Plan {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let milestone = WorkMilestoneV1::new(
+        milestone_id.clone(),
+        plan_id.clone(),
+        format!("Milestone {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let item = WorkItemV1::new(WorkItemInputV1 {
+        task_id: task_id.clone(),
+        hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+        title: format!("Task {identity}"),
+        dependencies: BTreeSet::new(),
+        informational_relations: BTreeSet::new(),
+        causal_candidates: BTreeSet::new(),
+        acceptance_criteria: Vec::new(),
+        effort: 1,
+        scheduled_at: None,
+        deadline: None,
+        created_at,
+        updated_at: created_at,
+    })
+    .unwrap();
+    let proposal = WorkProposalV1::new(
+        id::<ProposalId>(&format!("proposal.workflow.runtime.{identity}")),
+        task_id,
+        WorkGraphVersionV1::initial(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "complete fixture").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("fixture route").unwrap(),
+        format!("Proposal {identity}"),
+        input_digest.clone(),
+    )
+    .unwrap();
+    WorkflowFanOutInput {
+        instructions: identity.to_owned(),
+        input_digest,
+        initiative,
+        plan,
+        milestone,
+        item,
+        proposal,
+    }
 }
 
 fn authority() -> WorkAuthority {
@@ -122,9 +191,11 @@ fn request(inputs: &[&str], max_width: u32, max_parallel: u32) -> WorkflowFanOut
         inputs: inputs
             .iter()
             .enumerate()
-            .map(|(index, identity)| WorkflowFanOutInput {
-                identity: (*identity).to_owned(),
-                input_digest: digest(char::from(b'1' + u8::try_from(index).unwrap())),
+            .map(|(index, identity)| {
+                fan_out_input(
+                    identity,
+                    digest(char::from(b'1' + u8::try_from(index).unwrap())),
+                )
             })
             .collect(),
     }
@@ -139,14 +210,14 @@ fn planner_separates_fan_out_width_from_parallelism() {
     assert_eq!(
         plan.children
             .iter()
-            .map(|child| child.input.identity.as_str())
+            .map(|child| child.input.instructions.as_str())
             .collect::<Vec<_>>(),
         vec!["a", "b", "c"]
     );
     assert!(
         plan.children
             .iter()
-            .all(|child| child.task_id.as_str().starts_with("workflow-child:"))
+            .all(|child| child.task_id.as_str().starts_with("task.workflow.runtime."))
     );
 }
 
@@ -179,7 +250,7 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
     let event = projection
         .next_event(
             tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
-                step_id: durable.step_id,
+                step_id: durable.step_id.clone(),
                 attempts: released.clone(),
             },
             tracedecay_domain::WorkflowRunEventContext {
@@ -233,7 +304,7 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
     let next_release = after_settlement
         .next_event(
             tracedecay_domain::WorkflowRunCommand::ReleaseFanOutChildren {
-                step_id: durable.step_id,
+                step_id: durable.step_id.clone(),
                 attempts: vec![third.clone()],
             },
             tracedecay_domain::WorkflowRunEventContext {
@@ -246,7 +317,7 @@ fn durable_plan_releases_only_the_committed_parallel_frontier_after_rebuild() {
     assert!(matches!(
         next_release.event(),
         tracedecay_domain::WorkflowRunEventKind::FanOutChildrenReleased { attempts, .. }
-            if attempts == &[third]
+            if attempts == std::slice::from_ref(&third)
     ));
 
     let cancelling = after_settlement
@@ -297,7 +368,7 @@ fn planner_rejects_width_parallelism_and_duplicate_violations() {
     );
     assert_eq!(
         prepare_workflow_fan_out(&request(&["same", "same"], 2, 1)).unwrap_err(),
-        WorkflowFanOutRuntimeError::DuplicateChildIdentity("same".to_owned())
+        WorkflowFanOutRuntimeError::DuplicateChildIdentity("task.workflow.runtime.same".to_owned())
     );
 }
 
@@ -310,8 +381,8 @@ fn provider_admission_is_part_of_the_immutable_plan() {
 
     assert_ne!(first.plan_digest, changed.plan_digest);
     assert_ne!(
-        first.children[0].proposal_digest,
-        changed.children[0].proposal_digest
+        first.children[0].proposal_command_id,
+        changed.children[0].proposal_command_id
     );
 }
 
@@ -341,4 +412,3 @@ fn child_attempt_identity_survives_workflow_fence_renewal() {
             .collect::<Vec<_>>()
     );
 }
-use std::collections::BTreeSet;

@@ -4,17 +4,13 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblemKind,
     CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    GenerateProposalRequest, ReplanDependenciesCommand, RequestContext, RequestId, ResolvedScope,
-    ReviewProposalCommand, WorkAppendOutcome, WorkAppendRequest, WorkReadiness,
-    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
-    WorkStorageError, WorkStoragePort,
+    ReplanDependenciesCommand, RequestContext, RequestId, ResolvedScope, ReviewProposalCommand,
+    WorkAppendOutcome, WorkAppendRequest, WorkReadiness, WorkService, WorkStorageError,
+    WorkStoragePort,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
     WorkEvent, WorkProjection, WorkVersion, WorktreeId,
-};
-use tracedecay_policy::{
-    WorkEvidenceFrontierV1, WorkProposalActionV1, WorkProposalDispositionV1, WorkProposalReasonV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -127,20 +123,6 @@ impl WorkStoragePort for TestStore {
         Ok(WorkAppendOutcome::Appended(projection(history)?))
     }
 }
-
-struct EmptyProposalRouting;
-
-impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
-    fn routing_snapshot(
-        &self,
-        _context: &RequestContext,
-        _task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
-        Ok(WorkRoutingSnapshotV1::default())
-    }
-}
-
-const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
 
 fn projection(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
     WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
@@ -278,42 +260,6 @@ fn proposal_review_and_execution_admission_are_explicit_mutations() {
         "command.work.review.create",
         BTreeSet::new(),
     );
-    let proposal_request = GenerateProposalRequest {
-        task_id: task_id.clone(),
-        proposal_id: id("proposal.work.review"),
-        live_git_evidence: None,
-        occurred_at: UtcMicros(15),
-    };
-    let proposal = service
-        .generate_proposal(
-            &context,
-            digest('f'),
-            &EMPTY_PROPOSAL_ROUTING,
-            proposal_request.clone(),
-        )
-        .unwrap();
-    assert_eq!(proposal.based_on_version, WorkVersion::initial());
-    assert_eq!(
-        proposal.decision.disposition,
-        WorkProposalDispositionV1::Allow
-    );
-    assert_eq!(
-        proposal.decision.recommended_action,
-        Some(WorkProposalActionV1::ProceedToAcceptance)
-    );
-    // Proposal generation is read-only and deterministic: nothing is appended
-    // and a replay returns the identical explained proposal.
-    assert_eq!(
-        proposal,
-        service
-            .generate_proposal(
-                &context,
-                digest('f'),
-                &EMPTY_PROPOSAL_ROUTING,
-                proposal_request,
-            )
-            .unwrap()
-    );
     assert_eq!(service.load(&context, &task_id).unwrap().history_len(), 1);
 
     let accepted = service
@@ -322,8 +268,8 @@ fn proposal_review_and_execution_admission_are_explicit_mutations() {
             AcceptProposalCommand {
                 review: ReviewProposalCommand {
                     task_id: task_id.clone(),
-                    proposal_id: proposal.proposal_id,
-                    proposal_digest: proposal.proposal_digest,
+                    proposal_id: id("proposal.work.review"),
+                    proposal_digest: digest('c'),
                     expected_version: WorkVersion::initial(),
                     command_id: id("command.work.proposal.accept"),
                     occurred_at: UtcMicros(20),
@@ -427,148 +373,6 @@ fn replaying_the_same_mutation_command_is_idempotent_and_input_sensitive() {
         "application.work.idempotency-conflict"
     );
     assert_eq!(store.load(&authority(&context), &task_id).unwrap().len(), 2);
-}
-
-#[test]
-fn an_accepted_task_denies_further_proposals() {
-    let service = WorkService::new(TestStore::default());
-    let context = context("project.work.denied", "actor.work.owner");
-    let task_id = id::<TaskId>("task.work.denied");
-    create(
-        &service,
-        &context,
-        task_id.as_str(),
-        "command.work.denied.create",
-        BTreeSet::new(),
-    );
-    service
-        .accept_task(
-            &context,
-            AcceptTaskCommand {
-                task_id: task_id.clone(),
-                expected_version: WorkVersion::initial(),
-                command_id: id("command.work.denied.accept"),
-                occurred_at: UtcMicros(20),
-            },
-        )
-        .unwrap();
-
-    let proposal = service
-        .generate_proposal(
-            &context,
-            digest('f'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id,
-                proposal_id: id("proposal.work.denied"),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(30),
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        proposal.decision.disposition,
-        WorkProposalDispositionV1::Deny
-    );
-    assert_eq!(proposal.decision.recommended_action, None);
-    assert!(
-        proposal
-            .decision
-            .ordered_reason_codes
-            .contains(&WorkProposalReasonV1::TaskAccepted)
-    );
-}
-
-#[test]
-fn disagreeing_evidence_frontiers_abstain_and_preserve_both_frontiers() {
-    let service = WorkService::new(TestStore::default());
-    let context = context("project.work.frontier", "actor.work.owner");
-    let task_id = id::<TaskId>("task.work.frontier");
-    create(
-        &service,
-        &context,
-        task_id.as_str(),
-        "command.work.frontier.create",
-        BTreeSet::new(),
-    );
-
-    let live = WorkEvidenceFrontierV1 {
-        watermark: UtcMicros(25),
-        digest: digest('9'),
-    };
-    let proposal = service
-        .generate_proposal(
-            &context,
-            digest('f'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id,
-                proposal_id: id("proposal.work.frontier"),
-                live_git_evidence: Some(live.clone()),
-                occurred_at: UtcMicros(30),
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        proposal.decision.disposition,
-        WorkProposalDispositionV1::Abstain
-    );
-    assert_eq!(proposal.decision.recommended_action, None);
-    assert_eq!(proposal.decision.live_git_evidence, Some(live));
-    assert!(proposal.decision.local_evidence.is_some());
-}
-
-#[test]
-fn a_cancelled_or_expired_request_never_reaches_the_evaluator() {
-    let service = WorkService::new(TestStore::default());
-    let admitted = context("project.work.cancel", "actor.work.owner");
-    let task_id = id::<TaskId>("task.work.cancel");
-    create(
-        &service,
-        &admitted,
-        task_id.as_str(),
-        "command.work.cancel.create",
-        BTreeSet::new(),
-    );
-
-    let cancelled = RequestContext::new(
-        admitted.actor().clone(),
-        admitted.scope().clone(),
-        admitted.grant().clone(),
-        RequestId::new("request.work.cancelled").unwrap(),
-        Deadline::new(UtcMicros(9_000)).unwrap(),
-        CancellationContext::cancelled("cancel.work.cancelled", UtcMicros(5)).unwrap(),
-    )
-    .unwrap();
-    let refused = service
-        .generate_proposal(
-            &cancelled,
-            digest('f'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id: task_id.clone(),
-                proposal_id: id("proposal.work.cancelled"),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(30),
-            },
-        )
-        .unwrap_err();
-    assert_eq!(refused.kind(), ApplicationProblemKind::Cancelled);
-
-    let expired = service
-        .generate_proposal(
-            &admitted,
-            digest('f'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id,
-                proposal_id: id("proposal.work.expired"),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(10_000),
-            },
-        )
-        .unwrap_err();
-    assert_eq!(expired.kind(), ApplicationProblemKind::TimedOut);
 }
 
 #[test]

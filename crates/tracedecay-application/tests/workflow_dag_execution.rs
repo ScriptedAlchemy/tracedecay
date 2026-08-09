@@ -183,6 +183,17 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
             .map(WorkflowRunAppendOutcome::Appended)
             .map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
+
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+        let events = self.events.lock().unwrap();
+        events
+            .values()
+            .map(|history| {
+                WorkflowRunProjection::rebuild(history)
+                    .map_err(|_| WorkflowRunStorageError::InvalidHistory)
+            })
+            .collect()
+    }
 }
 
 type RecordedStepRequests =

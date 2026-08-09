@@ -10,13 +10,13 @@ use tracedecay_application::{
     RequestContext, RequestId, ResolvedScope, SelectedWorkEvidenceV1,
     VerifiedWorkEvidenceExpansionV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,
     WorkEvidenceReadPortErrorV1, WorkEvidenceReadPortV1, WorkEvidenceSelectRequestV1,
-    WorkGraphPublishPortErrorV1, WorkGraphPublishPortV1, WorkGraphReadModeV1,
-    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1,
-    WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1, WorkProductEventAppendOutcomeV1, WorkProductEventDraftV1,
-    WorkProductEventPortErrorV1, WorkProductEventPortV1, WorkProductEvidenceServiceV1,
-    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
+    WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1,
+    WorkHistoryReadPortV1, WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1,
+    WorkProductApplicationErrorV1, WorkProductBindingV1, WorkProductEventCommitOutcomeV1,
+    WorkProductEventCommitV1, WorkProductEventDraftV1, WorkProductEventPortErrorV1,
+    WorkProductEventPortV1, WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1,
+    WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
     WorkRelationScopeV1,
@@ -249,12 +249,23 @@ fn event_from_draft(draft: &WorkProductEventDraftV1) -> WorkProductEventV1 {
     .unwrap()
 }
 
+fn commit_from_event(event: WorkProductEventV1) -> WorkProductEventCommitV1 {
+    let verified = VerifiedWorkGraphVersionV1::new(
+        event.result_graph_version(),
+        event.sequence(),
+        event.source_watermark().clone(),
+        digest('d'),
+    )
+    .unwrap();
+    WorkProductEventCommitV1::new(event, verified).unwrap()
+}
+
 fn event_for_replay(
     context: &tracedecay_application::WorkProductPortContextV1,
     mutation: &WorkProductMutationIdentityV1,
     payload: WorkProductEventPayloadV1,
     canonical_input_digest: ManifestDigest,
-) -> WorkProductEventV1 {
+) -> WorkProductEventCommitV1 {
     let result_graph_version = match &payload {
         WorkProductEventPayloadV1::Created { .. } => WorkGraphVersionV1::initial(),
         WorkProductEventPayloadV1::Changed { .. } => match &mutation.expected_authority {
@@ -274,7 +285,7 @@ fn event_for_replay(
             verified_version.source_watermark().clone(),
         ),
     };
-    event_from_draft(&WorkProductEventDraftV1 {
+    commit_from_event(event_from_draft(&WorkProductEventDraftV1 {
         actor_id: context.actor().clone(),
         owner_scope: tracedecay_domain::WorkProductProfileScopeV1 {
             brain_id: context.authorized_scope().owner_brain_id().clone(),
@@ -297,12 +308,14 @@ fn event_for_replay(
         configuration_revision_id: mutation.revisions.configuration_revision_id.clone(),
         catalog_generation_id: mutation.revisions.catalog_generation_id.clone(),
         payload,
-    })
+    }))
 }
 
 #[derive(Default)]
 struct RecordingEventPort {
     replay: Mutex<Option<(WorkProductMutationIdentityV1, WorkProductEventPayloadV1)>>,
+    last_replay: Mutex<Option<WorkProductEventCommitV1>>,
+    last_append: Mutex<Option<WorkProductEventCommitV1>>,
     replay_calls: AtomicUsize,
     append_calls: AtomicUsize,
 }
@@ -313,53 +326,31 @@ impl WorkProductEventPortV1 for RecordingEventPort {
         context: &tracedecay_application::WorkProductPortContextV1,
         _command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
-    ) -> Result<Option<WorkProductEventV1>, WorkProductEventPortErrorV1> {
+    ) -> Result<Option<WorkProductEventCommitV1>, WorkProductEventPortErrorV1> {
         self.replay_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(self
+        let replay = self
             .replay
             .lock()
             .unwrap()
             .clone()
             .map(|(mutation, payload)| {
                 event_for_replay(context, &mutation, payload, canonical_input_digest.clone())
-            }))
+            });
+        if let Some(commit) = &replay {
+            *self.last_replay.lock().unwrap() = Some(commit.clone());
+        }
+        Ok(replay)
     }
 
-    fn append_with_outbox(
+    fn append_atomically(
         &self,
         _context: &tracedecay_application::WorkProductPortContextV1,
         draft: &WorkProductEventDraftV1,
-    ) -> Result<WorkProductEventAppendOutcomeV1, WorkProductEventPortErrorV1> {
+    ) -> Result<WorkProductEventCommitOutcomeV1, WorkProductEventPortErrorV1> {
         self.append_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(WorkProductEventAppendOutcomeV1::Appended(event_from_draft(
-            draft,
-        )))
-    }
-}
-
-#[derive(Default)]
-struct RecordingPublisher {
-    calls: AtomicUsize,
-    fail: AtomicBool,
-}
-
-impl WorkGraphPublishPortV1 for RecordingPublisher {
-    fn publish_event(
-        &self,
-        _context: &tracedecay_application::WorkProductPortContextV1,
-        event: &WorkProductEventV1,
-    ) -> Result<VerifiedWorkGraphVersionV1, WorkGraphPublishPortErrorV1> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.fail.load(Ordering::Relaxed) {
-            return Err(WorkGraphPublishPortErrorV1::Unavailable);
-        }
-        VerifiedWorkGraphVersionV1::new(
-            event.result_graph_version(),
-            event.sequence(),
-            event.source_watermark().clone(),
-            digest('d'),
-        )
-        .map_err(|_| WorkGraphPublishPortErrorV1::Unavailable)
+        let commit = commit_from_event(event_from_draft(draft));
+        *self.last_append.lock().unwrap() = Some(commit.clone());
+        Ok(WorkProductEventCommitOutcomeV1::Appended(commit))
     }
 }
 
@@ -720,8 +711,7 @@ fn same_command_replays_with_reordered_canonical_evidence_before_head_read() {
     let owner = RegisteredOwner::default();
     let events = RecordingEventPort::default();
     *events.replay.lock().unwrap() = Some((replay_mutation, payload));
-    let publisher = RecordingPublisher::default();
-    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events, &publisher);
+    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events);
 
     let receipt = service
         .accept_task(
@@ -740,6 +730,12 @@ fn same_command_replays_with_reordered_canonical_evidence_before_head_read() {
     assert_eq!(events.replay_calls.load(Ordering::Relaxed), 1);
     assert_eq!(events.append_calls.load(Ordering::Relaxed), 0);
     assert_eq!(graph_port.calls.load(Ordering::Relaxed), 0);
+    let replayed_commit = events.last_replay.lock().unwrap().clone().unwrap();
+    assert_eq!(receipt.event(), replayed_commit.event());
+    assert_eq!(
+        receipt.verified_graph_version(),
+        replayed_commit.verified_graph_version()
+    );
 }
 
 #[test]
@@ -751,8 +747,7 @@ fn create_appends_without_requiring_an_existing_head() {
     let graph_port = RecordingGraphPort::default();
     let owner = RegisteredOwner::default();
     let events = RecordingEventPort::default();
-    let publisher = RecordingPublisher::default();
-    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events, &publisher);
+    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events);
 
     let receipt = service
         .create(
@@ -774,6 +769,16 @@ fn create_appends_without_requiring_an_existing_head() {
     assert_eq!(receipt.event().expected_graph_version(), None);
     assert_eq!(graph_port.calls.load(Ordering::Relaxed), 0);
     assert_eq!(events.append_calls.load(Ordering::Relaxed), 1);
+    let appended_commit = events.last_append.lock().unwrap().clone().unwrap();
+    assert_eq!(receipt.event(), appended_commit.event());
+    assert_eq!(
+        receipt.verified_graph_version(),
+        appended_commit.verified_graph_version()
+    );
+    assert_eq!(
+        receipt.verified_graph_version().graph_version(),
+        receipt.event().result_graph_version()
+    );
 }
 
 #[test]
@@ -794,8 +799,7 @@ fn changed_replay_with_different_payload_is_an_idempotency_conflict() {
     let owner = RegisteredOwner::default();
     let events = RecordingEventPort::default();
     *events.replay.lock().unwrap() = Some((mutation.clone(), replayed_payload));
-    let publisher = RecordingPublisher::default();
-    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events, &publisher);
+    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events);
 
     assert_eq!(
         service
@@ -814,7 +818,6 @@ fn changed_replay_with_different_payload_is_an_idempotency_conflict() {
     );
     assert_eq!(graph_port.calls.load(Ordering::Relaxed), 0);
     assert_eq!(events.append_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(publisher.calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -838,8 +841,7 @@ fn changed_version_generation_or_watermark_fails_before_event_append() {
     let graph_port = RecordingGraphPort::default();
     let owner = RegisteredOwner::default();
     let events = RecordingEventPort::default();
-    let publisher = RecordingPublisher::default();
-    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events, &publisher);
+    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events);
 
     for expected_version in expected_versions {
         let mutation = mutation_identity(WorkProductExpectedAuthorityV1::Verified {
@@ -866,7 +868,7 @@ fn changed_version_generation_or_watermark_fails_before_event_append() {
 }
 
 #[test]
-fn durable_append_followed_by_publish_failure_requires_reconciliation() {
+fn atomic_append_returns_event_and_verified_projection_together() {
     let context = context(true);
     let selection = WorkProductSelectionScopeV1::ProfileOwnedNoGit;
     let initial_graph = graph(1);
@@ -874,26 +876,40 @@ fn durable_append_followed_by_publish_failure_requires_reconciliation() {
     let graph_port = RecordingGraphPort::default();
     let owner = RegisteredOwner::default();
     let events = RecordingEventPort::default();
-    let publisher = RecordingPublisher::default();
-    publisher.fail.store(true, Ordering::Relaxed);
-    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events, &publisher);
+    let service = WorkProductMutationServiceV1::new(&graph_port, &owner, &events);
 
-    assert_eq!(
-        service
-            .create(
-                &context,
-                &binding(),
-                CreateWorkProductRequestV1 {
-                    selection,
-                    initial_graph,
-                    mutation,
-                },
-            )
-            .unwrap_err(),
-        WorkProductApplicationErrorV1::ReconciliationRequired
-    );
+    let receipt = service
+        .create(
+            &context,
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection,
+                initial_graph,
+                mutation,
+            },
+        )
+        .unwrap();
+    let commit = events.last_append.lock().unwrap().clone().unwrap();
+
+    assert!(!receipt.replayed());
     assert_eq!(events.append_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(publisher.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(receipt.event(), commit.event());
+    assert_eq!(
+        receipt.verified_graph_version(),
+        commit.verified_graph_version()
+    );
+    assert_eq!(
+        commit.verified_graph_version().graph_version(),
+        commit.event().result_graph_version()
+    );
+    assert_eq!(
+        commit.verified_graph_version().event_sequence(),
+        commit.event().sequence()
+    );
+    assert_eq!(
+        commit.verified_graph_version().source_watermark(),
+        commit.event().source_watermark()
+    );
 }
 
 #[test]

@@ -395,15 +395,12 @@ fn leak_event(
     event_time_micros: i64,
     reference: &str,
     recovery: WorkExecutionLeakRecoveryV1,
-    revision: u64,
 ) -> ObservabilityEnvelopeV1 {
     envelope(
         sequence,
         event_time_micros,
         &format!("trace.leak.{reference}"),
         ObservabilityPayloadV1::WorkExecutionLeak(WorkExecutionLeakObservedV1 {
-            adjudication_ref: reference.to_owned(),
-            adjudication_revision: revision,
             kind: WorkExecutionLeakKindV1::AttemptWithoutLiveOwner,
             detection_horizon_micros: 1_000,
             recovery,
@@ -535,7 +532,6 @@ fn late_conflict_leak_and_blocked_corrections_choose_highest_revision_across_day
             3_000_000 + index as i64,
             &leak_reference,
             WorkExecutionLeakRecoveryV1::Pending,
-            1,
         ));
         if index == 0 {
             second_day.push(leak_event(
@@ -543,7 +539,6 @@ fn late_conflict_leak_and_blocked_corrections_choose_highest_revision_across_day
                 DAY_MICROS + 3_000_000,
                 &leak_reference,
                 WorkExecutionLeakRecoveryV1::Recovered,
-                2,
             ));
         }
         let blocked_trace = format!("trace.blocked.correction.{index}");

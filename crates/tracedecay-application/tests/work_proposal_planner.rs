@@ -1,7 +1,7 @@
 //! End-to-end shape, sizing, decomposition, and route-planning behaviour of the
 //! mounted `operation.work.generate_proposal`.
 //!
-//! Every assertion here runs through `WorkService::generate_proposal`, not
+//! Every assertion here runs through `WorkIntelligenceServiceV1::generate_proposal`, not
 //! through the policy evaluator directly, so the production path that assembles
 //! the authorized snapshot is the thing under test. Routes, budget, content
 //! location, prior outcomes, and any human override reach the evaluator only by
@@ -12,14 +12,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    GenerateProposalRequest, RequestContext, RequestId, ResolvedScope, WorkAppendOutcome,
-    WorkAppendRequest, WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
-    WorkRoutingSnapshotV1, WorkService, WorkStorageError, WorkStoragePort,
+    AuthorizedWorkProductScopeV1, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
+    VerifiedWorkGraphVersionV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphVersionEntryV1, WorkIntelligenceServiceV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
-    WorkEvent, WorkProjection, WorkVersion, WorktreeId,
+    ActorId, InitiativeId, ManifestDigest, MilestoneId, ProjectId, ProjectionGenerationId,
+    ProposalId, RepositoryId, TaskId, UtcMicros, WorkGraphVersionV1, WorkHierarchyV1,
+    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1,
+    WorkProjectionSequenceV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorktreeId,
 };
 use tracedecay_policy::{
     WORK_CALIBRATION_SUPPORT_FLOOR, WorkBudgetEnvelopeV1, WorkContentLocationClassV1,
@@ -28,9 +34,6 @@ use tracedecay_policy::{
     WorkRoutePlanV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-type WorkHistoryKey = (WorkAuthority, TaskId);
-type WorkHistories = Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>;
 
 /// Task creation time. The local evidence frontier watermark follows the last
 /// recorded event, so prior outcomes observed after this are not stale.
@@ -85,11 +88,10 @@ fn context(project: &str) -> RequestContext {
     .unwrap()
 }
 
-/// Storage that holds both the Work history and the authority's routing state,
-/// so a test can declare eligible routes exactly the way a real authority does.
+/// One exact product graph and the authority's routing state.
 #[derive(Clone, Default)]
 struct TestStore {
-    histories: WorkHistories,
+    graph: Arc<Mutex<Option<WorkProductGraphV1>>>,
     routing: Arc<Mutex<WorkRoutingSnapshotV1>>,
 }
 
@@ -97,60 +99,85 @@ impl TestStore {
     fn declare(&self, routing: WorkRoutingSnapshotV1) {
         *self.routing.lock().unwrap() = routing;
     }
-}
 
-impl WorkStoragePort for TestStore {
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        self.histories
+    fn seed_ready(&self, task_id: TaskId) {
+        *self.graph.lock().unwrap() = Some(graph_with_task(task_id));
+    }
+
+    fn graph(&self) -> WorkProductGraphV1 {
+        self.graph
             .lock()
             .unwrap()
-            .get(&(authority.clone(), task_id.clone()))
-            .cloned()
-            .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
+            .clone()
+            .expect("fixture graph is seeded")
     }
+}
 
-    fn projection(
+impl WorkProductOwnerAuthorizationPortV1 for TestStore {
+    fn authorize_scope(
         &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjection, WorkStorageError> {
-        let history = self.load(authority, task_id)?;
-        projection(&history)
+        _context: &RequestContext,
+        selection: &WorkProductSelectionScopeV1,
+        _observed_at: UtcMicros,
+    ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
+        AuthorizedWorkProductScopeV1::new(
+            id("brain.work-proposal.fixture"),
+            id("profile.work-proposal.fixture"),
+            selection.clone(),
+        )
+        .map_err(|_| WorkProductOwnerAuthorizationErrorV1::Unavailable)
     }
+}
 
-    fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        let mut histories = self.histories.lock().unwrap();
-        let key = (
-            request.event.authority().clone(),
-            request.event.task_id().clone(),
-        );
-        let existing = histories.get(&key).cloned().unwrap_or_default();
-
-        if let Some(prior) = existing
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(projection(&existing)?))
-            } else {
-                Err(WorkStorageError::IdempotencyConflict)
-            };
-        }
-
-        let current = existing.last().map(WorkEvent::version);
-        if current.is_none() && request.expected_version.is_some() {
-            return Err(WorkStorageError::NotFoundOrNotAuthorized);
-        }
-        if current != request.expected_version {
-            return Err(WorkStorageError::VersionConflict);
-        }
-        let history = histories.entry(key).or_default();
-        history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(projection(history)?))
+impl WorkGraphReadPortV1 for TestStore {
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
+        let graph = self
+            .graph
+            .lock()
+            .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?
+            .clone()
+            .ok_or(WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized)?;
+        let source_watermark = WorkProductSourceWatermarkV1::new(BTreeMap::new())
+            .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
+        let verified = VerifiedWorkGraphVersionV1::new(
+            graph.version(),
+            tracedecay_domain::WorkProductEventSequenceV1::new(1)
+                .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?,
+            source_watermark,
+            digest('c'),
+        )
+        .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
+        let runtime = WorkRuntimeProjectionV1::new(
+            graph.version(),
+            ProjectionGenerationId::new("generation.work-proposal.fixture")
+                .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?,
+            WorkProjectionSequenceV1::new(graph.version().get()),
+            request.observed_at,
+            Vec::new(),
+            WorkRuntimeProjectionCoverageV1::Complete,
+        )
+        .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
+        let projections =
+            WorkProductProjectionBundleV1::from_graph(&graph, &runtime, request.observed_at)
+                .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
+        let snapshot = WorkGraphVersionEntryV1::new(
+            CREATED_AT,
+            request.observed_at,
+            request.observed_at,
+            verified,
+            graph,
+            runtime,
+            projections,
+        )
+        .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
+        Ok(WorkGraphReadV1::Current {
+            authorized_scope: context.authorized_scope().clone(),
+            snapshot,
+        })
     }
 }
 
@@ -164,36 +191,86 @@ impl WorkRoutingSnapshotPortV1 for TestStore {
     }
 }
 
-fn projection(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
-    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
-}
-
 /// One ready, dependency-free task, so the planner path is reached without a
 /// gate short-circuit standing in front of it.
-fn ready_task(service: &WorkService<TestStore>, context: &RequestContext, task: &str) -> TaskId {
+fn ready_task(store: &TestStore, task: &str) -> TaskId {
     let task_id = id::<TaskId>(task);
-    service
-        .create(
-            context,
-            CreateWorkCommand {
-                task_id: task_id.clone(),
-                title: format!("Work for {task}"),
-                dependencies: BTreeSet::new(),
-                command_id: id(&format!("command.{task}.create")),
-                occurred_at: CREATED_AT,
-            },
-        )
-        .unwrap();
+    store.seed_ready(task_id.clone());
     task_id
+}
+
+fn proposal_service(store: &TestStore) -> WorkIntelligenceServiceV1<TestStore, TestStore> {
+    WorkIntelligenceServiceV1::new(
+        store.clone(),
+        store.clone(),
+        WorkProductBindingV1::new(
+            CapabilityId::new("capability.work.fixture").unwrap(),
+            UseCaseId::new("use-case.work.fixture").unwrap(),
+        ),
+    )
 }
 
 fn proposal_request(task_id: &TaskId, proposal: &str) -> GenerateProposalRequest {
     GenerateProposalRequest {
+        selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
         task_id: task_id.clone(),
         proposal_id: id::<ProposalId>(proposal),
         live_git_evidence: None,
         occurred_at: EVALUATED_AT,
     }
+}
+
+fn graph_with_task(task_id: TaskId) -> WorkProductGraphV1 {
+    let initiative_id = id::<InitiativeId>("initiative.work-proposal.fixture");
+    let plan_id = id::<WorkPlanId>("plan.work-proposal.fixture");
+    let milestone_id = id::<MilestoneId>("milestone.work-proposal.fixture");
+    WorkProductGraphV1::new(
+        WorkGraphVersionV1::initial(),
+        vec![
+            WorkInitiativeV1::new(
+                initiative_id.clone(),
+                "Proposal fixture initiative".to_owned(),
+                UtcMicros(1),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkPlanV1::new(
+                plan_id.clone(),
+                initiative_id.clone(),
+                "Proposal fixture plan".to_owned(),
+                UtcMicros(2),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkMilestoneV1::new(
+                milestone_id.clone(),
+                plan_id.clone(),
+                "Proposal fixture milestone".to_owned(),
+                UtcMicros(3),
+            )
+            .unwrap(),
+        ],
+        vec![
+            WorkItemV1::new(WorkItemInputV1 {
+                task_id,
+                hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+                title: "Proposal fixture task".to_owned(),
+                dependencies: BTreeSet::new(),
+                informational_relations: BTreeSet::new(),
+                causal_candidates: BTreeSet::new(),
+                acceptance_criteria: Vec::new(),
+                effort: 1,
+                scheduled_at: None,
+                deadline: None,
+                created_at: CREATED_AT,
+                updated_at: CREATED_AT,
+            })
+            .unwrap(),
+        ],
+    )
+    .unwrap()
 }
 
 /// A candidate that clears the declared budget and sits in an allowed content
@@ -260,9 +337,9 @@ fn three_routes() -> Vec<WorkRouteCandidateV1> {
 #[test]
 fn eligible_routes_from_the_authorized_snapshot_are_ranked_deterministically() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.rank");
-    let task_id = ready_task(&service, &context, "task.work.rank");
+    let task_id = ready_task(&store, "task.work.rank");
     store.declare(WorkRoutingSnapshotV1 {
         configuration_revision: None,
         eligible_routes: three_routes(),
@@ -314,9 +391,9 @@ fn eligible_routes_from_the_authorized_snapshot_are_ranked_deterministically() {
 #[test]
 fn budget_and_content_location_refusals_are_recorded_as_typed_exclusions() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.exclude");
-    let task_id = ready_task(&service, &context, "task.work.exclude");
+    let task_id = ready_task(&store, "task.work.exclude");
 
     let mut over_budget = route("route.expensive", WorkOrdinalBandV1::Highest);
     // Remaining budget is ceiling minus spent; this ceiling cannot fit inside it.
@@ -370,9 +447,9 @@ fn budget_and_content_location_refusals_are_recorded_as_typed_exclusions() {
 #[test]
 fn a_human_override_promotes_a_surviving_route_and_is_recorded() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.override");
-    let task_id = ready_task(&service, &context, "task.work.override");
+    let task_id = ready_task(&store, "task.work.override");
     store.declare(WorkRoutingSnapshotV1 {
         configuration_revision: None,
         eligible_routes: three_routes(),
@@ -416,9 +493,9 @@ fn a_human_override_promotes_a_surviving_route_and_is_recorded() {
 #[test]
 fn no_eligible_routes_is_a_typed_decision_and_not_a_failure() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.empty");
-    let task_id = ready_task(&service, &context, "task.work.empty");
+    let task_id = ready_task(&store, "task.work.empty");
     // The authority holds no routing state at all. Generation must still
     // succeed and answer honestly instead of inventing a default route.
     store.declare(WorkRoutingSnapshotV1::default());
@@ -452,9 +529,9 @@ fn no_eligible_routes_is_a_typed_decision_and_not_a_failure() {
 #[test]
 fn sizing_is_withheld_below_the_declared_calibration_support_floor() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.sparse");
-    let task_id = ready_task(&service, &context, "task.work.sparse");
+    let task_id = ready_task(&store, "task.work.sparse");
     let in_cohort: Vec<WorkPriorOutcomeV1> = (11..14)
         .map(|observed_at| outcome("route.alpha", observed_at))
         .collect();
@@ -490,9 +567,9 @@ fn sizing_is_withheld_below_the_declared_calibration_support_floor() {
 #[test]
 fn sizing_at_the_support_floor_carries_the_floor_that_governed_it() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.calibrated");
-    let task_id = ready_task(&service, &context, "task.work.calibrated");
+    let task_id = ready_task(&store, "task.work.calibrated");
     let support = WORK_CALIBRATION_SUPPORT_FLOOR;
     let first_observed = CREATED_AT.0 + 1;
     let in_cohort: Vec<WorkPriorOutcomeV1> = (0..i64::from(support))
@@ -544,9 +621,9 @@ fn sizing_at_the_support_floor_carries_the_floor_that_governed_it() {
 #[test]
 fn planning_a_proposal_mutates_no_work_state() {
     let store = TestStore::default();
-    let service = WorkService::new(store.clone());
+    let service = proposal_service(&store);
     let context = context("project.work.planner.readonly");
-    let task_id = ready_task(&service, &context, "task.work.readonly");
+    let task_id = ready_task(&store, "task.work.readonly");
     store.declare(WorkRoutingSnapshotV1 {
         configuration_revision: None,
         eligible_routes: three_routes(),
@@ -555,7 +632,7 @@ fn planning_a_proposal_mutates_no_work_state() {
         prior_outcomes: vec![outcome("route.alpha", 11)],
         human_override: None,
     });
-    let before = service.load(&context, &task_id).unwrap();
+    let before = store.graph();
 
     let proposal = service
         .generate_proposal(
@@ -567,10 +644,8 @@ fn planning_a_proposal_mutates_no_work_state() {
         .unwrap();
     assert!(proposal.decision.route_plan.is_some());
 
-    let after = service.load(&context, &task_id).unwrap();
-    assert_eq!(after.version(), before.version());
-    assert_eq!(after.version(), WorkVersion::initial());
-    assert_eq!(after.history_len(), before.history_len());
+    let after = store.graph();
+    assert_eq!(after.version(), WorkGraphVersionV1::initial());
     assert_eq!(after, before);
-    assert_eq!(proposal.based_on_version, before.version());
+    assert_eq!(proposal.proposal.based_on_version(), before.version());
 }

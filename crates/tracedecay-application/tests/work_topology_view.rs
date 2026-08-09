@@ -3,39 +3,33 @@
 //! Work is a typed state, and an invalid resolved policy is a typed
 //! unavailability rather than a fabricated view.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand, ApplicationProblem,
-    CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    ExecutionTopologyViewV1, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
-    ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
-    WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
-    WorkAttemptListCoverageV1, WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStorageError,
-    WorkPlacementStoragePort, WorkProjectionPortError, WorkProjectionReadPort,
-    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
-    WorkStorageError, WorkStoragePort, WorkTopologyViewRequestV1, execution_topology_view,
+    AdmitWorkPlacementCommand, ApplicationProblem, CancellationContext, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, ExecutionTopologyViewV1, GenerateProposalRequest, RequestContext,
+    RequestId, ResolvedScope, StartWorkAttemptCommand, WorkAttemptListCoverageV1,
+    WorkAttemptService, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
+    WorkIntelligenceServiceV1, WorkPlacementReadingV1, WorkPlacementService,
+    WorkPlacementStorageError, WorkPlacementStoragePort, WorkProductAttemptServiceV1,
+    WorkProductSelectionScopeV1, WorkRelationScopeV1, WorkRoutingSnapshotErrorV1,
+    WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkTopologyViewRequestV1,
+    execution_topology_view,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkEffectStateV1,
-    WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
+    ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAuthority,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
     WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkPlacementIdentityV1, WorkPlacementKindV1, WorkPlacementObservationV1,
-    WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1, WorkProjection,
-    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkSandboxPolicy, WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkPlacementIdentityV1, WorkPlacementKindV1, WorkPlacementObservationV1, WorkPlacementStateV1,
+    WorkPlacementTargetV1, WorkPlacementV1, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-type WorkHistoryKey = (WorkAuthority, TaskId);
-type WorkHistories = Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>;
 
 fn id<T>(value: &str) -> T
 where
@@ -83,64 +77,6 @@ fn context(project: &str) -> RequestContext {
     .unwrap()
 }
 
-#[derive(Clone, Default)]
-struct TestStore {
-    histories: WorkHistories,
-}
-
-impl WorkStoragePort for TestStore {
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        self.histories
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone()))
-            .cloned()
-            .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
-    }
-
-    fn projection(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjection, WorkStorageError> {
-        let history = self.load(authority, task_id)?;
-        rebuild(&history)
-    }
-
-    fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        let mut histories = self.histories.lock().unwrap();
-        let key = (
-            request.event.authority().clone(),
-            request.event.task_id().clone(),
-        );
-        let existing = histories.get(&key).cloned().unwrap_or_default();
-        if let Some(prior) = existing
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(rebuild(&existing)?))
-            } else {
-                Err(WorkStorageError::IdempotencyConflict)
-            };
-        }
-        let current = existing.last().map(WorkEvent::version);
-        if current.is_none() && request.expected_version.is_some() {
-            return Err(WorkStorageError::NotFoundOrNotAuthorized);
-        }
-        if current != request.expected_version {
-            return Err(WorkStorageError::VersionConflict);
-        }
-        let history = histories.entry(key).or_default();
-        history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(rebuild(history)?))
-    }
-}
-
 struct EmptyProposalRouting;
 
 impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
@@ -154,243 +90,6 @@ impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
 }
 
 const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
-
-fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
-    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
-}
-
-#[derive(Clone)]
-struct SnapshotPort {
-    store: TestStore,
-}
-
-impl WorkProjectionReadPort for SnapshotPort {
-    fn exact_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let projection =
-            self.store
-                .projection(authority, task_id)
-                .map_err(|error| match error {
-                    WorkStorageError::NotFoundOrNotAuthorized => {
-                        WorkProjectionPortError::NotFoundOrNotAuthorized
-                    }
-                    _ => WorkProjectionPortError::Unavailable,
-                })?;
-        WorkProjectionSnapshotV1::new(
-            id::<ProjectionGenerationId>("generation.topology.fixture"),
-            WorkProjectionSequenceV1::new(1),
-            vec![projection],
-            WorkProjectionCoverageV1::complete(1, 1)
-                .map_err(|_| WorkProjectionPortError::Unavailable)?,
-        )
-        .map_err(|_| WorkProjectionPortError::Unavailable)
-    }
-
-    fn snapshot(
-        &self,
-        _authority: &WorkAuthority,
-        _page_size: u32,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-
-    fn delta(
-        &self,
-        _authority: &WorkAuthority,
-        _cursor: &tracedecay_domain::WorkProjectionResumeCursorV1,
-        _page_size: u32,
-    ) -> Result<tracedecay_domain::WorkProjectionDeltaV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-}
-
-type AttemptKey = (WorkAuthority, String);
-
-#[derive(Default)]
-struct AttemptRows {
-    fences: BTreeMap<WorkAuthority, u64>,
-    rows: BTreeMap<AttemptKey, String>,
-}
-
-#[derive(Clone, Default)]
-struct AttemptStore {
-    inner: Arc<Mutex<AttemptRows>>,
-}
-
-fn attempt_key(authority: &WorkAuthority, identity: &WorkAttemptIdentityV1) -> AttemptKey {
-    (
-        authority.clone(),
-        format!(
-            "{}/{}/{}",
-            identity.task_id().as_str(),
-            identity.run_id().as_str(),
-            identity.attempt_id().as_str()
-        ),
-    )
-}
-
-impl WorkAttemptStoragePort for AttemptStore {
-    fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
-        let mut inner = self.inner.lock().unwrap();
-        let epoch = inner.fences.entry(authority.clone()).or_insert(0);
-        *epoch += 1;
-        Ok(*epoch)
-    }
-
-    fn insert(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        let payload =
-            serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, attempt.identity());
-        if let Some(existing) = inner.rows.get(&key) {
-            return if *existing == payload {
-                serde_json::from_str(existing)
-                    .map(WorkAttemptInsertOutcome::Replayed)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            } else {
-                Err(WorkAttemptStorageError::AttemptConflict)
-            };
-        }
-        inner.rows.insert(key, payload);
-        Ok(WorkAttemptInsertOutcome::Inserted)
-    }
-
-    fn insert_bounded(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-        _concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        self.insert(authority, attempt)
-    }
-
-    fn admission_capacities(
-        &self,
-        _authority: &WorkAuthority,
-        task_ids: &[TaskId],
-        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
-    ) -> Result<
-        BTreeMap<TaskId, tracedecay_application::WorkAttemptCapacityV1>,
-        WorkAttemptStorageError,
-    > {
-        Ok(task_ids
-            .iter()
-            .cloned()
-            .map(|task_id| {
-                (
-                    task_id,
-                    tracedecay_application::WorkAttemptCapacityV1::new(
-                        0,
-                        0,
-                        0,
-                        concurrency.clone(),
-                    ),
-                )
-            })
-            .collect())
-    }
-
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let payload = inner
-            .rows
-            .get(&attempt_key(authority, identity))
-            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
-    }
-
-    fn load_admission_kind(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        self.load(authority, identity)
-            .map(|_| WorkAttemptAdmissionKind::Ordinary)
-    }
-
-    fn update(
-        &self,
-        authority: &WorkAuthority,
-        expected_fence: &WorkLeaseFenceV1,
-        expected_state: WorkAttemptStateV1,
-        next: &WorkAttemptV1,
-        _evidence: Option<&WorkAttemptEvidenceRecordV1>,
-    ) -> Result<(), WorkAttemptStorageError> {
-        let payload =
-            serde_json::to_string(next).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, next.identity());
-        let Some(existing) = inner.rows.get(&key) else {
-            return Err(WorkAttemptStorageError::NotFoundOrNotAuthorized);
-        };
-        let current: WorkAttemptV1 =
-            serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        if current.lease() != expected_fence || current.state() != expected_state {
-            return Err(WorkAttemptStorageError::FenceConflict);
-        }
-        inner.rows.insert(key, payload);
-        Ok(())
-    }
-
-    fn open_attempts(
-        &self,
-        authority: &WorkAuthority,
-    ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .rows
-            .iter()
-            .filter(|((row_authority, _), _)| row_authority == authority)
-            .map(|(_, payload)| {
-                serde_json::from_str::<WorkAttemptV1>(payload)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            })
-            .collect()
-    }
-
-    fn list(
-        &self,
-        authority: &WorkAuthority,
-        start_after: Option<&WorkAttemptIdentityV1>,
-        limit: u32,
-    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let start_ordinal = start_after.map(|identity| attempt_key(authority, identity).1);
-        let mut pending = Vec::new();
-        for ((row_authority, ordinal), payload) in inner.rows.iter() {
-            if row_authority != authority {
-                continue;
-            }
-            if let Some(start) = &start_ordinal
-                && ordinal <= start
-            {
-                continue;
-            }
-            pending.push(
-                serde_json::from_str::<WorkAttemptV1>(payload)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            );
-        }
-        let remaining =
-            u32::try_from(pending.len()).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        pending.truncate(limit as usize);
-        Ok(WorkAttemptListPageV1 {
-            attempts: pending,
-            remaining,
-        })
-    }
-}
 
 type PlacementKey = (WorkAuthority, WorkPlacementIdentityV1);
 
@@ -485,25 +184,35 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     .unwrap()
 }
 
-fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &str) {
+fn selected_product_scope(context: &RequestContext) -> WorkProductSelectionScopeV1 {
+    WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+        project_id: context.scope().project_id.clone(),
+        repository_id: context.scope().repository_id.clone(),
+    }]))
+    .unwrap()
+}
+
+fn admit_work(
+    store: &common::WorkProductAttemptStore,
+    proposals: &WorkIntelligenceServiceV1<
+        common::WorkProductAttemptStore,
+        common::WorkProductAttemptStore,
+    >,
+    context: &RequestContext,
+    task: &str,
+) {
     let task_id = id::<TaskId>(task);
-    work.create(
-        context,
-        CreateWorkCommand {
-            task_id: task_id.clone(),
-            title: format!("Work for {task}"),
-            dependencies: BTreeSet::new(),
-            command_id: id(&format!("command.{task}.create")),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
-    let proposal = work
+    // The shared authority seeds a real immutable Work-product event journal
+    // whose accepted proposal and execution admission are required by the
+    // public product-attempt service below.
+    store.seed_task(context, task_id.clone(), true);
+    let proposal = proposals
         .generate_proposal(
             context,
             digest('b'),
             &EMPTY_PROPOSAL_ROUTING,
             GenerateProposalRequest {
+                selection: selected_product_scope(context),
                 task_id: task_id.clone(),
                 proposal_id: id(&format!("proposal.{task}")),
                 live_git_evidence: None,
@@ -511,30 +220,7 @@ fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &st
             },
         )
         .unwrap();
-    work.accept_proposal(
-        context,
-        AcceptProposalCommand {
-            review: ReviewProposalCommand {
-                task_id: task_id.clone(),
-                proposal_id: proposal.proposal_id,
-                proposal_digest: proposal.proposal_digest,
-                expected_version: WorkVersion::initial(),
-                command_id: id(&format!("command.{task}.accept")),
-                occurred_at: UtcMicros(20),
-            },
-        },
-    )
-    .unwrap();
-    work.admit_execution(
-        context,
-        AdmitExecutionCommand {
-            task_id,
-            expected_version: WorkVersion::new(2).unwrap(),
-            command_id: id(&format!("command.{task}.admit")),
-            occurred_at: UtcMicros(30),
-        },
-    )
-    .unwrap();
+    assert_eq!(proposal.proposal.task_id(), &task_id);
 }
 
 fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
@@ -554,25 +240,28 @@ fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
 }
 
 type Fixture = (
-    WorkAttemptService<AttemptStore, SnapshotPort, TestStore>,
-    WorkService<TestStore>,
+    WorkAttemptService<common::WorkProductAttemptStore>,
+    WorkProductAttemptServiceV1<common::WorkProductAttemptStore>,
+    WorkIntelligenceServiceV1<common::WorkProductAttemptStore, common::WorkProductAttemptStore>,
+    common::WorkProductAttemptStore,
     WorkPlacementService<PlacementStore>,
     RequestContext,
 );
 
 fn fixture(project: &str) -> Fixture {
-    let store = TestStore::default();
-    let work = WorkService::new(store.clone());
-    let attempts = WorkAttemptService::new(
-        AttemptStore::default(),
-        SnapshotPort {
-            store: store.clone(),
-        },
-        WorkService::new(store),
+    let store = common::WorkProductAttemptStore::default();
+    let attempts = WorkAttemptService::new(store.clone());
+    let product_attempts = WorkProductAttemptServiceV1::new(store.clone());
+    let proposals = WorkIntelligenceServiceV1::new(
+        store.clone(),
+        store.clone(),
+        common::work_product_binding(),
     );
     (
         attempts,
-        work,
+        product_attempts,
+        proposals,
+        store,
         WorkPlacementService::new(PlacementStore::default()),
         context(project),
     )
@@ -592,11 +281,18 @@ fn verified_binding()
 
 #[test]
 fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
-    let (attempts, work, placements, context) = fixture("project.topology.view");
+    let (attempts, product_attempts, proposals, store, placements, context) =
+        fixture("project.topology.view");
     for task in ["task.topology.a", "task.topology.b"] {
-        admit_work(&work, &context, task);
-        attempts
-            .start(&context, start_command(task, &format!("attempt.{task}.1")))
+        admit_work(&store, &proposals, &context, task);
+        product_attempts
+            .start_against_registered_topology(
+                &context,
+                &common::work_product_binding(),
+                &common::work_product_revisions(&context),
+                &safe_work_topology_policy_v1(),
+                start_command(task, &format!("attempt.{task}.1")),
+            )
             .unwrap();
     }
     let placed = placements
@@ -680,7 +376,8 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
 
 #[test]
 fn a_scope_without_any_work_is_the_typed_absent_view() {
-    let (attempts, _work, placements, context) = fixture("project.topology.absent");
+    let (attempts, _product_attempts, _proposals, _store, placements, context) =
+        fixture("project.topology.absent");
     let view = execution_topology_view(
         &attempts,
         &placements,
@@ -698,7 +395,8 @@ fn a_scope_without_any_work_is_the_typed_absent_view() {
 
 #[test]
 fn an_invalid_resolved_policy_is_refused_before_any_read() {
-    let (attempts, _work, placements, context) = fixture("project.topology.invalid");
+    let (attempts, _product_attempts, _proposals, _store, placements, context) =
+        fixture("project.topology.invalid");
     let mut policy = safe_work_topology_policy_v1();
     policy.schema_version = 99;
     let problem = execution_topology_view(

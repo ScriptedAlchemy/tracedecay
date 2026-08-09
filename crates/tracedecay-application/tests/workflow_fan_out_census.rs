@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_application::{
     CancellationContext, WorkflowFailurePolicy, WorkflowFanOutCensusEvidenceV1,
@@ -9,16 +9,20 @@ use tracedecay_domain::configuration::{
     BranchTopologyKindV1, ReviewTopologyKindV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProjectionGenerationId, ProviderId, RepositoryId, RunId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptProgressV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1,
-    WorkEgressPolicy, WorkEvent, WorkEventKind, WorkExecutableReference, WorkExecutionEnvelopeV1,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFenceEpochV1, WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProjection,
+    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, InitiativeId,
+    ManifestDigest, MilestoneId, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
+    RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAuthority,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkEvent, WorkEventKind,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
+    WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductSourceWatermarkV1, WorkProjection,
     WorkProjectionCoverageV1, WorkProjectionResumeCursorV1, WorkProjectionSequenceRangeV1,
-    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy,
+    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProposalV1, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1,
+    WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
     WorkTerminalEvidenceV1, WorkVersion, WorkflowCensusCountV1, WorkflowCensusEvidenceReasonV1,
     WorkflowCensusGenerationV1, WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef,
     WorkflowOutputName, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
@@ -36,6 +40,73 @@ where
 fn digest(byte: char) -> ManifestDigest {
     let hex = format!("{:02x}", u32::from(byte) & 0xff);
     ManifestDigest::new(format!("sha256:{}", hex.repeat(32))).unwrap()
+}
+
+fn fan_out_input(
+    identity: &str,
+    input_digest: ManifestDigest,
+) -> tracedecay_application::WorkflowFanOutInput {
+    let task_id = id::<TaskId>(&format!("task.workflow.census.{identity}"));
+    let initiative_id = id::<InitiativeId>(&format!("initiative.workflow.census.{identity}"));
+    let plan_id = id::<WorkPlanId>(&format!("plan.workflow.census.{identity}"));
+    let milestone_id = id::<MilestoneId>(&format!("milestone.workflow.census.{identity}"));
+    let created_at = UtcMicros(10);
+    let initiative = WorkInitiativeV1::new(
+        initiative_id.clone(),
+        format!("Initiative {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let plan = WorkPlanV1::new(
+        plan_id.clone(),
+        initiative_id.clone(),
+        format!("Plan {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let milestone = WorkMilestoneV1::new(
+        milestone_id.clone(),
+        plan_id.clone(),
+        format!("Milestone {identity}"),
+        created_at,
+    )
+    .unwrap();
+    let item = WorkItemV1::new(WorkItemInputV1 {
+        task_id: task_id.clone(),
+        hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+        title: format!("Task {identity}"),
+        dependencies: BTreeSet::new(),
+        informational_relations: BTreeSet::new(),
+        causal_candidates: BTreeSet::new(),
+        acceptance_criteria: Vec::new(),
+        effort: 1,
+        scheduled_at: None,
+        deadline: None,
+        created_at,
+        updated_at: created_at,
+    })
+    .unwrap();
+    let proposal = WorkProposalV1::new(
+        id::<ProposalId>(&format!("proposal.workflow.census.{identity}")),
+        task_id,
+        WorkGraphVersionV1::initial(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "complete fixture").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("fixture route").unwrap(),
+        format!("Proposal {identity}"),
+        input_digest.clone(),
+    )
+    .unwrap();
+    tracedecay_application::WorkflowFanOutInput {
+        instructions: identity.to_owned(),
+        input_digest,
+        initiative,
+        plan,
+        milestone,
+        item,
+        proposal,
+    }
 }
 
 fn fan_out_authority() -> WorkAuthority {
@@ -115,14 +186,8 @@ fn fixture() -> Fixture {
         failure_policy: WorkflowFailurePolicy::Collect,
         provider,
         inputs: vec![
-            tracedecay_application::WorkflowFanOutInput {
-                identity: "first".to_owned(),
-                input_digest: digest('1'),
-            },
-            tracedecay_application::WorkflowFanOutInput {
-                identity: "second".to_owned(),
-                input_digest: digest('2'),
-            },
+            fan_out_input("first", digest('1')),
+            fan_out_input("second", digest('2')),
         ],
     };
     let planned = prepare_workflow_fan_out(&request).unwrap();
@@ -170,12 +235,12 @@ fn fixture() -> Fixture {
     let attempts = durable
         .children
         .iter()
-        .map(|child| work_attempt(child, &generation, 2, &durable.execution_snapshot))
+        .map(|child| work_attempt(child, 2, &durable.execution_snapshot))
         .collect::<Vec<_>>();
     let prior_attempts = durable
         .children
         .iter()
-        .map(|child| work_attempt_without_progress(child, &generation, &durable.execution_snapshot))
+        .map(|child| work_attempt_without_progress(child, &durable.execution_snapshot))
         .collect::<Vec<_>>();
     let non_duplicates: BTreeSet<WorkAttemptIdentityV1> = durable
         .children
@@ -267,8 +332,8 @@ fn work_projection(
             child.proposal_command_id.clone(),
             digest('b'),
             WorkEventKind::ProposalAccepted {
-                proposal_id: child.proposal_id.clone(),
-                proposal_digest: child.proposal_digest.clone(),
+                proposal_id: child.proposal.proposal_id().clone(),
+                proposal_digest: tracedecay_domain::canonical_sha256(&child.proposal).unwrap(),
             },
         )
         .unwrap(),
@@ -292,13 +357,12 @@ fn work_projection(
 
 fn work_attempt(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    generation: &ProjectionGenerationId,
     completed: u64,
     snapshot: &WorkExecutionSnapshot,
 ) -> tracedecay_domain::WorkAttemptV1 {
     work_attempt_with_progress(
         child,
-        generation,
+        product_attempt_binding(child, false),
         Some(WorkAttemptProgressV1::new(completed, 10).unwrap()),
         snapshot,
     )
@@ -306,25 +370,76 @@ fn work_attempt(
 
 fn work_attempt_without_progress(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    generation: &ProjectionGenerationId,
     snapshot: &WorkExecutionSnapshot,
 ) -> tracedecay_domain::WorkAttemptV1 {
-    work_attempt_with_progress(child, generation, None, snapshot)
+    work_attempt_with_progress(child, product_attempt_binding(child, false), None, snapshot)
+}
+
+fn work_attempt_after_accepted_link(
+    child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
+    completed: u64,
+    snapshot: &WorkExecutionSnapshot,
+) -> tracedecay_domain::WorkAttemptV1 {
+    work_attempt_with_progress(
+        child,
+        product_attempt_binding(child, true),
+        Some(WorkAttemptProgressV1::new(completed, 10).unwrap()),
+        snapshot,
+    )
+}
+
+fn product_attempt_binding(
+    child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
+    accepted_attempt_linked: bool,
+) -> WorkAttemptProjectionBindingV1 {
+    let graph = WorkProductGraphV1::new(
+        WorkGraphVersionV1::initial(),
+        vec![child.initiative.clone()],
+        vec![child.plan.clone()],
+        vec![child.milestone.clone()],
+        vec![child.item.clone()],
+    )
+    .unwrap()
+    .apply(WorkGraphChangeV1::ProposalAccepted {
+        proposal: child.proposal.clone(),
+        accepted_at: UtcMicros(11),
+    })
+    .unwrap()
+    .apply(WorkGraphChangeV1::ExecutionAdmitted {
+        task_id: child.task_id.clone(),
+        based_on_version: WorkGraphVersionV1::new(2).unwrap(),
+        admitted_at: UtcMicros(12),
+    })
+    .unwrap();
+    let graph = if accepted_attempt_linked {
+        let based_on_version = graph.version();
+        graph
+            .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
+                task_id: child.task_id.clone(),
+                based_on_version,
+                identity: child.attempt_identity.clone(),
+                linked_at: UtcMicros(13),
+            })
+            .unwrap()
+    } else {
+        graph
+    };
+    WorkAttemptProjectionBindingV1::new(
+        graph.version(),
+        WorkProductEventSequenceV1::new(graph.version().get()).unwrap(),
+        WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
+        tracedecay_domain::canonical_sha256(&graph).unwrap(),
+        child.proposal.proposal_id().clone(),
+    )
+    .unwrap()
 }
 
 fn work_attempt_with_progress(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    generation: &ProjectionGenerationId,
+    binding: WorkAttemptProjectionBindingV1,
     progress: Option<WorkAttemptProgressV1>,
     snapshot: &WorkExecutionSnapshot,
 ) -> tracedecay_domain::WorkAttemptV1 {
-    let binding = WorkAttemptProjectionBindingV1::new(
-        generation.clone(),
-        WorkProjectionSequenceV1::new(3),
-        WorkVersion::new(3).unwrap(),
-        child.proposal_id.clone(),
-    )
-    .unwrap();
     let identity = child.attempt_identity.clone();
     let execution = WorkExecutionEnvelopeV1::new(
         identity.clone(),
@@ -366,12 +481,11 @@ fn work_attempt_with_progress(
 
 fn terminal_work_attempt(
     child: &tracedecay_domain::WorkflowFanOutChildPlanV1,
-    generation: &ProjectionGenerationId,
     completed: u64,
     snapshot: &WorkExecutionSnapshot,
     terminal_at: i64,
 ) -> tracedecay_domain::WorkAttemptV1 {
-    let attempt = work_attempt(child, generation, completed, snapshot);
+    let attempt = work_attempt(child, completed, snapshot);
     let route = snapshot.route().clone();
     attempt
         .transition(
@@ -559,7 +673,7 @@ fn work_generation_mismatch_is_typed_and_does_not_claim_exact_activity() {
                 .flat_map(|plan| &plan.children)
                 .find(|child| child.attempt_identity == attempt.identity().clone())
                 .unwrap();
-            work_attempt(child, &other_generation, 2, &plan_snapshot(&fixture))
+            work_attempt_after_accepted_link(child, 2, &plan_snapshot(&fixture))
         })
         .collect::<Vec<_>>();
     let first = census_evidence(
@@ -690,8 +804,8 @@ fn two_live_attempts_allow_one_missing_progress_frontier() {
         .unwrap();
     let snapshot = plan_snapshot(&fixture);
     let current_attempts = vec![
-        work_attempt(first_child, &fixture.generation, 1, &snapshot),
-        work_attempt_without_progress(second_child, &fixture.generation, &snapshot),
+        work_attempt(first_child, 1, &snapshot),
+        work_attempt_without_progress(second_child, &snapshot),
     ];
     let non_duplicates = BTreeSet::from([first_child.attempt_identity.clone()]);
     let current_evidence = census_evidence(
@@ -735,13 +849,7 @@ fn terminal_transition_in_interval_counts_active_and_useful_once() {
         .flat_map(|plan| &plan.children)
         .find(|child| child.attempt_identity == current_fixture.attempts[0].identity().clone())
         .unwrap();
-    let terminal = terminal_work_attempt(
-        first_child,
-        &current_fixture.generation,
-        2,
-        &plan_snapshot(&current_fixture),
-        180,
-    );
+    let terminal = terminal_work_attempt(first_child, 2, &plan_snapshot(&current_fixture), 180);
     let current_attempts = vec![terminal];
     let current_non_duplicates = BTreeSet::from([first_child.attempt_identity.clone()]);
     let current_evidence = census_evidence(
@@ -760,13 +868,8 @@ fn terminal_transition_in_interval_counts_active_and_useful_once() {
     assert_eq!(count(&census.useful_width), Some(1));
     assert!(census.execution_topology_sample().is_some());
 
-    let zero_terminal = terminal_work_attempt(
-        first_child,
-        &current_fixture.generation,
-        0,
-        &plan_snapshot(&current_fixture),
-        180,
-    );
+    let zero_terminal =
+        terminal_work_attempt(first_child, 0, &plan_snapshot(&current_fixture), 180);
     let zero_evidence = census_evidence(
         &current_fixture,
         Some(&current_fixture.snapshot),

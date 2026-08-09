@@ -2,474 +2,88 @@
 //! idempotent starts, the cancellation ladder, restart fencing, staleness
 //! refusal, and typed provider-availability terminal journeys.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+mod common;
+
+use std::collections::BTreeSet;
+use std::ops::Deref;
+
+use common::{id, work_attempt_context, work_digest};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind, CancelWorkAttemptCommand,
-    CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    GenerateProposalRequest, MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId,
-    ResolvedScope, ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand,
-    WorkAppendOutcome, WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptCapacityScopeV1,
-    WorkAttemptCapacityV1, WorkAttemptCapacityVerdictV1, WorkAttemptEvidenceRecordV1,
-    WorkAttemptInsertOutcome, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
-    WorkAttemptListPageV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptProviderOutcomeV1, WorkAttemptService, WorkAttemptStatusRequestV1,
-    WorkAttemptStorageError, WorkAttemptStoragePort, WorkAttemptTopologyBindingV1,
-    WorkAttemptTopologyStateV1, WorkProjectionPortError, WorkProjectionReadPort,
-    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
-    WorkStorageError, WorkStoragePort,
+    ApplicationProblem, ApplicationProblemKind, CancelWorkAttemptCommand,
+    MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, ResumeWorkAttemptsCommand,
+    StartWorkAttemptCommand, WorkAttemptCapacityScopeV1, WorkAttemptCapacityVerdictV1,
+    WorkAttemptEvidenceRecordV1, WorkAttemptListCoverageV1, WorkAttemptListCursorV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptProviderOutcomeV1, WorkAttemptService,
+    WorkAttemptStatusRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
+    WorkProductAttemptServiceV1,
 };
-use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
-    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkEffectStateV1,
-    WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
+    CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProviderId, RefId, TaskId,
+    UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
     WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkProjection, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkSandboxPolicy, WorkVersion, WorkflowOperationRef, WorktreeId,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkSandboxPolicy, WorkflowOperationRef,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-type WorkHistoryKey = (WorkAuthority, TaskId);
-type WorkHistories = Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>;
+type Store = common::WorkProductAttemptStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
+struct AttemptServices {
+    lifecycle: WorkAttemptService<Store>,
+    product: WorkProductAttemptServiceV1<Store>,
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+impl Deref for AttemptServices {
+    type Target = WorkAttemptService<Store>;
 
-fn context(project: &str, actor: &str) -> RequestContext {
-    let scope = ResolvedScope::new(
-        id::<ProjectId>(project),
-        id::<RepositoryId>("repository.attempt.fixture"),
-        id::<WorktreeId>("worktree.attempt.fixture"),
-        None,
-    )
-    .unwrap();
-    let capability = CapabilityId::new("capability.work.fixture").unwrap();
-    let use_case = UseCaseId::new("use-case.work.fixture").unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        id("grant.work.fixture"),
-        1,
-        digest('a'),
-        id::<ActorId>("actor.issuer"),
-        UtcMicros(1),
-        UtcMicros(10_000),
-        scope.clone(),
-        BTreeSet::from([capability]),
-        BTreeSet::from([use_case]),
-        DisclosureClass::Sensitive,
-    )
-    .unwrap();
-    RequestContext::new(
-        id::<ActorId>(actor),
-        scope,
-        grant,
-        RequestId::new(format!("request.{project}.{actor}")).unwrap(),
-        Deadline::new(UtcMicros(9_000)).unwrap(),
-        CancellationContext::active(format!("cancel.{project}.{actor}")).unwrap(),
-    )
-    .unwrap()
-}
-
-#[derive(Clone, Default)]
-struct TestStore {
-    histories: WorkHistories,
-}
-
-impl WorkStoragePort for TestStore {
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        self.histories
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone()))
-            .cloned()
-            .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
-    }
-
-    fn projection(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjection, WorkStorageError> {
-        let history = self.load(authority, task_id)?;
-        rebuild(&history)
-    }
-
-    fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        let mut histories = self.histories.lock().unwrap();
-        let key = (
-            request.event.authority().clone(),
-            request.event.task_id().clone(),
-        );
-        let existing = histories.get(&key).cloned().unwrap_or_default();
-        if let Some(prior) = existing
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(rebuild(&existing)?))
-            } else {
-                Err(WorkStorageError::IdempotencyConflict)
-            };
-        }
-        let current = existing.last().map(WorkEvent::version);
-        if current.is_none() && request.expected_version.is_some() {
-            return Err(WorkStorageError::NotFoundOrNotAuthorized);
-        }
-        if current != request.expected_version {
-            return Err(WorkStorageError::VersionConflict);
-        }
-        let history = histories.entry(key).or_default();
-        history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(rebuild(history)?))
+    fn deref(&self) -> &Self::Target {
+        &self.lifecycle
     }
 }
 
-struct EmptyProposalRouting;
-
-impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
-    fn routing_snapshot(
+impl AttemptServices {
+    fn start(
         &self,
-        _context: &RequestContext,
-        _task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
-        Ok(WorkRoutingSnapshotV1::default())
-    }
-}
-
-const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
-
-fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
-    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
-}
-
-/// Exact-projection read port over the same in-memory Work history the
-/// command authority writes.
-#[derive(Clone)]
-struct SnapshotPort {
-    store: TestStore,
-}
-
-impl WorkProjectionReadPort for SnapshotPort {
-    fn exact_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let projection =
-            self.store
-                .projection(authority, task_id)
-                .map_err(|error| match error {
-                    WorkStorageError::NotFoundOrNotAuthorized => {
-                        WorkProjectionPortError::NotFoundOrNotAuthorized
-                    }
-                    _ => WorkProjectionPortError::Unavailable,
-                })?;
-        WorkProjectionSnapshotV1::new(
-            id::<ProjectionGenerationId>("generation.attempt.fixture"),
-            WorkProjectionSequenceV1::new(1),
-            vec![projection],
-            WorkProjectionCoverageV1::complete(1, 1)
-                .map_err(|_| WorkProjectionPortError::Unavailable)?,
+        context: &RequestContext,
+        command: StartWorkAttemptCommand,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.start_against_registered_topology(
+            context,
+            &tracedecay_domain::safe_work_topology_policy_v1(),
+            command,
         )
-        .map_err(|_| WorkProjectionPortError::Unavailable)
     }
 
-    fn snapshot(
+    fn start_against_registered_topology(
         &self,
-        _authority: &WorkAuthority,
-        _page_size: u32,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-
-    fn delta(
-        &self,
-        _authority: &WorkAuthority,
-        _cursor: &tracedecay_domain::WorkProjectionResumeCursorV1,
-        _page_size: u32,
-    ) -> Result<tracedecay_domain::WorkProjectionDeltaV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
+        context: &RequestContext,
+        topology: &tracedecay_domain::configuration::WorkTopologyPolicyV1,
+        command: StartWorkAttemptCommand,
+    ) -> Result<WorkAttemptV1, ApplicationProblem> {
+        self.product.start_against_registered_topology(
+            context,
+            &common::work_product_binding(),
+            &common::work_product_revisions(context),
+            topology,
+            command,
+        )
     }
 }
 
-type AttemptKey = (WorkAuthority, String);
-
-#[derive(Default)]
-struct AttemptRows {
-    fences: BTreeMap<WorkAuthority, u64>,
-    rows: BTreeMap<AttemptKey, String>,
-    evidence: BTreeMap<AttemptKey, String>,
-}
-
-/// In-memory attempt rows with the same byte-identity replay and fenced
-/// compare-and-swap semantics as the registered SQLite store.
-#[derive(Clone, Default)]
-struct AttemptStore {
-    inner: Arc<Mutex<AttemptRows>>,
-}
-
-fn attempt_key(authority: &WorkAuthority, identity: &WorkAttemptIdentityV1) -> AttemptKey {
-    (
-        authority.clone(),
-        format!(
-            "{}/{}/{}",
-            identity.task_id().as_str(),
-            identity.run_id().as_str(),
-            identity.attempt_id().as_str()
-        ),
-    )
-}
-
-fn attempt_capacity(
-    inner: &AttemptRows,
-    authority: &WorkAuthority,
-    task_id: &TaskId,
-    concurrency: &TopologyConcurrencyPolicyV1,
-) -> Result<WorkAttemptCapacityV1, WorkAttemptStorageError> {
-    let mut global_active = 0_u64;
-    let mut repository_active = 0_u64;
-    let mut task_active = 0_u64;
-    for ((row_authority, _), payload) in &inner.rows {
-        if row_authority.project_id() != authority.project_id() {
-            continue;
-        }
-        let existing: WorkAttemptV1 =
-            serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        if existing.is_terminal() {
-            continue;
-        }
-        global_active += 1;
-        if row_authority.repository_id() == authority.repository_id() {
-            repository_active += 1;
-            if existing.identity().task_id() == task_id {
-                task_active += 1;
-            }
-        }
-    }
-    Ok(WorkAttemptCapacityV1::new(
-        global_active,
-        repository_active,
-        task_active,
-        concurrency.clone(),
-    ))
-}
-
-impl WorkAttemptStoragePort for AttemptStore {
-    fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
-        let mut inner = self.inner.lock().unwrap();
-        let epoch = inner.fences.entry(authority.clone()).or_insert(0);
-        *epoch += 1;
-        Ok(*epoch)
-    }
-
-    fn insert(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        let payload =
-            serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, attempt.identity());
-        if let Some(existing) = inner.rows.get(&key) {
-            return if *existing == payload {
-                serde_json::from_str(existing)
-                    .map(WorkAttemptInsertOutcome::Replayed)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            } else {
-                Err(WorkAttemptStorageError::AttemptConflict)
-            };
-        }
-        inner.rows.insert(key, payload);
-        Ok(WorkAttemptInsertOutcome::Inserted)
-    }
-
-    fn insert_bounded(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-        concurrency: &TopologyConcurrencyPolicyV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        let payload =
-            serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, attempt.identity());
-        if let Some(existing) = inner.rows.get(&key) {
-            return if *existing == payload {
-                serde_json::from_str(existing)
-                    .map(WorkAttemptInsertOutcome::Replayed)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            } else {
-                Err(WorkAttemptStorageError::AttemptConflict)
-            };
-        }
-        if matches!(
-            attempt_capacity(&inner, authority, attempt.identity().task_id(), concurrency)?
-                .verdict(),
-            WorkAttemptCapacityVerdictV1::Exhausted(_)
-        ) {
-            return Err(WorkAttemptStorageError::CapacityExceeded);
-        }
-        inner.rows.insert(key, payload);
-        Ok(WorkAttemptInsertOutcome::Inserted)
-    }
-
-    fn admission_capacities(
-        &self,
-        authority: &WorkAuthority,
-        task_ids: &[TaskId],
-        concurrency: &TopologyConcurrencyPolicyV1,
-    ) -> Result<BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        task_ids
-            .iter()
-            .cloned()
-            .map(|task_id| {
-                attempt_capacity(&inner, authority, &task_id, concurrency)
-                    .map(|capacity| (task_id, capacity))
-            })
-            .collect()
-    }
-
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let payload = inner
-            .rows
-            .get(&attempt_key(authority, identity))
-            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
-    }
-
-    fn load_admission_kind(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        self.load(authority, identity)
-            .map(|_| WorkAttemptAdmissionKind::Ordinary)
-    }
-
-    fn update(
-        &self,
-        authority: &WorkAuthority,
-        expected_fence: &WorkLeaseFenceV1,
-        expected_state: WorkAttemptStateV1,
-        next: &WorkAttemptV1,
-        evidence: Option<&WorkAttemptEvidenceRecordV1>,
-    ) -> Result<(), WorkAttemptStorageError> {
-        let payload =
-            serde_json::to_string(next).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, next.identity());
-        let Some(existing) = inner.rows.get(&key) else {
-            return Err(WorkAttemptStorageError::NotFoundOrNotAuthorized);
-        };
-        let current: WorkAttemptV1 =
-            serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        if current.lease() != expected_fence || current.state() != expected_state {
-            return Err(WorkAttemptStorageError::FenceConflict);
-        }
-        if let Some(evidence) = evidence {
-            let record = serde_json::to_string(evidence)
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            inner.evidence.insert(key.clone(), record);
-        }
-        inner.rows.insert(key, payload);
-        Ok(())
-    }
-
-    fn open_attempts(
-        &self,
-        authority: &WorkAuthority,
-    ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .rows
-            .iter()
-            .filter(|((row_authority, _), _)| row_authority == authority)
-            .map(|(_, payload)| {
-                serde_json::from_str::<WorkAttemptV1>(payload)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            })
-            .filter(|attempt| {
-                attempt
-                    .as_ref()
-                    .map(|attempt| !attempt.is_terminal())
-                    .unwrap_or(true)
-            })
-            .collect()
-    }
-
-    fn list(
-        &self,
-        authority: &WorkAuthority,
-        start_after: Option<&WorkAttemptIdentityV1>,
-        limit: u32,
-    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let start_ordinal = start_after.map(|identity| attempt_key(authority, identity).1);
-        let mut pending = Vec::new();
-        for ((row_authority, ordinal), payload) in inner.rows.iter() {
-            if row_authority != authority {
-                continue;
-            }
-            if let Some(start) = &start_ordinal
-                && ordinal <= start
-            {
-                continue;
-            }
-            pending.push(
-                serde_json::from_str::<WorkAttemptV1>(payload)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            );
-        }
-        let remaining =
-            u32::try_from(pending.len()).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        pending.truncate(limit as usize);
-        Ok(WorkAttemptListPageV1 {
-            attempts: pending,
-            remaining,
-        })
-    }
-}
-
-type Fixture = (
-    WorkAttemptService<AttemptStore, SnapshotPort, TestStore>,
-    WorkService<TestStore>,
-    RequestContext,
-);
+type Fixture = (AttemptServices, Store, RequestContext);
 
 fn fixture(project: &str) -> Fixture {
-    let store = TestStore::default();
-    let work = WorkService::new(store.clone());
-    let attempts = WorkAttemptService::new(
-        AttemptStore::default(),
-        SnapshotPort {
-            store: store.clone(),
+    let store = Store::default();
+    let context = work_attempt_context(project, "actor.attempt.owner");
+    (
+        AttemptServices {
+            lifecycle: WorkAttemptService::new(store.clone()),
+            product: WorkProductAttemptServiceV1::new(store.clone()),
         },
-        WorkService::new(store),
-    );
-    (attempts, work, context(project, "actor.attempt.owner"))
+        store,
+        context,
+    )
 }
 
 fn requested_route() -> WorkProviderRouteV1 {
@@ -484,15 +98,15 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.att.1"),
         configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.att.1"),
-        effective_behavior_digest: digest('c'),
-        resolution_provenance_digest: digest('d'),
+        effective_behavior_digest: work_digest('c'),
+        resolution_provenance_digest: work_digest('d'),
         route: requested_route(),
         backend: WorkProviderBackendV1::ClaudeCodeCli,
         protocol: WorkProviderProtocol::ClaudeStreamJson,
         model: "claude-test".to_owned(),
         executable: WorkExecutableReference::new(
             "executable.claude.code-cli".to_owned(),
-            digest('e'),
+            work_digest('e'),
         )
         .unwrap(),
         sandbox: WorkSandboxPolicy::Required,
@@ -509,56 +123,8 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     .unwrap()
 }
 
-fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &str) {
-    let task_id = id::<TaskId>(task);
-    work.create(
-        context,
-        CreateWorkCommand {
-            task_id: task_id.clone(),
-            title: format!("Work for {task}"),
-            dependencies: BTreeSet::new(),
-            command_id: id(&format!("command.{task}.create")),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
-    let proposal = work
-        .generate_proposal(
-            context,
-            digest('b'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id: task_id.clone(),
-                proposal_id: id(&format!("proposal.{task}")),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(15),
-            },
-        )
-        .unwrap();
-    work.accept_proposal(
-        context,
-        AcceptProposalCommand {
-            review: ReviewProposalCommand {
-                task_id: task_id.clone(),
-                proposal_id: proposal.proposal_id,
-                proposal_digest: proposal.proposal_digest,
-                expected_version: WorkVersion::initial(),
-                command_id: id(&format!("command.{task}.accept")),
-                occurred_at: UtcMicros(20),
-            },
-        },
-    )
-    .unwrap();
-    work.admit_execution(
-        context,
-        AdmitExecutionCommand {
-            task_id,
-            expected_version: WorkVersion::new(2).unwrap(),
-            command_id: id(&format!("command.{task}.admit")),
-            occurred_at: UtcMicros(30),
-        },
-    )
-    .unwrap();
+fn admit_work(work: &Store, context: &RequestContext, task: &str) {
+    work.seed_task(context, id::<TaskId>(task), true);
 }
 
 fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
@@ -588,19 +154,9 @@ fn start_is_denied_without_admitted_execution() {
         missing.kind(),
         ApplicationProblemKind::NotFoundOrNotAuthorized
     );
-    // A created task without admitted execution is a typed denial, not a
+    // A product task without execution admission is a typed denial, not a
     // queue: the attempt never reaches the lease store.
-    work.create(
-        &context,
-        CreateWorkCommand {
-            task_id: id("task.attempt.unadmitted"),
-            title: "Unadmitted work".to_owned(),
-            dependencies: BTreeSet::new(),
-            command_id: id("command.attempt.unadmitted.create"),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
+    work.seed_task(&context, id("task.attempt.unadmitted"), false);
     let denied = attempts
         .start(
             &context,
@@ -720,13 +276,9 @@ fn start_leases_once_and_replays_identical_admissions() {
     assert_eq!(status, leased);
 }
 
-/// Settling an attempt attaches its own terminal runtime evidence, which is a
-/// Work event on the same authority: it moves the projection sequence and the
-/// task version. A byte-identical replay of the admission issued after that
-/// must still return the durable attempt. Idempotency is about the content the
-/// caller supplied, not about the Work state standing still — otherwise the
-/// replay window closes the moment the attempt reports an outcome, and no
-/// client can safely retry a start it is unsure landed.
+/// Settling an attempt seals terminal runtime evidence without mutating the
+/// product graph. A byte-identical replay must still return the durable
+/// attempt and its original product binding.
 #[test]
 fn start_replays_an_identical_admission_after_the_projection_moves() {
     let (attempts, work, context) = fixture("project.attempt.replay-after-move");
@@ -745,18 +297,17 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
         outcome: WorkAttemptProviderOutcomeV1::Exited { code: 1 },
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(50),
     };
     let settled = attempts
         .settle(&context, leased.identity(), &evidence)
         .unwrap();
-    let moved = work.load(&context, leased.identity().task_id()).unwrap();
     assert_eq!(
-        moved.version(),
-        WorkVersion::new(4).unwrap(),
-        "the evidence append must move the task version"
+        work.graph_version(),
+        Some(admitted_binding.graph_version()),
+        "terminal evidence must not fabricate a product-graph transition"
     );
 
     let replayed = attempts.start(&context, command).unwrap();
@@ -794,7 +345,7 @@ fn start_refuses_a_divergent_admission_after_the_projection_moves() {
         outcome: WorkAttemptProviderOutcomeV1::Exited { code: 1 },
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(50),
     };
@@ -829,9 +380,8 @@ fn start_refuses_a_divergent_admission_after_the_projection_moves() {
 fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
     let (attempts, work, context) = fixture("project.attempt.cancel");
     admit_work(&work, &context, "task.attempt.cancel");
-    let leased = attempts
-        .start(&context, start_command("task.attempt.cancel", "attempt.1"))
-        .unwrap();
+    let leased =
+        work.persist_leased_attempt(&context, &start_command("task.attempt.cancel", "attempt.1"));
     let identity = leased.identity().clone();
     attempts
         .mark_running(&context, &identity, requested_route())
@@ -882,33 +432,23 @@ fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
         outcome: WorkAttemptProviderOutcomeV1::Cancelled,
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(90),
     };
     let cancelled = attempts.settle(&context, &identity, &evidence).unwrap();
     assert_eq!(cancelled.state(), WorkAttemptStateV1::Cancelled);
     assert!(cancelled.is_terminal());
-    // The sealed evidence digest is attached to the Work projection through
-    // the canonical command authority.
-    let projection = work.load(&context, identity.task_id()).unwrap();
-    assert_eq!(projection.runtime_evidence().len(), 1);
-    assert_eq!(
-        *projection.runtime_evidence()[0].evidence_digest(),
-        evidence.digest().unwrap()
-    );
 }
 
 #[test]
 fn leased_attempt_can_be_cancelled_without_a_provider_route() {
     let (attempts, work, context) = fixture("project.attempt.cancel-before-start");
     admit_work(&work, &context, "task.attempt.cancel-before-start");
-    let leased = attempts
-        .start(
-            &context,
-            start_command("task.attempt.cancel-before-start", "attempt.1"),
-        )
-        .unwrap();
+    let leased = work.persist_leased_attempt(
+        &context,
+        &start_command("task.attempt.cancel-before-start", "attempt.1"),
+    );
     let requested = attempts
         .request_cancellation(
             &context,
@@ -933,7 +473,7 @@ fn leased_attempt_can_be_cancelled_without_a_provider_route() {
         outcome: WorkAttemptProviderOutcomeV1::Cancelled,
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(70),
     };
@@ -948,15 +488,14 @@ fn leased_attempt_can_be_cancelled_without_a_provider_route() {
 fn resume_fences_open_attempts_and_completes_lost_cancellations() {
     let (attempts, work, context) = fixture("project.attempt.resume");
     admit_work(&work, &context, "task.attempt.resume");
-    let leased = attempts
-        .start(&context, start_command("task.attempt.resume", "attempt.1"))
-        .unwrap();
+    let leased =
+        work.persist_leased_attempt(&context, &start_command("task.attempt.resume", "attempt.1"));
     let running_identity = {
         let command = StartWorkAttemptCommand {
             attempt_id: id("attempt.2"),
             ..start_command("task.attempt.resume", "attempt.2")
         };
-        let attempt = attempts.start(&context, command).unwrap();
+        let attempt = work.persist_leased_attempt(&context, &command);
         attempts
             .mark_running(&context, attempt.identity(), requested_route())
             .unwrap();
@@ -967,7 +506,7 @@ fn resume_fences_open_attempts_and_completes_lost_cancellations() {
             attempt_id: id("attempt.3"),
             ..start_command("task.attempt.resume", "attempt.3")
         };
-        let attempt = attempts.start(&context, command).unwrap();
+        let attempt = work.persist_leased_attempt(&context, &command);
         attempts
             .mark_running(&context, attempt.identity(), requested_route())
             .unwrap();
@@ -1024,7 +563,7 @@ fn resume_fences_open_attempts_and_completes_lost_cancellations() {
                 outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
                 stdout: None,
                 stderr: None,
-                provider_session_id: None,
+                provider_session: None,
                 provider_fallback: None,
                 observed_at: UtcMicros(110),
             },
@@ -1043,12 +582,10 @@ fn resume_fences_open_attempts_and_completes_lost_cancellations() {
 fn provider_unavailability_is_a_typed_terminal_journey() {
     let (attempts, work, context) = fixture("project.attempt.unavailable");
     admit_work(&work, &context, "task.attempt.unavailable");
-    let leased = attempts
-        .start(
-            &context,
-            start_command("task.attempt.unavailable", "attempt.1"),
-        )
-        .unwrap();
+    let leased = work.persist_leased_attempt(
+        &context,
+        &start_command("task.attempt.unavailable", "attempt.1"),
+    );
     let identity = leased.identity().clone();
     let fenced = attempts
         .mark_provider_unavailable(&context, &identity)
@@ -1063,7 +600,7 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
         },
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(120),
     };
@@ -1072,8 +609,6 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
         .unwrap();
     assert_eq!(failed.state(), WorkAttemptStateV1::Failed);
     assert!(failed.is_terminal());
-    let projection = work.load(&context, identity.task_id()).unwrap();
-    assert_eq!(projection.runtime_evidence().len(), 1);
     // Failing recovery twice replays nothing: the terminal row refuses a
     // second transition.
     let repeated = attempts
@@ -1116,7 +651,7 @@ fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
             attempt_id: id(attempt_id),
             ..start_command("task.attempt.list", attempt_id)
         };
-        attempts.start(&context, command).unwrap();
+        work.persist_leased_attempt(&context, &command);
     }
 
     let first = attempts
@@ -1230,12 +765,10 @@ fn list_without_any_work_is_a_typed_absent_state() {
 fn list_cursor_from_a_superseded_topology_generation_is_stale() {
     let (attempts, work, context) = fixture("project.attempt.list.stale");
     admit_work(&work, &context, "task.attempt.list.stale");
-    attempts
-        .start(
-            &context,
-            start_command("task.attempt.list.stale", "attempt.1"),
-        )
-        .unwrap();
+    work.persist_leased_attempt(
+        &context,
+        &start_command("task.attempt.list.stale", "attempt.1"),
+    );
     let cursor = WorkAttemptListCursorV1 {
         generation: "generation.work.list.old".to_owned(),
         start_after: identity_of("task.attempt.list.stale", "attempt.1"),
@@ -1270,16 +803,14 @@ fn list_cursor_from_a_superseded_topology_generation_is_stale() {
 fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
     let (attempts, work, owner) = fixture("project.attempt.list.conceal");
     admit_work(&work, &owner, "task.attempt.list.conceal");
-    attempts
-        .start(
-            &owner,
-            start_command("task.attempt.list.conceal", "attempt.1"),
-        )
-        .unwrap();
+    work.persist_leased_attempt(
+        &owner,
+        &start_command("task.attempt.list.conceal", "attempt.1"),
+    );
 
     // A foreign actor's authority resolves its own topology: absent, exactly
     // like a scope that never had Work.
-    let foreign = context("project.attempt.list.conceal", "actor.attempt.foreign");
+    let foreign = work_attempt_context("project.attempt.list.conceal", "actor.attempt.foreign");
     let absent = attempts
         .list(
             &foreign,

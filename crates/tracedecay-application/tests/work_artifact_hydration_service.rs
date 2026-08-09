@@ -87,6 +87,7 @@ fn sealed_evidence(identity: &WorkAttemptIdentityV1) -> WorkAttemptEvidenceRecor
         outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
         stdout: None,
         stderr: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(500),
     }

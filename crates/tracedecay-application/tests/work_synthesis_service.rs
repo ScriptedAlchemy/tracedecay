@@ -2,41 +2,36 @@
 //! citation completeness, preservation of failures/unknowns/disagreement,
 //! and the unsynthesized-set answer when nothing is citable.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+
+use common::{
+    WorkProductAttemptStore, work_authority, work_product_binding, work_product_revisions,
+};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, AdmitWorkSynthesisCommand,
-    ApplicationProblemKind, CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand,
-    Deadline, DisclosureClass, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
-    ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
-    WorkAttemptAdmissionKind, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
-    WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort,
-    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkService,
-    WorkStorageError, WorkStoragePort, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisAdmissionStoragePort, WorkSynthesisAttemptV1, WorkSynthesisInsertOutcome,
-    WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
-    WorkSynthesisSourceSetV1, admit_work_synthesis,
+    AdmitWorkSynthesisCommand, ApplicationProblemKind, CancellationContext,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
+    StartWorkAttemptCommand, WorkAttemptStoragePort, WorkProductAttemptServiceV1,
+    WorkProductSynthesisAttemptServiceV1, WorkSynthesisAttemptV1, WorkSynthesisRefusalV1,
+    WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
+    admit_work_synthesis_against_registered_topology,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
-    UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
-    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkEvent,
-    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProjection, WorkProjectionCoverageV1,
-    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef,
-    WorkflowOutputName, WorktreeId,
+    WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
+    WorkProductSourceWatermarkV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
+    WorkflowOperationRef, WorkflowOutputName, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-type WorkHistoryKey = (WorkAuthority, TaskId);
-type WorkHistories = Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>;
 
 fn id<T>(value: &str) -> T
 where
@@ -84,460 +79,45 @@ fn context(project: &str, actor: &str) -> RequestContext {
     .unwrap()
 }
 
-fn authority(project: &str) -> WorkAuthority {
-    WorkAuthority::new(
-        id::<ProjectId>(project),
-        id::<RepositoryId>("repository.synthesis.fixture"),
-        id::<WorktreeId>("worktree.synthesis.fixture"),
-        id::<ActorId>("actor.synthesis.owner"),
-        digest('a'),
-    )
-    .unwrap()
-}
-
-#[derive(Clone, Default)]
-struct TestStore {
-    histories: WorkHistories,
-}
-
-impl WorkStoragePort for TestStore {
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        self.histories
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone()))
-            .cloned()
-            .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
-    }
-
-    fn projection(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjection, WorkStorageError> {
-        let history = self.load(authority, task_id)?;
-        rebuild(&history)
-    }
-
-    fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        let mut histories = self.histories.lock().unwrap();
-        let key = (
-            request.event.authority().clone(),
-            request.event.task_id().clone(),
-        );
-        let existing = histories.get(&key).cloned().unwrap_or_default();
-        if let Some(prior) = existing
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(rebuild(&existing)?))
-            } else {
-                Err(WorkStorageError::IdempotencyConflict)
-            };
-        }
-        let current = existing.last().map(WorkEvent::version);
-        if current.is_none() && request.expected_version.is_some() {
-            return Err(WorkStorageError::NotFoundOrNotAuthorized);
-        }
-        if current != request.expected_version {
-            return Err(WorkStorageError::VersionConflict);
-        }
-        let history = histories.entry(key).or_default();
-        history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(rebuild(history)?))
-    }
-}
-
-struct EmptyProposalRouting;
-
-impl WorkRoutingSnapshotPortV1 for EmptyProposalRouting {
-    fn routing_snapshot(
-        &self,
-        _context: &RequestContext,
-        _task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
-        Ok(WorkRoutingSnapshotV1::default())
-    }
-}
-
-const EMPTY_PROPOSAL_ROUTING: EmptyProposalRouting = EmptyProposalRouting;
-
-fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
-    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
-}
-
-#[derive(Clone)]
-struct SnapshotPort {
-    store: TestStore,
-}
-
-impl WorkProjectionReadPort for SnapshotPort {
-    fn exact_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        let projection =
-            self.store
-                .projection(authority, task_id)
-                .map_err(|error| match error {
-                    WorkStorageError::NotFoundOrNotAuthorized => {
-                        WorkProjectionPortError::NotFoundOrNotAuthorized
-                    }
-                    _ => WorkProjectionPortError::Unavailable,
-                })?;
-        WorkProjectionSnapshotV1::new(
-            id::<ProjectionGenerationId>("generation.synthesis.fixture"),
-            WorkProjectionSequenceV1::new(1),
-            vec![projection],
-            WorkProjectionCoverageV1::complete(1, 1)
-                .map_err(|_| WorkProjectionPortError::Unavailable)?,
-        )
-        .map_err(|_| WorkProjectionPortError::Unavailable)
-    }
-
-    fn snapshot(
-        &self,
-        _authority: &WorkAuthority,
-        _page_size: u32,
-    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-
-    fn delta(
-        &self,
-        _authority: &WorkAuthority,
-        _cursor: &tracedecay_domain::WorkProjectionResumeCursorV1,
-        _page_size: u32,
-    ) -> Result<tracedecay_domain::WorkProjectionDeltaV1, WorkProjectionPortError> {
-        Err(WorkProjectionPortError::Unavailable)
-    }
-}
-
-type AttemptKey = (WorkAuthority, String);
-
-#[derive(Default)]
-struct AttemptRows {
-    fences: BTreeMap<WorkAuthority, u64>,
-    rows: BTreeMap<AttemptKey, String>,
-    evidence: BTreeMap<AttemptKey, String>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct StoredAttempt {
-    attempt: WorkAttemptV1,
-    synthesis: Option<WorkSynthesisAdmissionRecordV1>,
-}
-
-#[derive(Clone, Default)]
-struct AttemptStore {
-    inner: Arc<Mutex<AttemptRows>>,
-}
-
-impl AttemptStore {
-    fn committed_result_count(
-        &self,
-        authority: &WorkAuthority,
-        run_id: &RunId,
-    ) -> Result<usize, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .rows
-            .iter()
-            .filter(|((row_authority, _), _)| row_authority == authority)
-            .try_fold(0, |count, (_, payload)| {
-                let record: StoredAttempt = serde_json::from_str(payload)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(count
-                    + usize::from(
-                        record.synthesis.is_some() && record.attempt.identity().run_id() == run_id,
-                    ))
-            })
-    }
-}
-
-fn attempt_key(authority: &WorkAuthority, identity: &WorkAttemptIdentityV1) -> AttemptKey {
-    (
-        authority.clone(),
-        format!(
-            "{}/{}/{}",
-            identity.task_id().as_str(),
-            identity.run_id().as_str(),
-            identity.attempt_id().as_str()
-        ),
-    )
-}
-
-impl WorkAttemptStoragePort for AttemptStore {
-    fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
-        let mut inner = self.inner.lock().unwrap();
-        let epoch = inner.fences.entry(authority.clone()).or_insert(0);
-        *epoch += 1;
-        Ok(*epoch)
-    }
-
-    fn insert(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        let payload = serde_json::to_string(&StoredAttempt {
-            attempt: attempt.clone(),
-            synthesis: None,
-        })
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, attempt.identity());
-        if let Some(existing) = inner.rows.get(&key) {
-            return if *existing == payload {
-                serde_json::from_str::<StoredAttempt>(existing)
-                    .map(|record| WorkAttemptInsertOutcome::Replayed(Box::new(record.attempt)))
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            } else {
-                Err(WorkAttemptStorageError::AttemptConflict)
-            };
-        }
-        inner.rows.insert(key, payload);
-        Ok(WorkAttemptInsertOutcome::Inserted)
-    }
-
-    fn insert_bounded(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptV1,
-        _concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
-    ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        self.insert(authority, attempt)
-    }
-
-    fn admission_capacities(
-        &self,
-        _authority: &WorkAuthority,
-        task_ids: &[TaskId],
-        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
-    ) -> Result<
-        BTreeMap<TaskId, tracedecay_application::WorkAttemptCapacityV1>,
-        WorkAttemptStorageError,
-    > {
-        Ok(task_ids
-            .iter()
-            .cloned()
-            .map(|task_id| {
-                (
-                    task_id,
-                    tracedecay_application::WorkAttemptCapacityV1::new(
-                        0,
-                        0,
-                        0,
-                        concurrency.clone(),
-                    ),
-                )
-            })
-            .collect())
-    }
-
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let payload = inner
-            .rows
-            .get(&attempt_key(authority, identity))
-            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredAttempt>(payload)
-            .map(|record| record.attempt)
-            .map_err(|_| WorkAttemptStorageError::Unavailable)
-    }
-
-    fn load_admission_kind(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let payload = inner
-            .rows
-            .get(&attempt_key(authority, identity))
-            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        let record: StoredAttempt =
-            serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        Ok(if record.synthesis.is_some() {
-            WorkAttemptAdmissionKind::Synthesis
-        } else {
-            WorkAttemptAdmissionKind::Ordinary
-        })
-    }
-
-    fn update(
-        &self,
-        authority: &WorkAuthority,
-        expected_fence: &WorkLeaseFenceV1,
-        expected_state: WorkAttemptStateV1,
-        next: &WorkAttemptV1,
-        evidence: Option<&WorkAttemptEvidenceRecordV1>,
-    ) -> Result<(), WorkAttemptStorageError> {
-        let mut inner = self.inner.lock().unwrap();
-        let key = attempt_key(authority, next.identity());
-        let Some(existing) = inner.rows.get(&key) else {
-            return Err(WorkAttemptStorageError::NotFoundOrNotAuthorized);
-        };
-        let mut record: StoredAttempt =
-            serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        if record.attempt.lease() != expected_fence || record.attempt.state() != expected_state {
-            return Err(WorkAttemptStorageError::FenceConflict);
-        }
-        if let Some(evidence) = evidence {
-            let record = serde_json::to_string(evidence)
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            inner.evidence.insert(key.clone(), record);
-        }
-        record.attempt = next.clone();
-        let payload =
-            serde_json::to_string(&record).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        inner.rows.insert(key, payload);
-        Ok(())
-    }
-
-    fn open_attempts(
-        &self,
-        authority: &WorkAuthority,
-    ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .rows
-            .iter()
-            .filter(|((row_authority, _), _)| row_authority == authority)
-            .map(|(_, payload)| {
-                serde_json::from_str::<StoredAttempt>(payload)
-                    .map(|record| record.attempt)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            })
-            .filter(|attempt| {
-                attempt
-                    .as_ref()
-                    .map(|attempt| !attempt.is_terminal())
-                    .unwrap_or(true)
-            })
-            .collect()
-    }
-
-    fn list(
-        &self,
-        authority: &WorkAuthority,
-        start_after: Option<&WorkAttemptIdentityV1>,
-        limit: u32,
-    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let start_ordinal = start_after.map(|identity| attempt_key(authority, identity).1);
-        let mut pending = Vec::new();
-        for ((row_authority, ordinal), payload) in inner.rows.iter() {
-            if row_authority != authority {
-                continue;
-            }
-            if let Some(start) = &start_ordinal
-                && ordinal <= start
-            {
-                continue;
-            }
-            pending.push(
-                serde_json::from_str::<StoredAttempt>(payload)
-                    .map(|record| record.attempt)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            );
-        }
-        let remaining =
-            u32::try_from(pending.len()).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        pending.truncate(limit as usize);
-        Ok(WorkAttemptListPageV1 {
-            attempts: pending,
-            remaining,
-        })
-    }
-}
-
-impl WorkSynthesisAdmissionStoragePort for AttemptStore {
-    fn insert_synthesis(
-        &self,
-        authority: &WorkAuthority,
-        record: &WorkSynthesisAdmissionRecordV1,
-    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
-        let key = attempt_key(authority, record.result.attempt.identity());
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(existing) = inner.rows.get(&key) {
-            let existing: StoredAttempt =
-                serde_json::from_str(existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            return match existing.synthesis {
-                Some(existing) if existing.request_digest == record.request_digest => Ok(
-                    WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
-                ),
-                _ => Err(WorkAttemptStorageError::AttemptConflict),
-            };
-        }
-        let payload = serde_json::to_string(&StoredAttempt {
-            attempt: record.result.attempt.clone(),
-            synthesis: Some(record.clone()),
-        })
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        inner.rows.insert(key, payload);
-        Ok(WorkSynthesisInsertOutcome::Inserted)
-    }
-
-    fn insert_synthesis_bounded(
-        &self,
-        authority: &WorkAuthority,
-        record: &WorkSynthesisAdmissionRecordV1,
-        _concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
-    ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError> {
-        self.insert_synthesis(authority, record)
-    }
-
-    fn load_synthesis(
-        &self,
-        authority: &WorkAuthority,
-        identity: &WorkAttemptIdentityV1,
-    ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
-        let inner = self.inner.lock().unwrap();
-        let payload = inner
-            .rows
-            .get(&attempt_key(authority, identity))
-            .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredAttempt>(payload)
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?
-            .synthesis
-            .ok_or(WorkAttemptStorageError::AttemptConflict)
-    }
-}
-
 type Fixture = (
-    WorkAttemptService<AttemptStore, SnapshotPort, TestStore>,
-    AttemptStore,
-    WorkService<TestStore>,
+    WorkProductSynthesisAttemptServiceV1<WorkProductAttemptStore>,
+    WorkProductAttemptServiceV1<WorkProductAttemptStore>,
+    WorkProductAttemptStore,
     RequestContext,
 );
 
 fn fixture(project: &str) -> Fixture {
-    let store = TestStore::default();
-    let attempt_store = AttemptStore::default();
-    let work = WorkService::new(store.clone());
-    let attempts = WorkAttemptService::new(
-        attempt_store.clone(),
-        SnapshotPort {
-            store: store.clone(),
-        },
-        WorkService::new(store),
-    );
+    let attempt_store = WorkProductAttemptStore::default();
+    let synthesis = WorkProductSynthesisAttemptServiceV1::new(attempt_store.clone());
+    let attempts = WorkProductAttemptServiceV1::new(attempt_store.clone());
     (
+        synthesis,
         attempts,
         attempt_store,
-        work,
         context(project, "actor.synthesis.owner"),
+    )
+}
+
+fn admit_work(store: &WorkProductAttemptStore, context: &RequestContext, task: &str) {
+    store.seed_task(context, id(task), true);
+}
+
+fn registered_topology() -> tracedecay_domain::WorkTopologyPolicyV1 {
+    tracedecay_domain::safe_work_topology_policy_v1()
+}
+
+fn admit_synthesis(
+    attempts: &WorkProductSynthesisAttemptServiceV1<WorkProductAttemptStore>,
+    context: &RequestContext,
+    command: AdmitWorkSynthesisCommand,
+) -> Result<WorkSynthesisAttemptV1, tracedecay_application::ApplicationProblem> {
+    admit_work_synthesis_against_registered_topology(
+        attempts,
+        context,
+        &work_product_binding(),
+        &work_product_revisions(context),
+        &registered_topology(),
+        command,
     )
 }
 
@@ -578,58 +158,6 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
     .unwrap()
 }
 
-fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &str) {
-    let task_id = id::<TaskId>(task);
-    work.create(
-        context,
-        CreateWorkCommand {
-            task_id: task_id.clone(),
-            title: format!("Work for {task}"),
-            dependencies: BTreeSet::new(),
-            command_id: id(&format!("command.{task}.create")),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
-    let proposal = work
-        .generate_proposal(
-            context,
-            digest('b'),
-            &EMPTY_PROPOSAL_ROUTING,
-            GenerateProposalRequest {
-                task_id: task_id.clone(),
-                proposal_id: id(&format!("proposal.{task}")),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(15),
-            },
-        )
-        .unwrap();
-    work.accept_proposal(
-        context,
-        AcceptProposalCommand {
-            review: ReviewProposalCommand {
-                task_id: task_id.clone(),
-                proposal_id: proposal.proposal_id,
-                proposal_digest: proposal.proposal_digest,
-                expected_version: WorkVersion::initial(),
-                command_id: id(&format!("command.{task}.accept")),
-                occurred_at: UtcMicros(20),
-            },
-        },
-    )
-    .unwrap();
-    work.admit_execution(
-        context,
-        AdmitExecutionCommand {
-            task_id,
-            expected_version: WorkVersion::new(2).unwrap(),
-            command_id: id(&format!("command.{task}.admit")),
-            occurred_at: UtcMicros(30),
-        },
-    )
-    .unwrap();
-}
-
 fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
     StartWorkAttemptCommand {
         task_id: id(task),
@@ -657,9 +185,10 @@ fn source_identity(task: &str, attempt: &str) -> WorkAttemptIdentityV1 {
 
 fn leased_attempt(identity: WorkAttemptIdentityV1) -> WorkAttemptV1 {
     let binding = WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.synthesis.fixture"),
-        WorkProjectionSequenceV1::new(7),
-        WorkVersion::new(3).unwrap(),
+        WorkGraphVersionV1::new(3).unwrap(),
+        WorkProductEventSequenceV1::new(7).unwrap(),
+        WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
+        digest('f'),
         id::<ProposalId>("proposal.synthesis.fixture"),
     )
     .unwrap();
@@ -704,7 +233,7 @@ fn leased_attempt(identity: WorkAttemptIdentityV1) -> WorkAttemptV1 {
 /// directly into the attempt store, the way the registered store carries
 /// settled rows.
 fn insert_terminal_source(
-    store: &AttemptStore,
+    store: &WorkProductAttemptStore,
     authority: &WorkAuthority,
     identity: WorkAttemptIdentityV1,
     state: WorkAttemptStateV1,
@@ -750,7 +279,7 @@ fn insert_terminal_source(
 }
 
 fn insert_running_source(
-    store: &AttemptStore,
+    store: &WorkProductAttemptStore,
     authority: &WorkAuthority,
     identity: WorkAttemptIdentityV1,
 ) -> WorkAttemptV1 {
@@ -772,7 +301,7 @@ fn insert_running_source(
 }
 
 fn mark_source_succeeded(
-    store: &AttemptStore,
+    store: &WorkProductAttemptStore,
     authority: &WorkAuthority,
     running: &WorkAttemptV1,
     artifacts: Vec<WorkArtifactRefV1>,
@@ -806,6 +335,20 @@ fn artifact(name: &str, byte: char) -> WorkArtifactRefV1 {
     WorkArtifactRefV1::new(id::<WorkArtifactId>(name), digest(byte), 128).unwrap()
 }
 
+fn attempt_count_for_run(
+    store: &WorkProductAttemptStore,
+    authority: &WorkAuthority,
+    run_id: &RunId,
+) -> usize {
+    store
+        .list(authority, None, 1_000)
+        .unwrap()
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.identity().run_id() == run_id)
+        .count()
+}
+
 fn synthesis_command(sources: Vec<WorkAttemptIdentityV1>) -> AdmitWorkSynthesisCommand {
     AdmitWorkSynthesisCommand {
         start: start_command("task.synthesis", "attempt.synthesis"),
@@ -817,12 +360,11 @@ fn synthesis_command(sources: Vec<WorkAttemptIdentityV1>) -> AdmitWorkSynthesisC
 #[test]
 fn synthesis_refuses_empty_duplicate_and_self_source_sets() {
     let (attempts, _, _, context) = fixture("project.synthesis.refusals");
-    let empty =
-        admit_work_synthesis(&attempts, &context, synthesis_command(Vec::new())).unwrap_err();
+    let empty = admit_synthesis(&attempts, &context, synthesis_command(Vec::new())).unwrap_err();
     assert_eq!(empty.kind(), ApplicationProblemKind::InvalidRequest);
 
     let source = source_identity("task.source.a", "attempt.1");
-    let duplicated = admit_work_synthesis(
+    let duplicated = admit_synthesis(
         &attempts,
         &context,
         synthesis_command(vec![source.clone(), source.clone()]),
@@ -832,15 +374,14 @@ fn synthesis_refuses_empty_duplicate_and_self_source_sets() {
 
     let own_identity = source_identity("task.synthesis", "attempt.synthesis");
     let self_citing =
-        admit_work_synthesis(&attempts, &context, synthesis_command(vec![own_identity]))
-            .unwrap_err();
+        admit_synthesis(&attempts, &context, synthesis_command(vec![own_identity])).unwrap_err();
     assert_eq!(self_citing.kind(), ApplicationProblemKind::InvalidRequest);
 }
 
 #[test]
 fn synthesis_refuses_an_unknown_source() {
     let (attempts, _, _, context) = fixture("project.synthesis.unknown-source");
-    let missing = admit_work_synthesis(
+    let missing = admit_synthesis(
         &attempts,
         &context,
         synthesis_command(vec![source_identity("task.source.ghost", "attempt.1")]),
@@ -854,8 +395,8 @@ fn synthesis_refuses_an_unknown_source() {
 
 #[test]
 fn synthesis_returns_the_unsynthesized_set_when_nothing_is_citable() {
-    let (attempts, attempt_store, _, context) = fixture("project.synthesis.unsynthesized");
-    let mine = authority("project.synthesis.unsynthesized");
+    let (attempts, _, attempt_store, context) = fixture("project.synthesis.unsynthesized");
+    let mine = work_authority(&context);
     let failed = source_identity("task.source.failed", "attempt.1");
     insert_terminal_source(
         &attempt_store,
@@ -877,7 +418,7 @@ fn synthesis_returns_the_unsynthesized_set_when_nothing_is_citable() {
         digest('2'),
     );
 
-    let outcome = admit_work_synthesis(
+    let outcome = admit_synthesis(
         &attempts,
         &context,
         synthesis_command(vec![failed.clone(), running.clone(), bare.clone()]),
@@ -918,11 +459,7 @@ fn synthesis_returns_the_unsynthesized_set_when_nothing_is_citable() {
     let unadmitted = attempts
         .status(
             &context,
-            &WorkAttemptStatusRequestV1 {
-                task_id: id("task.synthesis"),
-                run_id: id("run.task.synthesis"),
-                attempt_id: id("attempt.synthesis"),
-            },
+            &source_identity("task.synthesis", "attempt.synthesis"),
         )
         .unwrap_err();
     assert_eq!(
@@ -933,9 +470,9 @@ fn synthesis_returns_the_unsynthesized_set_when_nothing_is_citable() {
 
 #[test]
 fn synthesis_admits_citing_every_citable_source_and_preserves_the_rest() {
-    let (attempts, attempt_store, work, context) = fixture("project.synthesis.admission");
-    let mine = authority("project.synthesis.admission");
-    admit_work(&work, &context, "task.synthesis");
+    let (attempts, _, attempt_store, context) = fixture("project.synthesis.admission");
+    let mine = work_authority(&context);
+    admit_work(&attempt_store, &context, "task.synthesis");
 
     // Two sources agree on the same artifact pair, one dissents with a
     // different artifact, and one failed outright.
@@ -982,7 +519,7 @@ fn synthesis_admits_citing_every_citable_source_and_preserves_the_rest() {
         digest('9'),
     );
 
-    let outcome = admit_work_synthesis(
+    let outcome = admit_synthesis(
         &attempts,
         &context,
         synthesis_command(vec![
@@ -1032,9 +569,9 @@ fn synthesis_admits_citing_every_citable_source_and_preserves_the_rest() {
 
 #[test]
 fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
-    let (attempts, attempt_store, work, context) = fixture("project.synthesis.replay");
-    let mine = authority("project.synthesis.replay");
-    admit_work(&work, &context, "task.synthesis");
+    let (attempts, _, attempt_store, context) = fixture("project.synthesis.replay");
+    let mine = work_authority(&context);
+    admit_work(&attempt_store, &context, "task.synthesis");
 
     let citable = source_identity("task.source.citable", "attempt.1");
     insert_terminal_source(
@@ -1049,10 +586,15 @@ fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
     let running = insert_running_source(&attempt_store, &mine, mutable.clone());
     let command = synthesis_command(vec![citable, mutable]);
 
-    let first = admit_work_synthesis(&attempts, &context, command.clone()).unwrap();
+    let first = admit_synthesis(&attempts, &context, command.clone()).unwrap();
     let WorkSynthesisAttemptV1::Admitted(first_admission) = &first else {
         panic!("expected an admitted synthesis attempt");
     };
+    assert_eq!(
+        attempt_store.graph_version(),
+        Some(WorkGraphVersionV1::new(4).unwrap()),
+        "atomic admission must advance the canonical graph when it links the attempt",
+    );
     assert_eq!(
         first_admission.source_set.sources[1].outcome,
         WorkSynthesisSourceOutcomeV1::Unknown {
@@ -1065,25 +607,23 @@ fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
         &running,
         vec![artifact("artifact.late", '3')],
     );
-    let replay = admit_work_synthesis(&attempts, &context, command).unwrap();
+    let replay = admit_synthesis(&attempts, &context, command).unwrap();
 
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),
         serde_json::to_vec(&first).unwrap()
     );
     assert_eq!(
-        attempt_store
-            .committed_result_count(&mine, &id("run.task.synthesis"))
-            .unwrap(),
+        attempt_count_for_run(&attempt_store, &mine, &id("run.task.synthesis")),
         1
     );
 }
 
 #[test]
 fn changed_synthesis_request_conflicts_without_mutating_the_admitted_result() {
-    let (attempts, attempt_store, work, context) = fixture("project.synthesis.conflict");
-    let mine = authority("project.synthesis.conflict");
-    admit_work(&work, &context, "task.synthesis");
+    let (attempts, _, attempt_store, context) = fixture("project.synthesis.conflict");
+    let mine = work_authority(&context);
+    admit_work(&attempt_store, &context, "task.synthesis");
 
     let source = source_identity("task.source.citable", "attempt.1");
     insert_terminal_source(
@@ -1095,31 +635,30 @@ fn changed_synthesis_request_conflicts_without_mutating_the_admitted_result() {
         digest('5'),
     );
     let command = synthesis_command(vec![source]);
-    let first = admit_work_synthesis(&attempts, &context, command.clone()).unwrap();
+    let first = admit_synthesis(&attempts, &context, command.clone()).unwrap();
 
     let mut changed = command.clone();
     changed.output_name = id("output.synthesis.changed");
-    let conflict = admit_work_synthesis(&attempts, &context, changed).unwrap_err();
+    let conflict = admit_synthesis(&attempts, &context, changed).unwrap_err();
     assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
 
-    let replay = admit_work_synthesis(&attempts, &context, command).unwrap();
+    let replay = admit_synthesis(&attempts, &context, command).unwrap();
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),
         serde_json::to_vec(&first).unwrap()
     );
     assert_eq!(
-        attempt_store
-            .committed_result_count(&mine, &id("run.task.synthesis"))
-            .unwrap(),
+        attempt_count_for_run(&attempt_store, &mine, &id("run.task.synthesis")),
         1
     );
 }
 
 #[test]
 fn ordinary_start_conflicts_with_an_existing_synthesis_identity() {
-    let (attempts, attempt_store, work, context) = fixture("project.synthesis.cross-mode");
-    let mine = authority("project.synthesis.cross-mode");
-    admit_work(&work, &context, "task.synthesis");
+    let (attempts, ordinary_attempts, attempt_store, context) =
+        fixture("project.synthesis.cross-mode");
+    let mine = work_authority(&context);
+    admit_work(&attempt_store, &context, "task.synthesis");
 
     let source = source_identity("task.source.citable", "attempt.1");
     insert_terminal_source(
@@ -1131,20 +670,26 @@ fn ordinary_start_conflicts_with_an_existing_synthesis_identity() {
         digest('7'),
     );
     let command = synthesis_command(vec![source]);
-    let first = admit_work_synthesis(&attempts, &context, command.clone()).unwrap();
+    let first = admit_synthesis(&attempts, &context, command.clone()).unwrap();
 
-    let conflict = attempts.start(&context, command.start.clone()).unwrap_err();
+    let conflict = ordinary_attempts
+        .start_against_registered_topology(
+            &context,
+            &work_product_binding(),
+            &work_product_revisions(&context),
+            &registered_topology(),
+            command.start.clone(),
+        )
+        .unwrap_err();
     assert_eq!(conflict.kind(), ApplicationProblemKind::Conflict);
 
-    let replay = admit_work_synthesis(&attempts, &context, command).unwrap();
+    let replay = admit_synthesis(&attempts, &context, command).unwrap();
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),
         serde_json::to_vec(&first).unwrap()
     );
     assert_eq!(
-        attempt_store
-            .committed_result_count(&mine, &id("run.task.synthesis"))
-            .unwrap(),
+        attempt_count_for_run(&attempt_store, &mine, &id("run.task.synthesis")),
         1
     );
 }
