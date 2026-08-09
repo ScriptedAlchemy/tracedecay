@@ -1,12 +1,12 @@
-//! Post-approval outcome tracking for automation-applied changes (R10).
+//! Post-application outcome tracking for automatically curated changes.
 //!
-//! The automation loops stage skills and facts that humans approve, but
-//! approval alone says nothing about whether the change was good. This module
-//! measures what happened *after* approval:
+//! The automation loops validate and apply skills and facts automatically, but
+//! application alone says nothing about whether the change was good. This module
+//! measures what happened *after* automatic application:
 //!
-//! - approved managed skills: adoption derived from the usage ledger
+//! - automatically activated managed skills: adoption derived from the usage ledger
 //!   (`adopted` / `ignored` / `too_early`),
-//! - applied fact proposals: post-apply recall trajectory in the memory store
+//! - automatically applied facts: post-apply recall trajectory in the memory store
 //!   (`recalled_and_helpful` / `recalled` / `never_recalled` / `deleted`).
 //!
 //! Outcomes are persisted as a snapshot under the dashboard root so the next

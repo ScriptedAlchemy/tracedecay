@@ -4,11 +4,10 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_domain::FactOwnerV1;
+use tracedecay_domain::{FactOwnerV1, ManifestDigest, canonical_sha256};
 use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
-use crate::automation::apply_policy::MemoryApplyPolicy;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
 };
@@ -29,6 +28,10 @@ use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_policy::{
+    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
+    CurationValidationDispositionV1, evaluate_curation_apply,
+};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
 
@@ -178,14 +181,12 @@ pub(super) async fn validate_session_fact_proposals<A: ProjectMemoryFactStore>(
 
 pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
-    digest_root: Option<&std::path::Path>,
-    export_memory_digest: bool,
     proposal_records: Vec<FactProposalRecord>,
-) -> Result<(Vec<FactProposalRecord>, bool)> {
+) -> AutoApplySessionFactProposals {
     let mut applied = Vec::with_capacity(proposal_records.len());
     let mut newly_promoted = false;
     for record in proposal_records {
-        if record.state != FactProposalState::PendingApproval {
+        if record.add_fact_request.is_none() || record.validation_reason.is_some() {
             applied.push(record);
             continue;
         }
@@ -198,46 +199,27 @@ pub(super) async fn auto_apply_session_fact_proposals<A: ProjectMemoryFactStore>
         {
             Ok(result) => result,
             Err(error) => {
-                refresh_auto_apply_digest_for_new_promotions(
-                    memory,
-                    digest_root,
-                    export_memory_digest,
+                return AutoApplySessionFactProposals {
+                    records: applied,
                     newly_promoted,
-                )
-                .await;
-                return Err(error);
+                    error: Some(error),
+                };
             }
         };
         newly_promoted |= result.newly_promoted;
         applied.push(result.record);
     }
-    refresh_auto_apply_digest_for_new_promotions(
-        memory,
-        digest_root,
-        export_memory_digest,
+    AutoApplySessionFactProposals {
+        records: applied,
         newly_promoted,
-    )
-    .await;
-    Ok((applied, newly_promoted))
+        error: None,
+    }
 }
 
-async fn refresh_auto_apply_digest_for_new_promotions<A: ProjectMemoryFactStore>(
-    memory: &MemoryApplication<A>,
-    digest_root: Option<&std::path::Path>,
-    export_memory_digest: bool,
+struct AutoApplySessionFactProposals {
+    records: Vec<FactProposalRecord>,
     newly_promoted: bool,
-) {
-    if !newly_promoted {
-        return;
-    }
-    if let Some(digest_root) = digest_root {
-        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-            memory,
-            digest_root,
-            export_memory_digest,
-        )
-        .await;
-    }
+    error: Option<TraceDecayError>,
 }
 
 async fn skipped_session_reflector_run(
@@ -278,8 +260,8 @@ fn rejected_session_reflector_run(
     }
 }
 
-/// Validates and stages the `facts` half of a reflector (or combined) run,
-/// returning the report plus the not-yet-appended success ledger record.
+/// Validates and automatically applies the `facts` half of a reflector (or
+/// combined) run, returning the report plus the not-yet-appended ledger record.
 pub(super) struct ProposedAgentOutput<'a> {
     pub(super) response: &'a AgentTaskResponse,
     pub(super) retry_report: &'a AgentTaskRetryReport,
@@ -289,13 +271,24 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) proposals: &'a [Value],
 }
 
+pub(super) enum SessionReflectorFinalization {
+    Completed {
+        report: Value,
+        record: AutomationRunLedgerRecord,
+    },
+    FailedRecorded {
+        error: TraceDecayError,
+        record: AutomationRunLedgerRecord,
+    },
+}
+
 pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
-    digest_root: Option<&std::path::Path>,
     config: &AutomationConfig,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
-) -> Result<(Value, AutomationRunLedgerRecord)> {
+    validation_repairs: &[Value],
+) -> Result<SessionReflectorFinalization> {
     let ProposedAgentOutput {
         response,
         retry_report,
@@ -309,7 +302,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         validate_session_fact_proposals(memory, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
-    let mut proposal_records = record_session_fact_proposals(
+    let proposal_records = record_session_fact_proposals(
         memory,
         run_id,
         evidence_hash.as_deref(),
@@ -317,59 +310,85 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         &rejected_facts,
     )
     .await?;
-    let auto_apply_facts = MemoryApplyPolicy::should_apply(config, accepted_count);
-    let applied_fact_proposals = if auto_apply_facts {
-        let (records, _) = auto_apply_session_fact_proposals(
-            memory,
-            digest_root,
-            config.export_memory_digest,
-            std::mem::take(&mut proposal_records),
-        )
-        .await?;
-        records
+    let curation_decision =
+        session_curation_decision(config, evidence_hash.as_deref(), &accepted_facts)?;
+    let proposal_records = if curation_decision.allows_apply() {
+        let auto_apply = auto_apply_session_fact_proposals(memory, proposal_records).await;
+        if let Some(error) = auto_apply.error {
+            let record = finalizer
+                .append_failed_record_with_effects(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(json!({
+                        "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
+                        "accepted_facts": accepted_facts,
+                        "rejected_facts": rejected_facts,
+                    })),
+                    format!("session fact auto-apply failed after partial effects: {error}"),
+                    retry_report,
+                    Some(json!({
+                        "proposal_records": auto_apply.records,
+                        "newly_promoted": auto_apply.newly_promoted,
+                    })),
+                    None,
+                    Some(json!({
+                        "status": "failed_after_partial_effects",
+                        "error": error.to_string(),
+                    })),
+                    accepted_count,
+                    rejected_count,
+                )
+                .await?;
+            return Ok(SessionReflectorFinalization::FailedRecorded { error, record });
+        }
+        auto_apply.records
     } else {
-        Vec::new()
+        proposal_records
     };
-    if auto_apply_facts {
-        proposal_records.clone_from(&applied_fact_proposals);
-    }
     let proposal_ids: Vec<String> = proposal_records
         .iter()
         .map(|record| record.proposal_id.clone())
         .collect();
-    let applied_proposal_ids: Vec<String> = applied_fact_proposals
+    let applied_proposal_ids: Vec<String> = proposal_records
         .iter()
         .filter(|record| record.state == FactProposalState::Applied)
         .map(|record| record.proposal_id.clone())
         .collect();
-    let applied_fact_ids: Vec<String> = applied_fact_proposals
+    let applied_fact_ids: Vec<String> = proposal_records
         .iter()
         .filter(|record| record.state == FactProposalState::Applied)
         .filter_map(|record| record.applied_fact_id.clone())
         .collect();
     let applied_count = applied_proposal_ids.len();
     let fully_applied = accepted_count > 0 && applied_count == accepted_count;
-    let mut session_fact_apply_policy =
-        MemoryApplyPolicy::session_facts(config, accepted_count, applied_count).to_json();
-    if let Some(object) = session_fact_apply_policy.as_object_mut() {
-        object.insert(
-            "applied_proposal_ids".to_string(),
-            json!(applied_proposal_ids),
-        );
-        object.insert("applied_fact_ids".to_string(), json!(applied_fact_ids));
-        object.insert("applied_count".to_string(), json!(applied_count));
-        object.insert("fully_applied".to_string(), json!(fully_applied));
-    }
+    let curation_policy = json!({
+        "decision": curation_decision,
+        "effect": {
+            "accepted_count": accepted_count,
+            "applied_proposal_ids": applied_proposal_ids,
+            "applied_fact_ids": applied_fact_ids,
+            "applied_count": applied_count,
+            "fully_applied": fully_applied,
+            "mutates_store": applied_count > 0,
+        },
+    });
     let report = json!({
-        "status": if auto_apply_facts { "auto_applied" } else { "needs_approval" },
-        "dry_run": !auto_apply_facts,
+        "status": if accepted_count == 0 {
+            "no_valid_facts"
+        } else if curation_decision.allows_apply() {
+            "auto_applied"
+        } else {
+            "curation_not_applied"
+        },
+        "dry_run": false,
         "task": "session_reflector",
         "evidence_hash": evidence_hash,
         "accepted_facts": accepted_facts,
         "rejected_facts": rejected_facts,
         "proposal_ids": proposal_ids,
         "proposal_records": proposal_records,
-        "session_fact_apply_policy": session_fact_apply_policy,
+        "curation_policy": curation_policy,
+        "validation_repairs": validation_repairs,
     });
     let mut record = finalizer.success_record(
         response,
@@ -389,41 +408,68 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     record.backend_attempt_count = retry_report.attempt_count();
     record.backend_attempts = retry_report.attempts().to_vec();
     record.applied_ops = report
-        .pointer("/session_fact_apply_policy/applied_proposal_ids")
+        .pointer("/curation_policy/effect/applied_proposal_ids")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .cloned();
     record.rejected_ops = report.get("rejected_facts").cloned();
-    let proposal_review_key = if auto_apply_facts {
-        "applied_proposals"
-    } else {
-        "pending_proposals"
-    };
-    let proposal_review_ids = if auto_apply_facts {
-        report
-            .pointer("/session_fact_apply_policy/applied_proposal_ids")
-            .cloned()
-    } else {
-        report.get("proposal_ids").cloned()
-    }
-    .unwrap_or_else(|| json!([]));
+    let applied_proposal_ids = report
+        .pointer("/curation_policy/effect/applied_proposal_ids")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     let mut validation_report = json!({
-        "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
-        "dry_run": report.get("dry_run").cloned().unwrap_or(json!(true)),
+        "status": report.get("status").cloned().unwrap_or_else(|| json!("no_valid_facts")),
+        "dry_run": report.get("dry_run").cloned().unwrap_or(json!(false)),
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
-        "session_fact_apply_policy": report.get("session_fact_apply_policy").cloned().unwrap_or_else(|| json!({})),
+        "validation_repairs": validation_repairs,
+        "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     });
     if let Some(object) = validation_report.as_object_mut() {
         object.insert(
-            proposal_review_key.to_string(),
+            "applied_proposals".to_string(),
             json!({
-            "proposal_ids": proposal_review_ids,
+            "proposal_ids": applied_proposal_ids,
             "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
             }),
         );
     }
     record.validation_report = Some(validation_report);
-    Ok((report, record))
+    Ok(SessionReflectorFinalization::Completed { report, record })
+}
+
+fn session_curation_decision(
+    config: &AutomationConfig,
+    evidence_hash: Option<&str>,
+    accepted_facts: &[Value],
+) -> Result<CurationApplyDecisionV1> {
+    let evidence_digest = evidence_hash
+        .map(|hash| ManifestDigest::new(hash.to_owned()))
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid session curation evidence identity: {error}"),
+        })?;
+    let output_digest =
+        canonical_sha256(&accepted_facts).map_err(|error| TraceDecayError::Config {
+            message: format!("derive session curation output identity: {error}"),
+        })?;
+    let configuration_digest =
+        canonical_sha256(config).map_err(|error| TraceDecayError::Config {
+            message: format!("derive session curation configuration identity: {error}"),
+        })?;
+    evaluate_curation_apply(&CurationApplyPolicyInputV1 {
+        subject: CurationApplySubjectV1::SessionReflector,
+        evidence_digest,
+        output_digest,
+        validation: if accepted_facts.is_empty() {
+            CurationValidationDispositionV1::NoCandidate
+        } else {
+            CurationValidationDispositionV1::Accepted
+        },
+        configuration_digest,
+    })
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("evaluate session curation policy: {error}"),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,7 +478,6 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
-    digest_root: Option<&std::path::Path>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
@@ -474,15 +519,12 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             return skipped_session_reflector_run(&run, reason, evidence_hash.clone()).await;
         }
     };
-    if let Err(err) = crate::automation::outcomes::refresh_fact_outcomes(
+    crate::automation::outcomes::refresh_fact_outcomes(
         &run.dashboard_root,
         memory,
         current_timestamp(),
     )
-    .await
-    {
-        tracing::warn!(error = %err, "failed to refresh fact outcomes");
-    }
+    .await?;
 
     let request = AgentTaskRequest::new(
         run.run_id.clone(),
@@ -491,12 +533,12 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         evidence_hash.clone(),
         json!({
             "session_reflection_evidence": evidence,
-            "apply": false,
+            "apply": true,
         }),
     );
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
-    let (response, retry_report) = match finalizer
+    let (mut response, mut retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
     {
@@ -514,7 +556,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             });
         }
     };
-    let (proposed_ops, proposals) = finalizer
+    let (mut proposed_ops, mut proposals) = finalizer
         .response_output_array(
             &response,
             evidence_hash.clone(),
@@ -523,9 +565,86 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             "session reflector output must include a facts array",
         )
         .await?;
+    let retry_policy =
+        crate::automation::backend::BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
+    let mut validation_repairs = Vec::new();
+    loop {
+        let (_, rejected_facts) =
+            validate_session_fact_proposals(memory, &proposals, &evidence).await?;
+        if rejected_facts.is_empty() {
+            break;
+        }
+        let attempt = validation_repairs.len() + 1;
+        validation_repairs.push(json!({
+            "attempt": attempt,
+            "errors": rejected_facts,
+        }));
+        if attempt == 2 {
+            let error = TraceDecayError::Config {
+                message: "session reflector validation repair budget exhausted; output quarantined"
+                    .to_string(),
+            };
+            finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    evidence_hash,
+                    Some(proposed_ops),
+                    error.to_string(),
+                    &retry_report,
+                )
+                .await?;
+            return Err(error);
+        }
+        let repair_request = AgentTaskRequest::new(
+            run.run_id.clone(),
+            AgentTaskKind::SessionReflector,
+            "Repair the previous session fact JSON. Return only {\"facts\": [...]}. Preserve valid intent, fix every validation error, cite only the supplied session evidence, and do not add unrelated facts."
+                .to_string(),
+            evidence_hash.clone(),
+            json!({
+                "previous_output": proposed_ops.clone(),
+                "validation_errors": validation_repairs.last(),
+                "session_reflection_evidence": evidence.clone(),
+                "apply": true,
+            }),
+        );
+        let mut repair_retry_report = AgentTaskRetryReport::default();
+        response = match crate::automation::backend::run_agent_task_with_retry_report(
+            backend,
+            &repair_request,
+            &retry_policy,
+            &mut repair_retry_report,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                retry_report.extend(&repair_retry_report);
+                finalizer
+                    .append_failed_record(
+                        None,
+                        evidence_hash,
+                        Some(proposed_ops),
+                        error.to_string(),
+                        &retry_report,
+                    )
+                    .await?;
+                return Err(error);
+            }
+        };
+        retry_report.extend(&repair_retry_report);
+        (proposed_ops, proposals) = finalizer
+            .response_output_array(
+                &response,
+                evidence_hash.clone(),
+                &retry_report,
+                "facts",
+                "session reflector repair output must include a facts array",
+            )
+            .await?;
+    }
     let (report, record) = match finalize_session_reflector_success(
         memory,
-        digest_root,
         config,
         &finalizer,
         ProposedAgentOutput {
@@ -536,10 +655,12 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
+        &validation_repairs,
     )
     .await
     {
-        Ok(result) => result,
+        Ok(SessionReflectorFinalization::Completed { report, record }) => (report, record),
+        Ok(SessionReflectorFinalization::FailedRecorded { error, .. }) => return Err(error),
         Err(err) => {
             finalizer
                 .append_failed_record(
@@ -588,7 +709,6 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
         sessions_db,
         retrieval,
         &memory,
-        Some(cg.store_layout().project_root.as_path()),
         config,
         backend,
         options,
@@ -655,7 +775,6 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
         sessions_db,
         retrieval,
         &memory,
-        None,
         config,
         backend,
         options,

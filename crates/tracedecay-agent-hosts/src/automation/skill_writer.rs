@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use tracedecay_policy::CurationApplyDecisionV1;
 
 use super::artifacts::sha256_bytes;
 use super::managed_skills::{
@@ -17,7 +18,7 @@ use super::skill_usage::{
 };
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::ToolFamilySignal;
-use crate::errors::Result;
+use crate::errors::{Result, config_error};
 use crate::ports::session_evidence::LcmGrepHit;
 
 mod consolidation;
@@ -35,7 +36,7 @@ pub(crate) struct SkillProposalOutcome {
     pub updated: Vec<Value>,
     pub consolidations: Vec<Value>,
     pub rejected: Vec<Value>,
-    pub deployment: ManagedSkillDeploymentReceipt,
+    pub deployment: Option<ManagedSkillDeploymentReceipt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,7 +115,23 @@ pub(crate) async fn validate_and_apply_skill_proposals(
     project_root: Option<&Path>,
     run_id: &str,
     proposals: &[Value],
+    curation_decision: &CurationApplyDecisionV1,
 ) -> Result<SkillProposalOutcome> {
+    if proposals.is_empty() {
+        return Ok(SkillProposalOutcome {
+            created: Vec::new(),
+            updated: Vec::new(),
+            consolidations: Vec::new(),
+            rejected: Vec::new(),
+            deployment: None,
+        });
+    }
+    if !curation_decision.allows_apply() {
+        return Err(config_error(format!(
+            "skill writer curation policy does not admit this output: {:?}",
+            curation_decision.disposition
+        )));
+    }
     let mut existing_skills = list_managed_skills(profile_root)
         .await?
         .into_iter()
@@ -239,7 +256,8 @@ pub(crate) async fn validate_and_apply_skill_proposals(
             Err(reason) => rejected.push(rejected_skill(proposal, &reason)),
         }
     }
-    let deployment = deploy_managed_skills(profile_root, project_root);
+    let mutated = !created.is_empty() || !updated.is_empty() || !consolidations.is_empty();
+    let deployment = mutated.then(|| deploy_managed_skills(profile_root, project_root));
     Ok(SkillProposalOutcome {
         created,
         updated,

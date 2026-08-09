@@ -439,6 +439,41 @@ impl<'a> AgentRunFinalizer<'a> {
         Ok(record)
     }
 
+    /// Records a terminal failure after a store mutation has already committed.
+    /// The applied effects stay on the failed record so callers can diagnose
+    /// the partial outcome without retrying a mutation blindly.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn append_failed_record_with_effects(
+        &self,
+        model: Option<String>,
+        evidence_hash: Option<String>,
+        proposed_ops: Option<Value>,
+        error: String,
+        retry_report: &AgentTaskRetryReport,
+        applied_ops: Option<Value>,
+        rejected_ops: Option<Value>,
+        validation_report: Option<Value>,
+        accepted_count: usize,
+        rejected_count: usize,
+    ) -> Result<AutomationRunLedgerRecord> {
+        let mut record = self.record(RunRecordOutcome {
+            model,
+            status: AutomationRunStatus::Failed,
+            evidence_hash,
+            proposed_ops,
+            accepted_count,
+            rejected_count,
+            error: Some(error),
+        });
+        record.applied_ops = applied_ops;
+        record.rejected_ops = rejected_ops;
+        record.validation_report = validation_report;
+        apply_retry_report(&mut record, retry_report);
+        self.finish_record(&mut record);
+        append_run_record(self.dashboard_root, &record).await?;
+        Ok(record)
+    }
+
     pub(crate) fn success_record(
         &self,
         response: &AgentTaskResponse,

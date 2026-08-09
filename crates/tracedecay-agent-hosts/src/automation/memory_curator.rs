@@ -5,9 +5,8 @@ use std::sync::Arc;
 use tracedecay_application::memory::{
     VerifiedMemorySimilarityPairQueryV1, VerifiedMemorySimilarityReadV1,
 };
-use tracedecay_domain::{ActorId, FactId, FactOwnerV1};
+use tracedecay_domain::{ActorId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256};
 
-use super::apply_policy::{MemoryApplyDecision, MemoryApplyPolicy};
 use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
@@ -21,6 +20,10 @@ use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::project_runtime::TraceDecay;
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_policy::{
+    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
+    CurationValidationDispositionV1, evaluate_curation_apply,
+};
 use tracedecay_runtime_core::memory::types::MemoryGroomingOperation;
 use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
 
@@ -154,17 +157,6 @@ impl MemoryCuratorStore<'_> {
             Self::User { runtime, .. } => runtime.open_user_memory_db().await,
         }
     }
-
-    async fn refresh_digest(&self, memory: &MemoryApplication<DatabaseFactStore<'_>>) {
-        if let Self::Project { cg, .. } = self {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                memory,
-                &cg.store_layout().project_root,
-                true,
-            )
-            .await;
-        }
-    }
 }
 
 async fn run_memory_curator_for_store(
@@ -294,7 +286,6 @@ async fn run_memory_curator_for_store(
                 "allowed_fact_ids": allowed_fact_ids,
                 "min_confidence": min_confidence,
                 "apply": true,
-                "memory_apply_policy": "validate_then_apply",
             }),
         );
         let mut repair_retry_report = AgentTaskRetryReport::default();
@@ -326,13 +317,9 @@ async fn run_memory_curator_for_store(
             .response_output_json(&response, evidence_hash.clone(), &retry_report)
             .await?;
     };
-    let accepted_ops_value = Value::Array(accepted_ops.clone());
-    let dry_run_apply_policy = memory_curation_apply_policy(Some(&accepted_ops_value), None);
-    let should_apply = dry_run_apply_policy
-        .get("mutates_store")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (applied_count, receipts) = if should_apply && !accepted_ops.is_empty() {
+    let curation_decision =
+        memory_curation_decision(config, evidence_hash.as_deref(), &accepted_ops)?;
+    let (applied_count, receipts) = if curation_decision.allows_apply() {
         let database = store.open_memory_database().await?;
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database))
             .map_err(|error| TraceDecayError::Config {
@@ -354,18 +341,11 @@ async fn run_memory_curator_for_store(
                 return Err(err);
             }
         };
-        if applied_count > 0 && config.export_memory_digest {
-            store.refresh_digest(&memory).await;
-        }
         (applied_count, receipts)
     } else {
         (0, Vec::new())
     };
-    let apply_policy = if should_apply {
-        memory_curation_apply_policy(Some(&accepted_ops_value), Some(applied_count))
-    } else {
-        dry_run_apply_policy
-    };
+    let curation_policy = memory_curation_report(&accepted_ops, curation_decision, applied_count);
     let clusters_reviewed = llm_review
         .get("clusters_reviewed")
         .cloned()
@@ -381,10 +361,17 @@ async fn run_memory_curator_for_store(
             "validation_repairs": validation_repairs,
         }
     });
-    annotate_memory_curation_report(&mut validated_report, apply_policy);
+    annotate_memory_curation_report(&mut validated_report, curation_policy);
 
     let validation_report = validated_report.get("llm_apply").cloned();
-    let applied_ops = validated_report.pointer("/llm_apply/ops").cloned();
+    let applied_ops = validated_report
+        .pointer("/llm_apply/receipts")
+        .filter(|value| {
+            value
+                .as_array()
+                .is_some_and(|receipts| !receipts.is_empty())
+        })
+        .cloned();
     let rejected_ops = validated_report.pointer("/llm_apply/rejected_ops").cloned();
     let accepted_count = validated_report
         .pointer("/llm_apply/ops")
@@ -438,7 +425,6 @@ fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Va
     json!({
         "llm_review": llm_review,
         "apply": true,
-        "memory_apply_policy": "validate_then_apply",
         "min_confidence": min_confidence,
     })
 }
@@ -826,59 +812,50 @@ fn memory_validation_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-fn memory_curation_apply_policy(
-    accepted_ops: Option<&Value>,
-    applied_count: Option<usize>,
+fn memory_curation_report(
+    ops: &[Value],
+    decision: CurationApplyDecisionV1,
+    applied_count: usize,
 ) -> Value {
-    let ops = accepted_ops
-        .and_then(Value::as_array)
-        .map_or_else(|| &[] as &[Value], Vec::as_slice);
     let destructive = memory_destructive_op_counts(ops);
     let accepted_count = ops.len();
-    let policy = applied_count.map_or_else(
-        || MemoryApplyPolicy::curation_ops(accepted_count),
-        |applied_count| MemoryApplyPolicy::applied_curation_ops(accepted_count, applied_count),
-    );
-    let apply_instructions = match policy.decision() {
-        MemoryApplyDecision::AutoApplyAllowed => {
-            "Accepted memory curation ops were applied autonomously and recorded in automation telemetry."
-        }
-        MemoryApplyDecision::ApplyIncomplete => {
-            "Automation attempted to apply accepted memory curation ops, but one or more mutations did not complete."
-        }
-        MemoryApplyDecision::ProposalOnly => {
-            "Automation recorded accepted memory curation ops without mutating the memory store."
-        }
-        MemoryApplyDecision::NoValidOps | MemoryApplyDecision::NoValidFacts => {
-            "No accepted memory curation ops require apply."
-        }
-    };
-    let mut payload = policy.to_json();
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("validated_before_apply".to_string(), json!(true));
-        object.insert("accepted_count".to_string(), json!(accepted_count));
-        if let Some(applied_count) = applied_count {
-            object.insert("applied_count".to_string(), json!(applied_count));
-            object.insert(
-                "fully_applied".to_string(),
-                json!(accepted_count > 0 && applied_count >= accepted_count),
-            );
-        }
-        object.insert(
-            "permanent_delete_count".to_string(),
-            json!(destructive.permanent_delete_count),
-        );
-        object.insert(
-            "merge_loser_count".to_string(),
-            json!(destructive.merge_loser_count),
-        );
-        object.insert(
-            "destructive_target_count".to_string(),
-            json!(destructive.permanent_delete_count + destructive.merge_loser_count),
-        );
-        object.insert("apply_instructions".to_string(), json!(apply_instructions));
-    }
-    payload
+    json!({
+        "decision": decision,
+        "effect": {
+            "accepted_count": accepted_count,
+            "applied_count": applied_count,
+            "fully_applied": decision.allows_apply() && applied_count >= accepted_count,
+            "mutates_store": applied_count > 0,
+            "permanent_delete_count": destructive.permanent_delete_count,
+            "merge_loser_count": destructive.merge_loser_count,
+            "destructive_target_count": destructive.permanent_delete_count + destructive.merge_loser_count,
+        },
+    })
+}
+
+fn memory_curation_decision(
+    config: &AutomationConfig,
+    evidence_hash: Option<&str>,
+    accepted_ops: &[Value],
+) -> Result<CurationApplyDecisionV1> {
+    let evidence_digest = evidence_hash
+        .map(|hash| ManifestDigest::new(hash.to_owned()))
+        .transpose()
+        .map_err(memory_contract_error)?;
+    let output_digest = canonical_sha256(&accepted_ops).map_err(memory_contract_error)?;
+    let configuration_digest = canonical_sha256(config).map_err(memory_contract_error)?;
+    evaluate_curation_apply(&CurationApplyPolicyInputV1 {
+        subject: CurationApplySubjectV1::MemoryCurator,
+        evidence_digest,
+        output_digest,
+        validation: if accepted_ops.is_empty() {
+            CurationValidationDispositionV1::NoCandidate
+        } else {
+            CurationValidationDispositionV1::Accepted
+        },
+        configuration_digest,
+    })
+    .map_err(memory_contract_error)
 }
 
 #[derive(Debug, Default)]
@@ -904,12 +881,12 @@ fn memory_destructive_op_counts(ops: &[Value]) -> MemoryDestructiveOpCounts {
     counts
 }
 
-fn annotate_memory_curation_report(report: &mut Value, apply_policy: Value) {
+fn annotate_memory_curation_report(report: &mut Value, curation_policy: Value) {
     if let Some(object) = report.as_object_mut() {
-        object.insert("automation_apply_policy".to_string(), apply_policy.clone());
+        object.insert("curation_policy".to_string(), curation_policy.clone());
     }
     if let Some(llm_apply) = report.get_mut("llm_apply").and_then(Value::as_object_mut) {
-        llm_apply.insert("apply_policy".to_string(), apply_policy);
+        llm_apply.insert("curation_policy".to_string(), curation_policy);
     }
 }
 
@@ -949,10 +926,6 @@ mod tests {
         assert!(prompt.contains("generation-bound memory pairs"));
         assert_eq!(backend_message.matches(marker).count(), 1);
         assert_eq!(request.context["apply"], json!(true));
-        assert_eq!(
-            request.context["memory_apply_policy"],
-            json!("validate_then_apply")
-        );
     }
 
     #[test]

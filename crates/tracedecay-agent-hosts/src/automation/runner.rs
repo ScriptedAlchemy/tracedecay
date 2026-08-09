@@ -12,12 +12,12 @@ use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
-use tracedecay_domain::FactOwnerV1;
 #[cfg(test)]
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     UtcMicros, WorktreeId,
 };
+use tracedecay_domain::{FactOwnerV1, ManifestDigest, canonical_sha256};
 #[cfg(test)]
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -47,6 +47,10 @@ use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::ports::session_store::AutomationSessionStore;
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_policy::{
+    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
+    CurationValidationDispositionV1, evaluate_curation_apply,
+};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 #[cfg(test)]
 use tracedecay_temporal_query::TemporalKernelResult;
@@ -81,11 +85,23 @@ use evidence::{
 };
 use retrieval::{production_project_automation_retrieval, production_user_automation_retrieval};
 use session_reflector::{
-    ProposedAgentOutput, build_session_reflector_prompt, finalize_session_reflector_success,
+    ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
+    finalize_session_reflector_success,
 };
 use skill_writer::{
     build_skill_writer_prompt, rejected_skill_writer_run, skipped_skill_writer_run,
 };
+
+enum SkillWriterFinalization {
+    Completed {
+        report: Value,
+        record: AutomationRunLedgerRecord,
+    },
+    FailedRecorded {
+        error: TraceDecayError,
+        record: AutomationRunLedgerRecord,
+    },
+}
 
 #[cfg(test)]
 use evidence::{
@@ -476,6 +492,7 @@ async fn run_skill_writer_for_store(
         &finalizer,
         &profile_root,
         analytics_project_root,
+        config,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
@@ -489,7 +506,8 @@ async fn run_skill_writer_for_store(
     )
     .await
     {
-        Ok(result) => result,
+        Ok(SkillWriterFinalization::Completed { report, record }) => (report, record),
+        Ok(SkillWriterFinalization::FailedRecorded { error, .. }) => return Err(error),
         Err(err) => {
             finalizer
                 .append_failed_record(
@@ -515,37 +533,70 @@ async fn run_skill_writer_for_store(
     })
 }
 
-/// Validates and applies the `skills` half of a skill-writer (or combined) run,
-/// returning the report plus the not-yet-appended success ledger record.
+/// Validates and automatically applies the `skills` half of a skill-writer (or
+/// combined) run, returning the report plus the not-yet-appended ledger record.
 async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
+    config: &AutomationConfig,
     activation_policy: &'static str,
     output: ProposedAgentOutput<'_>,
     validation_repairs: &[Value],
-) -> Result<(Value, AutomationRunLedgerRecord)> {
+) -> Result<SkillWriterFinalization> {
     let ProposedAgentOutput {
         response,
-        retry_report: _,
+        retry_report,
         evidence,
         evidence_hash,
         proposed_ops,
         proposals,
     } = output;
     let run_id = finalizer.run_id();
-    let proposal_outcome =
-        validate_and_apply_skill_proposals(profile_root, project_root, run_id, proposals).await?;
+    let curation_decision =
+        skill_writer_curation_decision(config, evidence_hash.as_deref(), proposals)?;
+    let proposal_outcome = validate_and_apply_skill_proposals(
+        profile_root,
+        project_root,
+        run_id,
+        proposals,
+        &curation_decision,
+    )
+    .await?;
     let accepted_count = proposal_outcome.created.len()
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
     let rejected_count = proposal_outcome.rejected.len();
+    let deployment_failed = proposal_outcome
+        .deployment
+        .as_ref()
+        .is_some_and(|deployment| deployment.retry_required);
+    let no_candidate = proposals.is_empty();
+    let fully_applied = !no_candidate
+        && accepted_count == proposals.len()
+        && rejected_count == 0
+        && !deployment_failed;
     let report = json!({
-        "status": if proposal_outcome.rejected.is_empty() { "applied" } else { "quarantined_partial" },
+        "status": if no_candidate {
+            "no_candidate"
+        } else if fully_applied {
+            "applied"
+        } else {
+            "failed_after_partial_effects"
+        },
         "dry_run": false,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
+        "curation_policy": {
+            "decision": curation_decision,
+            "effect": {
+                "accepted_count": accepted_count,
+                "rejected_count": rejected_count,
+                "fully_applied": fully_applied,
+                "mutates_store": accepted_count > 0,
+            },
+        },
         "created_skills": proposal_outcome.created,
         "updated_skills": proposal_outcome.updated,
         "applied_consolidations": proposal_outcome.consolidations,
@@ -557,6 +608,43 @@ async fn finalize_skill_writer_success(
             .cloned()
             .unwrap_or_else(|| json!([])),
     });
+    if !no_candidate && !fully_applied {
+        let error = TraceDecayError::Config {
+            message: if deployment_failed {
+                "skill curation applied lifecycle changes but host deployment requires retry"
+                    .to_string()
+            } else {
+                "skill curation could not apply every validated proposal".to_string()
+            },
+        };
+        let record = finalizer
+            .append_failed_record_with_effects(
+                response.model.clone(),
+                evidence_hash,
+                Some(json!({
+                    "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
+                })),
+                error.to_string(),
+                retry_report,
+                Some(json!({
+                    "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
+                    "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
+                    "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
+                    "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
+                })),
+                report.get("rejected_skills").cloned(),
+                Some(json!({
+                    "status": "failed_after_partial_effects",
+                    "validation_repairs": validation_repairs,
+                    "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
+                    "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
+                })),
+                accepted_count,
+                rejected_count,
+            )
+            .await?;
+        return Ok(SkillWriterFinalization::FailedRecorded { error, record });
+    }
     let mut record = finalizer.success_record(
         response,
         report
@@ -574,12 +662,14 @@ async fn finalize_skill_writer_success(
         accepted_count,
         rejected_count,
     );
-    record.applied_ops = Some(json!({
-        "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
-        "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
-        "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
-        "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
-    }));
+    record.applied_ops = (accepted_count > 0).then(|| {
+        json!({
+            "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
+            "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
+            "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
+            "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
+        })
+    });
     record.rejected_ops = report.get("rejected_skills").cloned();
     record.validation_report = Some(json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("applied")),
@@ -588,8 +678,43 @@ async fn finalize_skill_writer_success(
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "validation_repairs": validation_repairs,
+        "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     }));
-    Ok((report, record))
+    Ok(SkillWriterFinalization::Completed { report, record })
+}
+
+fn skill_writer_curation_decision(
+    config: &AutomationConfig,
+    evidence_hash: Option<&str>,
+    proposals: &[Value],
+) -> Result<CurationApplyDecisionV1> {
+    let evidence_digest = evidence_hash
+        .map(|hash| ManifestDigest::new(hash.to_owned()))
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid skill curation evidence identity: {error}"),
+        })?;
+    let output_digest = canonical_sha256(&proposals).map_err(|error| TraceDecayError::Config {
+        message: format!("derive skill curation output identity: {error}"),
+    })?;
+    let configuration_digest =
+        canonical_sha256(config).map_err(|error| TraceDecayError::Config {
+            message: format!("derive skill curation configuration identity: {error}"),
+        })?;
+    evaluate_curation_apply(&CurationApplyPolicyInputV1 {
+        subject: CurationApplySubjectV1::SkillWriter,
+        evidence_digest,
+        output_digest,
+        validation: if proposals.is_empty() {
+            CurationValidationDispositionV1::NoCandidate
+        } else {
+            CurationValidationDispositionV1::Accepted
+        },
+        configuration_digest,
+    })
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("evaluate skill curation policy: {error}"),
+    })
 }
 
 fn unpersisted_rejected_parts(
@@ -862,7 +987,7 @@ async fn run_combined_review_for_retrieval(
         json!({
             "session_reflection_evidence": reflector_bundle.evidence,
             "skill_writer_evidence": skill_bundle.evidence,
-            "apply": false,
+            "apply": true,
             "activation_policy": activation_policy,
         }),
     );
@@ -890,7 +1015,7 @@ async fn run_combined_review_for_retrieval(
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
     let mut retry_report = AgentTaskRetryReport::default();
-    let response =
+    let mut response =
         match run_agent_task_with_retry_report(backend, &request, &retry_policy, &mut retry_report)
             .await
         {
@@ -930,11 +1055,7 @@ async fn run_combined_review_for_retrieval(
             }
         };
 
-    let output = match response
-        .output_json
-        .clone()
-        .map_or_else(|| extract_json_object_prefix(&response.output_text), Ok)
-    {
+    let (mut output, mut facts, mut skills) = match combined_review_output(&response) {
         Ok(output) => output,
         Err(err) => {
             let (reflector_record, skill_record) = append_combined_failed_records(
@@ -953,50 +1074,110 @@ async fn run_combined_review_for_retrieval(
             });
         }
     };
-    let facts = output.get("facts").and_then(Value::as_array).cloned();
-    let skills = output.get("skills").and_then(Value::as_array).cloned();
-    let (Some(facts), Some(skills)) = (facts, skills) else {
-        let err = TraceDecayError::Config {
-            message: "combined review output must include facts and skills arrays".to_string(),
-        };
-        let (reflector_record, skill_record) = append_combined_failed_records(
-            &reflector_finalizer,
-            &skill_finalizer,
-            &response,
-            &evidence_bundles,
-            Some(&output),
-            &err,
-            &retry_report,
+    let mut validation_repairs = Vec::new();
+    loop {
+        let (_, fact_errors) =
+            validate_session_fact_proposals(&memory, &facts, &reflector_bundle.evidence).await?;
+        let skill_errors =
+            validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills).await?;
+        if fact_errors.is_empty() && skill_errors.is_empty() {
+            break;
+        }
+        let attempt = validation_repairs.len() + 1;
+        validation_repairs.push(json!({
+            "attempt": attempt,
+            "fact_errors": fact_errors,
+            "skill_errors": skill_errors,
+        }));
+        if attempt == 2 {
+            let err = TraceDecayError::Config {
+                message: "combined curation validation repair budget exhausted; output quarantined"
+                    .to_string(),
+            };
+            let (reflector_record, skill_record) = append_combined_failed_records(
+                &reflector_finalizer,
+                &skill_finalizer,
+                &response,
+                &evidence_bundles,
+                Some(&output),
+                &err,
+                &retry_report,
+            )
+            .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                error: err,
+            });
+        }
+        let repair_request = AgentTaskRequest::new(
+            run_id.clone(),
+            AgentTaskKind::CombinedReview,
+            "Repair the previous combined curation JSON. Return only {\"facts\": [...], \"skills\": [...]}. Preserve valid intent, fix every validation error, use only the supplied evidence, and do not add unrelated proposals."
+                .to_string(),
+            Some(canonical_evidence_hash(&json!({
+                "session_reflection_evidence": reflector_bundle.evidence,
+                "skill_writer_evidence": skill_bundle.evidence,
+            }))),
+            json!({
+                "previous_output": output.clone(),
+                "validation_errors": validation_repairs.last(),
+                "session_reflection_evidence": reflector_bundle.evidence.clone(),
+                "skill_writer_evidence": skill_bundle.evidence.clone(),
+                "activation_policy": activation_policy,
+                "apply": true,
+            }),
+        );
+        let mut repair_retry_report = AgentTaskRetryReport::default();
+        response = match run_agent_task_with_retry_report(
+            backend,
+            &repair_request,
+            &retry_policy,
+            &mut repair_retry_report,
         )
-        .await?;
-        return Ok(CombinedReviewDispatch::RecordedFailure {
-            run: combined_failed_run(run_id, reflector_record, skill_record, &response),
-            error: err,
-        });
-    };
-    if !facts.is_empty() || !skills.is_empty() {
-        let err = TraceDecayError::Config {
-            message: "combined review proposals require an atomic apply authority".to_string(),
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                retry_report.extend(&repair_retry_report);
+                let (reflector_record, skill_record) = append_combined_failed_records(
+                    &reflector_finalizer,
+                    &skill_finalizer,
+                    &response,
+                    &evidence_bundles,
+                    Some(&output),
+                    &err,
+                    &retry_report,
+                )
+                .await?;
+                return Ok(CombinedReviewDispatch::RecordedFailure {
+                    run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                    error: err,
+                });
+            }
         };
-        let (reflector_record, skill_record) = append_combined_failed_records(
-            &reflector_finalizer,
-            &skill_finalizer,
-            &response,
-            &evidence_bundles,
-            Some(&output),
-            &err,
-            &retry_report,
-        )
-        .await?;
-        return Ok(CombinedReviewDispatch::RecordedFailure {
-            run: combined_failed_run(run_id, reflector_record, skill_record, &response),
-            error: err,
-        });
+        retry_report.extend(&repair_retry_report);
+        (output, facts, skills) = match combined_review_output(&response) {
+            Ok(output) => output,
+            Err(err) => {
+                let (reflector_record, skill_record) = append_combined_failed_records(
+                    &reflector_finalizer,
+                    &skill_finalizer,
+                    &response,
+                    &evidence_bundles,
+                    None,
+                    &err,
+                    &retry_report,
+                )
+                .await?;
+                return Ok(CombinedReviewDispatch::RecordedFailure {
+                    run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                    error: err,
+                });
+            }
+        };
     }
-
     let (reflector_report, reflector_record) = match finalize_session_reflector_success(
         &memory,
-        Some(cg.store_layout().project_root.as_path()),
         config,
         &reflector_finalizer,
         ProposedAgentOutput {
@@ -1007,10 +1188,26 @@ async fn run_combined_review_for_retrieval(
             proposed_ops: &output,
             proposals: &facts,
         },
+        &validation_repairs,
     )
     .await
     {
-        Ok(result) => result,
+        Ok(SessionReflectorFinalization::Completed { report, record }) => (report, record),
+        Ok(SessionReflectorFinalization::FailedRecorded { error, record }) => {
+            let skill_record = skill_finalizer
+                .append_failed_record(
+                    response.model.clone(),
+                    skill_bundle.evidence_hash.clone(),
+                    Some(output.clone()),
+                    error.to_string(),
+                    &retry_report,
+                )
+                .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, record, skill_record, &response),
+                error,
+            });
+        }
         Err(err) => {
             let (reflector_record, skill_record) = append_combined_failed_records(
                 &reflector_finalizer,
@@ -1033,6 +1230,7 @@ async fn run_combined_review_for_retrieval(
         &skill_finalizer,
         &skill_bundle.profile_root,
         Some(cg.store_layout().project_root.as_path()),
+        config,
         activation_policy,
         ProposedAgentOutput {
             response: &response,
@@ -1042,11 +1240,23 @@ async fn run_combined_review_for_retrieval(
             proposed_ops: &output,
             proposals: &skills,
         },
-        &[],
+        &validation_repairs,
     )
     .await
     {
-        Ok(result) => result,
+        Ok(SkillWriterFinalization::Completed { report, record }) => (report, record),
+        Ok(SkillWriterFinalization::FailedRecorded {
+            error,
+            record: skill_record,
+        }) => {
+            let reflector_record = reflector_finalizer
+                .append_success_record(&request, &response, &retry_report, reflector_record)
+                .await?;
+            return Ok(CombinedReviewDispatch::RecordedFailure {
+                run: combined_failed_run(run_id, reflector_record, skill_record, &response),
+                error,
+            });
+        }
         Err(err) => {
             let (reflector_record, skill_record) = append_combined_failed_records(
                 &reflector_finalizer,
@@ -1064,8 +1274,8 @@ async fn run_combined_review_for_retrieval(
             });
         }
     };
-    // Finalize both halves before either ledger append. Non-empty proposal
-    // sets already failed closed above; empty arrays may append both successes.
+    // Finalize both halves before either ledger append. Each half records its
+    // exact effects if the other half fails after mutation.
     let reflector_record = reflector_finalizer
         .append_success_record(&request, &response, &retry_report, reflector_record)
         .await?;
@@ -1113,6 +1323,28 @@ fn combined_failed_run(
             backend_response: Some(response.clone()),
         },
     })
+}
+
+fn combined_review_output(response: &AgentTaskResponse) -> Result<(Value, Vec<Value>, Vec<Value>)> {
+    let output = response
+        .output_json
+        .clone()
+        .map_or_else(|| extract_json_object_prefix(&response.output_text), Ok)?;
+    let facts = output
+        .get("facts")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "combined review output must include a facts array".to_string(),
+        })?;
+    let skills = output
+        .get("skills")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "combined review output must include a skills array".to_string(),
+        })?;
+    Ok((output, facts, skills))
 }
 
 /// Records the same failure for both halves of a combined run so each task's
@@ -1755,19 +1987,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_apply_refreshes_digest_only_for_a_new_authority_promotion() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = std::env::var_os(crate::config::USER_DATA_DIR_ENV)
-            .map(PathBuf::from)
-            .expect("pinned profile root");
+    async fn automatic_session_curation_promotes_once_through_the_fact_authority() {
         let temp = tempfile::tempdir().unwrap();
-        let project_root = temp.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
         let database_path = temp.path().join("memory.db");
         crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(
             &database_path,
-            "automation proposal digest disposition test",
+            "automatic session curation promotion test",
         )
         .unwrap();
         let (database, _) = Database::publish_test_runtime(
@@ -1782,11 +2008,11 @@ mod tests {
                 .unwrap();
         let records = record_session_fact_proposals(
             &memory,
-            "run-digest-disposition",
-            None,
+            "run-automatic-session-curation",
+            Some(&format!("sha256:{}", "a".repeat(64))),
             &[json!({
                 "add_fact_request": {
-                    "content": "Refresh the digest only after a new authority promotion",
+                    "content": "Validated session curation applies without human approval",
                     "category": "project",
                     "source": "automation-test",
                     "tags": ["automation"],
@@ -1800,118 +2026,14 @@ mod tests {
         .await
         .unwrap();
 
-        let (applied, newly_promoted) =
-            auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records.clone())
-                .await
-                .unwrap();
-        assert!(newly_promoted);
-        assert_eq!(applied[0].state, FactProposalState::Applied);
+        let applied = auto_apply_session_fact_proposals(&memory, records.clone()).await;
+        assert!(applied.error.is_none());
+        assert!(applied.newly_promoted);
+        assert_eq!(applied.records[0].state, FactProposalState::Applied);
 
-        let snapshot = crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root);
-        assert!(snapshot.exists(), "new promotion must refresh the digest");
-        std::fs::remove_file(&snapshot).unwrap();
-
-        let (replayed, newly_promoted) =
-            auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records)
-                .await
-                .unwrap();
-        assert!(
-            !newly_promoted,
-            "an applied proposal replay is not a promotion"
-        );
-        assert_eq!(replayed[0].state, FactProposalState::Applied);
-        assert!(
-            !snapshot.exists(),
-            "an idempotent applied replay must not refresh the digest"
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_apply_flushes_a_new_promotion_before_later_conflict_returns() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = std::env::var_os(crate::config::USER_DATA_DIR_ENV)
-            .map(PathBuf::from)
-            .expect("pinned profile root");
-        let temp = tempfile::tempdir().unwrap();
-        let project_root = temp.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let database_path = temp.path().join("memory.db");
-        crate::register_test_schema_installer();
-        let authority = DatabaseAuthority::acquire_test(
-            &database_path,
-            "automation proposal partial digest refresh test",
-        )
-        .unwrap();
-        let (database, _) = Database::publish_test_runtime(
-            &database_path,
-            &authority,
-            TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .unwrap();
-        let owner = FactOwnerV1::Profile;
-        let memory =
-            MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
-        let records = record_session_fact_proposals(
-            &memory,
-            "run-digest-partial",
-            None,
-            &[
-                json!({
-                    "add_fact_request": {
-                        "content": "A successful promotion must refresh before a later conflict",
-                        "category": "project",
-                        "source": "automation-test",
-                        "tags": ["automation"],
-                        "entities": ["TraceDecay"],
-                        "trust": 0.9,
-                        "metadata": {}
-                    }
-                }),
-                json!({
-                    "add_fact_request": {
-                        "content": "This proposal is rejected to force the later conflict",
-                        "category": "project",
-                        "source": "automation-test",
-                        "tags": ["automation"],
-                        "entities": ["TraceDecay"],
-                        "trust": 0.9,
-                        "metadata": {}
-                    }
-                }),
-            ],
-            &[],
-        )
-        .await
-        .unwrap();
-        let rejected_id =
-            tracedecay_domain::ProvenanceId::new(records[1].proposal_id.clone()).unwrap();
-        let rejected = memory
-            .get_project_memory_fact_proposal(rejected_id.clone())
-            .await
-            .unwrap()
-            .unwrap();
-        memory
-            .reject_project_memory_fact_proposal(
-                rejected_id,
-                rejected.revision(),
-                tracedecay_domain::ActorId::new("test:reviewer".to_string()).unwrap(),
-                "fixture conflict".to_string(),
-            )
-            .await
-            .unwrap();
-
-        let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), true, records)
-            .await
-            .expect_err("the rejected second proposal must keep its original error path");
-        assert!(
-            error
-                .to_string()
-                .contains("not awaiting automatic application")
-        );
-        assert!(
-            crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root).exists(),
-            "the first new promotion must still refresh before returning the later conflict"
-        );
+        let replayed = auto_apply_session_fact_proposals(&memory, records).await;
+        assert!(replayed.error.is_none());
+        assert!(!replayed.newly_promoted);
+        assert_eq!(replayed.records[0].state, FactProposalState::Applied);
     }
 }

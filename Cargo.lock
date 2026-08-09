@@ -5704,6 +5704,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-lsp",
+ "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-sessions",
  "tracedecay-store",
