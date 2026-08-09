@@ -1,6 +1,6 @@
 use std::env;
 
-use tracedecay::sessions::session_temporal_benchmark::{
+use tracedecay::session_temporal_benchmark::{
     refresh_contract, run_measurement, validate_contract,
 };
 

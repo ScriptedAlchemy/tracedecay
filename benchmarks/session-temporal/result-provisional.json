@@ -1,6 +1,7 @@
 {
   "acceptance_eligible": false,
   "capture_status": "provisional",
+  "evidence_status": "historical_stale",
   "claims": {
     "database_query_latency": {
       "reason": "descriptive nearest-rank sample quantiles only; not inferential",
@@ -189,6 +190,7 @@
     "warmup_repetitions": 3
   },
   "provisional_reason": "linux_measurement_capture",
+  "stale_reason": "measured before the root-wide session relation hydration harness replaced the deleted single-session source path; a clean Linux refresh is required for current evidence",
   "runtime": {
     "arch": "x86_64",
     "operating_system": "linux"

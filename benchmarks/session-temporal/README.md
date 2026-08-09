@@ -27,8 +27,9 @@ Runtime sanitizer provenance for those fixtures is in
 | Path | Role |
 |---|---|
 | [workload-v1.json](workload-v1.json) | Versioned workload/config pin |
-| [evidence-index.json](evidence-index.json) | Legacy pointer to the provisional measurement (`current_acceptance` is deprecated and always null) |
-| [result-provisional.json](result-provisional.json) | Linux measurement + observed focused-test outcomes |
+| [evidence-index.json](evidence-index.json) | Points to current provisional evidence only after a clean refresh; retains stale captures separately |
+| [result-provisional.json](result-provisional.json) | Historical single-session Linux capture; not evidence for the root-wide harness |
+| `result-current.json` | Created only by a clean `--refresh-contract` run for the active harness |
 
 ## Commands
 
@@ -41,10 +42,12 @@ cargo bench --bench session_temporal --all-features -- --run
 
 Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
 measures: `rebuild_activate`, `exact_replay`, `compact_rank`, and `late_hydrate`.
+`--run` prints diagnostic samples but never changes checked-in evidence.
 `--refresh-contract` requires a clean source commit, performs that same real
 measurement without accepting caller-supplied values, and publishes the
-workload and result as one hash-checked pair. The refreshed provenance records
-the source commit and mode, warmups, measured repetitions, and record counts.
+workload and result as one hash-checked pair before pointing the evidence index
+at it. The refreshed provenance records the source commit and mode, warmups,
+measured repetitions, and record counts.
 
 ## Observed focused tests
 

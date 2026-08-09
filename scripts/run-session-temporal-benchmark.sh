@@ -65,7 +65,9 @@ def sha256(path):
 workload_path = benchmark_root / "workload-v1.json"
 workload = load(workload_path)
 index = load(benchmark_root / "evidence-index.json")
-result = load(benchmark_root / "result-provisional.json")
+historical_result_path = benchmark_root / "result-provisional.json"
+current_result_path = benchmark_root / "result-current.json"
+historical_result = load(historical_result_path)
 receipt = load(root / receipt_path)
 
 require(workload.get("schema_version") == 2, "unexpected workload schema")
@@ -91,6 +93,11 @@ require(stats.get("p95_label") == p95_label, "p95 label mismatch")
 require(stats.get("p99_label") == p99_label, "p99 label mismatch")
 require(workload.get("production_path", {}).get("available_to_benchmark_target") is True,
         "production path must be available")
+implementation = workload.get("implementation") or {}
+require(implementation.get("path") == "src/session_temporal_benchmark.rs",
+        "implementation path mismatch")
+require(implementation.get("sha256") == sha256(root / implementation["path"]),
+        "implementation hash mismatch")
 
 inventory = workload.get("file_inventory")
 require(isinstance(inventory, list) and inventory, "file inventory is empty")
@@ -105,23 +112,69 @@ for entry in inventory:
     require(path.is_file(), f"missing inventory file: {relative}")
     require(sha256(path) == entry["sha256"], f"hash mismatch: {relative}")
 
-require(index == {
-    "schema_version": 2,
-    "current_acceptance": None,
-    "blocked": None,
-    "provisional": "result-provisional.json",
-    "historical_stale": [],
-}, "evidence index must expose provisional evidence only")
-require(result.get("schema_version") == 2, "unexpected result schema")
-require(result.get("workload_id") == workload["workload_id"], "result workload mismatch")
-require(result.get("capture_status") == "provisional", "result must be provisional")
-require(result.get("acceptance_eligible") is False, "result must be ineligible")
-require(result.get("workload_manifest_sha256") == sha256(workload_path),
-        "result workload hash mismatch")
-require("source_attestation" not in result, "deleted source_attestation field is forbidden")
-require(isinstance(result.get("source_identity"), dict), "source identity is required")
-require("attestation" not in json.dumps(result).lower(),
-        "deleted attestation terminology remains in result")
+require(index.get("schema_version") == 2, "unexpected evidence index schema")
+require(index.get("current_acceptance") is None, "current acceptance must remain null")
+require(index.get("blocked") is None, "blocked result pointer must remain null")
+require(index.get("historical_stale") == ["result-provisional.json"],
+        "historical stale result index mismatch")
+require(historical_result.get("schema_version") == 2, "unexpected historical result schema")
+require(historical_result.get("workload_id") == workload["workload_id"],
+        "historical result workload mismatch")
+require(historical_result.get("capture_status") == "provisional",
+        "historical capture must retain its original status")
+require(historical_result.get("evidence_status") == "historical_stale",
+        "historical result must be marked stale")
+require(historical_result.get("acceptance_eligible") is False,
+        "historical result must be ineligible")
+require(historical_result.get("source_identity", {}).get("harness")
+        == "src/sessions/session_temporal_benchmark.rs",
+        "historical result harness identity mismatch")
+require(bool(historical_result.get("stale_reason")),
+        "historical result must explain why it is stale")
+
+provisional = index.get("provisional")
+if provisional is None:
+    require("refresh_provenance" not in workload,
+            "harness without current measurement must not retain refresh provenance")
+    require(not current_result_path.exists(),
+            "current measurement exists without an evidence-index pointer")
+elif provisional == "result-current.json":
+    result = load(current_result_path)
+    require(result.get("schema_version") == 2, "unexpected current result schema")
+    require(result.get("workload_id") == workload["workload_id"], "current result workload mismatch")
+    require(result.get("capture_status") == "provisional", "current result must be provisional")
+    require(result.get("acceptance_eligible") is False, "current result must be ineligible")
+    require(result.get("workload_manifest_sha256") == sha256(workload_path),
+            "current result workload hash mismatch")
+    require(result.get("source_identity", {}).get("harness")
+            == "src/session_temporal_benchmark.rs",
+            "current result harness identity mismatch")
+    require(result.get("source_identity", {}).get("harness_sha256")
+            == sha256(root / "src/session_temporal_benchmark.rs"),
+            "current result harness hash mismatch")
+    provenance = workload.get("refresh_provenance") or {}
+    require(provenance.get("source_mode") == "clean_git_worktree_v1",
+            "current result must have clean-source provenance")
+    records_per_repetition = provenance.get("records_per_repetition")
+    require(isinstance(records_per_repetition, int) and records_per_repetition > 0,
+            "current result records_per_repetition must be positive")
+    require(provenance.get("record_count") == records_per_repetition,
+            "current result record count mismatch")
+    require(provenance.get("measured_record_count") == records_per_repetition * 30,
+            "current result measured record count mismatch")
+    require(result.get("measurement", {}).get("records_per_repetition") == records_per_repetition,
+            "current result measurement records mismatch")
+    require(result.get("measurement", {}).get("measured_record_count") == records_per_repetition * 30,
+            "current result measurement record count mismatch")
+else:
+    require(False, f"unexpected provisional result pointer: {provisional}")
+
+require("source_attestation" not in historical_result,
+        "deleted source_attestation field is forbidden")
+require(isinstance(historical_result.get("source_identity"), dict),
+        "historical source identity is required")
+require("attestation" not in json.dumps(historical_result).lower(),
+        "deleted attestation terminology remains in historical result")
 require("attestation" not in json.dumps(workload).lower(),
         "deleted attestation terminology remains in workload")
 

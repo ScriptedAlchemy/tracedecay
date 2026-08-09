@@ -3,15 +3,19 @@
   "file_inventory": [
     {
       "path": "benches/session_temporal.rs",
-      "sha256": "6242a97490f9e5b2b975afe7e191a22667eea160b23520a6201c8140dc636f3b"
+      "sha256": "e5c8477b50da6eb7e9ab05dac2c4ab9dc7147cf23ccab57d93860805de988e92"
     },
     {
-      "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "15847bc65f4abec41a65961e053657c33ad017b4cab565a3cb3c0a1fa7060c10"
+      "path": "src/session_temporal_benchmark.rs",
+      "sha256": "8691153a1b40df4c7893b5ed79a808bc6e7726e1b2f2ad45656ba0ddba22a815"
+    },
+    {
+      "path": "src/session_temporal_benchmark/root_relation_fixture.rs",
+      "sha256": "5016c09cfbaf979447d6c031a2af96753380302b86bd848be593de9423383ca9"
     },
     {
       "path": "scripts/run-session-temporal-benchmark.sh",
-      "sha256": "1f66c6dd38610c8980c0837cf32044bad111714b8bec60a03893d4d93191335c"
+      "sha256": "0dc2e8ea058e1b0b9e33567e9898970d887205f0b4f57e1b3dfa17c8ce9a44ec"
     },
     {
       "path": "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json",
@@ -31,7 +35,7 @@
     },
     {
       "path": "benchmarks/session-temporal/README.md",
-      "sha256": "9a2eea9e5208dd1295c6bfc7c18b324ae6d380a7fa05e4353107b699a86fcb0e"
+      "sha256": "da7ca937f11261a54c024e9665715f7e43be1c5a047f0e3aaf490d3fe94eb597"
     }
   ],
   "fixture_evidence": {
@@ -53,8 +57,8 @@
     "status": "accepted_for_harness"
   },
   "implementation": {
-    "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "15847bc65f4abec41a65961e053657c33ad017b4cab565a3cb3c0a1fa7060c10"
+    "path": "src/session_temporal_benchmark.rs",
+    "sha256": "8691153a1b40df4c7893b5ed79a808bc6e7726e1b2f2ad45656ba0ddba22a815"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -72,7 +76,7 @@
         "phase": "compact_rank"
       },
       {
-        "path": "SessionRetrievalService::retrieve Occurrence",
+        "path": "SessionRetrievalService::retrieve root-wide Occurrence hydration",
         "phase": "late_hydrate"
       }
     ],
@@ -80,12 +84,12 @@
   },
   "production_path": {
     "available_to_benchmark_target": true,
-    "reason": "harness admits provider-native Codex inputs, drains the canonical GlobalDb observation projector, then uses the production refresh materialize path and public retrieval adapters",
+    "reason": "harness admits provider-native Codex inputs, drains the canonical GlobalDb observation projector, refreshes every authorized root participant, then proves root-wide relation hydration through the public retrieval adapter",
     "required": [
       "HostAdmissionFacade::drain_projection_queue with the canonical GlobalDb observation projector",
       "CanonicalSessionTemporalProjector via GlobalDb::materialize_session_temporal_refresh_batch_result",
       "SessionRefreshService with GlobalDbSessionTemporalStore",
-      "SessionRetrievalService with GlobalDbSessionTemporalExecution"
+      "SessionRetrievalService with GlobalDbSessionTemporalExecution and AllSessionsInAuthorizedRoot hydration"
     ]
   },
   "profile": {
@@ -98,18 +102,9 @@
     "opt_level": 3,
     "overflow_checks": false
   },
-  "refresh_provenance": {
-    "measured_record_count": 30,
-    "measured_repetitions": 30,
-    "record_count": 1,
-    "records_per_repetition": 1,
-    "source_commit": "1a03fcdff61ac76e94e8cbbc0d49f51b023876e9",
-    "source_mode": "clean_git_worktree_v1",
-    "warmup_repetitions": 3
-  },
   "runner": {
     "path": "scripts/run-session-temporal-benchmark.sh",
-    "sha256": "1f66c6dd38610c8980c0837cf32044bad111714b8bec60a03893d4d93191335c"
+    "sha256": "0dc2e8ea058e1b0b9e33567e9898970d887205f0b4f57e1b3dfa17c8ce9a44ec"
   },
   "schema_version": 2,
   "statistics": {
