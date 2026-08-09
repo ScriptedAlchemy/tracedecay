@@ -8,6 +8,7 @@
 //! around project-open waits so route failures cannot hide cancellation or
 //! deadline expiry.
 
+use super::project_open_admission::ProjectOpenWaitOutcome;
 use super::*;
 #[cfg(any(not(unix), test))]
 use crate::daemon_contract::DaemonInvocationProblem;

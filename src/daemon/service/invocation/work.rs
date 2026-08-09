@@ -15,13 +15,15 @@ mod workflow_effect_journal;
 pub(in crate::daemon::service::invocation) mod workflow_fan_out;
 mod workflow_run_control;
 
-pub(super) use outcome::{
+use outcome::{
     complete_work_effect, complete_work_read, offer_work_blocked_interval_receipts,
-    work_background_context, work_blocked_interval_recovery_context, work_command_effect,
-    work_effect, work_evidence_packet, work_product_problem, work_projection_problem,
-    work_request_context, work_topology_problem, work_topology_unavailable_problem,
+    work_command_effect, work_effect, work_evidence_packet, work_product_problem,
+    work_projection_problem, work_request_context, work_topology_problem,
+    work_topology_unavailable_problem,
 };
+pub(super) use outcome::{work_background_context, work_blocked_interval_recovery_context};
 pub(super) use workflow_dispatch::execute_workflow_application;
+use workflow_fan_out::reconcile_active_workflow_fan_out;
 
 pub(super) fn application_problem(
     request_id: String,
@@ -100,6 +102,24 @@ pub(super) async fn execute_work_application(
         .await;
     }
     response
+}
+
+fn publish_committed_task_activity_in_background(
+    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    project_root: PathBuf,
+    detail: Option<String>,
+) {
+    tokio::spawn(async move {
+        crate::application::event_lane::publish(
+            &database,
+            crate::application::event_lane::ActivityFamilyV1::Task,
+            &project_root,
+            None,
+            1,
+            detail.as_deref(),
+        )
+        .await;
+    });
 }
 
 const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool {
