@@ -838,6 +838,7 @@ mod tests {
                     CoverageStateV1::Known,
                     terminal,
                     OperationResourceObservedV1 {
+                        provider_request_id: None,
                         scheduled_latency_micros: 5,
                         service_latency_micros: 100,
                         // Unmeasured resource dimensions stay `None`. Zero-filling

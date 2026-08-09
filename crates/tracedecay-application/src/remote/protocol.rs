@@ -725,6 +725,7 @@ mod tests {
     #[test]
     fn protocol_round_trip_preserves_observability_contracts() {
         let resource = OperationResourceObservedV1 {
+            provider_request_id: Some("request.remote.observability".to_owned()),
             scheduled_latency_micros: 5,
             service_latency_micros: 34,
             process_rss_bytes: None,

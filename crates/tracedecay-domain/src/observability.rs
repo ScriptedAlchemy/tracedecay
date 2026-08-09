@@ -200,6 +200,11 @@ impl ObservabilityEnvelopeV1 {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OperationResourceObservedV1 {
+    /// Provider-native request identity used only for an exact join to the
+    /// canonical provider-usage authority. This is never inferred from the
+    /// observability envelope's generated trace identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
     pub scheduled_latency_micros: u64,
     pub service_latency_micros: u64,
     pub process_rss_bytes: Option<u64>,
@@ -330,6 +335,14 @@ impl OperationResourceObservedV1 {
         &self,
         terminal_result: Option<ObservabilityTerminalResultV1>,
     ) -> Result<(), &'static str> {
+        if self.provider_request_id.as_ref().is_some_and(|request_id| {
+            !crate::canonical_text::is_canonical_text_within(
+                request_id,
+                crate::canonical_text::CANONICAL_TEXT_MAX_BYTES,
+            )
+        }) {
+            return Err("provider_request_id");
+        }
         if !self.stage_timings.is_empty() {
             let mut previous_order = None;
             let mut previous_elapsed = None;
@@ -539,6 +552,7 @@ mod tests {
         stage_timings: Vec<OperationStageTimingV1>,
     ) -> OperationResourceObservedV1 {
         OperationResourceObservedV1 {
+            provider_request_id: None,
             scheduled_latency_micros: 5,
             service_latency_micros: 34,
             process_rss_bytes: None,

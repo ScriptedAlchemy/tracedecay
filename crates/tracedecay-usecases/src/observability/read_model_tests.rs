@@ -105,6 +105,7 @@ async fn canonical_read_projects_recorded_adoption_retrieval_and_performance_fam
             coverage: CoverageStateV1::Known,
         }),
         ObservabilityPayloadV1::OperationResource(Box::new(OperationResourceObservedV1 {
+            provider_request_id: None,
             scheduled_latency_micros: 10,
             service_latency_micros: 100,
             process_rss_bytes: Some(4_096),
@@ -128,6 +129,7 @@ async fn canonical_read_projects_recorded_adoption_retrieval_and_performance_fam
             output_bytes: Some(50),
         })),
         ObservabilityPayloadV1::OperationResource(Box::new(OperationResourceObservedV1 {
+            provider_request_id: None,
             scheduled_latency_micros: 20,
             service_latency_micros: 200,
             process_rss_bytes: Some(8_192),

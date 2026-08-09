@@ -2,9 +2,10 @@
 //!
 //! Latency is measured only from retained `operation.resource.completed.v1`
 //! envelopes. Provider/model identity is joined only when the envelope's
-//! canonical trace identity exactly matches a request identity in the
-//! immutable provider-usage projection. A time-adjacent row, session-wide
-//! row, client stopwatch, or model default is never an attribution source.
+//! payload's explicit provider-native request identity exactly matches a
+//! request identity in the immutable provider-usage projection. A generated
+//! envelope trace identity, time-adjacent row, session-wide row, client
+//! stopwatch, or model default is never an attribution source.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,7 +158,7 @@ pub async fn provider_latency_read_model(
         };
         let identity = resolve_identity(
             &envelope.scope_ref,
-            &envelope.trace_id,
+            resource.provider_request_id.as_deref(),
             provider_usage,
             horizon,
         );
@@ -261,11 +262,11 @@ fn weaker_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageSta
 
 fn resolve_identity(
     scope_ref: &str,
-    trace_id: &str,
+    provider_request_id: Option<&str>,
     provider_usage: &ProviderUsageAggregateV1,
     horizon: &ObservabilityHorizonV1,
 ) -> Identity {
-    let candidates = matching_usage(scope_ref, trace_id, provider_usage, horizon);
+    let candidates = matching_usage(scope_ref, provider_request_id, provider_usage, horizon);
     let provider = unique_text(candidates.iter().map(|delta| delta.provider.as_str()));
     let model = unique_optional_text(candidates.iter().map(|delta| delta.model.as_deref()));
     let identity_complete = provider.is_some() && model.is_some();
@@ -279,10 +280,13 @@ fn resolve_identity(
 
 fn matching_usage<'a>(
     scope_ref: &str,
-    trace_id: &str,
+    provider_request_id: Option<&str>,
     provider_usage: &'a ProviderUsageAggregateV1,
     horizon: &ObservabilityHorizonV1,
 ) -> Vec<&'a ProviderUsageDeltaV1> {
+    let Some(provider_request_id) = provider_request_id else {
+        return Vec::new();
+    };
     if provider_usage.coverage != ProviderUsageCoverageV1::Complete {
         // A partial usage scan cannot prove that the one matching row is the
         // only provider/model candidate. Keep identity unavailable rather
@@ -307,7 +311,7 @@ fn matching_usage<'a>(
         .deltas
         .iter()
         .filter(same_scope)
-        .filter(|delta| delta.request_id.as_deref() == Some(trace_id))
+        .filter(|delta| delta.request_id.as_deref() == Some(provider_request_id))
         .collect()
 }
 
@@ -648,7 +652,7 @@ mod tests {
             1,
             1,
         )]);
-        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
+        let identity = resolve_identity(SCOPE_REF, Some("request-1"), &aggregate, &usage_horizon());
         assert_eq!(identity.provider.as_deref(), Some("codex"));
         assert_eq!(identity.model.as_deref(), Some("gpt-test"));
         assert_eq!(identity.source, MetricSourceV1::ProviderUsageObservation);
@@ -661,7 +665,7 @@ mod tests {
             usage_delta("codex", Some("gpt-a"), "session-1", Some("request-1"), 1, 1),
             usage_delta("codex", Some("gpt-b"), "session-1", Some("request-1"), 1, 2),
         ]);
-        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
+        let identity = resolve_identity(SCOPE_REF, Some("request-1"), &aggregate, &usage_horizon());
         assert_eq!(identity.provider.as_deref(), Some("codex"));
         assert_eq!(identity.model, None);
         assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
@@ -678,7 +682,25 @@ mod tests {
             1,
         )]);
         aggregate.coverage = ProviderUsageCoverageV1::Partial;
-        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
+        let identity = resolve_identity(SCOPE_REF, Some("request-1"), &aggregate, &usage_horizon());
+        assert_eq!(identity.provider, None);
+        assert_eq!(identity.model, None);
+        assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
+    }
+
+    #[test]
+    fn missing_provider_request_identity_never_joins_a_generated_trace() {
+        let aggregate = complete_usage(vec![usage_delta(
+            "codex",
+            Some("gpt-test"),
+            "session-1",
+            Some("generated-envelope-trace"),
+            1,
+            1,
+        )]);
+
+        let identity = resolve_identity(SCOPE_REF, None, &aggregate, &usage_horizon());
+
         assert_eq!(identity.provider, None);
         assert_eq!(identity.model, None);
         assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
