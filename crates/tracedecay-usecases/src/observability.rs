@@ -985,4 +985,49 @@ mod tests {
         assert_eq!(second.coverage, CoverageStateV1::Known);
         assert_eq!(second.next_watermark, None);
     }
+
+    #[tokio::test]
+    async fn sparse_exact_horizon_does_not_repeat_rows_across_dense_coarse_pages() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "observability-sparse-exact-horizon",
+        )
+        .await;
+        let port = RegisteredObservabilityPortV1::new(&harness.registered);
+        port.record(envelope("eligible:only", 1_550_000))
+            .await
+            .expect("record eligible event");
+        for index in 0..70 {
+            let event_time_micros = if index % 2 == 0 {
+                1_100_000 + index
+            } else {
+                1_900_000 + index
+            };
+            port.record(envelope(&format!("boundary:{index}"), event_time_micros))
+                .await
+                .expect("record coarse boundary event");
+        }
+
+        let page = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: None,
+                limit: 2,
+            })
+            .await
+            .expect("sparse exact page");
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:only"]
+        );
+        assert_eq!(page.coverage, CoverageStateV1::Known);
+        assert_eq!(page.next_watermark, None);
+    }
 }

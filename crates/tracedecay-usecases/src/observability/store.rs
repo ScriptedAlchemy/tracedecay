@@ -120,12 +120,12 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                 if rows.is_empty() {
                     break;
                 }
-                let Some(oldest_row) = rows.last() else {
+                let Some(oldest_row) = rows.first() else {
                     break;
                 };
                 let next_scan_before_id = oldest_row.id;
                 let exhausted = rows.len() < scan_limit;
-                for row in &rows {
+                for row in rows.iter().rev() {
                     let row_requested =
                         query.event_kinds.is_empty() || query.event_kinds.contains(&row.event_kind);
                     if row_requested {
