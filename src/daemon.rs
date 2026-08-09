@@ -345,12 +345,13 @@ pub(crate) use scheduler::automation_observation::{
     record_project_run as record_project_automation_run,
 };
 mod service;
+pub(crate) mod session_retrieval;
 pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
-mod work_evidence_retrieval;
+pub(crate) mod work_evidence_retrieval;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
