@@ -1319,6 +1319,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
     use tracedecay_domain::{
         CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,

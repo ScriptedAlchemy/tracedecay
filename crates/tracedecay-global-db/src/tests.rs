@@ -1131,27 +1131,20 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
     assert_eq!(read_tokens(&fresh, &project_key).await, 2);
 }
 
-/// The batched canonical-key migration merges multiple drifted rows that
-/// canonicalize to the same target via `MAX(tokens_saved)`, exactly as the
-/// prior per-row `INSERT ... ON CONFLICT DO UPDATE` + `DELETE` loop did.
-/// Regression coverage for `project_registry::migrate_project_rows_to_canonical_keys`.
+/// Existing registries with non-canonical project keys are not rewritten at
+/// admission: the final V2 registry authority requires an explicit reset.
 #[tokio::test]
-async fn migrate_project_rows_to_canonical_keys_merges_drifted_collisions() {
-    let harness = RegisteredGlobalDbHarness::open("canonical-key-migration-merge").await;
+async fn noncanonical_project_registry_key_requires_reset_without_mutation() {
+    let harness = RegisteredGlobalDbHarness::open("noncanonical-key-reset").await;
     let db = &harness.registered;
-    let root = harness.storage_root().join("canon-merge-project");
+    let root = harness.storage_root().join("canonical-project");
     std::fs::create_dir_all(root.join("sub")).unwrap();
     let canonical = root.canonicalize().unwrap().to_string_lossy().into_owned();
-    let drifted_via_parent = root.join("sub").join("..").to_string_lossy().into_owned();
-    let drifted_via_dot = root.join(".").to_string_lossy().into_owned();
-    assert_ne!(drifted_via_parent, canonical);
-    assert_ne!(drifted_via_dot, canonical);
-    assert_ne!(drifted_via_parent, drifted_via_dot);
+    let noncanonical = root.join("sub").join("..").to_string_lossy().into_owned();
+    assert_ne!(noncanonical, canonical);
 
     {
         let writer = db.writer_connection().unwrap();
-        // Pre-existing canonical row holds the lowest value; two drifted
-        // rows collapse onto it with higher values in scan order.
         writer
             .execute(
                 "INSERT INTO projects(path, tokens_saved) VALUES (?1, ?2)",
@@ -1162,24 +1155,30 @@ async fn migrate_project_rows_to_canonical_keys_merges_drifted_collisions() {
         writer
             .execute(
                 "INSERT INTO projects(path, tokens_saved) VALUES (?1, ?2)",
-                tracedecay_runtime_core::db::engine::params![drifted_via_parent.as_str(), 7_i64],
-            )
-            .await
-            .unwrap();
-        writer
-            .execute(
-                "INSERT INTO projects(path, tokens_saved) VALUES (?1, ?2)",
-                tracedecay_runtime_core::db::engine::params![drifted_via_dot.as_str(), 5_i64],
+                tracedecay_runtime_core::db::engine::params![noncanonical.as_str(), 7_i64],
             )
             .await
             .unwrap();
     }
 
-    let transaction = db.begin_write_transaction().await.unwrap();
-    super::project_registry::migrate_project_rows_to_canonical_keys(&transaction)
+    let writer = db.writer_connection().unwrap();
+    let error = super::project_registry::validate_project_rows_have_canonical_keys(&writer)
         .await
-        .unwrap();
-    transaction.commit().await.unwrap();
+        .expect_err("non-canonical registry key must require a reset");
+    let Some((authority, reason)) = error.reset_required_context() else {
+        panic!("non-canonical registry key returned the wrong typed problem: {error}");
+    };
+    assert_eq!(
+        authority,
+        super::project_registry::PROJECT_REGISTRY_AUTHORITY
+    );
+    assert_eq!(
+        reason,
+        format!(
+            "projects.path contains non-canonical key '{noncanonical}'; expected exact final key '{canonical}'"
+        )
+    );
+    drop(writer);
 
     let snapshot = db.read_snapshot().await.unwrap();
     let mut total_rows = snapshot
@@ -1193,17 +1192,9 @@ async fn migrate_project_rows_to_canonical_keys_merges_drifted_collisions() {
     drop(total_rows);
 
     assert_eq!(
-        remaining.get(canonical.as_str()),
-        Some(&7),
-        "canonical row keeps MAX(tokens_saved) across every collapsed drifted row: {remaining:?}"
-    );
-    assert!(
-        !remaining.contains_key(drifted_via_parent.as_str()),
-        "drifted row via `..` must be removed after migration: {remaining:?}"
-    );
-    assert!(
-        !remaining.contains_key(drifted_via_dot.as_str()),
-        "drifted row via `.` must be removed after migration: {remaining:?}"
+        remaining,
+        std::collections::BTreeMap::from([(canonical, 3), (noncanonical, 7)]),
+        "typed admission refusal must not rewrite or merge existing registry rows"
     );
 }
 

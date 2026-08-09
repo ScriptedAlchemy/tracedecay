@@ -1,17 +1,36 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
-use crate::schema_contract::{
-    validate_session_graph_publication_schema_contract, validate_session_temporal_schema_contract,
-};
 use crate::{global_db_operation_error, global_db_operation_message};
 
 use super::{
     MIGRATION_NAME, OPERATION, SESSION_TEMPORAL_AUTHORITY, SESSION_TEMPORAL_SCHEMA_VERSION,
-    TEMPORAL_FTS_CONTRACTS, TEMPORAL_TABLE_COLUMNS,
+    TEMPORAL_FTS_CONTRACTS, TEMPORAL_SCHEMA_DDL, TEMPORAL_TABLE_COLUMNS,
+    validate_temporal_table_shapes,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SchemaObject {
+    object_type: String,
+    table: String,
+    sql: String,
+}
+
+type SchemaInventory = BTreeMap<String, SchemaObject>;
+
+static EXPECTED_SESSION_TEMPORAL_SCHEMA: LazyLock<Result<SchemaInventory, String>> =
+    LazyLock::new(build_expected_session_temporal_schema);
+
+const GRAPH_PUBLICATION_TABLES: &[&str] = &[
+    "graph_publication_replay_v1",
+    "graph_publication_replay_dependencies_v1",
+    "graph_publication_replay_tombstones_v1",
+    "graph_publication_replay_tombstone_dependencies_v1",
+    "graph_verified_heads_v1",
+];
 
 const TEMPORAL_FTS_SHADOW_TABLES: &[&str] = &[
     "session_occurrences_fts_config",
@@ -61,18 +80,13 @@ pub(crate) async fn require_admissible_session_temporal_schema(
 async fn validate_current_session_temporal_schema(
     conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let tables = TEMPORAL_TABLE_COLUMNS
-        .iter()
-        .map(|(table, _)| *table)
-        .filter(|table| !table.ends_with("_fts"))
-        .collect::<Vec<_>>();
-    validate_session_temporal_schema_contract(conn, &tables)
+    validate_session_temporal_schema_objects(conn)
+        .await
+        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
+    validate_temporal_table_shapes(conn)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
     validate_temporal_namespace_tables(conn)
-        .await
-        .map_err(|error| session_temporal_reset_required(error.to_string()))?;
-    validate_session_graph_publication_schema_contract(conn)
         .await
         .map_err(|error| session_temporal_reset_required(error.to_string()))?;
     validate_temporal_fts_contracts(conn)
@@ -90,6 +104,7 @@ async fn validate_temporal_namespace_tables(
         .iter()
         .map(|(table, _)| *table)
         .chain(TEMPORAL_FTS_SHADOW_TABLES.iter().copied())
+        .chain(GRAPH_PUBLICATION_TABLES.iter().copied())
         .collect::<BTreeSet<_>>();
     let mut rows = conn
         .query(
@@ -138,9 +153,148 @@ fn belongs_to_temporal_namespace(name: &str) -> bool {
         "session_temporal",
         "session_thread",
         "session_turn",
+        "graph_publication_",
+        "graph_verified_",
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
+}
+
+fn build_expected_session_temporal_schema() -> Result<SchemaInventory, String> {
+    let connection = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("failed to open canonical in-memory schema: {error}"))?;
+    connection
+        .execute_batch(TEMPORAL_SCHEMA_DDL)
+        .map_err(|error| format!("failed to install canonical session temporal schema: {error}"))?;
+    connection
+        .execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
+        .map_err(|error| {
+            format!("failed to install canonical graph publication schema: {error}")
+        })?;
+    read_rusqlite_inventory(&connection)
+}
+
+fn read_rusqlite_inventory(connection: &rusqlite::Connection) -> Result<SchemaInventory, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(|error| format!("failed to prepare canonical schema inventory: {error}"))?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query canonical schema inventory: {error}"))?;
+    let mut inventory = SchemaInventory::new();
+    for row in rows {
+        let (object_type, name, table, sql) =
+            row.map_err(|error| format!("failed to read canonical schema object: {error}"))?;
+        if inventory
+            .insert(
+                name.clone(),
+                SchemaObject {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("canonical schema repeats object '{name}'"));
+        }
+    }
+    Ok(inventory)
+}
+
+async fn read_inventory(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<SchemaInventory> {
+    let mut rows = conn
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut inventory = SchemaInventory::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        let object_type = row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let name = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let table = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let sql = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if inventory
+            .insert(
+                name.clone(),
+                SchemaObject {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!("schema inventory repeats object '{name}'"),
+            ));
+        }
+    }
+    Ok(inventory)
+}
+
+pub(super) async fn validate_session_temporal_schema_objects(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let actual = read_inventory(conn).await?;
+    let expected = EXPECTED_SESSION_TEMPORAL_SCHEMA
+        .as_ref()
+        .map_err(|error| global_db_operation_message(OPERATION, error.clone()))?;
+    for (name, expected_object) in expected {
+        let Some(actual_object) = actual.get(name) else {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "session temporal schema is missing required {} '{name}'",
+                    expected_object.object_type
+                ),
+            ));
+        };
+        if actual_object != expected_object {
+            return Err(global_db_operation_message(
+                OPERATION,
+                format!(
+                    "session temporal schema has incompatible {} '{name}'",
+                    expected_object.object_type
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn session_temporal_reset_required(

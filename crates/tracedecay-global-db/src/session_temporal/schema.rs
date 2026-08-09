@@ -1,6 +1,5 @@
-use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use crate::schema_contract::validate_session_graph_publication_schema_contract;
 use crate::{global_db_operation_error, global_db_operation_message};
 
 mod admission;
@@ -8,7 +7,10 @@ mod admission;
 pub(crate) use admission::{
     SessionTemporalSchemaAdmission, require_admissible_session_temporal_schema,
 };
-use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
+use admission::{
+    validate_session_temporal_schema_objects, validate_temporal_fts_contracts,
+    validate_temporal_fts_match,
+};
 
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
@@ -885,7 +887,7 @@ pub(crate) async fn install_session_temporal_schema(
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    validate_session_graph_publication_schema_contract(conn).await?;
+    validate_session_temporal_schema_objects(conn).await?;
     validate_temporal_table_shapes(conn).await?;
     validate_temporal_fts_contracts(conn).await?;
     validate_temporal_fts_match(conn).await?;
@@ -900,7 +902,7 @@ pub(crate) async fn install_session_temporal_schema(
 }
 
 async fn validate_temporal_table_shapes(
-    conn: &impl Executor,
+    conn: &impl QueryExecutor,
 ) -> tracedecay_runtime_core::errors::Result<()> {
     for &(table, expected_columns) in TEMPORAL_TABLE_COLUMNS {
         let mut rows = conn
