@@ -6,6 +6,7 @@
 //! through one bounded actor per database.
 
 mod registry;
+pub(crate) mod stack_signals;
 mod store;
 
 #[cfg(test)]
