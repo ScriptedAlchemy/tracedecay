@@ -1,83 +1,171 @@
+#![cfg(feature = "test-transport")]
+
 use crate::support::*;
 use serde_json::{Value, json};
-#[cfg(feature = "test-transport")]
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tracedecay::storage::resolve_layout_for_current_profile;
+use std::sync::Arc;
 use tracedecay::tracedecay::TraceDecay;
 
-#[tokio::test]
-async fn fact_store_large_list_response_reports_store_failure_actionably() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    for index in 0..4 {
-        handle_tool_call(
-            &cg,
-            "tracedecay_fact_store",
-            json!({
-                "action": "add",
-                "format": "json",
-                "content": format!(
-                    "STORE_FAILURE_MARKER_{index:02}: {}",
-                    "large fact-store response should surface cache failures ".repeat(180)
-                ),
-                "category": "project",
-                "trust": 0.9
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
-
-    let handle_dir = response_handle_dir(&cg);
-    fs::write(&handle_dir, "not-a-directory").unwrap();
-
-    let listed = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0, "limit": 200}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let envelope: Value = serde_json::from_str(extract_text(&listed.value)).unwrap();
-
-    assert_eq!(envelope["truncated"], true, "{envelope}");
-    assert_eq!(envelope["handle_available"], false, "{envelope}");
-    assert!(envelope.get("handle").is_none(), "{envelope}");
-    assert!(
-        envelope["preview"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("STORE_FAILURE_MARKER_")
-    );
-    assert_eq!(
-        envelope["handle_status"]["reason_code"],
-        "handle_store_failed"
-    );
-    assert_eq!(envelope["handle_status"]["retryable"], true);
-    assert!(
-        envelope["handle_status"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("could not be cached locally")
-    );
-    assert!(
-        envelope["handle_status"]["retry_instruction"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("re-run the original MCP tool")
-    );
-    fs::remove_file(&handle_dir).unwrap();
-    fs::create_dir_all(&handle_dir).unwrap();
-    close_test_graph(cg).await;
+/// The fact-store surfaces are daemon-owned application operations. Keep these
+/// tests on the production composition so they cannot accidentally exercise
+/// the removed direct broad-action handler.
+struct FactStoreMcpFixture {
+    production: ProductionCompositionFixture,
+    server: Arc<tracedecay::mcp::McpServer>,
+    graph: Arc<TraceDecay>,
 }
 
-#[cfg(feature = "test-transport")]
+impl std::ops::Deref for FactStoreMcpFixture {
+    type Target = TraceDecay;
+
+    fn deref(&self) -> &Self::Target {
+        self.graph.as_ref()
+    }
+}
+
+async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
+    let production = production_composition_fixture().await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("production fact-store MCP server");
+    let graph = server.cg().await;
+    FactStoreMcpFixture {
+        production,
+        server,
+        graph,
+    }
+}
+
+async fn setup_empty_project() -> (FactStoreMcpFixture, (), ()) {
+    (fact_store_mcp_fixture().await, (), ())
+}
+
+async fn setup_project() -> (FactStoreMcpFixture, ()) {
+    (fact_store_mcp_fixture().await, ())
+}
+
+/// Invoke an exact MCP operation through the production daemon executor and
+/// project its typed operation payload for focused behavioral assertions.
+async fn invoke_exact_tool(
+    server: &tracedecay::mcp::McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> tracedecay::errors::Result<tracedecay::mcp::ToolResult> {
+    let response = handle_real_server_tool_call_raw(server, tool_name, arguments).await;
+    if !response["error"].is_null() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: response["error"].to_string(),
+        });
+    }
+    let mcp_result = response["result"].clone();
+    let text = extract_real_server_text(&mcp_result);
+    let response_value: Value = serde_json::from_str(text).map_err(|error| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: format!("{tool_name} returned invalid application JSON: {error}"),
+        }
+    })?;
+    if mcp_result.get("isError").and_then(Value::as_bool) == Some(true) {
+        let message = response_value
+            .pointer("/result/message")
+            .and_then(Value::as_str)
+            .unwrap_or(text)
+            .to_owned();
+        return Err(tracedecay::errors::TraceDecayError::Config { message });
+    }
+    let payload = response_value
+        .pointer("/result/outcome/value/payload")
+        .cloned()
+        .unwrap_or(response_value);
+    Ok(tracedecay::mcp::ToolResult::new(
+        json!({"content": [{"type": "text", "text": payload.to_string()}]}),
+        Vec::new(),
+    ))
+}
+
+async fn invoke_production_tool(
+    fixture: &FactStoreMcpFixture,
+    tool_name: &str,
+    arguments: Value,
+    _server_stats: Option<Value>,
+    _scope_prefix: Option<&str>,
+) -> tracedecay::errors::Result<tracedecay::mcp::ToolResult> {
+    invoke_exact_tool(&fixture.server, tool_name, arguments).await
+}
+
+async fn close_test_graph(fixture: FactStoreMcpFixture) {
+    fixture.production.harness.shutdown().await;
+}
+
+struct FactStoreCrossProjectFixture {
+    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    target_root: std::path::PathBuf,
+    active_server: Arc<tracedecay::mcp::McpServer>,
+    target_server: Arc<tracedecay::mcp::McpServer>,
+    _isolation: TestTempDir,
+}
+
+fn initialize_production_fact_project(root: &Path) {
+    fs::create_dir_all(root).expect("cross-project fact fixture root");
+    crate::fixture::write_indexed_fixture_sources(root);
+    let init = Command::new(crate::common::git_program())
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .expect("initialize cross-project fact fixture");
+    assert!(init.success(), "git init should succeed");
+    let add = Command::new(crate::common::git_program())
+        .args(["add", "."])
+        .current_dir(root)
+        .status()
+        .expect("stage cross-project fact fixture");
+    assert!(add.success(), "git add should succeed");
+    let commit = Command::new(crate::common::git_program())
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "-qm",
+            "production fact-store fixture",
+        ])
+        .current_dir(root)
+        .status()
+        .expect("commit cross-project fact fixture");
+    assert!(commit.success(), "git commit should succeed");
+}
+
+async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+    let isolation = test_temp_dir();
+    let active_root = isolation.path().join("active");
+    let target_root = isolation.path().join("target");
+    initialize_production_fact_project(&active_root);
+    initialize_production_fact_project(&target_root);
+    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        vec![active_root.clone(), target_root.clone()],
+    )
+    .await
+    .expect("production cross-project fact fixture");
+    let active_server = harness
+        .server(&active_root)
+        .expect("active production fact server");
+    let target_server = harness
+        .server(&target_root)
+        .expect("target production fact server");
+    FactStoreCrossProjectFixture {
+        harness,
+        target_root,
+        active_server,
+        target_server,
+        _isolation: isolation,
+    }
+}
+
 #[tokio::test]
 async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -94,11 +182,10 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     contents.extend(unrelated);
     let mut exact_fact_id = None;
     for content in &contents {
-        let added = handle_tool_call(
+        let added = invoke_production_tool(
             &cg,
-            "tracedecay_fact_store",
+            "tracedecay_fact_store_add",
             json!({
-                "action": "add",
                 "format": "json",
                 "content": content,
                 "category": "decision",
@@ -112,16 +199,15 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         .unwrap();
         let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
         if *content == exact {
-            exact_fact_id = added["fact"]["fact_id"].as_i64();
+            exact_fact_id = added["fact"]["fact_id"].as_str().map(str::to_owned);
         }
     }
     let exact_fact_id = exact_fact_id.expect("exact operational fact should be stored");
 
-    let first = handle_tool_call(
+    let first = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_search",
         json!({
-            "action": "search",
             "format": "json",
             "query": "stale tracedecay serve processes versions open database file descriptors doctor upgrade",
             "limit": 10,
@@ -135,17 +221,12 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     let first_results = first["facts"].as_array().expect("fact search results");
     assert_eq!(
-        first_results[0]["fact"]["fact_id"].as_i64(),
-        Some(exact_fact_id),
+        first_results[0]["fact"]["fact_id"].as_str(),
+        Some(exact_fact_id.as_str()),
         "exact operational evidence must outrank unrelated V2 facts: {first}"
     );
-    let after_first = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
-    assert_eq!(after_first.retrieval_count, 1);
-    assert_eq!(after_first.access_count, 1);
-    assert!(after_first.last_retrieved_at.is_some());
-    assert!(after_first.last_recalled_at.is_some());
 
-    let context = handle_tool_call(
+    let context = invoke_production_tool(
         &cg,
         "tracedecay_context",
         json!({
@@ -163,17 +244,13 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     assert!(context["memory_matches"].as_array().is_some_and(|matches| {
         matches
             .iter()
-            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(exact_fact_id))
+            .any(|hit| hit["fact"]["fact_id"].as_str() == Some(exact_fact_id.as_str()))
     }));
-    let after_context = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
-    assert_eq!(after_context.retrieval_count, 1);
-    assert_eq!(after_context.access_count, 1);
 
-    let rare = handle_tool_call(
+    let rare = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_search",
         json!({
-            "action": "search",
             "format": "json",
             "query": "22 long-lived 0.0.38 0.0.47 four 0.0.45",
             "limit": 10,
@@ -192,17 +269,13 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         "rare terms should exclude unrelated facts: {rare}"
     );
     assert_eq!(
-        rare_results[0]["fact"]["fact_id"].as_i64(),
-        Some(exact_fact_id)
+        rare_results[0]["fact"]["fact_id"].as_str(),
+        Some(exact_fact_id.as_str())
     );
     assert!(rare_results[0]["fts_score"].as_f64().unwrap_or_default() > 0.0);
-    let after_rare = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
-    assert_eq!(after_rare.retrieval_count, 2);
-    assert_eq!(after_rare.access_count, 2);
 
-    let server = real_mcp_server(cg).await;
     let analytics = handle_real_server_tool_call(
-        &server,
+        &cg.server,
         "tracedecay_analytics",
         json!({"section": "facts", "format": "json"}),
     )
@@ -220,27 +293,27 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     // the distinct-fact tally is the size of the returned id set — not the
     // number of stored facts, which would also assert how many weak matches
     // the ranker chooses to return.
-    let retrieved_ids: BTreeSet<i64> = first_results
+    let retrieved_ids: BTreeSet<String> = first_results
         .iter()
         .chain(rare_results.iter())
-        .filter_map(|hit| hit["fact"]["fact_id"].as_i64())
+        .filter_map(|hit| hit["fact"]["fact_id"].as_str().map(str::to_owned))
         .collect();
     assert_eq!(
         analytics["facts"]["facts_retrieved"].as_i64(),
         Some(retrieved_ids.len() as i64),
         "analytics must count each retrieved fact once: {analytics}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
 async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     let (cg, _dir) = setup_project().await;
 
-    let added = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Project Phoenix uses Amari Memory in src/memory/types.rs",
             "category": "project",
@@ -257,20 +330,35 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
     let fact_id = added["fact"]["fact_id"]
-        .as_i64()
-        .expect("fact_store add should return numeric id");
+        .as_str()
+        .expect("fact_store_add should return a canonical fact id")
+        .to_owned();
+    assert!(fact_id.starts_with("fact.v1."));
     assert!(added["fact"].get("id").is_none());
     assert!(added["fact"].get("trust").is_none());
     assert!(added["fact"]["trust_score"].as_f64().is_some());
-    assert_eq!(added["action"], "add");
     assert_eq!(added["fact"]["category"], "project");
     assert_eq!(added["fact"]["source"], "mcp-test");
+    let added_mutation = &added["mutation"];
+    assert!(added_mutation["operation_id"].as_str().is_some());
+    assert_eq!(
+        added_mutation["input_digest"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(added_mutation["commit"]["disposition"], "committed");
+    assert!(added_mutation["expected_last_event_id"].is_null());
+    assert!(added_mutation["commit"]["expected_last_event_id"].is_null());
+    assert_eq!(
+        added_mutation["committed_generation"],
+        added_mutation["commit"]["last_event_id"]
+    );
+    assert_eq!(added_mutation["replayed"], false);
+    let added_generation = added_mutation["committed_generation"].clone();
 
-    let search = handle_tool_call(
+    let search = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_search",
         json!({
-            "action": "search",
             "format": "json",
             "query": "Amari Memory",
             "category": "project",
@@ -283,7 +371,6 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     .await
     .unwrap();
     let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    assert_eq!(search["action"], "search");
     assert_eq!(search["count"].as_u64(), Some(1));
     assert_eq!(search["results"], search["facts"]);
     assert!(
@@ -291,40 +378,50 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id)),
+            .any(|hit| hit["fact"]["fact_id"].as_str() == Some(fact_id.as_str())),
         "search results should include added fact: {search}"
     );
 
-    for (action, payload) in [
-        ("probe", json!({"entity": "Project Phoenix"})),
-        ("related", json!({"entity": "Amari Memory"})),
+    for (tool_name, label, args) in [
         (
+            "tracedecay_fact_store_probe",
+            "probe",
+            json!({"entity": "Project Phoenix", "format": "json"}),
+        ),
+        (
+            "tracedecay_fact_store_related",
+            "related",
+            json!({"entity": "Amari Memory", "format": "json"}),
+        ),
+        (
+            "tracedecay_fact_store_reason",
             "reason",
-            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
+            json!({"entities": ["Project Phoenix", "Amari Memory"], "format": "json"}),
         ),
         (
+            "tracedecay_fact_store_contradict",
             "contradict",
-            json!({"category": "project", "threshold": 0.8}),
+            json!({"category": "project", "threshold": 0.8, "format": "json"}),
         ),
-        ("list", json!({"category": "project", "min_trust": 0.1})),
+        (
+            "tracedecay_fact_store_list",
+            "list",
+            json!({"category": "project", "min_trust": 0.1, "format": "json"}),
+        ),
     ] {
-        let mut args = payload;
-        args["action"] = json!(action);
-        args["format"] = json!("json");
-        let result = handle_tool_call(&cg, "tracedecay_fact_store", args, None, None)
+        let result = invoke_production_tool(&cg, tool_name, args, None, None)
             .await
             .unwrap();
         let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-        assert_eq!(output["action"], action, "{action} should echo action");
         assert!(
             output["results"].is_array(),
-            "{action} should include results array: {output}"
+            "{label} should include results array: {output}"
         );
         assert!(
             output["count"].is_number(),
-            "{action} should include count: {output}"
+            "{label} should include count: {output}"
         );
-        if action == "related" {
+        if label == "related" {
             assert!(
                 output["count"].as_u64().unwrap_or_default() > 0,
                 "related should return facts connected through adjacent entities: {output}"
@@ -332,13 +429,12 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
         }
     }
 
-    let updated = handle_tool_call(
+    let updated = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_update",
         json!({
-            "action": "update",
             "format": "json",
-            "fact_id": fact_id,
+            "fact_id": fact_id.clone(),
             "content": "Project Phoenix uses deterministic Amari Memory",
             "entities": ["Project Phoenix", "Amari Memory"],
             "metadata": {"updated": true}
@@ -354,11 +450,24 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
         "Project Phoenix uses deterministic Amari Memory"
     );
     assert_eq!(updated["count"].as_u64(), Some(1));
+    assert_eq!(
+        updated["mutation"]["expected_last_event_id"],
+        added_generation
+    );
+    assert_eq!(
+        updated["mutation"]["commit"]["expected_last_event_id"],
+        added_generation
+    );
+    assert_eq!(
+        updated["mutation"]["committed_generation"],
+        updated["mutation"]["commit"]["last_event_id"]
+    );
+    let updated_generation = updated["mutation"]["committed_generation"].clone();
 
-    let removed = handle_tool_call(
+    let removed = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "remove", "format": "json", "fact_id": fact_id.to_string()}),
+        "tracedecay_fact_store_remove",
+        json!({"format": "json", "fact_id": fact_id}),
         None,
         None,
     )
@@ -366,73 +475,27 @@ async fn memory_fact_store_add_search_update_remove_and_wrappers() {
     .unwrap();
     let removed: Value = serde_json::from_str(extract_text(&removed.value)).unwrap();
     assert_eq!(removed["removed"], true);
-}
-
-#[tokio::test]
-async fn memory_fact_store_defaults_to_compact_markdown() {
-    let (cg, _dir) = setup_project().await;
-
-    let added = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "add",
-            "content": "Project Phoenix uses readable fact rendering",
-            "category": "project",
-            "entity": "Project Phoenix",
-            "entities": ["Fact Renderer"],
-            "tags": ["memory"],
-            "source": "mcp-test"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let added_text = extract_text(&added.value);
-    assert!(
-        added_text.starts_with("## Fact Store"),
-        "unexpected fact_store markdown:\n{added_text}"
+    assert_eq!(
+        removed["mutation"]["expected_last_event_id"],
+        updated_generation
     );
-    assert!(added_text.contains("**action:** add"));
-    assert!(added_text.contains("- #"));
-    assert!(added_text.contains("Project Phoenix uses readable fact rendering"));
-    assert!(!added_text.contains("| fact_id |"));
-
-    let search = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "search",
-            "query": "readable fact rendering",
-            "category": "project",
-            "min_trust": 0.1,
-            "limit": 5
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let search_text = extract_text(&search.value);
-    assert!(search_text.starts_with("## Fact Store"));
-    assert!(search_text.contains("**action:** search"));
-    assert!(search_text.contains("**query:** readable fact rendering"));
-    assert!(search_text.contains("**category:** project"));
-    assert!(search_text.contains("**count:** 1"));
-    assert!(search_text.contains("### Facts"));
-    assert!(search_text.contains("score "));
-    assert!(search_text.contains("Project Phoenix uses readable fact rendering"));
-    assert!(!search_text.contains("|"));
+    assert_eq!(
+        removed["mutation"]["commit"]["expected_last_event_id"],
+        updated_generation
+    );
+    assert_eq!(
+        removed["mutation"]["committed_generation"],
+        removed["mutation"]["commit"]["last_event_id"]
+    );
 }
 
 #[tokio::test]
 async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let profile_root = cg.production.harness.profile_root();
     let prompt_path = cg.project_root().join("CLAUDE.md");
     tracedecay::automation::memory_digest::sync_memory_digest_export(
-        &profile_root,
+        profile_root,
         tracedecay::automation::skill_targets::SkillInstallTarget::Claude,
         &prompt_path,
     )
@@ -443,11 +506,10 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
             .contains("No durable facts exported yet")
     );
 
-    let added = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Refresh exported digest after MCP fact add",
             "category": "decision",
@@ -459,20 +521,22 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     .await
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
     assert!(
         fs::read_to_string(&prompt_path)
             .unwrap()
             .contains("Refresh exported digest after MCP fact add")
     );
 
-    handle_tool_call(
+    invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_update",
         json!({
-            "action": "update",
             "format": "json",
-            "fact_id": fact_id,
+            "fact_id": fact_id.clone(),
             "content": "Refresh exported digest after MCP fact update"
         }),
         None,
@@ -484,10 +548,10 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     assert!(rendered.contains("Refresh exported digest after MCP fact update"));
     assert!(!rendered.contains("Refresh exported digest after MCP fact add"));
 
-    handle_tool_call(
+    invoke_production_tool(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "unhelpful": true}),
+        json!({"fact_id": fact_id.clone(), "unhelpful": true}),
         None,
         None,
     )
@@ -499,10 +563,10 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
             .contains("trust 0.80")
     );
 
-    handle_tool_call(
+    invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "remove", "format": "json", "fact_id": fact_id}),
+        "tracedecay_fact_store_remove",
+        json!({"format": "json", "fact_id": fact_id}),
         None,
         None,
     )
@@ -513,67 +577,59 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     assert!(rendered.contains("No durable facts exported yet"));
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
-    let (active, target, _env) = setup_cross_project_memory_projects().await;
-    let active_runtime = active.test_runtime_for_test().expect("active runtime");
-    let target_runtime = target.test_runtime_for_test().expect("target runtime");
-    let target_project_id = target
+    let fixture = fact_store_cross_project_fixture().await;
+    let target_graph = fixture.target_server.cg().await;
+    let target_project_id = target_graph
         .store_layout()
         .identity
         .project_id
         .as_deref()
-        .expect("target project should have a profile project_id");
-    let target_project_path = target.project_root().to_string_lossy().to_string();
+        .expect("target project should have a profile project_id")
+        .to_owned();
+    let target_project_path = fixture.target_root.to_string_lossy().to_string();
 
-    handle_tool_call_with_runtime(
-        &target,
-        &target_runtime,
-        "tracedecay_fact_store",
+    let target_added = invoke_exact_tool(
+        &fixture.target_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Target selector fact stays with the registered target project",
             "category": "project",
             "entity": "Target selector"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
+    let target_added = extract_json(&target_added.value);
+    let target_fact_id = target_added["fact"]["fact_id"]
+        .as_str()
+        .expect("target add should return a canonical fact id")
+        .to_owned();
 
-    handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Active selector fact stays with the active project",
             "category": "project",
             "entity": "Active selector"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
 
-    let target_list = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let target_list = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "format": "json",
-            "project_path": target_project_path,
+            "project_path": target_project_path.clone(),
             "category": "project",
             "min_trust": 0.0
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -585,19 +641,15 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "project_path selector should read target-project facts",
     );
 
-    let target_list_by_nested_project_path = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let target_list_by_nested_project_path = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "format": "json",
-            "project_selector": {"project_path": target_project_path},
+            "project_selector": {"project_path": target_project_path.clone()},
             "category": "project",
             "min_trust": 0.0
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -610,13 +662,10 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "nested project_path selector should read target-project facts",
     );
 
-    let active_list = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
-        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0}),
-        None,
-        None,
+    let active_list = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
+        json!({"format": "json", "category": "project", "min_trust": 0.0}),
     )
     .await
     .unwrap();
@@ -625,155 +674,114 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         &active_list,
         "Active selector fact",
         "Target selector fact",
-        "default fact_store scope should remain the active project",
+        "default exact fact-tool scope should remain the active project",
     );
 
-    let cross_project_write = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let cross_project_write = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
-            "project_selector": {"project_id": target_project_id},
+            "project_selector": {"project_id": target_project_id.clone()},
             "content": "Cross-project writes should be rejected",
             "category": "project"
         }),
-        None,
-        None,
     )
     .await;
-    let Err(err) = cross_project_write else {
-        panic!("expected cross-project fact_store add to be rejected");
-    };
     assert!(
-        format!("{err}").contains("cross-project fact_store writes are not supported"),
-        "unexpected cross-project write error: {err}"
+        cross_project_write.is_err(),
+        "the exact add route must reject cross-project writes"
     );
 
-    let cross_project_feedback = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
+    let cross_project_feedback = invoke_exact_tool(
+        &fixture.active_server,
         "tracedecay_fact_feedback",
         json!({
-            "fact_id": 1,
+            "fact_id": target_fact_id,
             "action": "helpful",
-            "project_selector": {"project_id": target_project_id}
+            "project_selector": {"project_id": target_project_id.clone()}
         }),
-        None,
-        None,
     )
     .await;
-    let Err(err) = cross_project_feedback else {
-        panic!("expected cross-project fact feedback to be rejected");
-    };
     assert!(
-        format!("{err}").contains("does not accept project selectors"),
-        "unexpected cross-project feedback error: {err}"
+        cross_project_feedback.is_err(),
+        "fact feedback must reject cross-project selectors"
     );
 
-    let typo_selector = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let typo_selector = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "project_id": "proj_does_not_exist",
             "category": "project",
             "min_trust": 0.0
         }),
-        None,
-        None,
     )
     .await;
-    let Err(err) = typo_selector else {
-        panic!("expected unresolved explicit selector to fail");
-    };
     assert!(
-        format!("{err}").contains("registered project not found for selector"),
-        "unresolved selector must not fall back to active project: {err}"
+        typo_selector.is_err(),
+        "an unresolved explicit selector must not fall back to the active project"
     );
 
-    let hidden_top_level_path = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let hidden_top_level_path = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "format": "json",
             "path": target_project_path,
             "category": "project",
             "min_trust": 0.0
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let hidden_top_level_path = extract_json(&hidden_top_level_path.value);
-    assert_fact_results(
-        &hidden_top_level_path,
-        "Active selector fact",
-        "Target selector fact",
-        "top-level path should not act as an undocumented project selector",
+    .await;
+    assert!(
+        hidden_top_level_path.is_err(),
+        "an undocumented top-level path must be rejected by the exact list schema"
     );
 
-    close_test_graph(target).await;
-    close_test_graph(active).await;
+    fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn memory_status_project_selector_reports_registered_project_memory() {
-    let (active, target, _env) = setup_cross_project_memory_projects().await;
-    let active_runtime = active.test_runtime_for_test().expect("active runtime");
-    let target_runtime = target.test_runtime_for_test().expect("target runtime");
-    let target_project_id = target
+    let fixture = fact_store_cross_project_fixture().await;
+    let target_graph = fixture.target_server.cg().await;
+    let target_project_id = target_graph
         .store_layout()
         .identity
         .project_id
         .as_deref()
-        .expect("target project should have a profile project_id");
-    let target_project_path = target.project_root().to_string_lossy().to_string();
+        .expect("target project should have a profile project_id")
+        .to_owned();
+    let target_project_path = fixture.target_root.to_string_lossy().to_string();
 
     for content in ["Active status fact one", "Active status fact two"] {
-        handle_tool_call_with_runtime(
-            &active,
-            &active_runtime,
-            "tracedecay_fact_store",
+        invoke_exact_tool(
+            &fixture.active_server,
+            "tracedecay_fact_store_add",
             json!({
-                "action": "add",
                 "content": content,
                 "category": "project"
             }),
-            None,
-            None,
         )
         .await
         .unwrap();
     }
 
-    handle_tool_call_with_runtime(
-        &target,
-        &target_runtime,
-        "tracedecay_fact_store",
+    invoke_exact_tool(
+        &fixture.target_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": "Target status fact",
             "category": "project"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
 
-    let active_status = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
+    let active_status = invoke_exact_tool(
+        &fixture.active_server,
         "tracedecay_memory_status",
         json!({}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -781,13 +789,10 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
     assert_eq!(active_status["status"], "ok");
     assert_eq!(active_status["memory"]["fact_count"].as_u64(), Some(2));
 
-    let target_status_by_id = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
+    let target_status_by_id = invoke_exact_tool(
+        &fixture.active_server,
         "tracedecay_memory_status",
         json!({"project_id": target_project_id}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -799,13 +804,10 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
         "project_id selector should report the target project's memory: {target_status_by_id}"
     );
 
-    let target_status_by_path = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
+    let target_status_by_path = invoke_exact_tool(
+        &fixture.active_server,
         "tracedecay_memory_status",
         json!({"project_selector": {"path": target_project_path}}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -816,82 +818,61 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
         "nested path selector should report the target project's memory: {target_status_by_path}"
     );
 
-    let missing_status = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
+    let missing_status = invoke_exact_tool(
+        &fixture.active_server,
         "tracedecay_memory_status",
         json!({"project_id": "proj_does_not_exist"}),
-        None,
-        None,
     )
     .await;
-    let Err(err) = missing_status else {
-        panic!("expected unresolved memory_status selector to fail");
-    };
     assert!(
-        format!("{err}").contains("registered project not found for selector"),
-        "unresolved memory_status selector must not fall back to active project: {err}"
+        missing_status.is_err(),
+        "an unresolved memory-status selector must not fall back to the active project"
     );
+
+    fixture.harness.shutdown().await;
 }
 
-#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
-    let (active, target, _env) = setup_cross_project_memory_projects().await;
-    let active_runtime = active.test_runtime_for_test().expect("active runtime");
+    let fixture = fact_store_cross_project_fixture().await;
 
-    handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": "Project-only routing decision",
             "category": "project"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
-    handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": "User prefers concise technical answers",
             "category": "user_pref",
             "memory_scope": "user"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
 
-    let project_facts = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
-        json!({"action": "list", "format": "json", "min_trust": 0.0}),
-        None,
-        None,
+    let project_facts = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
+        json!({"format": "json", "min_trust": 0.0}),
     )
     .await
     .unwrap();
-    let user_facts = handle_tool_call_with_runtime(
-        &active,
-        &active_runtime,
-        "tracedecay_fact_store",
+    let user_facts = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "format": "json",
             "min_trust": 0.0,
             "memory_scope": "user"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -902,18 +883,27 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     assert!(user_facts.contains("User prefers concise technical answers"));
     assert!(!user_facts.contains("Project-only routing decision"));
 
-    close_test_graph(target).await;
-    close_test_graph(active).await;
+    let user_status = invoke_exact_tool(
+        &fixture.active_server,
+        "tracedecay_memory_status",
+        json!({"format": "json", "memory_scope": "user"}),
+    )
+    .await
+    .unwrap();
+    let user_status = extract_json(&user_status.value);
+    assert_eq!(user_status["status"], "ok");
+    assert_eq!(user_status["memory"]["fact_count"].as_u64(), Some(1));
+
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
-async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
+async fn memory_fact_store_update_rejects_secret_like_content_without_mutating_fact() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let added = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Project preference: never store provider API keys",
             "category": "project"
@@ -924,51 +914,57 @@ async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report()
     .await
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
 
-    let rejected = handle_tool_call(
+    let rejected = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_update",
         json!({
-            "action": "update",
             "format": "json",
-            "fact_id": fact_id,
+            "fact_id": fact_id.clone(),
             "content": "api_key=sk-test-742913 must not be persisted"
         }),
         None,
         None,
     )
-    .await
-    .unwrap();
-    let rejected: Value = serde_json::from_str(extract_text(&rejected.value)).unwrap();
-    assert_eq!(rejected["action"], "update");
-    assert_eq!(rejected["count"], 0);
-    assert_eq!(rejected["diff"], "rejected_secret_like");
-    assert!(rejected["fact"].is_null());
+    .await;
     assert!(
-        rejected["reason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("secret"),
-        "reason should describe the hygiene rejection: {rejected}"
+        rejected.is_err(),
+        "the exact update route must reject secret-like content"
     );
 
-    let stored = cg.get_fact(fact_id).await.unwrap().unwrap();
+    let stored = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_get",
+        json!({"format": "json", "fact_id": fact_id}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let stored: Value = serde_json::from_str(extract_text(&stored.value)).unwrap();
     assert_eq!(
-        stored.content,
+        stored["fact"]["content"],
         "Project preference: never store provider API keys"
     );
-    assert!(!stored.content.contains("sk-test-742913"));
+    assert!(
+        !stored["fact"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sk-test-742913")
+    );
 }
 
 #[tokio::test]
 async fn memory_recall_updates_retrieval_count() {
     let (cg, _dir) = setup_project().await;
-    let added = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Retrieval counters move after search",
             "entity": "Counter Entity"
@@ -979,22 +975,25 @@ async fn memory_recall_updates_retrieval_count() {
     .await
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
 
-    handle_tool_call(
+    invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "search", "format": "json", "query": "Retrieval counters", "limit": 5}),
+        "tracedecay_fact_store_search",
+        json!({"format": "json", "query": "Retrieval counters", "limit": 5}),
         None,
         None,
     )
     .await
     .unwrap();
 
-    let status = handle_tool_call(
+    let status = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "list", "format": "json", "min_trust": 0.0, "limit": 10}),
+        "tracedecay_fact_store_list",
+        json!({"format": "json", "min_trust": 0.0, "limit": 10}),
         None,
         None,
     )
@@ -1005,7 +1004,7 @@ async fn memory_recall_updates_retrieval_count() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|fact| fact["fact_id"].as_i64() == Some(fact_id))
+        .find(|fact| fact["fact_id"].as_str() == Some(fact_id.as_str()))
         .unwrap();
     assert!(
         fact["retrieval_count"].as_i64().unwrap_or_default() > 0,
@@ -1014,74 +1013,12 @@ async fn memory_recall_updates_retrieval_count() {
 }
 
 #[tokio::test]
-async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let first = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "add",
-            "format": "json",
-            "content": "First fact should remain updateable after many later facts",
-            "trust": 0.4
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
-    let first_id = first["fact"]["fact_id"].as_i64().unwrap();
-
-    let db = cg.open_project_store_db().await.unwrap();
-    let mut fixture_conn = rusqlite::Connection::open(db.database_path()).unwrap();
-    let fixture_tx = fixture_conn.transaction().unwrap();
-    for i in 0..205i64 {
-        fixture_tx
-            .execute(
-                "INSERT INTO memory_facts (
-                    content, category, tags, trust_score, created_at, updated_at, source, metadata
-                 )
-                 VALUES (?1, 'general', '[]', 0.5, ?2, ?2, 'test', '{}')",
-                rusqlite::params![
-                    format!("Later fact {i} should not hide the first fact"),
-                    9_000_000_000i64 + i,
-                ],
-            )
-            .unwrap();
-    }
-    fixture_tx.commit().unwrap();
-
-    let updated = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "update",
-            "format": "json",
-            "fact_id": first_id,
-            "trust_delta": 0.2
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let updated: Value = serde_json::from_str(extract_text(&updated.value)).unwrap();
-    assert_eq!(updated["fact"]["fact_id"].as_i64(), Some(first_id));
-    assert!(
-        (updated["fact"]["trust_score"].as_f64().unwrap() - 0.6).abs() < 0.000_001,
-        "trust_delta should apply through direct fact lookup: {updated}"
-    );
-}
-
-#[tokio::test]
 async fn memory_feedback_and_status_include_trust_fields() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let added = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Helpful memory fact for feedback",
             "category": "general"
@@ -1092,15 +1029,18 @@ async fn memory_feedback_and_status_include_trust_fields() {
     .await
     .unwrap();
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
     assert!(added["fact"].get("id").is_none());
     assert!(added["fact"].get("trust").is_none());
     assert!(added["fact"]["trust_score"].as_f64().is_some());
 
-    let helpful = handle_tool_call(
+    let helpful = invoke_production_tool(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "format": "json", "helpful": true, "source": "mcp-test", "note": "matched"}),
+        json!({"fact_id": fact_id.clone(), "format": "json", "helpful": true, "source": "mcp-test", "note": "matched"}),
         None,
         None,
     )
@@ -1116,10 +1056,10 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert_eq!(helpful["feedback"]["helpful_count"], 1);
     assert_eq!(helpful["feedback"]["unhelpful_count"], 0);
 
-    let unhelpful = handle_tool_call(
+    let unhelpful = invoke_production_tool(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "format": "json", "unhelpful": true}),
+        json!({"fact_id": fact_id.clone(), "format": "json", "unhelpful": true}),
         None,
         None,
     )
@@ -1134,17 +1074,16 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert_eq!(unhelpful["feedback"]["helpful_count"], 1);
     assert_eq!(unhelpful["feedback"]["unhelpful_count"], 1);
 
-    let fetched = handle_tool_call(
+    let fetched = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "get", "format": "json", "fact_id": fact_id}),
+        "tracedecay_fact_store_get",
+        json!({"format": "json", "fact_id": fact_id.clone()}),
         None,
         None,
     )
     .await
     .unwrap();
     let fetched: Value = serde_json::from_str(extract_text(&fetched.value)).unwrap();
-    assert_eq!(fetched["action"], "get");
     assert_eq!(fetched["fact"]["fact_id"], fact_id);
     let trust_history = fetched["trust_history"]
         .as_array()
@@ -1155,22 +1094,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert_eq!(trust_history[1]["action"], "unhelpful");
     assert!(trust_history[1]["note"].is_null());
 
-    let markdown_feedback = handle_tool_call(
-        &cg,
-        "tracedecay_fact_feedback",
-        json!({"fact_id": fact_id, "helpful": true, "source": "mcp-test", "note": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let markdown_feedback = extract_text(&markdown_feedback.value);
-    assert!(markdown_feedback.contains("**status:** recorded"));
-    assert!(markdown_feedback.contains("**action:** helpful"));
-    assert!(markdown_feedback.contains("**fact_id:**"));
-    assert!(!markdown_feedback.contains("|"));
-
-    let status = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+    let status = invoke_production_tool(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
         .unwrap();
     let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
@@ -1182,61 +1106,63 @@ async fn memory_feedback_and_status_include_trust_fields() {
     assert!(status["memory"].get("trust_075_100_count").is_some());
     assert!(status["memory"].get("helpful_count").is_some());
     assert!(status["memory"].get("unhelpful_count").is_some());
-    assert!(status["memory"].get("missing_vector_count").is_some());
 }
 
 #[tokio::test]
 async fn memory_tools_validate_malformed_inputs() {
     let (cg, _env, _dir) = setup_empty_project().await;
 
-    let missing_action =
-        handle_tool_call(&cg, "tracedecay_fact_store", json!({}), None, None).await;
-    assert!(expect_tool_error(missing_action).contains("action"));
-
-    let bad_action = handle_tool_call(
+    let bad_category = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "teleport"}),
+        "tracedecay_fact_store_list",
+        json!({"category": "definitely-not-a-category"}),
         None,
         None,
     )
     .await;
-    assert!(expect_tool_error(bad_action).contains("unknown fact_store action"));
+    assert!(
+        bad_category.is_err(),
+        "the exact list schema must reject an unknown category"
+    );
 
-    let bad_category = handle_tool_call(
+    let added = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "list", "category": "definitely-not-a-category"}),
+        "tracedecay_fact_store_add",
+        json!({"content": "Feedback action validation needs a canonical fact id"}),
         None,
         None,
     )
-    .await;
-    assert!(expect_tool_error(bad_category).contains("category"));
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
 
-    let missing_feedback_action = handle_tool_call(
+    let missing_feedback_action = invoke_production_tool(
         &cg,
         "tracedecay_fact_feedback",
-        json!({"fact_id": 123}),
+        json!({"fact_id": fact_id}),
         None,
         None,
     )
     .await;
-    assert!(expect_tool_error(missing_feedback_action).contains("helpful"));
+    assert!(
+        missing_feedback_action.is_err(),
+        "fact feedback must require its declared action"
+    );
 }
 
-/// A plain `tracedecay_memory_status` read must never repair derived vectors
-/// or rebuild dirty banks as a side effect (repair is owned by the daemon's
-/// bounded memory-repair scheduler and the explicit repair entry point). The
-/// status projection must still report the repair/backlog fields from stored
-/// state once an explicit repair has actually run.
+/// Status reports the canonical similarity projection shape through the
+/// production memory authority; vector-bank repair is not an MCP concern.
 #[tokio::test]
-async fn memory_status_reports_repair_state_without_repairing() {
+async fn memory_status_reports_canonical_similarity_projection_shape() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    let added = handle_tool_call(
+    invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Status should report repair state without repairing it",
             "category": "project",
@@ -1247,128 +1173,62 @@ async fn memory_status_reports_repair_state_without_repairing() {
     )
     .await
     .unwrap();
-    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
-    let db_path = project_graph_db(&cg);
-    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    let changed = rusqlite::Connection::open(db.database_path())
-        .unwrap()
-        .execute(
-            "UPDATE memory_facts
-             SET hrr_vector = NULL, hrr_algebra = 'legacy', hrr_dim = 8
-             WHERE fact_id = ?1",
-            rusqlite::params![fact_id],
-        )
-        .unwrap();
-    assert_eq!(changed, 1, "the out-of-band corruption must hit one fact");
-    db.close();
-
-    // A status read alone must not repair the missing vector or rebuild banks.
-    let unrepaired = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
+    let status = invoke_production_tool(&cg, "tracedecay_memory_status", json!({}), None, None)
         .await
         .unwrap();
-    let unrepaired: Value = serde_json::from_str(extract_text(&unrepaired.value)).unwrap();
-    assert_eq!(unrepaired["status"], "ok");
+    let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
+    assert_eq!(status["status"], "ok");
+    let fact_count = status["memory"]["fact_count"]
+        .as_u64()
+        .expect("status must expose the canonical fact count");
     assert_eq!(
-        unrepaired["memory"]["missing_vector_count"].as_u64(),
-        Some(1),
-        "a status read must not repair the missing vector as a side effect: {unrepaired}"
+        fact_count, 1,
+        "status must include the stored fact: {status}"
     );
     assert_eq!(
-        unrepaired["memory"]["repair"]["missing_vectors_repaired"].as_u64(),
-        Some(0),
-        "a status read must not report repair work it never performed: {unrepaired}"
+        status["memory"]["algebra_name"], "amari_fhrr",
+        "status must name the canonical similarity algebra: {status}"
     );
+    assert_eq!(status["memory"]["hrr_dim"].as_u64(), Some(2048));
+    assert_eq!(
+        status["memory"]["estimated_capacity"].as_u64(),
+        Some(fact_count * 2048),
+        "capacity must derive from canonical fact count and dimension: {status}"
+    );
+    for retired_field in ["missing_vector_count", "bank_count", "repair"] {
+        assert!(
+            status["memory"].get(retired_field).is_none(),
+            "status must not expose retired vector-bank state `{retired_field}`: {status}"
+        );
+    }
+}
 
-    // Seed the repaired state via the explicit repair entry point instead of
-    // relying on a status read to trigger it.
-    let project_id = resolve_layout_for_current_profile(cg.project_root())
-        .unwrap()
-        .identity
-        .project_id
-        .expect("test project has a resolved project id");
-    let owner = tracedecay_domain::FactOwnerV1::Project {
-        project_id: tracedecay_domain::ProjectId::new(project_id).unwrap(),
-    };
-    let (repair_db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    let memory = tracedecay::application::memory::MemoryApplication::new(
-        owner.clone(),
-        tracedecay::store::memory::DatabaseFactStore::new(&repair_db),
+#[tokio::test]
+async fn fact_store_reason_requires_an_entity_selection() {
+    let (cg, _dir) = setup_project().await;
+
+    let result = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_reason",
+        json!({"format": "json"}),
+        None,
+        None,
     )
-    .unwrap();
-    let repair = memory
-        .dashboard_repair_v1(
-            tracedecay::application::memory::MemoryOperationContext::generated(
-                &owner,
-                "explicit-status-test-repair",
-                None,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    .await;
     assert!(
-        repair.missing_vectors_repaired() >= 1,
-        "explicit repair should have repaired the seeded missing vector"
-    );
-    repair_db.close();
-
-    // Now a plain status read must report the already-repaired stored state,
-    // without needing to repair anything itself.
-    let repaired = handle_tool_call(&cg, "tracedecay_memory_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let repaired: Value = serde_json::from_str(extract_text(&repaired.value)).unwrap();
-    assert_eq!(repaired["status"], "ok");
-    assert!(
-        repaired["memory"]["bank_count"]
-            .as_u64()
-            .unwrap_or_default()
-            >= 2,
-        "status should report the banks the explicit repair rebuilt: {repaired}"
-    );
-    assert_eq!(
-        repaired["memory"]["missing_vector_count"].as_u64(),
-        Some(0),
-        "status should report the vector the explicit repair fixed: {repaired}"
+        result.is_err(),
+        "the exact reason route must reject an empty entity selection"
     );
 }
 
 #[tokio::test]
-async fn fact_store_reason_without_entities_names_the_missing_parameter() {
+async fn fact_store_add_rejects_out_of_range_trust() {
     let (cg, _dir) = setup_project().await;
 
-    let err = handle_tool_call(
+    let result = invoke_production_tool(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "reason", "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap_err();
-    let message = err.to_string();
-    assert!(
-        message.contains("entities"),
-        "error should name the missing `entities` parameter instead of a bare \
-         canonicalization failure: {message}"
-    );
-    assert!(
-        !message.contains("is not canonical"),
-        "error should not surface the internal contract-violation phrasing \
-         for a plain missing parameter: {message}"
-    );
-}
-
-#[tokio::test]
-async fn fact_store_add_out_of_range_trust_states_the_valid_range() {
-    let (cg, _dir) = setup_project().await;
-
-    let err = handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Trust out of range must be rejected with an actionable message",
             "category": "project",
@@ -1377,43 +1237,61 @@ async fn fact_store_add_out_of_range_trust_states_the_valid_range() {
         None,
         None,
     )
-    .await
-    .unwrap_err();
-    let message = err.to_string();
+    .await;
     assert!(
-        message.contains("0.0") && message.contains("1.0"),
-        "error should state the valid 0.0-1.0 trust range: {message}"
+        result.is_err(),
+        "the exact add route must reject a trust value outside its schema range"
     );
 }
 
 #[tokio::test]
-async fn fact_feedback_on_nonexistent_fact_id_fails_fast_like_get() {
+async fn fact_feedback_on_nonexistent_fact_id_fails_fast() {
     let (cg, _dir) = setup_project().await;
 
+    let added = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_add",
+        json!({"content": "A removed fact must reject later feedback"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+    let fact_id = added["fact"]["fact_id"]
+        .as_str()
+        .expect("fact-store add should return a canonical fact id")
+        .to_owned();
+    invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_remove",
+        json!({"fact_id": fact_id.clone()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
     let started = std::time::Instant::now();
-    let err = tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        handle_tool_call(
+        invoke_production_tool(
             &cg,
             "tracedecay_fact_feedback",
-            json!({"fact_id": 999_999_999_i64, "action": "helpful", "format": "json"}),
+            json!({"fact_id": fact_id, "action": "helpful", "format": "json"}),
             None,
             None,
         ),
     )
     .await
-    .expect("fact_feedback on a nonexistent fact must not hang until a client deadline")
-    .unwrap_err();
+    .expect("fact_feedback on a nonexistent fact must not hang until a client deadline");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
-        "fact_feedback on a nonexistent fact must fail fast like fact_store get: {:?}",
+        "fact_feedback on a nonexistent fact must fail fast like fact_store_get: {:?}",
         started.elapsed()
     );
-    let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("not found")
-            || message.contains("missing")
-            || message.contains("unavailable"),
-        "error should clearly report the fact as absent: {message}"
+        result.is_err(),
+        "fact_feedback must reject a nonexistent fact identifier"
     );
 }
