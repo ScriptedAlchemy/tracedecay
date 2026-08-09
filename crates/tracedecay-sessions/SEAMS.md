@@ -1,9 +1,8 @@
 # tracedecay-sessions root seams
 
-The one-shot crate split moved the whole former `src/sessions/` tree into
-`crates/tracedecay-sessions/src/runtime/` without resolving references back
-into the root binary crate. That aftermath is now **closed for the library
-target**:
+The one-shot crate split moved the session runtime into
+`crates/tracedecay-sessions/src/runtime/`. Root and integration callers use
+that crate directly; the library-target aftermath is **closed**:
 
 ```
 cargo check -p tracedecay-sessions --all-features   # 0 errors
@@ -37,7 +36,7 @@ seams that `cargo check` does not compile.
 | `crate::context::read_cache::digest_bytes` | Owned as a private helper in `runtime::git_correlation`. |
 | `crate::agents::hermes::read_config_pinned_project_root` | Inverted behind `host_ports::hermes_profile_pin`. |
 | `crate::hooks::schedule_user_session_review` | Inverted behind `host_ports::session_review`. |
-| `crate::user_config::UserConfig` (LCM redaction) | Inverted behind `host_ports::lcm_redaction`. |
+| LCM payload sanitization and remediation | Owned by `tracedecay_runtime_core::privacy` and `runtime::lcm::privacy_remediation`; every ingest and replay path emits a content-bound sanitization receipt and fails closed on unverifiable content. |
 | `HostAdmissionAuthorities::unregistered_*` | Inverted behind `host_ports::unregistered_admission`. |
 
 Provider usage is no longer a Claude-only accounting-parser seam. Every runtime
@@ -116,24 +115,13 @@ runs. Every one of these must be installed before transcript ingest:
 | --- | --- |
 | `host_ports::hermes_profile_pin::register` | `tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root` |
 | `host_ports::session_review::register` | `crate::hooks::schedule_user_session_review` |
-| `host_ports::lcm_redaction::register` | Read `UserConfig::load()` into `LcmRedactionPolicy { enabled: lcm_sensitive_redaction_enabled, patterns: lcm_sensitive_redaction_patterns }` |
 | `host_ports::unregistered_admission::register` | `HostAdmissionFacade::new(HostAdmissionAuthorities::unregistered_for_{project,profile}(..))` boxed |
 
 Until `unregistered_admission` is registered, the two standalone Codex entry
 points (`try_admit_codex_jsonl_observations_for_{project,profile}`) return an
 empty progress instead of walking the rollout.
 
-### 4. Re-home the composition-root benchmark module staged under `root-wiring/`
-
-One module is pure composition-root code: it builds registered databases,
-daemon runtime registries, and root application services. It is preserved
-verbatim under `crates/tracedecay-sessions/root-wiring/` (not part of any
-target) and must move into `src/` in the root crate:
-
-| Staged file | Notes |
-| --- | --- |
-| `root-wiring/session_temporal_benchmark.rs` | 1500 lines. Needs root `application::{context, session}`, `daemon::{profile_identity, store_runtime::session_registry}`, `config::lock_user_data_dir_test_env`, `RegisteredGlobalDb`, `GlobalDbSessionTemporalStore`. `benches/session_temporal.rs` and `tests/session_suite/temporal_benchmark.rs` reach it through `tracedecay::sessions::session_temporal_benchmark`, so the root module must keep that path. |
-### 5. Layout helpers that now exist twice
+### 4. Layout helpers that now exist twice
 
 `host_ports::{vscode_data_dir, kiro_data_dir}` duplicate
 `tracedecay_agent_hosts::agents::{vscode_data_dir, kiro_data_dir}`. The
@@ -152,15 +140,13 @@ the fixtures move.
 | `src/runtime/lcm/dashboard_fixes_tests.rs` | `crate::application::configuration::ProductionUserSettingsDaemonClient`, `crate::daemon::{profile_identity::load_or_create, store_runtime::session_registry::DaemonSessionRuntimeRegistryV1}`, `crate::dashboard::scope::resolve_dashboard_scope`, `crate::config::RetentionConfig`, `crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1}`, `RegisteredGlobalDb` |
 | `src/runtime/workflow_ingest/tests.rs` | `crate::daemon::{profile_identity::load_or_create, store_runtime::session_registry::DaemonSessionRuntimeRegistryV1}`, `RegisteredGlobalDb`, `GlobalDbWorkflowStore` |
 | `src/runtime/claude_observation.rs` (`mod tests`) | `crate::config::PinnedUserDataDir`, `crate::admission::HostAdmissionTestRuntimeV1`, `RegisteredGlobalDb`; also defines two spies against the retired `*AdmissionPort` trait pair that should collapse into one `impl HostAdmission`. |
-| `src/runtime/claude_observation_benchmark/baseline.rs` | `crate::hooks::…` |
-| `src/runtime/lcm/raw.rs` (`mod ingest_protection_defaults_tests`) | `crate::user_config::UserConfig` — should build `host_ports::LcmRedactionPolicy` directly and call `IngestProtectionDefaults::from_policy`. |
 | `src/runtime/{cline_like,kiro,cursor,cursor_composer,hermes,ingest,kimi,opencode}` test modules | `crate::admission::HostAdmissionTestRuntimeV1` and `RegisteredGlobalDb` fixtures |
 
-## Non-code references to the old path
+## Sealed benchmark provenance
 
-These name `src/sessions/…` as data or prose and were deliberately left alone;
-the benchmark manifests additionally pin SHA-256 digests over the harness files,
-so they need a re-seal rather than a path edit.
+The benchmark manifests and results below carry file-identity digests. Their
+paths and hashes must be re-sealed together from a clean source commit, not
+rewritten as a compatibility edit.
 
 - `benchmarks/claude-observation/workload-v1.json` and
   `benchmarks/claude-observation/result-2026-07-26-dc17dd73.json`

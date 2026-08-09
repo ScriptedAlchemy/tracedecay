@@ -208,7 +208,7 @@ tools, reads a store, or starts a model.
 
 ### Other agents
 
-TraceDecay supports fifteen agents. Pass `--agent` to install for a specific one:
+TraceDecay has receipt-backed profile-wide install lifecycles for these agents:
 
 ```bash
 tracedecay install --agent claude      # Claude Code (default)
@@ -218,22 +218,20 @@ tracedecay install --agent gemini      # Gemini CLI
 tracedecay install --agent hermes      # Hermes Agent
 tracedecay install --agent copilot     # GitHub Copilot CLI
 tracedecay install --agent cursor      # Cursor
-tracedecay install --agent zed         # Zed
-tracedecay install --agent cline       # Cline
-tracedecay install --agent roo-code    # Roo Code
-tracedecay install --agent antigravity # Antigravity (Windsurf)
-tracedecay install --agent kilo        # Kilo CLI
 tracedecay install --agent kiro        # AWS Kiro
 tracedecay install --agent kimi        # Kimi Code CLI
-tracedecay install --agent vibe        # Mistral Vibe
 ```
 
-Each agent gets the configuration its host supports: MCP registration or native plugin tools, permissions where available, and prompt rules where applicable.
+Other host integrations can be detected by `doctor`, but do not appear in the
+installer until they have a canonical first-party component route.
+
+Each installed agent gets the profile-wide configuration its host supports:
+MCP registration or native plugin tools, with permissions where available.
 
 - Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
-- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, activation config, or cache entries.
-- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths; `--local` writes `<project>/.kimi-code/mcp.json` and project `AGENTS.md` rules.
+- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex's profile-wide install does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, activation config, or cache entries.
+- Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
 
 Hermes setup writes the single user integration to
 `~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
@@ -247,7 +245,7 @@ The plugin registers one Hermes-native wrapper per tracedecay tool, adds a
 lightweight `pre_llm_call` steering hook, registers a `/tracedecay_status` slash
 command when the installed Hermes version supports plugin commands, and bundles
 a `tracedecay:tracedecay` plugin skill. It also registers a `tracedecay` memory
-provider (holographic facts via `fact_store` / `fact_feedback` /
+provider (holographic facts via exact fact tools / `fact_feedback` /
 `memory_status`) and a `tracedecay` context engine that compresses long
 conversations through the daemon's session authority. Project-attached sessions
 and lossless LCM are project-wide; untethered user sessions remain
@@ -289,34 +287,22 @@ gated unless the host explicitly forwards messages. The
 not stock Hermes API. Treat `compression.*` as built-in compressor config; only
 `compression.enabled` gates auto-compaction globally.
 
-Kiro setup registers tracedecay in `~/.kiro/settings/mcp.json`, writes steering to
-`~/.kiro/steering/tracedecay.md`, and writes a tracedecay-managed agent that loads
-that steering as a resource while keeping Kiro's default prompt. The managed
-agent exposes all configured tools and pre-approves Kiro built-ins plus the
-tracedecay MCP server, then adds hooks that block research delegation until
-tracedecay MCP tools have been tried and notify the daemon/server after Kiro
-writes files so the server can schedule background convergence.
-If you already have a different custom default agent or a user-managed
-`tracedecay` agent, tracedecay leaves it alone and prints a warning.
+Kiro setup registers the profile-wide `tracedecay` MCP server through
+`kiro-cli`. It does not create steering files, custom agents, default-agent
+settings, hooks, or workspace MCP registrations. See
+[Kiro integration](KIRO-INTEGRATION.md) for the exact lifecycle.
 
 The install is idempotent — safe to run again after upgrading tracedecay. You'll also be offered the option to set up an optional global git post-commit hint hook (more on that below).
 
-### Project-local installs
+### Profile-wide installs
 
-If you want an integration to apply only to the current repository, run install from the project root with `--local`:
-
-```bash
-tracedecay install --local --agent claude
-tracedecay install --local --agent cursor
-tracedecay install --local --agent copilot
-```
-
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `plugins/tracedecay`, `.agents/plugins/marketplace.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes always uses its user-level plugin bundle.
+Each install writes or stages the active profile's host integration; it does
+not create per-repository host configuration. The host's workspace/session
+context selects the active TraceDecay project at runtime.
 
 Cursor install is plugin-based:
 
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
-- `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
 - The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
 - The plugin bundles Cursor-specific, fail-open hooks: `sessionStart`,
@@ -352,11 +338,6 @@ from `~/plugins/tracedecay`; start a new Codex session after adding the plugin o
 recopying it. Codex also skips new or changed command hooks until you trust them,
 so run `/hooks` inside Codex after install or recopy.
 
-Codex local install writes the repository plugin bundle to `plugins/tracedecay`
-and the repository marketplace to `.agents/plugins/marketplace.json`. It does
-not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, project
-`.codex/config.toml`, project `.codex/hooks.json`, or `AGENTS.md`.
-
 Current Codex limitations: TraceDecay can refresh the plugin source and
 marketplace entry, but it cannot force Codex to run `plugin add`, update or
 remove its cache, reload an active session, or trust plugin command hooks for
@@ -370,7 +351,7 @@ Code's `/plugins remove tracedecay` first, then rerun `tracedecay uninstall
 --agent kimi` to remove the staged source. TraceDecay never writes Kimi's
 managed plugin directory or `installed.json`.
 
-The generated MCP entries use the resolved absolute path to the current `tracedecay` executable. A local install does not update `~/.tracedecay/config.toml`, installed-agent tracking, the last installed version, or the optional global git post-commit hint-hook prompt. Antigravity and Cline do not currently have documented project-local config paths, so `tracedecay install --local --agent antigravity` and `tracedecay install --local --agent cline` are rejected with unsupported-agent errors.
+The generated MCP entries use the resolved absolute path to the current `tracedecay` executable.
 
 #### Config backups
 
@@ -682,7 +663,7 @@ pub async fn produce(&mut self, topic: &str, batch: Bytes) -> io::Result<i64> { 
 
 Marked functions are excluded from `tracedecay_test_risk` attribution calculations, giving you an accurate picture of testable-code attribution (the `skipped` count appears in the summary). Note this is a **static attribution** signal, not executed coverage — see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md).
 
-**Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_session_start`/`session_end`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
+**Health penalty:** The `coverage_discipline` dimension (visible in `tracedecay_health` and `tracedecay_health_delta`) penalises overuse. Each skipped function lowers the score proportionally — a few genuine exclusions have negligible impact, but marking 50%+ of your codebase as untestable will visibly reduce your quality signal. This encourages using the annotation for its intended purpose rather than as a way to game coverage numbers.
 
 ### Structural analysis
 
@@ -713,31 +694,24 @@ Marked functions are excluded from `tracedecay_test_risk` attribution calculatio
 | `tracedecay_port_status` | Compare symbols between source/target directories to track cross-language porting progress. |
 | `tracedecay_port_order` | Topological sort of symbols for porting — tells you what to port first based on dependencies. |
 
-### Session management
-
-| Tool | What it does |
-|------|-------------|
-| `tracedecay_session_start` | Save current health metrics as a baseline before starting work. |
-| `tracedecay_session_end` | Compare current health against the baseline to detect structural degradation during the session. |
-
 ### Memory and fact recall
 
 The holographic memory tools store durable facts linked to entities:
 
 | Tool | What it does |
 |------|--------------|
-| `tracedecay_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
+| Exact `tracedecay_fact_store_*` tools | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
 | `tracedecay_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
 | `tracedecay_memory_status` | Read-only report of project/profile fact and entity counts, trust-score buckets, feedback counts, coverage, and missing-vector state. It never repairs or mutates storage. |
 
-Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
+Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. Update old prompts and permissions to use the exact `tracedecay_fact_store_*` tools, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
-Common `tracedecay_fact_store` payloads:
+Common exact fact-tool payloads (in add/search/probe order):
 
 ```json
-{"action": "add", "content": "Repository prefers local installs during active development.", "entities": ["install", "tracedecay"], "category": "project", "source": "user", "tags": ["preference"], "trust": 0.9}
-{"action": "search", "query": "local install preference", "min_trust": 0.5, "limit": 10}
-{"action": "probe", "entity": "tracedecay"}
+{"content": "Repository uses profile-wide host installs during active development.", "entities": ["install", "tracedecay"], "category": "project", "source": "user", "tags": ["preference"], "trust": 0.9}
+{"query": "profile-wide host install preference", "min_trust": 0.5, "limit": 10}
+{"entity": "tracedecay"}
 ```
 
 Common `tracedecay_fact_feedback` payloads:
@@ -917,9 +891,10 @@ tracedecay doctor
 tracedecay status --json
 ```
 
-If the status is `reset_required`, explicitly recreate the affected final store
-as instructed by the daemon. Do not copy database files or run a compatibility
-migration/backfill.
+If the status is `reset_required`, stop reads and writes for the affected
+authority and follow the daemon's typed remediation or reset instructions. Do
+not copy or edit database files, bypass the daemon, or reopen the authority
+until remediation completes or the daemon explicitly recreates the final store.
 
 ---
 
@@ -932,7 +907,7 @@ Clients and hosts never open the underlying files directly.
 
 The profile-owned user-memory store stores durable user preferences and memory
 from chat sessions that are not attached to an initialized TraceDecay project. Use
-`memory_scope=user` with `tracedecay_fact_store`,
+`memory_scope=user` with exact `tracedecay_fact_store_*` tools,
 `tracedecay_fact_feedback`, or `tracedecay_memory_status`. The CLI can access
 this scope outside any project. Hermes routes untethered chat and explicit
 user-preference writes here; projectless Codex and Cursor hooks recall from it.
@@ -955,9 +930,10 @@ storage authority or open a database directly.
 Add the explicit local enrollment marker to your `.gitignore` if your setup uses
 one, but do not copy or edit store files.
 
-Projects with an incompatible pre-rebrand or older persisted shape return
-`ResetRequired`. Recreate the final store explicitly; runtime never migrates,
-backfills, or falls back to an old database.
+An incompatible persisted shape or incomplete privacy remediation returns
+`ResetRequired`/`reset_required`. Follow the daemon's remediation or explicitly
+recreate the final store; runtime never guesses, falls back, or exposes
+unverified content.
 
 ### Cross-project reads
 
@@ -989,32 +965,30 @@ last_worldwide_total = 1000000
 last_worldwide_fetch_at = 1711375200
 ```
 
-#### Redacting secrets in ingested transcripts
+#### Mandatory structured sanitization of ingested transcripts
 
-Agent transcripts occasionally contain credentials the agent pasted or echoed.
-TraceDecay always applies *structural* sanitization on ingestion routes, but
-the LCM raw payloads — the lossless archive that session expansion drills back
-into — keep message text verbatim by default, because redaction is
-irreversible and would silently destroy the archive's losslessness.
+Agent transcripts can contain credentials or other sensitive values. TraceDecay
+applies one canonical, structured sanitizer to every ingest, replay, and
+derived-content path before content becomes durable or searchable. It parses
+JSON and other structured values before scanning, redacts values whose field
+meaning or credential evidence is sensitive, preserves valid document shape,
+and binds a `SanitizationReceiptV1` to the source and sanitized content.
 
-Opt in per profile:
+Sanitization is mandatory. It cannot be disabled, narrowed, or overridden by a
+profile setting, host configuration, or message metadata. LCM payloads are
+never retained verbatim: clean content is accepted, detected secrets are
+replaced and marked redacted/lossy, and malformed, oversized, unverifiable, or
+sanitizer-failing content is quarantined or rejected fail-closed. Externalized
+payloads are sanitized before storage and are represented in projections by a
+safe placeholder.
 
-```toml
-lcm_sensitive_redaction_enabled = true
-```
-
-When enabled, four redactors run over raw message text and structured values
-before they are persisted: `api_key`, `bearer_token`, `password_assignment`,
-and `private_key`. Redacted messages are marked lossy in their ingest
-protection metadata and the original value is not recoverable. Restrict the
-set with:
-
-```toml
-lcm_sensitive_redaction_patterns = ["api_key", "private_key"]
-```
-
-An empty or absent list runs all four. This applies to messages ingested after
-the change; transcripts already at rest are not rewritten.
+The daemon's LCM status reports scan, quarantine, derivative-rebuild, and
+reset-required phases. Reads remain locked while remediation is incomplete;
+the daemon sanitizes recoverable inline rows, quarantines content it cannot
+prove safe, rebuilds derivatives atomically, and requires explicit reset when
+the retained payload or privacy revision cannot be verified. Follow the typed
+status and reset instructions; never copy or edit store files or hand-edit
+sanitization metadata.
 
 ---
 
