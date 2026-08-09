@@ -235,6 +235,77 @@ CREATE TABLE IF NOT EXISTS work_retry_receipts_v1 (
 -- A provider dispatch owns this receipt. It is deliberately distinct from a
 -- process holder: it survives daemon restart and retains whether the source
 -- could prove no effect or only an unknown terminal reconciliation.
+-- A Work-minted opaque token is the causal link between one terminal Work
+-- attempt and one managed Test operation. Tokens progress from minted to one
+-- exact launched operation and then to its immutable sealed terminal.
+CREATE TABLE IF NOT EXISTS work_retry_test_binding_tokens_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    minted_at INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('minted', 'launched', 'sealed')),
+    source_ref TEXT,
+    sealed_evidence_digest TEXT,
+    sealed_evidence_payload TEXT,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest, token_id
+    )
+) STRICT;
+
+-- The affected-Test handler starts from the opaque token and must resolve its
+-- one owning authority without scanning every Work scope in the profile DB.
+CREATE UNIQUE INDEX IF NOT EXISTS work_retry_test_binding_tokens_id_v1
+ON work_retry_test_binding_tokens_v1 (token_id);
+
+-- A sealed operational terminal with no affirmative failed test may be
+-- followed by another managed-Test launch. At most one token can be active
+-- for the exact attempt, so concurrent re-mint remains deterministic.
+CREATE UNIQUE INDEX IF NOT EXISTS work_retry_test_binding_tokens_active_attempt_v1
+ON work_retry_test_binding_tokens_v1 (
+    project_id, repository_id, worktree_id, actor_id, policy_digest,
+    task_id, run_id, attempt_id
+)
+WHERE state IN ('minted', 'launched');
+
+-- A managed Test source can bind only once and must name the exact consumed
+-- token. CI is absent until a real Work-dispatched CI producer retains this
+-- same authority instead of relying on root/commit similarity.
+CREATE TABLE IF NOT EXISTS work_retry_evidence_bindings_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind = 'test'),
+    source_ref TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    binding_payload TEXT NOT NULL,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest,
+        source_kind, source_ref
+    ),
+    UNIQUE (
+        project_id, repository_id, worktree_id, actor_id, policy_digest, token_id
+    )
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS work_retry_evidence_bindings_attempt_v1
+ON work_retry_evidence_bindings_v1 (
+    project_id, repository_id, worktree_id, actor_id, policy_digest,
+    task_id, run_id, attempt_id, source_kind, source_ref
+);
+
 CREATE TABLE IF NOT EXISTS work_attempt_effect_holders_v1 (
     project_id TEXT NOT NULL,
     repository_id TEXT NOT NULL,
