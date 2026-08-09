@@ -29,6 +29,7 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_s
 mod generation_scan;
 mod graph_replay_release;
 mod locking;
+mod scope_quarantine;
 pub use graph_replay_release::{
     CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
@@ -40,6 +41,7 @@ pub use locking::{
 
 use generation_scan::read_generation_metadata;
 use locking::acquire_scope_retention_lock;
+use scope_quarantine::{ScopeDirectoryIdentityV1, ScopeQuarantineAuthority};
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 0;
 pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 32;
@@ -1507,6 +1509,7 @@ struct ScopeReceiptMaterial<'a> {
 struct ScopeRootRetentionTransactionV1 {
     schema: String,
     receipt: ScopeRootRetentionReceiptV1,
+    scope_identities: BTreeMap<String, ScopeDirectoryIdentityV1>,
 }
 
 /// A durable promise to remove one semantic source-scope binding only after
@@ -1785,21 +1788,24 @@ pub fn execute_scope_root_retention(
     }
 
     let receipt = expected_binding_cleanup_intent.receipt;
+    let mut quarantine =
+        ScopeQuarantineAuthority::prepare(store_root, &receipt.receipt_digest, &collected)?;
     let transaction = ScopeRootRetentionTransactionV1 {
         schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
         receipt: receipt.clone(),
+        scope_identities: quarantine.scope_identities().clone(),
     };
     persist_scope_transaction(store_root, &transaction)?;
 
     let result = (|| {
-        stage_stranded_scopes(store_root, &transaction)?;
+        quarantine.stage(&transaction.receipt.collected_scopes)?;
         write_scope_receipt(store_root, &receipt)?;
-        cleanup_committed_scope_transaction(store_root, &transaction)?;
+        quarantine.cleanup_committed(&transaction.receipt.collected_scopes)?;
         clear_scope_transaction(store_root)
     })();
     if let Err(error) = result {
         if !scope_receipt_is_durable(store_root, &receipt)? {
-            rollback_staged_scopes(store_root, &transaction)?;
+            quarantine.rollback(&transaction.receipt.collected_scopes)?;
             clear_scope_transaction(store_root)?;
         }
         return Err(error);
@@ -1957,10 +1963,15 @@ fn recover_pending_scope_transaction_unlocked(
     let Some(transaction) = load_scope_transaction(store_root)? else {
         return Ok(());
     };
+    let mut quarantine = ScopeQuarantineAuthority::recover(
+        store_root,
+        &transaction.receipt.receipt_digest,
+        transaction.scope_identities.clone(),
+    )?;
     if scope_receipt_is_durable(store_root, &transaction.receipt)? {
-        cleanup_committed_scope_transaction(store_root, &transaction)?;
+        quarantine.cleanup_committed(&transaction.receipt.collected_scopes)?;
     } else {
-        rollback_staged_scopes(store_root, &transaction)?;
+        quarantine.rollback(&transaction.receipt.collected_scopes)?;
     }
     clear_scope_transaction(store_root)
 }
@@ -1973,6 +1984,7 @@ fn scope_binding_cleanup_intent_path(store_root: &Path) -> PathBuf {
     store_root.join(SCOPE_BINDING_CLEANUP_INTENT_FILE)
 }
 
+#[cfg(test)]
 fn scope_stage_root(store_root: &Path, receipt: &ScopeRootRetentionReceiptV1) -> PathBuf {
     store_root
         .join(SCOPE_RETENTION_QUARANTINE_DIRECTORY)
@@ -2216,7 +2228,25 @@ fn validate_scope_transaction(
             "scope reconciliation transaction has an incompatible schema".to_owned(),
         ));
     }
-    validate_scope_receipt(&transaction.receipt)
+    validate_scope_receipt(&transaction.receipt)?;
+    let collected = transaction
+        .receipt
+        .collected_scopes
+        .iter()
+        .map(|scope| scope.scope_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    let fenced = transaction
+        .scope_identities
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if collected != fenced {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope reconciliation transaction does not fence every collected scope identity"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn scope_root_liveness_proof_digest(
@@ -2485,135 +2515,6 @@ fn write_scope_receipt(
     file.sync_all().map_err(storage)?;
     std::fs::rename(&temporary, &final_path).map_err(storage)?;
     sync_directory(&receipts_root)
-}
-
-fn stage_stranded_scopes(
-    store_root: &Path,
-    transaction: &ScopeRootRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let stage_root = scope_stage_root(store_root, &transaction.receipt);
-    std::fs::create_dir_all(&stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation quarantine has no parent".to_owned(),
-        )
-    })?)?;
-
-    for scope in &transaction.receipt.collected_scopes {
-        let source = scope_root_path(store_root, &scope.scope_hash)?;
-        let staged = scope_root_path(&stage_root, &scope.scope_hash)?;
-        match (
-            scope_directory_exists(&source)?,
-            scope_directory_exists(&staged)?,
-        ) {
-            (true, false) => {
-                std::fs::rename(&source, &staged).map_err(storage)?;
-                sync_directory(store_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "stranded scope '{}' is missing before quarantine",
-                    scope.scope_hash
-                )));
-            }
-            (false, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "stranded scope '{}' was already quarantined",
-                    scope.scope_hash
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "stranded scope '{}' exists in both source and quarantine",
-                    scope.scope_hash
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rollback_staged_scopes(
-    store_root: &Path,
-    transaction: &ScopeRootRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let stage_root = scope_stage_root(store_root, &transaction.receipt);
-    for scope in &transaction.receipt.collected_scopes {
-        let source = scope_root_path(store_root, &scope.scope_hash)?;
-        let staged = scope_root_path(&stage_root, &scope.scope_hash)?;
-        match (
-            scope_directory_exists(&source)?,
-            scope_directory_exists(&staged)?,
-        ) {
-            (true, false) => {}
-            (false, true) => {
-                std::fs::rename(&staged, &source).map_err(storage)?;
-                sync_directory(store_root)?;
-                sync_directory(&stage_root)?;
-            }
-            (false, false) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "scope reconciliation rollback cannot find '{}'",
-                    scope.scope_hash
-                )));
-            }
-            (true, true) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "scope reconciliation rollback found duplicate '{}'",
-                    scope.scope_hash
-                )));
-            }
-        }
-    }
-    remove_empty_scope_stage_root(&stage_root)
-}
-
-fn cleanup_committed_scope_transaction(
-    store_root: &Path,
-    transaction: &ScopeRootRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let stage_root = scope_stage_root(store_root, &transaction.receipt);
-    for scope in &transaction.receipt.collected_scopes {
-        let source = scope_root_path(store_root, &scope.scope_hash)?;
-        if scope_directory_exists(&source)? {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "scope reconciliation receipt is durable but '{}' returned to the store root",
-                scope.scope_hash
-            )));
-        }
-        let staged = scope_root_path(&stage_root, &scope.scope_hash)?;
-        if scope_directory_exists(&staged)? {
-            // The only recursive removal in this module. Its path is
-            // `<store_root>/<quarantine>/<receipt digest>/<scope hash>`, every
-            // component of which is a validated hex string from the durable
-            // journal, and the tree only reaches that path by a rename this
-            // transaction performed.
-            std::fs::remove_dir_all(&staged).map_err(storage)?;
-            sync_directory(&stage_root)?;
-        }
-    }
-    remove_empty_scope_stage_root(&stage_root)
-}
-
-fn remove_empty_scope_stage_root(stage_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let mut entries = match std::fs::read_dir(stage_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(storage(error)),
-    };
-    if entries.next().is_some() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "scope reconciliation quarantine '{}' contains unexpected entries",
-            stage_root.display()
-        )));
-    }
-    std::fs::remove_dir(stage_root).map_err(storage)?;
-    sync_directory(stage_root.parent().ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope reconciliation quarantine has no parent".to_owned(),
-        )
-    })?)
 }
 
 fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
@@ -3202,15 +3103,24 @@ mod tests {
 
         let receipt = build_scope_receipt(&plan, plan.collectable_scopes.clone(), UtcMicros(11))
             .expect("build reconciliation receipt");
+        let mut quarantine = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            &receipt.receipt_digest,
+            &receipt.collected_scopes,
+        )
+        .expect("open scope quarantine authority");
         let transaction = ScopeRootRetentionTransactionV1 {
             schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
             receipt: receipt.clone(),
+            scope_identities: quarantine.scope_identities().clone(),
         };
         let staged_root = scope_stage_root(store.path(), &receipt);
 
         // Crash exactly between quarantine and the durable receipt.
         persist_scope_transaction(store.path(), &transaction).expect("persist journal");
-        stage_stranded_scopes(store.path(), &transaction).expect("quarantine stranded scope");
+        quarantine
+            .stage(&transaction.receipt.collected_scopes)
+            .expect("quarantine stranded scope");
         assert!(!store.path().join(&stranded).exists());
         assert!(staged_root.join(&stranded).is_dir());
 
@@ -3238,16 +3148,25 @@ mod tests {
         .expect("plan scope reconciliation");
         let receipt = build_scope_receipt(&plan, plan.collectable_scopes.clone(), UtcMicros(12))
             .expect("build reconciliation receipt");
+        let mut quarantine = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            &receipt.receipt_digest,
+            &receipt.collected_scopes,
+        )
+        .expect("open scope quarantine authority");
         let transaction = ScopeRootRetentionTransactionV1 {
             schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
             receipt: receipt.clone(),
+            scope_identities: quarantine.scope_identities().clone(),
         };
         let staged_root = scope_stage_root(store.path(), &receipt);
 
         // Crash after the receipt is durable but before the quarantine is
         // unlinked: the decision is committed, so recovery rolls forward.
         persist_scope_transaction(store.path(), &transaction).expect("persist journal");
-        stage_stranded_scopes(store.path(), &transaction).expect("quarantine stranded scope");
+        quarantine
+            .stage(&transaction.receipt.collected_scopes)
+            .expect("quarantine stranded scope");
         write_scope_receipt(store.path(), &receipt).expect("commit reconciliation receipt");
 
         recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
@@ -3344,7 +3263,7 @@ mod tests {
 
     #[test]
     fn scope_transaction_never_journals_a_live_scope() {
-        let (_store, live, stranded) = fixture_scope_store();
+        let (store, live, stranded) = fixture_scope_store();
         let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
         let mut receipt = ScopeRootRetentionReceiptV1 {
             schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
@@ -3370,9 +3289,16 @@ mod tests {
         receipt.receipt_digest =
             scope_receipt_digest(&receipt).expect("calculate malformed receipt digest");
 
+        let quarantine = ScopeQuarantineAuthority::prepare(
+            store.path(),
+            &receipt.receipt_digest,
+            &receipt.collected_scopes,
+        )
+        .expect("open scope quarantine authority");
         let error = validate_scope_transaction(&ScopeRootRetentionTransactionV1 {
             schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
             receipt,
+            scope_identities: quarantine.scope_identities().clone(),
         })
         .expect_err("a live scope in the collected set must be rejected");
 
