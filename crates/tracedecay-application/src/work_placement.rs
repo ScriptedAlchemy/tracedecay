@@ -28,9 +28,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    RunId, TaskId, UtcMicros, WorkAuthority, WorkPlacementBlockerV1, WorkPlacementContractError,
-    WorkPlacementIdentityV1, WorkPlacementObservationV1, WorkPlacementPreflightV1,
-    WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1,
+    ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority, WorkPlacementBlockerV1,
+    WorkPlacementContractError, WorkPlacementIdentityV1, WorkPlacementObservationV1,
+    WorkPlacementPreflightV1, WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1,
 };
 
 use crate::work::work_authority;
@@ -64,6 +64,17 @@ pub trait WorkPlacementStoragePort: Send + Sync {
         authority: &WorkAuthority,
         root: &str,
     ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError>;
+
+    /// Whether an admitted or quarantined placement holds this exact root in
+    /// this registered scope, regardless of its actor or policy lineage.
+    fn has_target_holder_in_exact_repository_root(
+        &self,
+        _project_id: &ProjectId,
+        _repository_id: &RepositoryId,
+        _root: &str,
+    ) -> Result<bool, WorkPlacementStorageError> {
+        Err(WorkPlacementStorageError::Unavailable)
+    }
 
     /// Publishes `next` under a compare-and-swap on the authority version the
     /// caller read. `expected` is `None` only for the first admission.
@@ -139,6 +150,41 @@ where
 {
     pub const fn new(storage: S) -> Self {
         Self { storage }
+    }
+
+    /// Whether an admitted or quarantined Work placement holds the exact
+    /// canonical target root for this Work authority.
+    pub fn has_target_holder(
+        &self,
+        context: &RequestContext,
+        root: &str,
+    ) -> Result<bool, ApplicationProblem> {
+        let authority = work_authority(context)?;
+        self.has_target_holder_for_authority(&authority, root)
+    }
+
+    pub fn has_target_holder_for_authority(
+        &self,
+        authority: &WorkAuthority,
+        root: &str,
+    ) -> Result<bool, ApplicationProblem> {
+        self.storage
+            .target_holder(authority, root)
+            .map(|holder| holder.is_some())
+            .map_err(storage_problem)
+    }
+
+    /// Cleanup-only exact-scope census, intentionally independent of the
+    /// current caller's actor and policy lineage.
+    pub fn has_target_holder_in_exact_repository_root(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        root: &str,
+    ) -> Result<bool, ApplicationProblem> {
+        self.storage
+            .has_target_holder_in_exact_repository_root(project_id, repository_id, root)
+            .map_err(storage_problem)
     }
 
     /// Evaluates a placement without changing anything.

@@ -6,12 +6,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkArtifactRefV1, WorkCommandId, WorkflowDefinition,
+    ManifestDigest, RunId, WorkArtifactRefV1, WorkAuthority, WorkCommandId, WorkflowDefinition,
     WorkflowDefinitionId, WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowRunCommand,
     WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection, WorkflowRunStateError,
     WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepInput, WorkflowStepOutput,
     canonical_sha256, canonical_text::canonical_framed_sha256,
 };
+
+/// Maximum number of workflow histories rebuilt by one restart-recovery read.
+pub const WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1: usize = 32;
 
 use crate::workflow_provider::WorkflowProviderRegistration;
 use crate::workflow_synthesis::{
@@ -61,6 +64,96 @@ pub trait WorkflowRunStoragePort: Send + Sync {
         &self,
         request: &WorkflowRunAppendRequest,
     ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError>;
+
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError>;
+
+    fn active_projection_page(
+        &self,
+        authority: &WorkAuthority,
+        after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+    ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
+        let mut projections = self.projections()?;
+        projections.sort_by(|left, right| left.run_id().as_str().cmp(right.run_id().as_str()));
+        let mut candidates = projections
+            .into_iter()
+            .filter(|projection| {
+                after.is_none_or(|cursor| {
+                    projection.run_id().as_str() > cursor.after_run_id.as_str()
+                })
+            })
+            .take(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
+            .collect::<Vec<_>>();
+        let continuation = (candidates.len() > WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1).then(|| {
+            WorkflowActiveRunRecoveryCursorV1 {
+                after_run_id: candidates[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1]
+                    .run_id()
+                    .clone(),
+            }
+        });
+        candidates.truncate(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1);
+        candidates.retain(|projection| {
+            !projection.status().is_terminal()
+                && projection
+                    .fan_out_plans()
+                    .values()
+                    .all(|plan| &plan.authority == authority)
+        });
+        Ok(WorkflowActiveRunRecoveryPageV1 {
+            projections: candidates,
+            continuation,
+        })
+    }
+
+    fn fan_out_binding(
+        &self,
+        identity: &tracedecay_domain::WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
+        let mut binding = None;
+        for projection in self.projections()? {
+            for plan in projection.fan_out_plans().values() {
+                if plan
+                    .children
+                    .iter()
+                    .any(|child| &child.attempt_identity == identity)
+                {
+                    let candidate = WorkflowFanOutAttemptBindingV1 {
+                        run_id: projection.run_id().clone(),
+                        step_id: plan.step_id.clone(),
+                        plan_digest: plan.plan_digest.clone(),
+                    };
+                    if binding
+                        .as_ref()
+                        .is_some_and(|existing| existing != &candidate)
+                    {
+                        return Err(WorkflowRunStorageError::InvalidHistory);
+                    }
+                    binding = Some(candidate);
+                }
+            }
+        }
+        Ok(binding)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowActiveRunRecoveryCursorV1 {
+    pub after_run_id: RunId,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowActiveRunRecoveryPageV1 {
+    pub projections: Vec<WorkflowRunProjection>,
+    pub continuation: Option<WorkflowActiveRunRecoveryCursorV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowFanOutAttemptBindingV1 {
+    pub run_id: RunId,
+    pub step_id: tracedecay_domain::WorkflowStepId,
+    pub plan_digest: ManifestDigest,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -106,6 +199,17 @@ where
         admission: WorkflowAdmissionSnapshot,
         context: WorkflowRunEventContext,
     ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
+        self.admit_with_fan_out(run_id, definition, admission, Vec::new(), context)
+    }
+
+    pub fn admit_with_fan_out(
+        &self,
+        run_id: RunId,
+        definition: WorkflowDefinition,
+        admission: WorkflowAdmissionSnapshot,
+        fan_out_plans: Vec<tracedecay_domain::WorkflowFanOutPlanV1>,
+        context: WorkflowRunEventContext,
+    ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
         if definition.pinned_policy_digest() != &admission.policy_digest {
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
@@ -115,11 +219,12 @@ where
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
-        let event = WorkflowRunEvent::admitted(
+        let event = WorkflowRunEvent::admitted_with_fan_out(
             run_id,
             definition,
             admission.topology_digest,
             admission.provider_registry_digest,
+            fan_out_plans,
             context,
         )?;
         Ok(self
@@ -681,6 +786,7 @@ pub struct WorkflowRunStartRequest {
     #[schemars(range(min = 1))]
     pub definition_version: u64,
     pub provider: WorkflowProviderRegistration,
+    pub fan_out: Option<crate::workflow_runtime::WorkflowFanOutStartV1>,
     pub command_id: WorkCommandId,
 }
 

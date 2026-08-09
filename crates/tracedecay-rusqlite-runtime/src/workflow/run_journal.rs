@@ -6,12 +6,15 @@
 //! are verified against their declared reference on every hydration.
 
 use tracedecay_application::{
-    WorkflowArtifactPayload, WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError,
-    WorkflowArtifactStorePort, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
-    WorkflowRunStorageError, WorkflowRunStoragePort,
+    WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1, WorkflowActiveRunRecoveryCursorV1,
+    WorkflowActiveRunRecoveryPageV1, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
+    WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowFanOutAttemptBindingV1,
+    WorkflowRunAppendOutcome, WorkflowRunAppendRequest, WorkflowRunStorageError,
+    WorkflowRunStoragePort,
 };
 use tracedecay_domain::{
-    RunId, WorkArtifactRefV1, WorkflowRunEvent, WorkflowRunProjection, canonical_sha256,
+    RunId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkflowRunEvent,
+    WorkflowRunProjection, canonical_sha256,
 };
 
 use super::{
@@ -144,6 +147,139 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             .commit()
             .map(|_| WorkflowRunAppendOutcome::Appended(projection))
             .map_err(run_journal_unavailable)
+    }
+
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(run_journal_unavailable)?;
+        let rows = query_tx(
+            &transaction,
+            "SELECT DISTINCT run_id FROM workflow_run_journal ORDER BY run_id",
+            Vec::new(),
+        )
+        .map_err(run_journal_unavailable)?;
+        let projections = rows
+            .rows
+            .iter()
+            .map(|row| {
+                let run_id = sql_text(&row.values, 0)
+                    .ok_or(WorkflowRunStorageError::InvalidHistory)
+                    .and_then(|value| {
+                        RunId::new(value.to_owned())
+                            .map_err(|_| WorkflowRunStorageError::InvalidHistory)
+                    })?;
+                history_tx(&transaction, &run_id).and_then(|history| rebuild(&history))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let _ = transaction.rollback();
+        Ok(projections)
+    }
+
+    fn active_projection_page(
+        &self,
+        authority: &WorkAuthority,
+        after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+    ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(run_journal_unavailable)?;
+        let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
+            .map_err(|_| WorkflowRunStorageError::Unavailable)?;
+        let rows = match after {
+            Some(cursor) => query_tx(
+                &transaction,
+                "SELECT DISTINCT run_id FROM workflow_run_journal
+                 WHERE run_id > ?1 ORDER BY run_id LIMIT ?2",
+                vec![
+                    ExactSqlValue::Text(cursor.after_run_id.as_str().to_owned()),
+                    ExactSqlValue::Integer(page_limit),
+                ],
+            ),
+            None => query_tx(
+                &transaction,
+                "SELECT DISTINCT run_id FROM workflow_run_journal
+                 ORDER BY run_id LIMIT ?1",
+                vec![ExactSqlValue::Integer(page_limit)],
+            ),
+        }
+        .map_err(run_journal_unavailable)?;
+        let run_ids = rows
+            .rows
+            .iter()
+            .map(|row| {
+                let value =
+                    sql_text(&row.values, 0).ok_or(WorkflowRunStorageError::InvalidHistory)?;
+                RunId::new(value.to_owned()).map_err(|_| WorkflowRunStorageError::InvalidHistory)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_run_ids = run_ids
+            .iter()
+            .take(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1)
+            .cloned()
+            .collect::<Vec<_>>();
+        let continuation = (run_ids.len() > WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1).then(|| {
+            WorkflowActiveRunRecoveryCursorV1 {
+                after_run_id: page_run_ids[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1].clone(),
+            }
+        });
+        let projections = page_run_ids
+            .iter()
+            .map(|run_id| history_tx(&transaction, run_id).and_then(|history| rebuild(&history)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|projection| {
+                !projection.status().is_terminal()
+                    && projection
+                        .fan_out_plans()
+                        .values()
+                        .all(|plan| &plan.authority == authority)
+            })
+            .collect();
+        let _ = transaction.rollback();
+        Ok(WorkflowActiveRunRecoveryPageV1 {
+            projections,
+            continuation,
+        })
+    }
+
+    fn fan_out_binding(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
+        // The attempt identity already carries its owning workflow run ID, so
+        // the journal primary key provides a bounded lookup. Do not use the
+        // trait's cross-run fallback scan on response-delivery paths.
+        let projection = match self.projection(identity.run_id()) {
+            Ok(projection) => projection,
+            Err(WorkflowRunStorageError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut binding = None;
+        for plan in projection.fan_out_plans().values() {
+            if !plan
+                .children
+                .iter()
+                .any(|child| &child.attempt_identity == identity)
+            {
+                continue;
+            }
+            let candidate = WorkflowFanOutAttemptBindingV1 {
+                run_id: projection.run_id().clone(),
+                step_id: plan.step_id.clone(),
+                plan_digest: plan.plan_digest.clone(),
+            };
+            if binding
+                .as_ref()
+                .is_some_and(|existing| existing != &candidate)
+            {
+                return Err(WorkflowRunStorageError::InvalidHistory);
+            }
+            binding = Some(candidate);
+        }
+        Ok(binding)
     }
 }
 

@@ -1,7 +1,5 @@
 //! Atomic ordinary/synthesis attempt admission over one durable row authority.
 
-use std::num::NonZeroU16;
-
 use tracedecay_domain::{
     ManifestDigest, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
     WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkExecutionEnvelopeV1,
@@ -47,8 +45,7 @@ pub trait WorkSynthesisAdmissionStoragePort: WorkAttemptStoragePort {
         &self,
         authority: &WorkAuthority,
         record: &WorkSynthesisAdmissionRecordV1,
-        maximum_active_per_repository: NonZeroU16,
-        maximum_parallel_per_task: NonZeroU16,
+        concurrency: &tracedecay_domain::configuration::TopologyConcurrencyPolicyV1,
     ) -> Result<WorkSynthesisInsertOutcome, WorkAttemptStorageError>;
 
     /// Loads the immutable synthesis admission. An ordinary row is a typed
@@ -130,12 +127,10 @@ where
         let authority = prepared.authority.clone();
         let attempt = self.lease_prepared(prepared)?;
         let inserted = match registered_topology {
-            Some(topology) => self.attempts.insert_bounded(
-                &authority,
-                &attempt,
-                topology.concurrency.maximum_active_per_repository,
-                topology.concurrency.maximum_parallel_per_task,
-            ),
+            Some(topology) => {
+                self.attempts
+                    .insert_bounded(&authority, &attempt, &topology.concurrency)
+            }
             None => self.attempts.insert(&authority, &attempt),
         };
         match inserted {
@@ -289,12 +284,10 @@ where
             result,
         };
         let inserted = match registered_topology {
-            Some(topology) => self.attempts.insert_synthesis_bounded(
-                &authority,
-                &record,
-                topology.concurrency.maximum_active_per_repository,
-                topology.concurrency.maximum_parallel_per_task,
-            ),
+            Some(topology) => {
+                self.attempts
+                    .insert_synthesis_bounded(&authority, &record, &topology.concurrency)
+            }
             None => self.attempts.insert_synthesis(&authority, &record),
         };
         match inserted {

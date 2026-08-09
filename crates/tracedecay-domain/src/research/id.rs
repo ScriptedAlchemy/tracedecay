@@ -210,6 +210,7 @@ digest_id!(
     AccessPolicyDigest,
     RegistryManifestDigest,
     DataVersionDigest,
+    WorkTopologyGenerationRefV1,
 );
 
 /// Monotonic epoch of the writer authority for a shard.

@@ -135,16 +135,44 @@ impl WorkflowEffectIdentityV1 {
     }
 
     pub fn identity_digest(&self) -> Result<ManifestDigest, crate::ApplicationContractError> {
+        let request_id = (self.operation == WorkflowEffectOperationV1::HandoffRedeem)
+            .then_some(&self.request_id);
         canonical_sha256(&(
             "tracedecay.application.workflow-effect-identity.v1",
             self.operation,
             &self.idempotency_key,
+            request_id,
             &self.actor,
             &self.scope,
             &self.input_digest,
             self.receipt_context.binding_digest()?,
         ))
         .map_err(Into::into)
+    }
+
+    /// Handoff redemption retries are idempotent only for the exact admitted
+    /// request. A different request must reach the single-use token authority
+    /// and receive its terminal replay refusal instead of aliasing the first
+    /// request's successful journal entry.
+    pub fn handoff_redeem_idempotency_key(
+        request_id: &RequestId,
+        actor: &ActorId,
+        scope: &ResolvedScope,
+        receipt_binding_digest: &ManifestDigest,
+    ) -> Result<IdempotencyKey, crate::ApplicationContractError> {
+        let digest = canonical_sha256(&(
+            "tracedecay.application.workflow-handoff-redeem-request.v1",
+            request_id,
+            actor,
+            scope,
+            receipt_binding_digest,
+        ))?;
+        let suffix = digest.as_str().strip_prefix("sha256:").ok_or(
+            crate::ApplicationContractError::Inconsistent {
+                field: "Workflow handoff redeem request digest",
+            },
+        )?;
+        IdempotencyKey::new(format!("workflow.handoff_redeem.{suffix}"))
     }
 
     pub fn payload_digest(&self) -> Result<ManifestDigest, crate::ApplicationContractError> {
@@ -569,6 +597,13 @@ impl fmt::Display for WorkflowEffectAuthorityErrorV1 {
 impl std::error::Error for WorkflowEffectAuthorityErrorV1 {}
 
 pub trait WorkflowEffectAuthorityPortV1: Send + Sync {
+    /// Whether any effect is still before-effect or in-flight. An authority
+    /// read failure must remain unavailable to cleanup callers.
+    fn has_pending_effects(
+        &self,
+        worktree_id: &tracedecay_domain::WorktreeId,
+    ) -> Result<bool, WorkflowEffectAuthorityErrorV1>;
+
     fn reserve_effect(
         &self,
         identity: &WorkflowEffectIdentityV1,

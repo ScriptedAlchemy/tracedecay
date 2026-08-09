@@ -5,7 +5,7 @@
 //! through the policy evaluator directly, so the production path that assembles
 //! the authorized snapshot is the thing under test. Routes, budget, content
 //! location, prior outcomes, and any human override reach the evaluator only by
-//! way of `WorkStoragePort::routing_snapshot`; nothing in this file hands the
+//! way of `WorkRoutingSnapshotPortV1`; nothing in this file hands the
 //! evaluator a route the authority did not declare.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::{
     CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
     GenerateProposalRequest, RequestContext, RequestId, ResolvedScope, WorkAppendOutcome,
-    WorkAppendRequest, WorkRoutingSnapshotV1, WorkService, WorkStorageError, WorkStoragePort,
+    WorkAppendRequest, WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
+    WorkRoutingSnapshotV1, WorkService, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
@@ -151,12 +152,14 @@ impl WorkStoragePort for TestStore {
         history.push(request.event.clone());
         Ok(WorkAppendOutcome::Appended(projection(history)?))
     }
+}
 
+impl WorkRoutingSnapshotPortV1 for TestStore {
     fn routing_snapshot(
         &self,
-        _authority: &WorkAuthority,
+        _context: &RequestContext,
         _task_id: &TaskId,
-    ) -> Result<WorkRoutingSnapshotV1, WorkStorageError> {
+    ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
         Ok(self.routing.lock().unwrap().clone())
     }
 }
@@ -261,6 +264,7 @@ fn eligible_routes_from_the_authorized_snapshot_are_ranked_deterministically() {
     let context = context("project.work.planner.rank");
     let task_id = ready_task(&service, &context, "task.work.rank");
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: three_routes(),
         budget: Some(budget()),
         content_location: Some(local_and_tenant()),
@@ -270,7 +274,7 @@ fn eligible_routes_from_the_authorized_snapshot_are_ranked_deterministically() {
 
     let request = proposal_request(&task_id, "proposal.work.rank");
     let proposal = service
-        .generate_proposal(&context, digest('f'), request.clone())
+        .generate_proposal(&context, digest('f'), &store, request.clone())
         .unwrap();
     let plan = proposal
         .decision
@@ -302,7 +306,7 @@ fn eligible_routes_from_the_authorized_snapshot_are_ranked_deterministically() {
     // Identical authorized inputs produce a byte-identical decision, so the
     // proposal digest that binds acceptance is stable across replay.
     let replayed = service
-        .generate_proposal(&context, digest('f'), request)
+        .generate_proposal(&context, digest('f'), &store, request)
         .unwrap();
     assert_eq!(proposal, replayed);
 }
@@ -320,6 +324,7 @@ fn budget_and_content_location_refusals_are_recorded_as_typed_exclusions() {
     let mut offshore = route("route.external", WorkOrdinalBandV1::Highest);
     offshore.content_location = WorkContentLocationClassV1::External;
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: vec![
             over_budget,
             offshore,
@@ -335,6 +340,7 @@ fn budget_and_content_location_refusals_are_recorded_as_typed_exclusions() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.exclude"),
         )
         .unwrap();
@@ -368,6 +374,7 @@ fn a_human_override_promotes_a_surviving_route_and_is_recorded() {
     let context = context("project.work.planner.override");
     let task_id = ready_task(&service, &context, "task.work.override");
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: three_routes(),
         budget: Some(budget()),
         content_location: Some(local_and_tenant()),
@@ -382,6 +389,7 @@ fn a_human_override_promotes_a_surviving_route_and_is_recorded() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.override"),
         )
         .unwrap();
@@ -419,6 +427,7 @@ fn no_eligible_routes_is_a_typed_decision_and_not_a_failure() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.empty"),
         )
         .expect("an empty route set is a decision, not an error");
@@ -451,6 +460,7 @@ fn sizing_is_withheld_below_the_declared_calibration_support_floor() {
         .collect();
     assert!(u32::try_from(in_cohort.len()).unwrap() < WORK_CALIBRATION_SUPPORT_FLOOR);
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: three_routes(),
         budget: Some(budget()),
         content_location: Some(local_and_tenant()),
@@ -462,6 +472,7 @@ fn sizing_is_withheld_below_the_declared_calibration_support_floor() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.sparse"),
         )
         .unwrap();
@@ -489,6 +500,7 @@ fn sizing_at_the_support_floor_carries_the_floor_that_governed_it() {
         .chain(std::iter::once(outcome("route.beta", first_observed)))
         .collect();
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: three_routes(),
         budget: Some(budget()),
         content_location: Some(local_and_tenant()),
@@ -500,6 +512,7 @@ fn sizing_at_the_support_floor_carries_the_floor_that_governed_it() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.calibrated"),
         )
         .unwrap();
@@ -535,6 +548,7 @@ fn planning_a_proposal_mutates_no_work_state() {
     let context = context("project.work.planner.readonly");
     let task_id = ready_task(&service, &context, "task.work.readonly");
     store.declare(WorkRoutingSnapshotV1 {
+        configuration_revision: None,
         eligible_routes: three_routes(),
         budget: Some(budget()),
         content_location: Some(local_and_tenant()),
@@ -547,6 +561,7 @@ fn planning_a_proposal_mutates_no_work_state() {
         .generate_proposal(
             &context,
             digest('f'),
+            &store,
             proposal_request(&task_id, "proposal.work.readonly"),
         )
         .unwrap();

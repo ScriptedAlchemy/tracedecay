@@ -21,25 +21,24 @@ use tracedecay_domain::WorkAttemptV1;
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AttachRuntimeEvidenceCommand,
-    CancelWorkAttemptCommand, CreateWorkCommand, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
-    ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    ReviewProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkDuplicateAdjudicationAppendOutcomeV1, WorkGraphReadRequestV1, WorkGraphReadV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CancelWorkAttemptCommand,
+    CreateWorkCommand, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    WorkEvidenceRetrieveRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
     WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
     WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkProductMutationRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkRetryTestBindingTokenOutcomeV1, WorkRetryTestBindingTokenRequestV1,
-    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
-    WorkTopologyViewRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 33] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -71,11 +70,6 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
         "admit_execution",
         "capability.work.admit_execution",
         "use-case.work.admit_execution",
-    ),
-    (
-        "attach_runtime_evidence",
-        "capability.work.attach_runtime_evidence",
-        "use-case.work.attach_runtime_evidence",
     ),
     (
         "accept_task",
@@ -113,11 +107,6 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
         "use-case.work.retry_attempt",
     ),
     (
-        "mint_retry_test_binding",
-        "capability.work.mint_retry_test_binding",
-        "use-case.work.mint_retry_test_binding",
-    ),
-    (
         "list_attempts",
         "capability.work.list_attempts",
         "use-case.work.list_attempts",
@@ -127,7 +116,17 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
         "capability.work.hydrate_artifacts",
         "use-case.work.hydrate_artifacts",
     ),
+    (
+        "retrieve_evidence",
+        "capability.work.evidence.read",
+        "use-case.work.evidence.read",
+    ),
     ("views", "capability.work.views", "use-case.work.views"),
+    (
+        "prepare_graph_mutation",
+        "capability.work.prepare_graph_mutation",
+        "use-case.work.prepare_graph_mutation",
+    ),
     (
         "mutate_graph",
         "capability.work.mutate_graph",
@@ -142,6 +141,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
         "topology_metrics",
         "capability.work.topology_metrics",
         "use-case.work.topology_metrics",
+    ),
+    (
+        "prepare_duplicate_adjudication",
+        "capability.work.prepare_duplicate_adjudication",
+        "use-case.work.prepare_duplicate_adjudication",
     ),
     (
         "adjudicate_duplicate",
@@ -249,13 +253,6 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::AdmitExecutionCommand",
             "tracedecay_domain::WorkProjection",
         )?,
-        available::<AttachRuntimeEvidenceCommand, WorkProjection>(
-            "attach_runtime_evidence",
-            "/application/work/attach-runtime-evidence",
-            EffectClass::Administrative,
-            "tracedecay_application::AttachRuntimeEvidenceCommand",
-            "tracedecay_domain::WorkProjection",
-        )?,
         available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
             "/application/work/accept-task",
@@ -305,13 +302,6 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::RetryWorkAttemptCommandV1",
             "tracedecay_application::WorkRetryAttemptOutcomeV1",
         )?,
-        available::<WorkRetryTestBindingTokenRequestV1, WorkRetryTestBindingTokenOutcomeV1>(
-            "mint_retry_test_binding",
-            "/application/work/mint-retry-test-binding",
-            EffectClass::Administrative,
-            "tracedecay_application::WorkRetryTestBindingTokenRequestV1",
-            "tracedecay_application::WorkRetryTestBindingTokenOutcomeV1",
-        )?,
         available::<WorkAttemptListRequestV1, WorkAttemptListV1>(
             "list_attempts",
             "/application/work/list-attempts",
@@ -326,12 +316,26 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::WorkArtifactHydrationRequestV1",
             "tracedecay_application::WorkArtifactHydrationV1",
         )?,
+        available::<WorkEvidenceRetrieveRequestV1, WorkEvidenceRetrievalV1>(
+            "retrieve_evidence",
+            "/application/work/retrieve-evidence",
+            EffectClass::Read,
+            "tracedecay_application::WorkEvidenceRetrieveRequestV1",
+            "tracedecay_application::WorkEvidenceRetrievalV1",
+        )?,
         available::<WorkGraphReadRequestV1, WorkGraphReadV1>(
             "views",
             "/application/work/views",
             EffectClass::Read,
             "tracedecay_application::WorkGraphReadRequestV1",
             "tracedecay_application::WorkGraphReadV1",
+        )?,
+        available::<PrepareWorkProductMutationRequestV1, WorkProductMutationRequestV1>(
+            "prepare_graph_mutation",
+            "/application/work/prepare-graph-mutation",
+            EffectClass::Read,
+            "tracedecay_application::PrepareWorkProductMutationRequestV1",
+            "tracedecay_application::WorkProductMutationRequestV1",
         )?,
         available::<WorkProductMutationRequestV1, WorkProductMutationReceiptV1>(
             "mutate_graph",
@@ -353,6 +357,13 @@ pub fn work_executable_binding_registry()
             EffectClass::Read,
             "tracedecay_application::ExecutionTopologyMetricsRequestV1",
             "tracedecay_application::ExecutionTopologyMetricsV1",
+        )?,
+        available::<PrepareWorkDuplicateAdjudicationRequestV1, WorkDuplicateAdjudicationCommandV1>(
+            "prepare_duplicate_adjudication",
+            "/application/work/prepare-duplicate-adjudication",
+            EffectClass::Read,
+            "tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1",
+            "tracedecay_domain::WorkDuplicateAdjudicationCommandV1",
         )?,
         available::<WorkDuplicateAdjudicationCommandV1, WorkDuplicateAdjudicationAppendOutcomeV1>(
             "adjudicate_duplicate",

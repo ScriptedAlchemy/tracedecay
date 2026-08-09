@@ -39,14 +39,67 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn authority(actor: &str) -> WorkAuthority {
+    authority_in_worktree_with_policy(actor, "worktree.placement.storage", 'a')
+}
+
+fn authority_in_worktree_with_policy(actor: &str, worktree: &str, policy: char) -> WorkAuthority {
     WorkAuthority::new(
         id::<ProjectId>("project.placement.storage"),
         id::<RepositoryId>("repository.placement.storage"),
-        id::<WorktreeId>("worktree.placement.storage"),
+        id::<WorktreeId>(worktree),
         id::<ActorId>(actor),
-        digest('a'),
+        digest(policy),
     )
     .unwrap()
+}
+
+#[test]
+fn authority_in_worktree_a_targeting_root_b_blocks_cleanup_of_b_across_lineage() {
+    let store = RegisteredWorkStore::start("placement-cleanup-holder-scope");
+    let old_policy = authority_in_worktree_with_policy(
+        "actor.placement.current",
+        "worktree.placement.old-policy",
+        '9',
+    );
+    let other_actor = authority_in_worktree_with_policy(
+        "actor.placement.delegated",
+        "worktree.placement.other-actor",
+        'a',
+    );
+    let old_root = "/workspace/placement-target-b";
+    let other_root = "/workspace/placement-other-actor";
+    store
+        .storage()
+        .publish_placement(&old_policy, None, &admitted("run.old-policy", old_root))
+        .unwrap();
+    store
+        .storage()
+        .publish_placement(&other_actor, None, &admitted("run.other-actor", other_root))
+        .unwrap();
+
+    for (authority, root) in [(&old_policy, old_root), (&other_actor, other_root)] {
+        assert!(
+            store
+                .storage()
+                .has_target_holder_in_exact_repository_root(
+                    authority.project_id(),
+                    authority.repository_id(),
+                    root,
+                )
+                .unwrap(),
+            "cleanup must see placements outside its current actor/policy lineage"
+        );
+    }
+    assert!(
+        !store
+            .storage()
+            .has_target_holder_in_exact_repository_root(
+                old_policy.project_id(),
+                old_policy.repository_id(),
+                "/workspace/placement-unrelated",
+            )
+            .unwrap()
+    );
 }
 
 fn identity(run: &str) -> WorkPlacementIdentityV1 {
