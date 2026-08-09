@@ -244,7 +244,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
                 || !expected.iter().all(|candidate| {
                     self.database
                         .resolve_retrieval_anchor_record(
-                            candidate.owner(),
+                            RetrievalAnchorOwnerV1::from(candidate.owner().clone()),
                             candidate.anchor_id().clone(),
                         )
                         .ok()

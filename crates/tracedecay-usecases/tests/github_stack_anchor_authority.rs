@@ -13,11 +13,12 @@ use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId, CommitId, GitHubStackCapabilityStateV1, ManifestDigest, ProjectId,
-    ProviderId, RefId, RepositoryId, RetrievalAnchorTargetV3, UseCaseId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, AnchorOwnerBindingV1, CapabilityId, CommitId, GitHubStackCapabilityStateV1,
+    ManifestDigest, PrivacyDomainId, ProjectId, ProviderId, RefId, RepositoryId,
+    RetrievalAnchorTargetV3, UseCaseId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_store::RetrievalAnchorOwnerV1;
 use tracedecay_usecases::advisory::github_runtime::{
     GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
 };
@@ -174,6 +175,21 @@ async fn compare_unavailable_degraded_capability_persists_without_a_snapshot_anc
     )
     .expect("generic durable read");
     assert!(durable.snapshot_anchor.is_none());
+    let wrong_privacy_owner = AnchorOwnerBindingV1::for_project(
+        database.binding().shard_id.profile_id.clone(),
+        resolved.project_id.clone(),
+        PrivacyDomainId::new("privacy.github-stack.wrong").expect("wrong privacy domain"),
+    )
+    .expect("wrong privacy owner");
+    assert!(
+        database
+            .resolve_retrieval_anchor_record(
+                RetrievalAnchorOwnerV1::from(wrong_privacy_owner),
+                observation.capability_anchor_id.clone(),
+            )
+            .expect("wrong privacy read")
+            .is_none()
+    );
 
     let (wrong_resolved, wrong_feedback) = scopes("wrong");
     let (wrong_context, wrong_request) = context_and_request(wrong_resolved, wrong_feedback);
