@@ -424,27 +424,3 @@ pub(crate) async fn ensure_parse_offset_columns(
     )
     .await
 }
-
-pub(crate) async fn ensure_code_project_native_root_columns(
-    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    ensure_table_columns(
-        conn,
-        "code_projects",
-        &[
-            (
-                "primary_root_platform",
-                "ALTER TABLE code_projects ADD COLUMN primary_root_platform TEXT",
-            ),
-            (
-                "primary_root_bytes",
-                "ALTER TABLE code_projects ADD COLUMN primary_root_bytes BLOB",
-            ),
-            (
-                "primary_root_last_seen_at",
-                "ALTER TABLE code_projects ADD COLUMN primary_root_last_seen_at INTEGER",
-            ),
-        ],
-    )
-    .await
-}
