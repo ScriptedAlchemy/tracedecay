@@ -176,7 +176,7 @@ pub(super) struct ExecutionTopologyEvidenceV1 {
     pub(super) outcomes: BTreeMap<String, ConflictOutcomeRowV1>,
     pub(super) integrations: Vec<IntegrationRowV1>,
     pub(super) stack_drifts: BTreeMap<String, StackDriftRowV1>,
-    pub(super) duplicates: BTreeMap<String, (u64, Option<DuplicateRowV1>, i64)>,
+    pub(super) duplicates: BTreeMap<String, (Option<DuplicateRowV1>, i64)>,
     pub(super) blocked: Vec<BlockedRowV1>,
     pub(super) reruns: Vec<RerunRowV1>,
     pub(super) leaks: BTreeMap<String, (u64, Option<LeakRowV1>, i64)>,
@@ -410,31 +410,20 @@ impl ExecutionTopologyEvidenceV1 {
             coverage: duplicate.coverage,
             event_time_micros,
         };
-        match self.duplicates.get(&duplicate.adjudication_ref) {
-            Some((revision, _, _)) if *revision > duplicate.adjudication_revision => {}
-            Some((revision, existing, existing_time))
-                if *revision == duplicate.adjudication_revision =>
-            {
-                if existing.is_some_and(|existing| existing != row) {
-                    self.duplicates.insert(
-                        duplicate.adjudication_ref.clone(),
-                        (
-                            duplicate.adjudication_revision,
-                            None,
-                            (*existing_time).max(event_time_micros),
-                        ),
-                    );
-                }
-            }
-            _ => {
+        let Some(anchor_ref) = duplicate.local_anchor_refs.iter().min() else {
+            return;
+        };
+        match self.duplicates.get(anchor_ref) {
+            Some((existing, existing_time)) if existing.as_ref() != Some(&row) => {
                 self.duplicates.insert(
-                    duplicate.adjudication_ref.clone(),
-                    (
-                        duplicate.adjudication_revision,
-                        Some(row),
-                        event_time_micros,
-                    ),
+                    anchor_ref.clone(),
+                    (None, (*existing_time).max(event_time_micros)),
                 );
+            }
+            Some(_) => {}
+            None => {
+                self.duplicates
+                    .insert(anchor_ref.clone(), (Some(row), event_time_micros));
             }
         }
     }
@@ -504,7 +493,7 @@ pub(super) fn same_stack_drift_interval(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod revision_tests {
+mod aggregation_tests {
     use super::*;
     use tracedecay_domain::{
         DuplicateEffectOutcomeV1, DuplicateEffortKindV1, QuantityEvidenceClassV1,
@@ -512,10 +501,10 @@ mod revision_tests {
         WorkExecutionLeakRecoveryV1,
     };
 
-    fn duplicate(revision: u64, wall_micros: u64) -> WorkDuplicateEffortObservedV1 {
+    fn duplicate(anchor_refs: &[&str], wall_micros: u64) -> WorkDuplicateEffortObservedV1 {
         WorkDuplicateEffortObservedV1 {
-            adjudication_ref: "duplicate-relation:fixture".to_owned(),
-            adjudication_revision: revision,
+            adjudication_ref: "duplicate.relation.fixture".to_owned(),
+            adjudication_revision: 1,
             kind: DuplicateEffortKindV1::ExactDuplicate,
             wall_micros: Some(wall_micros),
             token_count: None,
@@ -525,39 +514,49 @@ mod revision_tests {
             evidence: QuantityEvidenceClassV1::OwnerReceipt,
             effect_outcome: DuplicateEffectOutcomeV1::NotApplicable,
             coverage: CoverageStateV1::Known,
-            local_anchor_refs: Vec::new(),
+            local_anchor_refs: anchor_refs
+                .iter()
+                .map(|anchor| (*anchor).to_owned())
+                .collect(),
         }
     }
 
     #[test]
-    fn duplicate_adjudication_is_revision_monotone_and_order_independent() {
+    fn duplicate_effort_aggregation_is_anchor_keyed_and_order_independent() {
         for rows in [
-            vec![duplicate(1, 10), duplicate(2, 20)],
-            vec![duplicate(2, 20), duplicate(1, 10)],
-            vec![duplicate(1, 10), duplicate(1, 11), duplicate(2, 20)],
+            vec![
+                duplicate(&["receipt.duplicate.alpha"], 10),
+                duplicate(&["receipt.duplicate.beta"], 20),
+            ],
+            vec![
+                duplicate(&["receipt.duplicate.beta"], 20),
+                duplicate(&["receipt.duplicate.alpha"], 10),
+            ],
+            vec![
+                duplicate(&["receipt.duplicate.alpha"], 10),
+                duplicate(&["receipt.duplicate.alpha"], 10),
+                duplicate(&["receipt.duplicate.beta"], 20),
+            ],
         ] {
             let mut evidence = ExecutionTopologyEvidenceV1::default();
             for row in &rows {
                 evidence.absorb_duplicate(row, 0);
             }
-            let (_, row, _) = evidence
-                .duplicates
-                .get("duplicate-relation:fixture")
-                .unwrap();
+            let (row, _) = evidence.duplicates.get("receipt.duplicate.alpha").unwrap();
+            assert_eq!(row.unwrap().quantities[0], Some(10));
+            let (row, _) = evidence.duplicates.get("receipt.duplicate.beta").unwrap();
             assert_eq!(row.unwrap().quantities[0], Some(20));
         }
     }
 
     #[test]
-    fn conflicting_latest_duplicate_revision_remains_unknown() {
+    fn conflicting_duplicate_quantities_remain_unknown() {
         let mut evidence = ExecutionTopologyEvidenceV1::default();
-        evidence.absorb_duplicate(&duplicate(2, 20), 0);
-        evidence.absorb_duplicate(&duplicate(2, 21), 0);
+        evidence.absorb_duplicate(&duplicate(&["receipt.duplicate.alpha"], 20), 0);
+        evidence.absorb_duplicate(&duplicate(&["receipt.duplicate.alpha"], 21), 0);
         assert!(
-            evidence.duplicates["duplicate-relation:fixture"]
-                .1
-                .is_none(),
-            "same-revision conflict must not pick an arrival-order winner"
+            evidence.duplicates["receipt.duplicate.alpha"].0.is_none(),
+            "conflicting anchor quantities must not pick an arrival-order winner"
         );
     }
 

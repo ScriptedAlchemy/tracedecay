@@ -22,7 +22,6 @@ pub(in crate::execution_topology_metrics) struct ExecutionTopologyCapacityCorrec
 enum ExecutionTopologyCapacityCorrectionCandidateV1 {
     Duplicate {
         reference: String,
-        revision: u64,
         event_time_micros: i64,
         row: Option<DuplicateRowV1>,
     },
@@ -42,10 +41,9 @@ impl ExecutionTopologyEvidenceV1 {
     ) -> Result<ExecutionTopologyCapacityCorrectionCarryV1, ExecutionTopologyRollupStateErrorV1>
     {
         let mut carry = ExecutionTopologyCapacityCorrectionCarryV1::default();
-        for (reference, (revision, row, event_time_micros)) in &self.duplicates {
+        for (reference, (row, event_time_micros)) in &self.duplicates {
             carry.push(ExecutionTopologyCapacityCorrectionCandidateV1::Duplicate {
                 reference: protected_reference("execution-topology.duplicate", reference)?,
-                revision: *revision,
                 event_time_micros: *event_time_micros,
                 row: *row,
             })?;
@@ -229,17 +227,16 @@ fn apply_candidates(
     capacity: &mut ExecutionTopologyCapacityRollupV1,
     candidates: &[ExecutionTopologyCapacityCorrectionCandidateV1],
 ) {
-    let mut duplicates = BTreeMap::<String, (u64, Option<DuplicateRowV1>)>::new();
+    let mut duplicates = BTreeMap::<String, (Option<DuplicateRowV1>, i64)>::new();
     let mut predictions = BTreeMap::<String, ConflictPredictionRowV1>::new();
     let mut outcomes = BTreeMap::<String, ConflictOutcomeRowV1>::new();
     for candidate in candidates {
         match candidate {
             ExecutionTopologyCapacityCorrectionCandidateV1::Duplicate {
                 reference,
-                revision,
                 row,
-                ..
-            } => absorb_duplicate_candidate(&mut duplicates, reference, *revision, *row),
+                event_time_micros,
+            } => absorb_duplicate_candidate(&mut duplicates, reference, *event_time_micros, *row),
             ExecutionTopologyCapacityCorrectionCandidateV1::Prediction { reference, row } => {
                 predictions
                     .entry(reference.clone())
@@ -255,20 +252,20 @@ fn apply_candidates(
 }
 
 fn absorb_duplicate_candidate(
-    target: &mut BTreeMap<String, (u64, Option<DuplicateRowV1>)>,
+    target: &mut BTreeMap<String, (Option<DuplicateRowV1>, i64)>,
     reference: &str,
-    revision: u64,
+    event_time_micros: i64,
     row: Option<DuplicateRowV1>,
 ) {
-    match target.get(reference) {
-        Some((existing_revision, _)) if *existing_revision > revision => {}
-        Some((existing_revision, existing)) if *existing_revision == revision => {
+    match target.get_mut(reference) {
+        Some((existing, existing_time)) => {
+            *existing_time = (*existing_time).max(event_time_micros);
             if *existing != row {
-                target.insert(reference.to_owned(), (revision, None));
+                *existing = None;
             }
         }
-        _ => {
-            target.insert(reference.to_owned(), (revision, row));
+        None => {
+            target.insert(reference.to_owned(), (row, event_time_micros));
         }
     }
 }

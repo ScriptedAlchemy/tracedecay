@@ -244,9 +244,9 @@ impl ExecutionTopologyCapacityRollupV1 {
 
     pub(super) fn absorb_duplicate_rows(
         &mut self,
-        rows: &BTreeMap<String, (u64, Option<DuplicateRowV1>)>,
+        rows: &BTreeMap<String, (Option<DuplicateRowV1>, i64)>,
     ) {
-        for (_, row) in rows.values() {
+        for (row, _) in rows.values() {
             self.absorb_duplicate_row(*row);
         }
     }
