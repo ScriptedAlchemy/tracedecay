@@ -574,9 +574,11 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
+                let observability_producer = self.observability_producer(project_root).await;
                 Box::pin(execute_work_application(
                     registered,
                     Arc::clone(&self.work_attempt_processes),
+                    observability_producer,
                     project_root.map(Path::to_path_buf),
                     request_id,
                     request,
@@ -604,13 +606,18 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
+                let observability_producer = self.observability_producer(Some(project_root)).await;
                 Box::pin(execute_workflow_application(
                     registered,
+                    Arc::clone(&self.work_attempt_processes),
+                    observability_producer,
+                    project_root.to_path_buf(),
                     request_id,
                     request,
                     observed_at,
                     deadline,
                     cancellation,
+                    self.worktree_holder_admission.clone(),
                 ))
                 .await
             }

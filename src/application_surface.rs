@@ -37,18 +37,13 @@ use tracedecay_application::retrieval::{
     TypeHierarchyRequest,
 };
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, AcceptProposalCommand, AcceptTaskCommand,
-    AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationContext,
-    CancellationSignal, CreateWorkCommand, Deadline, GenerateProposalRequest,
-    GeneratedWorkProposal, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor,
-    OperationTermination, PageRequest, ProblemOwningLayer, ReplanDependenciesCommand,
-    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken,
-    ResumeWorkAttemptsCommand, RetrievalOrder, RetrievalRequestMeta, RetryDirective,
-    ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
-    StartWorkAttemptCommand, StreamEvent, StreamEventKind, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
+    ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
+    IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
+    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -112,6 +107,7 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 mod configuration_wire;
 mod handoff;
 mod multi_root_http;
+mod work;
 mod workflow;
 
 use configuration_wire::{
@@ -889,10 +885,7 @@ pub(crate) async fn invoke_multi_root_surface_request(
 fn work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    validate_work_catalog_bindings()?;
-    Ok(tracedecay_api::work_application_router(WorkExecutorOwner {
-        executor,
-    }))
+    work::router_with_executor(executor)
 }
 
 /// Refuse to mount Work unless the catalog advertises every descriptor
@@ -901,42 +894,7 @@ fn work_application_router_with_executor(
 /// The descriptor and the catalog are two statements of the same surface, and a
 /// mount that disagreed with the catalog would advertise routes nobody serves.
 pub(crate) fn validate_work_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
-    let registry = tracedecay_application::work_executable_binding_registry()
-        .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
-    for operation in WorkOperation::ALL {
-        let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
-            .map_err(ApplicationSurfaceAdapterError::Identifier)?;
-        let Some(binding) = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-        else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        if route_path != operation.application_route_path() {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        }
-    }
-    Ok(())
-}
-
-/// The Work application owner: canonical dispatch behind every Work route,
-/// whichever router mounted it.
-#[derive(Clone)]
-pub(crate) struct WorkExecutorOwner {
-    pub(crate) executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-}
-
-impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
-    fn invoke_work(
-        &self,
-        request: tracedecay_api::WorkHttpRequest,
-    ) -> tracedecay_api::WorkInvocationFuture {
-        let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_work_operation(executor.as_ref(), request).await })
-    }
+    work::validate_catalog_bindings()
 }
 
 /// Invoke the Work owner shared by the HTTP router and the MCP adapter.
@@ -948,159 +906,7 @@ pub(crate) async fn invoke_work_operation(
     executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
 ) -> Response {
-    let tracedecay_api::WorkHttpRequest {
-        operation,
-        request_id,
-        controls,
-        body,
-    } = request;
-
-    macro_rules! core {
-        ($request_ty:ty, $variant:ident, $output:ty) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
-                request_id.as_str(),
-                WorkApplicationInvocationV1::$variant(decoded),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<$output, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
-                        scope,
-                        outcome: WorkApplicationOutcomeV1::$variant(outcome),
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
-    match operation {
-        WorkOperation::Snapshot => core!(
-            WorkProjectionSnapshotRequestV1,
-            Snapshot,
-            WorkProjectionSnapshotV1
-        ),
-        WorkOperation::Delta => core!(WorkProjectionDeltaRequestV1, Delta, WorkProjectionDeltaV1),
-        WorkOperation::GenerateProposal => core!(
-            GenerateProposalRequest,
-            GenerateProposal,
-            GeneratedWorkProposal
-        ),
-        WorkOperation::Create => core!(CreateWorkCommand, Create, WorkProjection),
-        WorkOperation::ReplanDependencies => {
-            core!(
-                ReplanDependenciesCommand,
-                ReplanDependencies,
-                WorkProjection
-            )
-        }
-        WorkOperation::ReviewProposal => {
-            core!(ReviewProposalRequestV1, ReviewProposal, WorkProjection)
-        }
-        WorkOperation::AcceptProposal => {
-            core!(AcceptProposalCommand, AcceptProposal, WorkProjection)
-        }
-        WorkOperation::AdmitExecution => {
-            core!(AdmitExecutionCommand, AdmitExecution, WorkProjection)
-        }
-        WorkOperation::AttachRuntimeEvidence => core!(
-            AttachRuntimeEvidenceCommand,
-            AttachRuntimeEvidence,
-            WorkProjection
-        ),
-        WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
-        WorkOperation::StartAttempt => core!(
-            StartWorkAttemptCommand,
-            StartAttempt,
-            tracedecay_domain::WorkAttemptV1
-        ),
-        WorkOperation::Synthesize => core!(
-            tracedecay_application::AdmitWorkSynthesisCommand,
-            Synthesize,
-            tracedecay_application::WorkSynthesisAttemptV1
-        ),
-        WorkOperation::AttemptStatus => core!(
-            WorkAttemptStatusRequestV1,
-            AttemptStatus,
-            tracedecay_domain::WorkAttemptV1
-        ),
-        WorkOperation::CancelAttempt => core!(
-            CancelWorkAttemptCommand,
-            CancelAttempt,
-            tracedecay_domain::WorkAttemptV1
-        ),
-        WorkOperation::ResumeAttempts => core!(
-            ResumeWorkAttemptsCommand,
-            ResumeAttempts,
-            WorkAttemptRecoveryReportV1
-        ),
-        WorkOperation::ListAttempts => core!(
-            tracedecay_application::WorkAttemptListRequestV1,
-            ListAttempts,
-            tracedecay_application::WorkAttemptListV1
-        ),
-        WorkOperation::HydrateArtifacts => core!(
-            tracedecay_application::WorkArtifactHydrationRequestV1,
-            HydrateArtifacts,
-            tracedecay_application::WorkArtifactHydrationV1
-        ),
-        WorkOperation::Views => core!(
-            tracedecay_application::WorkGraphReadRequestV1,
-            Views,
-            tracedecay_application::WorkGraphReadV1
-        ),
-        WorkOperation::Topology => core!(
-            tracedecay_application::WorkTopologyViewRequestV1,
-            Topology,
-            tracedecay_application::ExecutionTopologyViewV1
-        ),
-        WorkOperation::PauseRun => core!(
-            tracedecay_application::PauseWorkRunCommand,
-            PauseRun,
-            tracedecay_domain::WorkRunControlV1
-        ),
-        WorkOperation::ResumeRun => core!(
-            tracedecay_application::ResumeWorkRunCommand,
-            ResumeRun,
-            tracedecay_domain::WorkRunControlV1
-        ),
-        WorkOperation::RunControl => core!(
-            tracedecay_application::WorkRunControlRequestV1,
-            RunControl,
-            tracedecay_application::WorkRunControlReadingV1
-        ),
-        WorkOperation::PlacementPreflight => core!(
-            tracedecay_application::WorkPlacementPreflightRequestV1,
-            PlacementPreflight,
-            tracedecay_domain::WorkPlacementPreflightV1
-        ),
-        WorkOperation::AdmitPlacement => core!(
-            tracedecay_application::AdmitWorkPlacementCommand,
-            AdmitPlacement,
-            tracedecay_domain::WorkPlacementV1
-        ),
-        WorkOperation::PlacementStatus => core!(
-            tracedecay_application::WorkPlacementStatusRequestV1,
-            PlacementStatus,
-            tracedecay_application::WorkPlacementReadingV1
-        ),
-        WorkOperation::ReleasePlacement => core!(
-            tracedecay_application::ReleaseWorkPlacementCommand,
-            ReleasePlacement,
-            tracedecay_domain::WorkPlacementV1
-        ),
-    }
+    work::invoke_work_operation(Some(executor), request).await
 }
 
 /// Refuse a registered request that never reached dispatch in the canonical envelope.
@@ -1538,10 +1344,9 @@ pub fn http_application_router_with_executor(
 pub fn dashboard_work_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    validate_work_catalog_bindings()?;
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     Ok(
-        tracedecay_api::work_core_router(WorkExecutorOwner { executor }).layer(
+        work::dashboard_router_with_executor(executor)?.layer(
             axum::middleware::from_fn_with_state(cancellations, application_http_context),
         ),
     )

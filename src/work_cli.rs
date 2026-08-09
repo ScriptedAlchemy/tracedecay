@@ -11,19 +11,20 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationSignal, CreateWorkCommand,
-    Deadline, ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, LegalAction,
-    PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand,
+    CancellationSignal, CreateWorkTaskRequestV1, Deadline, DecideWorkProposalRequestV1,
+    ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, LegalAction, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
-    ReviewProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkRetryTestBindingTokenRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
-    work_executable_binding_registry,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1,
+    WorkExperienceRequestV1, WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1,
+    WorkPlacementStatusRequestV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkRunControlRequestV1,
+    WorkTopologyViewRequestV1, work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
@@ -140,21 +141,16 @@ fn decode_work_invocation(
         WorkOperation::GenerateProposal => decode::<GenerateProposalRequest>(body)
             .map(WorkApplicationInvocationV1::GenerateProposal),
         WorkOperation::Create => {
-            decode::<CreateWorkCommand>(body).map(WorkApplicationInvocationV1::Create)
+            decode::<CreateWorkTaskRequestV1>(body).map(WorkApplicationInvocationV1::Create)
         }
         WorkOperation::ReplanDependencies => decode::<ReplanDependenciesCommand>(body)
             .map(WorkApplicationInvocationV1::ReplanDependencies),
-        WorkOperation::ReviewProposal => {
-            decode::<ReviewProposalRequestV1>(body).map(WorkApplicationInvocationV1::ReviewProposal)
-        }
-        WorkOperation::AcceptProposal => {
-            decode::<AcceptProposalCommand>(body).map(WorkApplicationInvocationV1::AcceptProposal)
-        }
-        WorkOperation::AdmitExecution => {
-            decode::<AdmitExecutionCommand>(body).map(WorkApplicationInvocationV1::AdmitExecution)
-        }
-        WorkOperation::AttachRuntimeEvidence => decode::<AttachRuntimeEvidenceCommand>(body)
-            .map(WorkApplicationInvocationV1::AttachRuntimeEvidence),
+        WorkOperation::ReviewProposal => decode::<DecideWorkProposalRequestV1>(body)
+            .map(WorkApplicationInvocationV1::ReviewProposal),
+        WorkOperation::AcceptProposal => decode::<DecideWorkProposalRequestV1>(body)
+            .map(WorkApplicationInvocationV1::AcceptProposal),
+        WorkOperation::AdmitExecution => decode::<AdmitWorkExecutionRequestV1>(body)
+            .map(WorkApplicationInvocationV1::AdmitExecution),
         WorkOperation::AcceptTask => {
             decode::<AcceptTaskCommand>(body).map(WorkApplicationInvocationV1::AcceptTask)
         }
@@ -174,16 +170,25 @@ fn decode_work_invocation(
         WorkOperation::RetryAttempt => {
             decode::<RetryWorkAttemptCommandV1>(body).map(WorkApplicationInvocationV1::RetryAttempt)
         }
-        WorkOperation::MintRetryTestBinding => decode::<WorkRetryTestBindingTokenRequestV1>(body)
-            .map(WorkApplicationInvocationV1::MintRetryTestBinding),
         WorkOperation::ListAttempts => {
             decode::<WorkAttemptListRequestV1>(body).map(WorkApplicationInvocationV1::ListAttempts)
         }
+        WorkOperation::ExecutionHistory => decode::<WorkAttemptListRequestV1>(body)
+            .map(WorkApplicationInvocationV1::ExecutionHistory),
         WorkOperation::HydrateArtifacts => decode::<WorkArtifactHydrationRequestV1>(body)
             .map(WorkApplicationInvocationV1::HydrateArtifacts),
+        WorkOperation::RetrieveEvidence => decode::<WorkEvidenceRetrieveRequestV1>(body)
+            .map(WorkApplicationInvocationV1::RetrieveEvidence),
         WorkOperation::Views => {
             decode::<WorkGraphReadRequestV1>(body).map(WorkApplicationInvocationV1::Views)
         }
+        WorkOperation::Experience => {
+            decode::<WorkExperienceRequestV1>(body).map(WorkApplicationInvocationV1::Experience)
+        }
+        WorkOperation::CompareProposal => decode::<WorkProposalComparisonRequestV1>(body)
+            .map(WorkApplicationInvocationV1::CompareProposal),
+        WorkOperation::PrepareGraphMutation => decode::<PrepareWorkProductMutationRequestV1>(body)
+            .map(WorkApplicationInvocationV1::PrepareGraphMutation),
         WorkOperation::MutateGraph => decode::<WorkProductMutationRequestV1>(body)
             .map(WorkApplicationInvocationV1::MutateGraph),
         WorkOperation::Topology => {
@@ -191,6 +196,10 @@ fn decode_work_invocation(
         }
         WorkOperation::TopologyMetrics => decode::<ExecutionTopologyMetricsRequestV1>(body)
             .map(WorkApplicationInvocationV1::TopologyMetrics),
+        WorkOperation::PrepareDuplicateAdjudication => {
+            decode::<PrepareWorkDuplicateAdjudicationRequestV1>(body)
+                .map(WorkApplicationInvocationV1::PrepareDuplicateAdjudication)
+        }
         WorkOperation::AdjudicateDuplicate => decode::<WorkDuplicateAdjudicationCommandV1>(body)
             .map(WorkApplicationInvocationV1::AdjudicateDuplicate),
         WorkOperation::AdjudicateLeak => decode::<AdjudicateWorkLeakCommandV1>(body)
@@ -244,10 +253,6 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
                 WorkApplicationOutcomeV1::AdmitExecution(_)
             )
             | (
-                WorkOperation::AttachRuntimeEvidence,
-                WorkApplicationOutcomeV1::AttachRuntimeEvidence(_)
-            )
-            | (
                 WorkOperation::AcceptTask,
                 WorkApplicationOutcomeV1::AcceptTask(_)
             )
@@ -276,18 +281,34 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
                 WorkApplicationOutcomeV1::RetryAttempt(_)
             )
             | (
-                WorkOperation::MintRetryTestBinding,
-                WorkApplicationOutcomeV1::MintRetryTestBinding(_)
-            )
-            | (
                 WorkOperation::ListAttempts,
                 WorkApplicationOutcomeV1::ListAttempts(_)
+            )
+            | (
+                WorkOperation::ExecutionHistory,
+                WorkApplicationOutcomeV1::ExecutionHistory(_)
             )
             | (
                 WorkOperation::HydrateArtifacts,
                 WorkApplicationOutcomeV1::HydrateArtifacts(_)
             )
+            | (
+                WorkOperation::RetrieveEvidence,
+                WorkApplicationOutcomeV1::RetrieveEvidence(_)
+            )
             | (WorkOperation::Views, WorkApplicationOutcomeV1::Views(_))
+            | (
+                WorkOperation::Experience,
+                WorkApplicationOutcomeV1::Experience(_)
+            )
+            | (
+                WorkOperation::CompareProposal,
+                WorkApplicationOutcomeV1::CompareProposal(_)
+            )
+            | (
+                WorkOperation::PrepareGraphMutation,
+                WorkApplicationOutcomeV1::PrepareGraphMutation(_)
+            )
             | (
                 WorkOperation::MutateGraph,
                 WorkApplicationOutcomeV1::MutateGraph(_)
@@ -299,6 +320,10 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
             | (
                 WorkOperation::TopologyMetrics,
                 WorkApplicationOutcomeV1::TopologyMetrics(_)
+            )
+            | (
+                WorkOperation::PrepareDuplicateAdjudication,
+                WorkApplicationOutcomeV1::PrepareDuplicateAdjudication(_)
             )
             | (
                 WorkOperation::AdjudicateDuplicate,
@@ -490,7 +515,6 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::ReviewProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AcceptProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AdmitExecution(outcome) => serde_json::to_value(outcome),
-        WorkApplicationOutcomeV1::AttachRuntimeEvidence(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AcceptTask(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::StartAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Synthesize(outcome) => serde_json::to_value(outcome),
@@ -498,13 +522,20 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::CancelAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::RetryAttempt(outcome) => serde_json::to_value(outcome),
-        WorkApplicationOutcomeV1::MintRetryTestBinding(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ListAttempts(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::ExecutionHistory(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::HydrateArtifacts(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::RetrieveEvidence(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Views(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::Experience(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::CompareProposal(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::PrepareGraphMutation(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::MutateGraph(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Topology(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::TopologyMetrics(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::PrepareDuplicateAdjudication(outcome) => {
+            serde_json::to_value(outcome)
+        }
         WorkApplicationOutcomeV1::AdjudicateDuplicate(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AdjudicateLeak(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::PauseRun(outcome) => serde_json::to_value(outcome),

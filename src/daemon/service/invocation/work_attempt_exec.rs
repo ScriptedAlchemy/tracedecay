@@ -405,8 +405,8 @@ fn availability_state(error: WorkExecutableBindingError) -> WorkProviderAvailabi
 
 /// Seals a terminal denial for an attempt whose provider never started:
 /// fence to `RecoveryRequired`, then fail recovery with the typed outcome.
-fn settle_unstarted<S, P, W>(
-    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+fn settle_unstarted<S>(
+    attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     attempt: &WorkAttemptV1,
@@ -414,8 +414,6 @@ fn settle_unstarted<S, P, W>(
     provider_fallback: Option<WorkProviderFallbackRecordV1>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
-    P: tracedecay_application::WorkProjectionReadPort,
-    W: tracedecay_application::WorkStoragePort,
 {
     if let Err(problem) = attempts.mark_provider_unavailable(context, identity) {
         tracing::warn!(
@@ -462,8 +460,8 @@ fn admitted_provider_environment(
         .collect()
 }
 
-async fn execute_provider_with_environment<S, P, W>(
-    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+async fn execute_provider_with_environment<S>(
+    attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -471,8 +469,6 @@ async fn execute_provider_with_environment<S, P, W>(
     cancel: Arc<Notify>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
-    P: tracedecay_application::WorkProjectionReadPort,
-    W: tracedecay_application::WorkStoragePort,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
@@ -611,8 +607,8 @@ enum AppServerEnding {
 /// The session client is blocking, so it runs on a blocking worker while the
 /// deadline and cancellation arms stay on the runtime — the same three-armed
 /// shape the stdio path uses.
-async fn execute_app_server<S, P, W>(
-    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+async fn execute_app_server<S>(
+    attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     selection: &ProviderSelection,
@@ -620,8 +616,6 @@ async fn execute_app_server<S, P, W>(
     cancel: Arc<Notify>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
-    P: tracedecay_application::WorkProjectionReadPort,
-    W: tracedecay_application::WorkStoragePort,
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
@@ -752,16 +746,14 @@ async fn execute_app_server<S, P, W>(
 
 /// Runs the graceful-interrupt / forced-kill cancellation ladder after the
 /// durable cancellation request has been observed.
-async fn cancel_ladder<S, P, W>(
-    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+async fn cancel_ladder<S>(
+    attempts: &tracedecay_application::WorkAttemptService<S>,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     child: &mut tokio::process::Child,
 ) -> WorkAttemptProviderOutcomeV1
 where
     S: tracedecay_application::WorkAttemptStoragePort,
-    P: tracedecay_application::WorkProjectionReadPort,
-    W: tracedecay_application::WorkStoragePort,
 {
     if let Err(problem) = attempts.acknowledge_cancellation(context, identity, current_micros()) {
         tracing::warn!(
