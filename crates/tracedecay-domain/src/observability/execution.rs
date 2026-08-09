@@ -308,6 +308,8 @@ pub struct WorkStackDriftObservedV1 {
 }
 
 impl WorkStackDriftObservedV1 {
+    /// An open interval has no terminal observation; a closed interval cannot
+    /// precede its first observation.
     pub fn validate(&self) -> Result<(), &'static str> {
         match (self.state, self.terminal_micros) {
             (IntervalStateV1::Open, None) => Ok(()),

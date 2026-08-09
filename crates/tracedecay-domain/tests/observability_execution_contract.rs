@@ -234,3 +234,36 @@ fn conflict_integration_drift_duplicate_and_rerun_family_round_trips() {
         );
     }
 }
+
+#[test]
+fn stack_drift_intervals_and_ready_phase_preserve_typed_boundaries() {
+    assert_eq!(
+        serde_json::to_value(tracedecay_domain::IntegrationPhaseV1::Ready)
+            .expect("serialize ready phase"),
+        serde_json::Value::String("ready".into())
+    );
+    assert_eq!(
+        serde_json::from_value::<tracedecay_domain::IntegrationPhaseV1>(serde_json::Value::String(
+            "ready".into()
+        ),)
+        .expect("deserialize ready phase"),
+        tracedecay_domain::IntegrationPhaseV1::Ready
+    );
+
+    let open_with_terminal = tracedecay_domain::WorkStackDriftObservedV1 {
+        kind: tracedecay_domain::StackDriftKindV1::HeadAdvanced,
+        state: tracedecay_domain::IntervalStateV1::Open,
+        first_observed_micros: 10,
+        terminal_micros: Some(11),
+        age_bucket: tracedecay_domain::DurationBucketV1::Under1m,
+        coverage: CoverageStateV1::Known,
+    };
+    assert_eq!(open_with_terminal.validate(), Err("stack_drift_interval"));
+
+    let closed_before_open = tracedecay_domain::WorkStackDriftObservedV1 {
+        state: tracedecay_domain::IntervalStateV1::Closed,
+        terminal_micros: Some(9),
+        ..open_with_terminal
+    };
+    assert_eq!(closed_before_open.validate(), Err("stack_drift_interval"));
+}
