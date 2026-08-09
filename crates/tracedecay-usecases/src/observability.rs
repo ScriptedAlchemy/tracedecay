@@ -10,6 +10,7 @@ mod execution_emit;
 mod export;
 mod github_stack_emit;
 mod producer;
+mod product_view_emit;
 mod read;
 mod read_model;
 #[cfg(test)]
@@ -20,6 +21,7 @@ mod work_blocked_interval_emit;
 mod work_duplicate_emit;
 mod work_owner_observation_recovery;
 mod work_retry_leak_emit;
+mod workflow_emit;
 
 pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
 pub use costs::{
@@ -52,6 +54,11 @@ pub use producer::{
     ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
     ObservabilityProducerIdentityV1, ObservabilityProducerSummaryV1,
 };
+pub use product_view_emit::{
+    record_automation_funnel_observation, record_reliance_decision,
+    record_remote_coverage_observation, record_task_intelligence_decision,
+    record_terminal_attempt_product_views,
+};
 pub use read::{observatory_read_model, observatory_unavailable_read_model};
 pub use retrieval_emit::{
     AblationDimensionV1, RetrievalEmissionSummaryV1, emit_retrieval_pipeline,
@@ -74,6 +81,7 @@ pub use work_owner_observation_recovery::{
 pub use work_retry_leak_emit::{
     WorkOwnerObservationResultV1, record_work_leak_observation, record_work_retry_observation,
 };
+pub use workflow_emit::record_workflow_settlement;
 
 use tracedecay_application::{
     MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1, MetricSourceV1,
@@ -434,7 +442,6 @@ const fn feedback_unavailable_reason(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -6,9 +6,12 @@ mod activity_tests;
 mod delivery;
 mod execution;
 mod mcp_dispatch;
+mod payload;
+mod product_views;
 mod retrieval;
 mod review_labels;
 mod runtime;
+mod workflow;
 
 pub use activity::ActivityObservedV1;
 pub use delivery::*;
@@ -16,9 +19,20 @@ pub use execution::*;
 pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
 };
+pub use payload::ObservabilityPayloadV1;
+pub use product_views::{
+    AppropriateRelianceObservedV1, AutomationFunnelObservedV1, AutomationTerminalV1,
+    ObservedTernaryV1, ProviderAttemptTerminalV1, ProviderReliabilityObservedV1,
+    RelianceDecisionV1, RelianceVerificationV1, RemoteCoverageObservedV1, RemoteOperationV1,
+    TaskCalibrationEvidenceV1, TaskDecisionDispositionV1, TaskIntelligenceDecisionObservedV1,
+    TaskIntelligenceOutcomeObservedV1, TaskOutcomeV1,
+};
 pub use retrieval::*;
 pub use review_labels::*;
 pub use runtime::*;
+pub use workflow::{
+    WorkflowLifecycleObservedV1, WorkflowOutcomeObservedV1, WorkflowResourceObservedV1,
+};
 
 use std::collections::BTreeMap;
 
@@ -88,116 +102,6 @@ pub struct ObservabilityEnvelopeV1 {
     pub process_boot_id: String,
     pub producer_sequence: u64,
     pub payload: ObservabilityPayloadV1,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum ObservabilityPayloadV1 {
-    RetrievalQuery(RetrievalQueryObservedV1),
-    RetrievalPlanner(RetrievalPlannerObservedV1),
-    Retriever(RetrieverObservedV1),
-    RetrievalSynthesis(RetrievalSynthesisObservedV1),
-    RetrievalSource(RetrievalSourceObservedV1),
-    ContextOutcome(ContextOutcomeObservedV1),
-    RetrievalAblation(RetrievalAblationObservedV1),
-    AdoptionEligibility(AdoptionEligibilityObservedV1),
-    AdoptionOutcome(AdoptionOutcomeLinkedV1),
-    AnalyticsConsent(AnalyticsConsentChangedV1),
-    OperationResource(Box<OperationResourceObservedV1>),
-    NoProgress(NoProgressObservedV1),
-    Latency(LatencyObservedV1),
-    Deadline(DeadlineObservedV1),
-    Storage(StorageObservedV1),
-    Index(IndexObservedV1),
-    ExecutionTopology(ExecutionTopologySampledV1),
-    WorkConflictPrediction(WorkConflictPredictionObservedV1),
-    WorkConflictOutcome(WorkConflictOutcomeLinkedV1),
-    WorkIntegrationTransition(WorkIntegrationTransitionObservedV1),
-    WorkStackDrift(WorkStackDriftObservedV1),
-    GitHubStackCapability(GitHubStackCapabilityObservedV1),
-    WorkDuplicateEffort(WorkDuplicateEffortObservedV1),
-    WorkBlockedInterval(WorkBlockedIntervalObservedV1),
-    WorkRerun(WorkRerunObservedV1),
-    WorkExecutionLeak(WorkExecutionLeakObservedV1),
-    WorkDeliveryFanout(WorkDeliveryFanoutObservedV1),
-    TelemetryDrop(TelemetryDropObservedV1),
-    HealthSnapshot(HealthSnapshotObservedV1),
-    Activity(ActivityObservedV1),
-    McpDispatch(McpDispatchObservedV1),
-}
-
-impl ObservabilityPayloadV1 {
-    pub const fn event_kind(&self) -> &'static str {
-        match self {
-            Self::RetrievalQuery(_) => "retrieval.query.completed.v1",
-            Self::RetrievalPlanner(_) => "retrieval.planner.decided.v1",
-            Self::Retriever(_) => "retrieval.retriever.completed.v1",
-            Self::RetrievalSynthesis(_) => "retrieval.synthesis.completed.v1",
-            Self::RetrievalSource(_) => "retrieval.source.observed.v1",
-            Self::ContextOutcome(_) => "retrieval.context.outcome_linked.v1",
-            Self::RetrievalAblation(_) => "retrieval.ablation.measured.v1",
-            Self::AdoptionEligibility(_) => "adoption.eligibility_observed.v1",
-            Self::AdoptionOutcome(_) => "adoption.outcome.linked.v1",
-            Self::AnalyticsConsent(_) => "analytics.consent.changed.v1",
-            Self::OperationResource(_) => "operation.resource.completed.v1",
-            Self::NoProgress(_) => "operation.no_progress.terminal.v1",
-            Self::Latency(_) => "operation.latency.observed.v1",
-            Self::Deadline(_) => "operation.deadline.observed.v1",
-            Self::Storage(_) => "storage.measurement.observed.v1",
-            Self::Index(_) => "index.measurement.observed.v1",
-            Self::ExecutionTopology(_) => "work.execution_topology.sampled.v1",
-            Self::WorkConflictPrediction(_) => "work.conflict_prediction.observed.v1",
-            Self::WorkConflictOutcome(_) => "work.conflict_outcome.linked.v1",
-            Self::WorkIntegrationTransition(_) => "work.integration.transition.observed.v1",
-            Self::WorkStackDrift(_) => "work.stack_drift.observed.v1",
-            Self::GitHubStackCapability(_) => "work.github_stack_capability.observed.v1",
-            Self::WorkDuplicateEffort(_) => "work.duplicate_effort.observed.v1",
-            Self::WorkBlockedInterval(_) => "work.blocked_interval.observed.v1",
-            Self::WorkRerun(_) => "work.rerun.observed.v1",
-            Self::WorkExecutionLeak(_) => "work.execution_leak.observed.v1",
-            Self::WorkDeliveryFanout(_) => "work.delivery_fanout.observed.v1",
-            Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
-            Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
-            Self::Activity(_) => "activity.observed.v1",
-            Self::McpDispatch(_) => "mcp.dispatch.observed.v1",
-        }
-    }
-
-    /// Validates payload-specific bounds and semantic relationships before a
-    /// record reaches the registered observation authority.
-    pub fn validate(&self) -> Result<(), &'static str> {
-        match self {
-            Self::RetrievalQuery(value) => value.validate(),
-            Self::RetrievalPlanner(value) => value.validate(),
-            Self::Retriever(value) => value.validate(),
-            Self::RetrievalSynthesis(value) => value.validate(),
-            Self::RetrievalSource(value) => value.validate(),
-            Self::ContextOutcome(value) => value.validate(),
-            Self::RetrievalAblation(value) => value.validate(),
-            Self::AdoptionEligibility(value) => value.validate(),
-            Self::AdoptionOutcome(value) => value.validate(),
-            Self::AnalyticsConsent(_) => Ok(()),
-            Self::OperationResource(_) => Ok(()),
-            Self::NoProgress(value) => value.validate(),
-            Self::Latency(value) => value.validate(),
-            Self::Deadline(value) => value.validate(),
-            Self::Storage(value) => value.validate(),
-            Self::Index(value) => value.validate(),
-            Self::ExecutionTopology(value) => value.validate(),
-            Self::WorkConflictPrediction(value) => value.validate(),
-            Self::WorkConflictOutcome(value) => value.validate(),
-            Self::WorkIntegrationTransition(value) => value.validate(),
-            Self::WorkStackDrift(value) => value.validate(),
-            Self::GitHubStackCapability(value) => value.validate(),
-            Self::WorkDuplicateEffort(value) => value.validate(),
-            Self::WorkBlockedInterval(value) => value.validate(),
-            Self::WorkRerun(value) => value.validate(),
-            Self::WorkExecutionLeak(value) => value.validate(),
-            Self::WorkDeliveryFanout(value) => value.validate(),
-            Self::TelemetryDrop(value) => value.validate(),
-            Self::HealthSnapshot(_) | Self::Activity(_) | Self::McpDispatch(_) => Ok(()),
-        }
-    }
 }
 
 impl ObservabilityEnvelopeV1 {

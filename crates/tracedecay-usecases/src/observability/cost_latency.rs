@@ -1,10 +1,10 @@
 //! Provider latency projection for the canonical Costs read model.
 //!
 //! Latency is measured only from retained `operation.resource.completed.v1`
-//! envelopes. Provider/model identity is taken from that envelope when the
-//! operation boundary observed it, or joined through an exact request/session
-//! identity in the immutable provider-usage projection. A time-adjacent row,
-//! client stopwatch, or model default is never an attribution source.
+//! envelopes. Provider/model identity is joined only when the envelope's
+//! canonical trace identity exactly matches a request identity in the
+//! immutable provider-usage projection. A time-adjacent row, session-wide
+//! row, client stopwatch, or model default is never an attribution source.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -155,7 +155,12 @@ pub async fn provider_latency_read_model(
         let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
             continue;
         };
-        let identity = resolve_identity(&envelope.scope_ref, resource, provider_usage, horizon);
+        let identity = resolve_identity(
+            &envelope.scope_ref,
+            &envelope.trace_id,
+            provider_usage,
+            horizon,
+        );
         let key = (identity.provider.clone(), identity.model.clone());
         let group = groups.entry(key).or_default();
         if !group.identity_sources.contains(&identity.source) {
@@ -256,37 +261,25 @@ fn weaker_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageSta
 
 fn resolve_identity(
     scope_ref: &str,
-    resource: &OperationResourceObservedV1,
+    trace_id: &str,
     provider_usage: &ProviderUsageAggregateV1,
     horizon: &ObservabilityHorizonV1,
 ) -> Identity {
-    let candidates = matching_usage(scope_ref, resource, provider_usage, horizon);
-    let provider = resource
-        .provider
-        .clone()
-        .or_else(|| unique_text(candidates.iter().map(|delta| delta.provider.as_str())));
-    let model = resource
-        .model
-        .clone()
-        .or_else(|| unique_optional_text(candidates.iter().map(|delta| delta.model.as_deref())));
-    let joined = (resource.provider.is_none() && provider.is_some())
-        || (resource.model.is_none() && model.is_some());
+    let candidates = matching_usage(scope_ref, trace_id, provider_usage, horizon);
+    let provider = unique_text(candidates.iter().map(|delta| delta.provider.as_str()));
+    let model = unique_optional_text(candidates.iter().map(|delta| delta.model.as_deref()));
     let identity_complete = provider.is_some() && model.is_some();
     Identity {
         provider,
         model,
-        source: if joined {
-            MetricSourceV1::ProviderUsageObservation
-        } else {
-            MetricSourceV1::ObservabilityEnvelope
-        },
+        source: MetricSourceV1::ProviderUsageObservation,
         unavailable_reason: (!identity_complete).then_some(UNKNOWN_IDENTITY_REASON),
     }
 }
 
 fn matching_usage<'a>(
     scope_ref: &str,
-    resource: &OperationResourceObservedV1,
+    trace_id: &str,
     provider_usage: &'a ProviderUsageAggregateV1,
     horizon: &ObservabilityHorizonV1,
 ) -> Vec<&'a ProviderUsageDeltaV1> {
@@ -310,22 +303,11 @@ fn matching_usage<'a>(
             .native_timestamp
             .is_some_and(|timestamp| timestamp >= since_seconds && timestamp < until_seconds)
     };
-    if let Some(request_id) = resource.request_id.as_deref() {
-        return provider_usage
-            .deltas
-            .iter()
-            .filter(same_scope)
-            .filter(|delta| delta.request_id.as_deref() == Some(request_id))
-            .collect();
-    }
-    let Some(session_id) = resource.session_id.as_deref() else {
-        return Vec::new();
-    };
     provider_usage
         .deltas
         .iter()
         .filter(same_scope)
-        .filter(|delta| delta.session_id == session_id)
+        .filter(|delta| delta.request_id.as_deref() == Some(trace_id))
         .collect()
 }
 
@@ -355,8 +337,8 @@ fn sample(envelope: &ObservabilityEnvelopeV1, resource: &OperationResourceObserv
     if let (Some(scheduled), Some(admitted)) = (scheduled, admitted) {
         values.insert(StageMetric::Queue, admitted.saturating_sub(scheduled));
     } else {
-        // Legacy operation-resource receipts carry the canonical scheduled
-        // arrival span even when detailed stage timings were not retained.
+        // The canonical summary carries the scheduled-arrival span even when
+        // detailed stage timings were not retained.
         values.insert(StageMetric::Queue, resource.scheduled_latency_micros);
     }
     if let (Some(scheduled), Some(started)) = (scheduled, started) {
@@ -614,41 +596,6 @@ mod tests {
         }
     }
 
-    fn resource(
-        provider: Option<&str>,
-        model: Option<&str>,
-        session_id: Option<&str>,
-        request_id: Option<&str>,
-    ) -> OperationResourceObservedV1 {
-        OperationResourceObservedV1 {
-            provider: provider.map(str::to_owned),
-            model: model.map(str::to_owned),
-            session_id: session_id.map(str::to_owned),
-            request_id: request_id.map(str::to_owned),
-            scheduled_latency_micros: 0,
-            service_latency_micros: 0,
-            process_rss_bytes: None,
-            process_pss_bytes: None,
-            cpu_user_micros: None,
-            cpu_system_micros: None,
-            read_bytes: None,
-            write_bytes: None,
-            input_tokens: None,
-            output_tokens: None,
-            cost_amount: None,
-            cost_currency: None,
-            pricing_revision: None,
-            stage_timings: Vec::new(),
-            phase_timings: Vec::new(),
-            absolute_deadline_micros: None,
-            availability: Default::default(),
-            activation_outcome: None,
-            process_count: None,
-            input_bytes: None,
-            output_bytes: None,
-        }
-    }
-
     fn usage_delta(
         provider: &str,
         model: Option<&str>,
@@ -701,12 +648,7 @@ mod tests {
             1,
             1,
         )]);
-        let identity = resolve_identity(
-            SCOPE_REF,
-            &resource(Some("codex"), None, Some("session-1"), Some("request-1")),
-            &aggregate,
-            &usage_horizon(),
-        );
+        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
         assert_eq!(identity.provider.as_deref(), Some("codex"));
         assert_eq!(identity.model.as_deref(), Some("gpt-test"));
         assert_eq!(identity.source, MetricSourceV1::ProviderUsageObservation);
@@ -714,17 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_session_join_keeps_identity_unavailable() {
+    fn ambiguous_request_join_keeps_identity_unavailable() {
         let aggregate = complete_usage(vec![
-            usage_delta("codex", Some("gpt-a"), "session-1", None, 1, 1),
-            usage_delta("codex", Some("gpt-b"), "session-1", None, 1, 2),
+            usage_delta("codex", Some("gpt-a"), "session-1", Some("request-1"), 1, 1),
+            usage_delta("codex", Some("gpt-b"), "session-1", Some("request-1"), 1, 2),
         ]);
-        let identity = resolve_identity(
-            SCOPE_REF,
-            &resource(None, None, Some("session-1"), None),
-            &aggregate,
-            &usage_horizon(),
-        );
+        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
         assert_eq!(identity.provider.as_deref(), Some("codex"));
         assert_eq!(identity.model, None);
         assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
@@ -741,12 +678,7 @@ mod tests {
             1,
         )]);
         aggregate.coverage = ProviderUsageCoverageV1::Partial;
-        let identity = resolve_identity(
-            SCOPE_REF,
-            &resource(None, None, Some("session-1"), Some("request-1")),
-            &aggregate,
-            &usage_horizon(),
-        );
+        let identity = resolve_identity(SCOPE_REF, "request-1", &aggregate, &usage_horizon());
         assert_eq!(identity.provider, None);
         assert_eq!(identity.model, None);
         assert_eq!(identity.unavailable_reason, Some(UNKNOWN_IDENTITY_REASON));
