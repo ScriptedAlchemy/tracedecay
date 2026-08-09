@@ -3,6 +3,13 @@ mod invariants;
 mod pragma;
 mod validation;
 
+pub(super) fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
 fn normalize_trigger_sql(sql: &str) -> String {
     sql.trim_end_matches(';')
         .split_whitespace()

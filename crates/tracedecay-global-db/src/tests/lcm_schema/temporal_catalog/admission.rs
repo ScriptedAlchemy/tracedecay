@@ -17,6 +17,19 @@ async fn persisted_column_names(db_path: &Path, table: &str) -> Vec<String> {
     columns
 }
 
+async fn schema_object_exists(db_path: &Path, object_type: &str, name: &str) -> bool {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().is_some()
+}
+
 #[tokio::test]
 async fn temporal_schema_accepts_only_fresh_or_exact_final_stores() {
     let tmp = TempDir::new().unwrap();
@@ -613,6 +626,126 @@ async fn final_schema_admission_rejects_extra_graph_publication_table() {
         row_count(&db_path, "graph_publication_branch_local_v1").await,
         1,
         "typed refusal must not delete an extra graph publication object"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_mixed_case_extra_temporal_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install the final temporal schema");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "CREATE TABLE SeSsIoN_SuMmArY_BrAnCh_Local (
+             retained_row INTEGER NOT NULL
+         );
+         INSERT INTO SeSsIoN_SuMmArY_BrAnCh_Local(retained_row) VALUES (91);",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a mixed-case extra temporal table must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a mixed-case temporal table must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("SeSsIoN_SuMmArY_BrAnCh_Local"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        row_count(&db_path, "SeSsIoN_SuMmArY_BrAnCh_Local").await,
+        1,
+        "typed refusal must not delete a mixed-case temporal object"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_mixed_case_extra_graph_publication_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install graph publication authority");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "CREATE TABLE GrApH_PuBlIcAtIoN_BrAnCh_Local (
+             retained_row INTEGER NOT NULL
+         );
+         INSERT INTO GrApH_PuBlIcAtIoN_BrAnCh_Local(retained_row) VALUES (91);",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("a mixed-case extra graph publication table must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("a mixed-case graph table must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("GrApH_PuBlIcAtIoN_BrAnCh_Local"),
+        "unexpected reason: {reason}"
+    );
+    assert_eq!(
+        row_count(&db_path, "GrApH_PuBlIcAtIoN_BrAnCh_Local").await,
+        1,
+        "typed refusal must not delete a mixed-case graph publication object"
+    );
+}
+
+#[tokio::test]
+async fn final_schema_admission_rejects_extra_index_on_canonical_graph_table() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path)
+        .await
+        .expect("fresh initialization should install graph publication authority");
+    drop(db);
+
+    let raw_db = TestConnection::open(&db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "CREATE INDEX branch_local_graph_head_digest
+         ON graph_verified_heads_v1(recovered_digest);",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    drop(raw_db);
+
+    let error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("an extra index on a canonical graph table must require reset"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .expect("an extra graph index must return typed reset-required");
+    assert_eq!(authority, "session temporal");
+    assert!(
+        reason.contains("branch_local_graph_head_digest"),
+        "unexpected reason: {reason}"
+    );
+    assert!(
+        schema_object_exists(&db_path, "index", "branch_local_graph_head_digest").await,
+        "typed refusal must not delete an extra index on graph publication authority"
     );
 }
 

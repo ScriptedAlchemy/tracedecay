@@ -4,7 +4,8 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use crate::configuration::FreshConfigurationStoreEvidence;
 use crate::schema_contract::{
-    validate_session_graph_publication_schema_contract, validate_session_temporal_schema_contract,
+    starts_with_ignore_ascii_case, validate_session_graph_publication_schema_contract,
+    validate_session_temporal_schema_contract,
 };
 use crate::{global_db_operation_error, global_db_operation_message};
 
@@ -139,7 +140,7 @@ fn belongs_to_temporal_namespace(name: &str) -> bool {
         "session_turn",
     ]
     .iter()
-    .any(|prefix| name.starts_with(prefix))
+    .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
 }
 
 fn session_temporal_reset_required(

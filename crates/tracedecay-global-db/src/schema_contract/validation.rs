@@ -7,10 +7,10 @@ use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEXES, Index, OBSERVATIONS_TABLE_NAME, REGISTRY_TABLE_NAMES, TABLES, Table,
 };
-use super::normalize_trigger_sql;
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
 };
+use super::{normalize_trigger_sql, starts_with_ignore_ascii_case};
 
 const OPERATION: &str = "validate global database authority schema";
 
@@ -636,7 +636,8 @@ async fn read_graph_publication_inventory(
 
 fn belongs_to_graph_publication_namespace(name: &str, table: &str) -> bool {
     [name, table].iter().any(|value| {
-        value.starts_with("graph_publication_") || value.starts_with("graph_verified_")
+        starts_with_ignore_ascii_case(value, "graph_publication_")
+            || starts_with_ignore_ascii_case(value, "graph_verified_")
     })
 }
 
