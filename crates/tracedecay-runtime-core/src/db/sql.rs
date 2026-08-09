@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use crate::db::engine::{Error, Row, Rows, Value};
+use crate::db::engine::{Error, Row, Value};
 use crate::errors::{Result, TraceDecayError};
 
 // ---------------------------------------------------------------------------
@@ -25,54 +25,6 @@ pub fn build_qmark_placeholders(n: usize) -> String {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Converts `Option<String>` to an engine [`Value`] for use in parameters.
-pub(super) fn opt_str(opt: Option<&str>) -> Value {
-    match opt {
-        Some(s) => Value::Text(s.to_string()),
-        None => Value::Null,
-    }
-}
-
-/// Builds a bound-parameter value for literal path-prefix `LIKE` filters.
-///
-/// Keep caller-provided prefixes out of SQL text. The `%` suffix is the only
-/// wildcard added by query helpers; quotes, comments, and semicolons inside the
-/// prefix stay plain data when bound through `SQLite` parameters.
-pub(super) fn path_prefix_like_value(prefix: &str) -> Value {
-    Value::Text(format!("{prefix}%"))
-}
-
-/// Appends a SQL-safe single-quoted string literal to `buf`, escaping `'` as `''`.
-///
-/// This is only for bulk value literals in `execute_batch` paths. Do not use it
-/// for identifiers, column names, table names, predicates, or new dynamic query
-/// surfaces; prefer prepared statements and bound parameters whenever possible.
-pub(super) fn push_quoted(buf: &mut String, s: &str) {
-    buf.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            buf.push_str("''");
-        } else {
-            buf.push(ch);
-        }
-    }
-    buf.push('\'');
-}
-
-/// Appends a SQL-safe quoted string literal or NULL for Option<String>.
-pub(super) fn push_opt_quoted(buf: &mut String, opt: Option<&str>) {
-    match opt {
-        Some(s) => push_quoted(buf, s),
-        None => buf.push_str("NULL"),
-    }
-}
-
-/// Appends an integer literal to the buffer.
-pub(super) fn push_int(buf: &mut String, val: i64) {
-    use std::fmt::Write;
-    let _ = write!(buf, "{val}");
-}
 
 /// Rows requested per keyset page of a whole-table scan.
 ///
@@ -323,27 +275,6 @@ where
     C: crate::db::engine::QueryExecutor + ?Sized,
 {
     collect_rowid_pages_capped_with(conn, page_sql, &[], cursor_index, map_fn, operation, cap).await
-}
-
-/// Collects all rows from a `Rows` iterator into a `Vec<T>` using the given
-/// row-mapping function. This helper never constructs SQL; callers must build
-/// and parameterize queries before invoking it.
-pub(super) async fn collect_rows<T>(
-    rows: &mut Rows,
-    map_fn: fn(&Row) -> std::result::Result<T, Error>,
-    operation: &str,
-) -> Result<Vec<T>> {
-    let mut items = Vec::new();
-    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-        message: format!("failed to read row: {e}"),
-        operation: operation.to_string(),
-    })? {
-        items.push(map_fn(&row).map_err(|e| TraceDecayError::Database {
-            message: format!("failed to map row: {e}"),
-            operation: operation.to_string(),
-        })?);
-    }
-    Ok(items)
 }
 
 #[cfg(test)]

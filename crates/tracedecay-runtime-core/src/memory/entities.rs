@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 
-use super::hygiene::detect_secret_like;
-
 /// Hard upper bound on an entity's character length. An entity name is a short
 /// identifier-like or proper-noun span, never a sentence, so anything longer is
 /// a mangled extraction (e.g. a run captured between two apostrophes) and is
@@ -18,22 +16,6 @@ pub fn normalize_entity(entity: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Canonicalizes an entity alias and rejects values that are unsafe or too
-/// broad for deterministic alias matching.
-pub(crate) fn normalize_entity_alias(alias: &str) -> Result<String, &'static str> {
-    let normalized = normalize_entity(alias);
-    if normalized.is_empty() || !is_valid_entity(&normalized) {
-        return Err("alias is empty or not a bounded entity name");
-    }
-    if normalized.contains(['/', '\\']) || normalized == "." || normalized == ".." {
-        return Err("path fragments are not valid entity aliases");
-    }
-    if detect_secret_like(&normalized).is_some() {
-        return Err("secret-like values are not valid entity aliases");
-    }
-    Ok(normalized)
 }
 
 pub fn extract_entities(text: &str) -> Vec<String> {
@@ -573,7 +555,7 @@ fn is_file_path(token: &str) -> bool {
     // Otherwise a path must have a directory separator AND at least one
     // dotted (extension-bearing) segment. This rejects prose slash-runs such as
     // "approval/sandbox/effort" and "X/Y/Z" that carry no file extension while
-    // still accepting "src/sessions/codex.rs" and "src\memory\mod.rs".
+    // still accepting "crates/tracedecay-sessions/src/runtime/codex.rs" and "src\memory\mod.rs".
     if token.contains('/') || token.contains('\\') {
         return token
             .split(['/', '\\'])
@@ -642,7 +624,7 @@ mod tests {
     // Representative of the live fact #122 that motivated the fix: long,
     // em-dash-heavy, apostrophe-laden prose with file paths, snake/camelCase
     // identifiers, parentheticals and "X/Y/Z" slash-runs.
-    const REPRO_FACT: &str = "Codex session ingestion (src/sessions/codex.rs:378) reads the session's own JSONL — update_plan, turn_context governance (approval/sandbox/effort) — while src/sessions/claude.rs and src/sessions/cursor.rs read cursorDiskKV; the pipeline's ingestion path normalizes each provider's records before the reducer merges them into a single turn-ordered transcript that downstream tooling can replay deterministically.";
+    const REPRO_FACT: &str = "Codex session ingestion (crates/tracedecay-sessions/src/runtime/codex.rs:378) reads the session's own JSONL — update_plan, turn_context governance (approval/sandbox/effort) — while crates/tracedecay-sessions/src/runtime/claude.rs and crates/tracedecay-sessions/src/runtime/cursor.rs read cursorDiskKV; the pipeline's ingestion path normalizes each provider's records before the reducer merges them into a single turn-ordered transcript that downstream tooling can replay deterministically.";
 
     #[test]
     fn long_punctuation_heavy_fact_yields_only_sane_entities() {
@@ -682,9 +664,9 @@ mod tests {
 
         // Genuinely useful entities must survive.
         for expected in [
-            "src/sessions/codex.rs:378",
-            "src/sessions/claude.rs",
-            "src/sessions/cursor.rs",
+            "crates/tracedecay-sessions/src/runtime/codex.rs:378",
+            "crates/tracedecay-sessions/src/runtime/claude.rs",
+            "crates/tracedecay-sessions/src/runtime/cursor.rs",
             "cursorDiskKV",
             "update_plan",
             "turn_context",
@@ -698,8 +680,12 @@ mod tests {
 
     #[test]
     fn file_paths_and_line_numbers_still_extract() {
-        let entities = extract_entities("see src/sessions/codex.rs:378 and /etc/config.toml");
-        assert!(entities.contains(&"src/sessions/codex.rs:378".to_string()));
+        let entities = extract_entities(
+            "see crates/tracedecay-sessions/src/runtime/codex.rs:378 and /etc/config.toml",
+        );
+        assert!(
+            entities.contains(&"crates/tracedecay-sessions/src/runtime/codex.rs:378".to_string())
+        );
         assert!(entities.contains(&"/etc/config.toml".to_string()));
     }
 

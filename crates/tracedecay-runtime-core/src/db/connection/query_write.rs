@@ -1,8 +1,7 @@
 use super::{
     Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseMemoryWriter, DatabaseWriteTransaction,
-    DatabaseWriterConnection, ReadSnapshot, Result, TraceDecayError, TransactionBehavior,
-    database_query_error, integrity,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, ReadSnapshot,
+    Result, TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
 impl Database {
@@ -160,16 +159,6 @@ impl Database {
         })
     }
 
-    /// Acquires opaque, serialized access to memory mutations.
-    #[doc(hidden)]
-    pub async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {
-        Ok(DatabaseMemoryWriter {
-            writer: self
-                .writer_connection("memory store writer capability")
-                .await?,
-        })
-    }
-
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
     pub(crate) async fn begin_isolated_read_snapshot(
@@ -193,24 +182,6 @@ impl Database {
         self.begin_isolated_read_snapshot(operation)
             .await
             .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
-    }
-
-    /// Starts a query-only snapshot on the reserved health-reader lane.
-    /// Health aggregates use this lane so they remain available when general
-    /// readers are saturated by background graph work.
-    pub(crate) async fn begin_engine_health_read_snapshot(
-        &self,
-        operation: &str,
-    ) -> Result<DatabaseEngineReadSnapshot> {
-        self.inner
-            .conn
-            .health_read_snapshot()
-            .await
-            .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to begin health read snapshot: {error}"),
-                operation: operation.to_string(),
-            })
     }
 
     pub async fn begin_memory_read_transaction(

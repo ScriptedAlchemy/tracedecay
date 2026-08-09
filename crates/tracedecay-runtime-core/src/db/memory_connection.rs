@@ -29,9 +29,7 @@ pub type Result<T> = std::result::Result<T, MemoryConnectionError>;
 #[derive(Clone, Copy)]
 pub enum MemoryConnection<'a> {
     Runtime(&'a engine::Connection),
-    RuntimeTransaction(&'a engine::Transaction),
     Transaction(&'a MemoryTransaction),
-    DatabaseTransaction(&'a crate::db::DatabaseMemoryTransaction<'a>),
 }
 
 impl<'a> MemoryConnection<'a> {
@@ -39,18 +37,8 @@ impl<'a> MemoryConnection<'a> {
         Self::Runtime(connection)
     }
 
-    pub(crate) const fn runtime_transaction(transaction: &'a engine::Transaction) -> Self {
-        Self::RuntimeTransaction(transaction)
-    }
-
     pub const fn transaction(transaction: &'a MemoryTransaction) -> Self {
         Self::Transaction(transaction)
-    }
-
-    pub(crate) const fn database_transaction(
-        transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
-    ) -> Self {
-        Self::DatabaseTransaction(transaction)
     }
 
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
@@ -63,19 +51,11 @@ impl<'a> MemoryConnection<'a> {
                 .execute(sql, engine::params_from_iter(params))
                 .await
                 .map_err(Into::into),
-            Self::RuntimeTransaction(transaction) => transaction
-                .execute(sql, engine::params_from_iter(params))
-                .await
-                .map_err(Into::into),
             Self::Transaction(transaction) => {
                 transaction
                     .execute(sql, engine::params_from_iter(params))
                     .await
             }
-            Self::DatabaseTransaction(transaction) => transaction
-                .execute(sql, engine::params_from_iter(params))
-                .await
-                .map_err(Into::into),
         }
     }
 
@@ -89,32 +69,18 @@ impl<'a> MemoryConnection<'a> {
                 .query(sql, engine::params_from_iter(params))
                 .await
                 .map_err(Into::into),
-            Self::RuntimeTransaction(transaction) => transaction
-                .query(sql, engine::params_from_iter(params))
-                .await
-                .map_err(Into::into),
             Self::Transaction(transaction) => {
                 transaction
                     .query(sql, engine::params_from_iter(params))
                     .await
             }
-            Self::DatabaseTransaction(transaction) => transaction
-                .query(sql, engine::params_from_iter(params))
-                .await
-                .map_err(Into::into),
         }
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         match self {
             Self::Runtime(connection) => connection.execute_batch(sql).await.map_err(Into::into),
-            Self::RuntimeTransaction(transaction) => {
-                transaction.execute_batch(sql).await.map_err(Into::into)
-            }
             Self::Transaction(transaction) => transaction.execute_batch(sql).await,
-            Self::DatabaseTransaction(transaction) => {
-                transaction.execute_batch(sql).await.map_err(Into::into)
-            }
         }
     }
 
@@ -128,9 +94,7 @@ impl<'a> MemoryConnection<'a> {
                 .await
                 .map(MemoryTransaction::Runtime)
                 .map_err(Into::into),
-            Self::RuntimeTransaction(_) | Self::Transaction(_) | Self::DatabaseTransaction(_) => {
-                Err(MemoryConnectionError::NestedTransaction)
-            }
+            Self::Transaction(_) => Err(MemoryConnectionError::NestedTransaction),
         }
     }
 }

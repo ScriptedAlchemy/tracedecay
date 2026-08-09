@@ -1,6 +1,5 @@
 use super::{
-    Connection, DatabaseEngineConnection, DatabaseEngineReadSnapshot, DatabaseEngineStatement,
-    DatabaseEngineStatementTarget, DatabaseMemoryTransaction, DatabaseMemoryWriter,
+    Connection, DatabaseEngineConnection, DatabaseEngineReadSnapshot, DatabaseMemoryTransaction,
     DatabaseWriteTransaction, DatabaseWriterConnection, Path, Result, TraceDecayError,
 };
 
@@ -20,10 +19,6 @@ impl DatabaseWriterConnection<'_> {
         P: crate::db::engine::IntoParams,
     {
         self.conn.execute(sql, params).await
-    }
-
-    pub fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
-        crate::memory::store::MemoryStore::new_runtime(&self.conn)
     }
 
     #[cfg(test)]
@@ -71,21 +66,6 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineConnection {
     {
         DatabaseEngineConnection::query(self, sql, params).await
     }
-}
-
-impl DatabaseEngineStatement<'_> {
-    pub async fn execute<P>(&self, params: P) -> crate::db::engine::Result<u64>
-    where
-        P: crate::db::engine::IntoParams,
-    {
-        match &self.target {
-            DatabaseEngineStatementTarget::Transaction(transaction) => {
-                transaction.execute(&self.sql, params).await
-            }
-        }
-    }
-
-    pub fn reset(&self) {}
 }
 
 impl DatabaseEngineReadSnapshot {
@@ -245,19 +225,6 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
     }
 }
 
-impl DatabaseMemoryWriter<'_> {
-    /// Returns a memory store whose writable connection remains protected by
-    /// the canonical database writer lane for this capability's lifetime.
-    pub fn store(&self) -> crate::memory::store::MemoryStore<'_> {
-        self.writer.memory_store()
-    }
-
-    /// Returns a retriever bound to the same serialized memory authority.
-    pub fn retriever(&self) -> crate::memory::retrieval::FactRetriever<'_> {
-        crate::memory::retrieval::FactRetriever::new_runtime(&self.writer.conn)
-    }
-}
-
 impl DatabaseWriteTransaction<'_> {
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
@@ -301,17 +268,6 @@ impl DatabaseWriteTransaction<'_> {
         P: crate::db::engine::IntoParams,
     {
         self.transaction.query(sql, params).await
-    }
-
-    pub(crate) async fn prepare_engine(
-        &self,
-        sql: &str,
-    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
-        self.transaction.validate(sql).await?;
-        Ok(DatabaseEngineStatement {
-            target: DatabaseEngineStatementTarget::Transaction(&self.transaction),
-            sql: sql.to_owned(),
-        })
     }
 
     pub async fn commit(self) -> Result<()> {

@@ -109,17 +109,8 @@ pub struct DatabaseEngineConnection {
     conn: Connection,
 }
 
-pub(crate) struct DatabaseEngineStatement<'a> {
-    target: DatabaseEngineStatementTarget<'a>,
-    sql: String,
-}
-
 pub struct DatabaseEngineReadSnapshot {
     snapshot: ReadSnapshot,
-}
-
-enum DatabaseEngineStatementTarget<'a> {
-    Transaction(&'a Transaction),
 }
 
 /// Driver-neutral transaction used by the canonical memory store during the
@@ -127,15 +118,6 @@ enum DatabaseEngineStatementTarget<'a> {
 pub enum DatabaseMemoryTransaction<'a> {
     Read(DatabaseEngineReadSnapshot),
     Write(DatabaseWriteTransaction<'a>),
-}
-
-/// Opaque, serialized access to memory mutations for integration fixtures.
-///
-/// This capability intentionally exposes neither the writable connection nor
-/// arbitrary SQL execution.
-#[doc(hidden)]
-pub struct DatabaseMemoryWriter<'a> {
-    writer: DatabaseWriterConnection<'a>,
 }
 
 /// An immediate transaction that retains the canonical writer lane until the
