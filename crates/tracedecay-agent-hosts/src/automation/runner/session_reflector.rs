@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_domain::{FactOwnerV1, ManifestDigest, canonical_sha256};
+use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
@@ -28,19 +28,16 @@ use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_policy::{
-    CurationApplyDecisionV1, CurationApplyPolicyInputV1, CurationApplySubjectV1,
-    CurationValidationDispositionV1, evaluate_curation_apply,
-};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
+
+use super::curation::{evaluate_session_curation, unpersisted_rejected_parts};
 
 use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
 };
 use super::retrieval::{AutomationSessionRetrieval, production_project_automation_retrieval};
-use super::unpersisted_rejected_parts;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -311,7 +308,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     )
     .await?;
     let curation_decision =
-        session_curation_decision(config, evidence_hash.as_deref(), &accepted_facts)?;
+        evaluate_session_curation(config, evidence_hash.as_deref(), &accepted_facts)?;
     let proposal_records = if curation_decision.allows_apply() {
         let auto_apply = auto_apply_session_fact_proposals(memory, proposal_records).await;
         if let Some(error) = auto_apply.error {
@@ -435,41 +432,6 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     }
     record.validation_report = Some(validation_report);
     Ok(SessionReflectorFinalization::Completed { report, record })
-}
-
-fn session_curation_decision(
-    config: &AutomationConfig,
-    evidence_hash: Option<&str>,
-    accepted_facts: &[Value],
-) -> Result<CurationApplyDecisionV1> {
-    let evidence_digest = evidence_hash
-        .map(|hash| ManifestDigest::new(hash.to_owned()))
-        .transpose()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid session curation evidence identity: {error}"),
-        })?;
-    let output_digest =
-        canonical_sha256(&accepted_facts).map_err(|error| TraceDecayError::Config {
-            message: format!("derive session curation output identity: {error}"),
-        })?;
-    let configuration_digest =
-        canonical_sha256(config).map_err(|error| TraceDecayError::Config {
-            message: format!("derive session curation configuration identity: {error}"),
-        })?;
-    evaluate_curation_apply(&CurationApplyPolicyInputV1 {
-        subject: CurationApplySubjectV1::SessionReflector,
-        evidence_digest,
-        output_digest,
-        validation: if accepted_facts.is_empty() {
-            CurationValidationDispositionV1::NoCandidate
-        } else {
-            CurationValidationDispositionV1::Accepted
-        },
-        configuration_digest,
-    })
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("evaluate session curation policy: {error}"),
-    })
 }
 
 #[allow(clippy::too_many_arguments)]

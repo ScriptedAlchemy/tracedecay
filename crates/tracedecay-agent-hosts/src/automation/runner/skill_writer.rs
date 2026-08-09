@@ -7,10 +7,10 @@ use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::AgentTaskRunContext;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 
+use super::curation::unpersisted_rejected_parts;
 use super::session_reflector::{default_include_recent_sessions, default_recent_sessions_limit};
-use super::unpersisted_rejected_parts;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillWriterAutomationOptions {
@@ -57,6 +57,17 @@ pub struct SkillWriterAutomationRun {
     pub ledger_record: AutomationRunLedgerRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_response: Option<AgentTaskResponse>,
+}
+
+pub(super) enum SkillWriterFinalization {
+    Completed {
+        report: Value,
+        record: AutomationRunLedgerRecord,
+    },
+    FailedRecorded {
+        error: TraceDecayError,
+        record: AutomationRunLedgerRecord,
+    },
 }
 
 pub(super) fn default_skill_writer_provider() -> String {
