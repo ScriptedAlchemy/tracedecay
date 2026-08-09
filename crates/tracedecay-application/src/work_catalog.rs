@@ -20,25 +20,27 @@ use tracedecay_domain::WorkAttemptV1;
 
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
-    AcceptProposalCommand, AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CancelWorkAttemptCommand,
-    CreateWorkCommand, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
-    WorkEvidenceRetrieveRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkLeakAdjudicationOutcomeV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
-    WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1, WorkProductMutationRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
-    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
+    WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
+    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
+    WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 33] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 36] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -112,6 +114,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 33] = [
         "use-case.work.list_attempts",
     ),
     (
+        "execution_history",
+        "capability.work.execution_history",
+        "use-case.work.execution_history",
+    ),
+    (
         "hydrate_artifacts",
         "capability.work.hydrate_artifacts",
         "use-case.work.hydrate_artifacts",
@@ -122,6 +129,16 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 33] = [
         "use-case.work.evidence.read",
     ),
     ("views", "capability.work.views", "use-case.work.views"),
+    (
+        "experience",
+        "capability.work.experience",
+        "use-case.work.experience",
+    ),
+    (
+        "compare_proposal",
+        "capability.work.compare_proposal",
+        "use-case.work.compare_proposal",
+    ),
     (
         "prepare_graph_mutation",
         "capability.work.prepare_graph_mutation",
@@ -218,12 +235,12 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::GenerateProposalRequest",
             "tracedecay_application::GeneratedWorkProposal",
         )?,
-        available::<CreateWorkCommand, WorkProjection>(
+        available::<CreateWorkTaskRequestV1, WorkProductMutationReceiptV1>(
             "create",
             "/application/work/create",
             EffectClass::Administrative,
-            "tracedecay_application::CreateWorkCommand",
-            "tracedecay_domain::WorkProjection",
+            "tracedecay_application::CreateWorkTaskRequestV1",
+            "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
         available::<ReplanDependenciesCommand, WorkProjection>(
             "replan_dependencies",
@@ -232,19 +249,19 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::ReplanDependenciesCommand",
             "tracedecay_domain::WorkProjection",
         )?,
-        available::<ReviewProposalRequestV1, WorkProjection>(
+        available::<DecideWorkProposalRequestV1, WorkProductMutationReceiptV1>(
             "review_proposal",
             "/application/work/review-proposal",
             EffectClass::Administrative,
-            "tracedecay_application::ReviewProposalRequestV1",
-            "tracedecay_domain::WorkProjection",
+            "tracedecay_application::DecideWorkProposalRequestV1",
+            "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
-        available::<AcceptProposalCommand, WorkProjection>(
+        available::<DecideWorkProposalRequestV1, WorkProductMutationReceiptV1>(
             "accept_proposal",
             "/application/work/accept-proposal",
             EffectClass::Administrative,
-            "tracedecay_application::AcceptProposalCommand",
-            "tracedecay_domain::WorkProjection",
+            "tracedecay_application::DecideWorkProposalRequestV1",
+            "tracedecay_application::WorkProductMutationReceiptV1",
         )?,
         available::<AdmitExecutionCommand, WorkProjection>(
             "admit_execution",
@@ -309,6 +326,13 @@ pub fn work_executable_binding_registry()
             "tracedecay_application::WorkAttemptListRequestV1",
             "tracedecay_application::WorkAttemptListV1",
         )?,
+        available::<WorkAttemptListRequestV1, WorkExecutionHistoryV1>(
+            "execution_history",
+            "/application/work/execution-history",
+            EffectClass::Read,
+            "tracedecay_application::WorkAttemptListRequestV1",
+            "tracedecay_application::WorkExecutionHistoryV1",
+        )?,
         available::<WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1>(
             "hydrate_artifacts",
             "/application/work/hydrate-artifacts",
@@ -329,6 +353,20 @@ pub fn work_executable_binding_registry()
             EffectClass::Read,
             "tracedecay_application::WorkGraphReadRequestV1",
             "tracedecay_application::WorkGraphReadV1",
+        )?,
+        available::<WorkExperienceRequestV1, WorkExperienceV1>(
+            "experience",
+            "/application/work/experience",
+            EffectClass::Read,
+            "tracedecay_application::WorkExperienceRequestV1",
+            "tracedecay_application::WorkExperienceV1",
+        )?,
+        available::<WorkProposalComparisonRequestV1, WorkProposalComparisonV1>(
+            "compare_proposal",
+            "/application/work/compare-proposal",
+            EffectClass::Read,
+            "tracedecay_application::WorkProposalComparisonRequestV1",
+            "tracedecay_application::WorkProposalComparisonV1",
         )?,
         available::<PrepareWorkProductMutationRequestV1, WorkProductMutationRequestV1>(
             "prepare_graph_mutation",
@@ -755,5 +793,31 @@ mod tests {
         };
         assert_eq!(route_path, "/application/work/mutate-graph");
         assert!(!mutation.effect().is_read_only());
+    }
+
+    #[test]
+    fn create_binding_uses_the_canonical_work_product_authority() {
+        let registry = work_executable_binding_registry().unwrap();
+        let create = registry
+            .get(&tracedecay_tool_catalog::OperationId::new("operation.work.create").unwrap())
+            .unwrap()
+            .binding()
+            .unwrap();
+        assert_eq!(
+            create.request_schema().body()["title"],
+            "CreateWorkTaskRequestV1"
+        );
+        assert_eq!(
+            create.result_schema().body()["title"],
+            "WorkProductMutationReceiptV1"
+        );
+        assert_eq!(
+            create.request_schema().rust_type_path(),
+            "tracedecay_application::CreateWorkTaskRequestV1"
+        );
+        assert_eq!(
+            create.result_schema().rust_type_path(),
+            "tracedecay_application::WorkProductMutationReceiptV1"
+        );
     }
 }

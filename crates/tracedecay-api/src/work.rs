@@ -26,22 +26,28 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationProblem, AttachRuntimeEvidenceCommand,
-    CancelWorkAttemptCommand, CreateWorkCommand, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, ReleaseWorkPlacementCommand,
-    ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitExecutionCommand,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationProblem,
+    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
+    WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
+    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
+    WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
-    WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
-    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
 };
 
 use crate::http::{
@@ -64,17 +70,27 @@ pub enum WorkOperation {
     ReviewProposal,
     AcceptProposal,
     AdmitExecution,
-    AttachRuntimeEvidence,
     AcceptTask,
     StartAttempt,
     Synthesize,
     AttemptStatus,
     CancelAttempt,
     ResumeAttempts,
+    RetryAttempt,
     ListAttempts,
+    ExecutionHistory,
     HydrateArtifacts,
+    RetrieveEvidence,
     Views,
+    Experience,
+    CompareProposal,
+    PrepareGraphMutation,
+    MutateGraph,
     Topology,
+    TopologyMetrics,
+    PrepareDuplicateAdjudication,
+    AdjudicateDuplicate,
+    AdjudicateLeak,
     PauseRun,
     ResumeRun,
     RunControl,
@@ -139,17 +155,27 @@ work_operations! {
     ReviewProposal: "review_proposal", "review-proposal";
     AcceptProposal: "accept_proposal", "accept-proposal";
     AdmitExecution: "admit_execution", "admit-execution";
-    AttachRuntimeEvidence: "attach_runtime_evidence", "attach-runtime-evidence";
     AcceptTask: "accept_task", "accept-task";
     StartAttempt: "start_attempt", "start-attempt";
     Synthesize: "synthesize", "synthesize";
     AttemptStatus: "attempt_status", "attempt-status";
     CancelAttempt: "cancel_attempt", "cancel-attempt";
     ResumeAttempts: "resume_attempts", "resume-attempts";
+    RetryAttempt: "retry_attempt", "retry-attempt";
     ListAttempts: "list_attempts", "list-attempts";
+    ExecutionHistory: "execution_history", "execution-history";
     HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts";
+    RetrieveEvidence: "retrieve_evidence", "retrieve-evidence";
     Views: "views", "views";
+    Experience: "experience", "experience";
+    CompareProposal: "compare_proposal", "compare-proposal";
+    PrepareGraphMutation: "prepare_graph_mutation", "prepare-graph-mutation";
+    MutateGraph: "mutate_graph", "mutate-graph";
     Topology: "topology", "topology";
+    TopologyMetrics: "topology_metrics", "topology-metrics";
+    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication", "prepare-duplicate-adjudication";
+    AdjudicateDuplicate: "adjudicate_duplicate", "adjudicate-duplicate";
+    AdjudicateLeak: "adjudicate_leak", "adjudicate-leak";
     PauseRun: "pause_run", "pause-run";
     ResumeRun: "resume_run", "resume-run";
     RunControl: "run_control", "run-control";
@@ -161,7 +187,7 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 36] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -170,17 +196,27 @@ impl WorkOperation {
         Self::ReviewProposal,
         Self::AcceptProposal,
         Self::AdmitExecution,
-        Self::AttachRuntimeEvidence,
         Self::AcceptTask,
         Self::StartAttempt,
         Self::Synthesize,
         Self::AttemptStatus,
         Self::CancelAttempt,
         Self::ResumeAttempts,
+        Self::RetryAttempt,
         Self::ListAttempts,
+        Self::ExecutionHistory,
         Self::HydrateArtifacts,
+        Self::RetrieveEvidence,
         Self::Views,
+        Self::Experience,
+        Self::CompareProposal,
+        Self::PrepareGraphMutation,
+        Self::MutateGraph,
         Self::Topology,
+        Self::TopologyMetrics,
+        Self::PrepareDuplicateAdjudication,
+        Self::AdjudicateDuplicate,
+        Self::AdjudicateLeak,
         Self::PauseRun,
         Self::ResumeRun,
         Self::RunControl,
@@ -204,9 +240,16 @@ impl WorkOperation {
                 | Self::GenerateProposal
                 | Self::AttemptStatus
                 | Self::ListAttempts
+                | Self::ExecutionHistory
                 | Self::HydrateArtifacts
+                | Self::RetrieveEvidence
                 | Self::Views
+                | Self::Experience
+                | Self::CompareProposal
+                | Self::PrepareGraphMutation
                 | Self::Topology
+                | Self::TopologyMetrics
+                | Self::PrepareDuplicateAdjudication
                 | Self::RunControl
                 | Self::PlacementPreflight
                 | Self::PlacementStatus
@@ -219,22 +262,35 @@ impl WorkOperation {
             Self::Snapshot => schema_name::<WorkProjectionSnapshotRequestV1>(),
             Self::Delta => schema_name::<WorkProjectionDeltaRequestV1>(),
             Self::GenerateProposal => schema_name::<GenerateProposalRequest>(),
-            Self::Create => schema_name::<CreateWorkCommand>(),
+            Self::Create => schema_name::<CreateWorkTaskRequestV1>(),
             Self::ReplanDependencies => schema_name::<ReplanDependenciesCommand>(),
-            Self::ReviewProposal => schema_name::<ReviewProposalRequestV1>(),
-            Self::AcceptProposal => schema_name::<AcceptProposalCommand>(),
+            Self::ReviewProposal | Self::AcceptProposal => {
+                schema_name::<DecideWorkProposalRequestV1>()
+            }
             Self::AdmitExecution => schema_name::<AdmitExecutionCommand>(),
-            Self::AttachRuntimeEvidence => schema_name::<AttachRuntimeEvidenceCommand>(),
             Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
             Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
             Self::AttemptStatus => schema_name::<WorkAttemptStatusRequestV1>(),
             Self::CancelAttempt => schema_name::<CancelWorkAttemptCommand>(),
             Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
+            Self::RetryAttempt => schema_name::<RetryWorkAttemptCommandV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListRequestV1>(),
+            Self::ExecutionHistory => schema_name::<WorkAttemptListRequestV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationRequestV1>(),
+            Self::RetrieveEvidence => schema_name::<WorkEvidenceRetrieveRequestV1>(),
             Self::Views => schema_name::<WorkGraphReadRequestV1>(),
+            Self::Experience => schema_name::<WorkExperienceRequestV1>(),
+            Self::CompareProposal => schema_name::<WorkProposalComparisonRequestV1>(),
+            Self::PrepareGraphMutation => schema_name::<PrepareWorkProductMutationRequestV1>(),
+            Self::MutateGraph => schema_name::<WorkProductMutationRequestV1>(),
             Self::Topology => schema_name::<WorkTopologyViewRequestV1>(),
+            Self::TopologyMetrics => schema_name::<ExecutionTopologyMetricsRequestV1>(),
+            Self::PrepareDuplicateAdjudication => {
+                schema_name::<PrepareWorkDuplicateAdjudicationRequestV1>()
+            }
+            Self::AdjudicateDuplicate => schema_name::<WorkDuplicateAdjudicationCommandV1>(),
+            Self::AdjudicateLeak => schema_name::<AdjudicateWorkLeakCommandV1>(),
             Self::PauseRun => schema_name::<PauseWorkRunCommand>(),
             Self::ResumeRun => schema_name::<ResumeWorkRunCommand>(),
             Self::RunControl => schema_name::<WorkRunControlRequestV1>(),
@@ -251,22 +307,36 @@ impl WorkOperation {
             Self::Snapshot => schema_name::<WorkProjectionSnapshotV1>(),
             Self::Delta => schema_name::<WorkProjectionDeltaV1>(),
             Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
-            Self::Create
-            | Self::ReplanDependencies
-            | Self::ReviewProposal
-            | Self::AcceptProposal
-            | Self::AdmitExecution
-            | Self::AttachRuntimeEvidence
-            | Self::AcceptTask => schema_name::<WorkProjection>(),
+            Self::Create | Self::ReviewProposal | Self::AcceptProposal => {
+                schema_name::<WorkProductMutationReceiptV1>()
+            }
+            Self::ReplanDependencies | Self::AdmitExecution | Self::AcceptTask => {
+                schema_name::<WorkProjection>()
+            }
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
             Self::Synthesize => schema_name::<WorkSynthesisAttemptV1>(),
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
+            Self::RetryAttempt => {
+                schema_name::<tracedecay_application::WorkRetryAttemptOutcomeV1>()
+            }
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
+            Self::ExecutionHistory => schema_name::<WorkExecutionHistoryV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),
+            Self::RetrieveEvidence => schema_name::<WorkEvidenceRetrievalV1>(),
             Self::Views => schema_name::<WorkGraphReadV1>(),
+            Self::Experience => schema_name::<WorkExperienceV1>(),
+            Self::CompareProposal => schema_name::<WorkProposalComparisonV1>(),
+            Self::PrepareGraphMutation => schema_name::<WorkProductMutationRequestV1>(),
+            Self::MutateGraph => schema_name::<WorkProductMutationReceiptV1>(),
             Self::Topology => schema_name::<ExecutionTopologyViewV1>(),
+            Self::TopologyMetrics => schema_name::<ExecutionTopologyMetricsV1>(),
+            Self::PrepareDuplicateAdjudication => {
+                schema_name::<WorkDuplicateAdjudicationCommandV1>()
+            }
+            Self::AdjudicateDuplicate => schema_name::<WorkDuplicateAdjudicationAppendOutcomeV1>(),
+            Self::AdjudicateLeak => schema_name::<WorkLeakAdjudicationOutcomeV1>(),
             Self::PauseRun | Self::ResumeRun => schema_name::<WorkRunControlV1>(),
             Self::RunControl => schema_name::<WorkRunControlReadingV1>(),
             Self::PlacementPreflight => schema_name::<WorkPlacementPreflightV1>(),
@@ -285,6 +355,13 @@ impl WorkOperation {
             .iter()
             .copied()
             .find(|operation| operation.route_segment() == segment)
+    }
+
+    /// Whether the embedded dashboard has a real operator journey for this
+    /// operation. Scheduler-owned attempt start remains available to its owning
+    /// surface but is not a dashboard API.
+    pub const fn is_dashboard_operation(self) -> bool {
+        !matches!(self, Self::StartAttempt)
     }
 
     fn parse(segment: &str) -> Option<Self> {
@@ -361,6 +438,38 @@ where
         .route("/{operation}", post(core_operation::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owner)
+}
+
+/// Build only Work operations that have a real dashboard operator journey.
+pub fn work_dashboard_router<O>(owner: O) -> Router
+where
+    O: WorkApplicationOwner,
+{
+    Router::new()
+        .route("/{operation}", post(dashboard_operation::<O>))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owner)
+}
+
+async fn dashboard_operation<O>(
+    Path(segment): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    controls: Extension<HttpApplicationControls>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: WorkApplicationOwner,
+{
+    if WorkOperation::from_route_segment(&segment)
+        .is_some_and(|operation| !operation.is_dashboard_operation())
+    {
+        return application_problem_response(adapter_problem(
+            request_id.0.clone(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    }
+    dispatch(segment, state, request_id, controls, body).await
 }
 
 async fn core_operation<O>(
@@ -483,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_projection_reads_and_proposal_generation_are_read_only() {
+    fn read_only_operations_are_declared_exactly() {
         let read_only = WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
@@ -496,13 +605,57 @@ mod tests {
                 WorkOperation::GenerateProposal,
                 WorkOperation::AttemptStatus,
                 WorkOperation::ListAttempts,
+                WorkOperation::ExecutionHistory,
                 WorkOperation::HydrateArtifacts,
+                WorkOperation::RetrieveEvidence,
                 WorkOperation::Views,
+                WorkOperation::Experience,
+                WorkOperation::CompareProposal,
+                WorkOperation::PrepareGraphMutation,
                 WorkOperation::Topology,
+                WorkOperation::TopologyMetrics,
+                WorkOperation::PrepareDuplicateAdjudication,
                 WorkOperation::RunControl,
                 WorkOperation::PlacementPreflight,
                 WorkOperation::PlacementStatus,
             ]
         );
+    }
+
+    #[test]
+    fn dashboard_excludes_scheduler_owned_attempt_start() {
+        let excluded = WorkOperation::ALL
+            .into_iter()
+            .filter(|operation| !operation.is_dashboard_operation())
+            .collect::<Vec<_>>();
+        assert_eq!(excluded, vec![WorkOperation::StartAttempt]);
+    }
+
+    #[test]
+    fn task_creation_and_proposal_decisions_publish_product_receipts() {
+        for operation in [
+            WorkOperation::Create,
+            WorkOperation::ReviewProposal,
+            WorkOperation::AcceptProposal,
+        ] {
+            assert_eq!(
+                operation.result_schema_name(),
+                "WorkProductMutationReceiptV1",
+                "{}",
+                operation.operation_key()
+            );
+        }
+        assert_eq!(
+            WorkOperation::Create.request_schema_name(),
+            "CreateWorkTaskRequestV1"
+        );
+        for operation in [WorkOperation::ReviewProposal, WorkOperation::AcceptProposal] {
+            assert_eq!(
+                operation.request_schema_name(),
+                "DecideWorkProposalRequestV1",
+                "{}",
+                operation.operation_key()
+            );
+        }
     }
 }
