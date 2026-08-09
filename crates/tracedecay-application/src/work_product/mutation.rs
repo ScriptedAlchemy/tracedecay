@@ -7,10 +7,11 @@ use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId,
     MAX_WORK_PRODUCT_EVENT_EVIDENCE, ManifestDigest, PolicyRevisionId, ProposalId,
     TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkGraphChangeV1, WorkGraphVersionV1, WorkHandoffV1,
-    WorkProductEventEvidenceV1, WorkProductEventId, WorkProductEventPayloadV1, WorkProductEventV1,
-    WorkProductGraphV1, WorkProductProfileScopeV1, WorkProductSourceWatermarkV1,
-    WorkProposalDispositionV1, WorkProposalV1, WorkRelationReplanProposalV1, canonical_sha256,
+    WorkCommandId, WorkGraphChangeV1, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1,
+    WorkItemV1, WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
+    WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
+    WorkProductSourceWatermarkV1, WorkProposalDispositionV1, WorkProposalV1,
+    WorkRelationReplanProposalV1, canonical_sha256,
 };
 
 use crate::{RequestAdmission, RequestContext};
@@ -93,34 +94,80 @@ pub enum WorkProductEventPortErrorV1 {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum WorkProductEventAppendOutcomeV1 {
-    Appended(WorkProductEventV1),
-    Replayed(WorkProductEventV1),
+pub enum WorkProductEventCommitOutcomeV1 {
+    Appended(WorkProductEventCommitV1),
+    Replayed(WorkProductEventCommitV1),
 }
 
-impl WorkProductEventAppendOutcomeV1 {
-    fn into_parts(self) -> (WorkProductEventV1, bool) {
+impl WorkProductEventCommitOutcomeV1 {
+    fn into_parts(self) -> (WorkProductEventCommitV1, bool) {
         match self {
-            Self::Appended(event) => (event, false),
-            Self::Replayed(event) => (event, true),
+            Self::Appended(commit) => (commit, false),
+            Self::Replayed(commit) => (commit, true),
         }
     }
 }
 
-/// Relational immutable event/idempotency/outbox authority.
+/// One atomic journal and verified-projection commit.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkProductEventCommitV1 {
+    event: WorkProductEventV1,
+    verified_graph_version: VerifiedWorkGraphVersionV1,
+}
+
+impl WorkProductEventCommitV1 {
+    pub fn new(
+        event: WorkProductEventV1,
+        verified_graph_version: VerifiedWorkGraphVersionV1,
+    ) -> Result<Self, WorkProductEventPortErrorV1> {
+        let commit = Self {
+            event,
+            verified_graph_version,
+        };
+        commit.validate()?;
+        Ok(commit)
+    }
+
+    pub const fn event(&self) -> &WorkProductEventV1 {
+        &self.event
+    }
+
+    pub const fn verified_graph_version(&self) -> &VerifiedWorkGraphVersionV1 {
+        &self.verified_graph_version
+    }
+
+    fn validate(&self) -> Result<(), WorkProductEventPortErrorV1> {
+        if self.verified_graph_version.graph_version() != self.event.result_graph_version()
+            || self.verified_graph_version.event_sequence() != self.event.sequence()
+            || self.verified_graph_version.source_watermark() != self.event.source_watermark()
+        {
+            return Err(WorkProductEventPortErrorV1::Unavailable);
+        }
+        Ok(())
+    }
+
+    fn into_parts(self) -> (WorkProductEventV1, VerifiedWorkGraphVersionV1) {
+        (self.event, self.verified_graph_version)
+    }
+}
+
+/// Relational immutable event/idempotency and verified-projection authority.
+///
+/// A successful call commits both records in one transaction. There is no
+/// intermediate appended-but-unpublished state for a restart to reconcile.
 pub trait WorkProductEventPortV1: Send + Sync {
     fn replay(
         &self,
         context: &WorkProductPortContextV1,
         command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
-    ) -> Result<Option<WorkProductEventV1>, WorkProductEventPortErrorV1>;
+    ) -> Result<Option<WorkProductEventCommitV1>, WorkProductEventPortErrorV1>;
 
-    fn append_with_outbox(
+    fn append_atomically(
         &self,
         context: &WorkProductPortContextV1,
         draft: &WorkProductEventDraftV1,
-    ) -> Result<WorkProductEventAppendOutcomeV1, WorkProductEventPortErrorV1>;
+    ) -> Result<WorkProductEventCommitOutcomeV1, WorkProductEventPortErrorV1>;
 }
 
 impl<E> WorkProductEventPortV1 for &E
@@ -132,52 +179,16 @@ where
         context: &WorkProductPortContextV1,
         command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
-    ) -> Result<Option<WorkProductEventV1>, WorkProductEventPortErrorV1> {
+    ) -> Result<Option<WorkProductEventCommitV1>, WorkProductEventPortErrorV1> {
         (**self).replay(context, command_id, canonical_input_digest)
     }
 
-    fn append_with_outbox(
+    fn append_atomically(
         &self,
         context: &WorkProductPortContextV1,
         draft: &WorkProductEventDraftV1,
-    ) -> Result<WorkProductEventAppendOutcomeV1, WorkProductEventPortErrorV1> {
-        (**self).append_with_outbox(context, draft)
-    }
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum WorkGraphPublishPortErrorV1 {
-    #[error("Work graph publication version changed")]
-    VersionConflict,
-    #[error("Work graph publication is unavailable")]
-    Unavailable,
-    #[error("Work graph publication durability is uncertain")]
-    DurabilityUncertain,
-    #[error("Work graph publication was cancelled")]
-    Cancelled,
-    #[error("Work graph publication timed out")]
-    TimedOut,
-}
-
-/// Exact verified Grafeo topology publication authority.
-pub trait WorkGraphPublishPortV1: Send + Sync {
-    fn publish_event(
-        &self,
-        context: &WorkProductPortContextV1,
-        event: &WorkProductEventV1,
-    ) -> Result<VerifiedWorkGraphVersionV1, WorkGraphPublishPortErrorV1>;
-}
-
-impl<P> WorkGraphPublishPortV1 for &P
-where
-    P: WorkGraphPublishPortV1 + ?Sized,
-{
-    fn publish_event(
-        &self,
-        context: &WorkProductPortContextV1,
-        event: &WorkProductEventV1,
-    ) -> Result<VerifiedWorkGraphVersionV1, WorkGraphPublishPortErrorV1> {
-        (**self).publish_event(context, event)
+    ) -> Result<WorkProductEventCommitOutcomeV1, WorkProductEventPortErrorV1> {
+        (**self).append_atomically(context, draft)
     }
 }
 
@@ -187,6 +198,31 @@ pub struct WorkProductMutationReceiptV1 {
     event: WorkProductEventV1,
     verified_graph_version: VerifiedWorkGraphVersionV1,
     replayed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkProductMutationReceiptWireV1 {
+    event: WorkProductEventV1,
+    verified_graph_version: VerifiedWorkGraphVersionV1,
+    replayed: bool,
+}
+
+impl<'de> Deserialize<'de> for WorkProductMutationReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WorkProductMutationReceiptWireV1::deserialize(deserializer)?;
+        let commit = WorkProductEventCommitV1::new(wire.event, wire.verified_graph_version)
+            .map_err(serde::de::Error::custom)?;
+        let (event, verified_graph_version) = commit.into_parts();
+        Ok(Self {
+            event,
+            verified_graph_version,
+            replayed: wire.replayed,
+        })
+    }
 }
 
 impl WorkProductMutationReceiptV1 {
@@ -218,6 +254,13 @@ macro_rules! mutation_request {
 mutation_request!(CreateWorkProductRequestV1 {
     initial_graph: WorkProductGraphV1
 });
+mutation_request!(AddWorkTaskRequestV1 { item: WorkItemV1 });
+mutation_request!(CreateWorkTaskRequestV1 {
+    initiative: WorkInitiativeV1,
+    plan: WorkPlanV1,
+    milestone: WorkMilestoneV1,
+    item: WorkItemV1,
+});
 mutation_request!(DecideWorkProposalRequestV1 {
     proposal: WorkProposalV1,
     disposition: WorkProposalDispositionV1,
@@ -243,27 +286,274 @@ mutation_request!(RecordWorkHandoffRequestV1 {
     handoff: WorkHandoffV1
 });
 
-pub struct WorkProductMutationServiceV1<G, A, E, P> {
+/// Operator-selected graph change before the owning Work authority binds the
+/// current verified head and revision authorities.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum WorkProductChangeDraftV1 {
+    AddTask {
+        item: WorkItemV1,
+    },
+    CreateTask {
+        initiative: WorkInitiativeV1,
+        plan: WorkPlanV1,
+        milestone: WorkMilestoneV1,
+        item: WorkItemV1,
+    },
+    DecideProposal {
+        proposal: WorkProposalV1,
+        disposition: WorkProposalDispositionV1,
+    },
+    DecideRelationReplan {
+        proposal: WorkRelationReplanProposalV1,
+        disposition: WorkProposalDispositionV1,
+    },
+    ApplyRelationReplan {
+        proposal_id: ProposalId,
+    },
+    AcceptTask {
+        task_id: TaskId,
+        evidence_by_criterion: BTreeMap<AcceptanceCriterionId, TaskEvidenceLinkId>,
+    },
+    LinkAcceptedAttempt {
+        task_id: TaskId,
+        identity: WorkAttemptIdentityV1,
+        evidence: TaskEvidenceLinkV1,
+    },
+    RecordHandoff {
+        handoff: WorkHandoffV1,
+    },
+}
+
+/// Read-only preparation input. Authority identities, clocks, and revision
+/// pins are deliberately absent because the backend owns them.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareWorkProductMutationRequestV1 {
+    pub selection: WorkProductSelectionScopeV1,
+    pub change: WorkProductChangeDraftV1,
+    pub causation_event_id: Option<WorkProductEventId>,
+    pub evidence: Vec<WorkProductEventEvidenceV1>,
+}
+
+/// Closed public mutation surface for the Work-product graph authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "mutation", content = "request", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
+pub enum WorkProductMutationRequestV1 {
+    Create(CreateWorkProductRequestV1),
+    AddTask(AddWorkTaskRequestV1),
+    CreateTask(CreateWorkTaskRequestV1),
+    DecideProposal(DecideWorkProposalRequestV1),
+    DecideRelationReplan(DecideWorkRelationReplanRequestV1),
+    ApplyRelationReplan(ApplyWorkRelationReplanRequestV1),
+    AcceptTask(AcceptWorkTaskRequestV1),
+    LinkAcceptedAttempt(LinkAcceptedWorkAttemptRequestV1),
+    RecordHandoff(RecordWorkHandoffRequestV1),
+}
+
+impl WorkProductMutationRequestV1 {
+    pub const fn mutation_identity(&self) -> &WorkProductMutationIdentityV1 {
+        match self {
+            Self::Create(request) => &request.mutation,
+            Self::AddTask(request) => &request.mutation,
+            Self::CreateTask(request) => &request.mutation,
+            Self::DecideProposal(request) => &request.mutation,
+            Self::DecideRelationReplan(request) => &request.mutation,
+            Self::ApplyRelationReplan(request) => &request.mutation,
+            Self::AcceptTask(request) => &request.mutation,
+            Self::LinkAcceptedAttempt(request) => &request.mutation,
+            Self::RecordHandoff(request) => &request.mutation,
+        }
+    }
+}
+
+pub struct WorkProductMutationServiceV1<G, A, E> {
     graph: G,
     owner_authority: A,
     events: E,
-    publisher: P,
 }
 
-impl<G, A, E, P> WorkProductMutationServiceV1<G, A, E, P>
+impl<G, A, E> WorkProductMutationServiceV1<G, A, E>
 where
     G: WorkGraphReadPortV1,
     A: WorkProductOwnerAuthorizationPortV1,
     E: WorkProductEventPortV1,
-    P: WorkGraphPublishPortV1,
 {
-    pub const fn new(graph: G, owner_authority: A, events: E, publisher: P) -> Self {
+    pub const fn new(graph: G, owner_authority: A, events: E) -> Self {
         Self {
             graph,
             owner_authority,
             events,
-            publisher,
         }
+    }
+
+    pub fn mutate(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        request: WorkProductMutationRequestV1,
+        current_revisions: &WorkProductRevisionPinsV1,
+    ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+        if &request.mutation_identity().revisions != current_revisions {
+            return Err(WorkProductApplicationErrorV1::RevisionConflict);
+        }
+        match request {
+            WorkProductMutationRequestV1::Create(request) => self.create(context, binding, request),
+            WorkProductMutationRequestV1::AddTask(request) => {
+                self.add_task(context, binding, request)
+            }
+            WorkProductMutationRequestV1::CreateTask(request) => {
+                self.create_task(context, binding, request)
+            }
+            WorkProductMutationRequestV1::DecideProposal(request) => {
+                self.decide_proposal(context, binding, request)
+            }
+            WorkProductMutationRequestV1::DecideRelationReplan(request) => {
+                self.decide_relation_replan(context, binding, request)
+            }
+            WorkProductMutationRequestV1::ApplyRelationReplan(request) => {
+                self.apply_relation_replan(context, binding, request)
+            }
+            WorkProductMutationRequestV1::AcceptTask(request) => {
+                self.accept_task(context, binding, request)
+            }
+            WorkProductMutationRequestV1::LinkAcceptedAttempt(request) => {
+                self.link_accepted_attempt(context, binding, request)
+            }
+            WorkProductMutationRequestV1::RecordHandoff(request) => {
+                self.record_handoff(context, binding, request)
+            }
+        }
+    }
+
+    /// Prepare an exact mutation command from the current verified Work head.
+    /// A later submit still performs normal graph-version and revision CAS, so
+    /// state that changes between prepare and submit is rejected as stale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_mutation(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        request: PrepareWorkProductMutationRequestV1,
+        command_id: WorkCommandId,
+        occurred_at: UtcMicros,
+        revisions: WorkProductRevisionPinsV1,
+    ) -> Result<WorkProductMutationRequestV1, WorkProductApplicationErrorV1> {
+        authorize_and_admit(context, binding, occurred_at)?;
+        request
+            .selection
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        let authorized_scope = self
+            .owner_authority
+            .authorize_scope(context, &request.selection, occurred_at)
+            .map_err(map_owner_error)?;
+        if authorized_scope.selection() != &request.selection {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        }
+        let port_context =
+            WorkProductPortContextV1::from_request(context, authorized_scope, occurred_at);
+        let read_request = WorkGraphReadRequestV1::current(request.selection.clone(), occurred_at);
+        let read = self.graph.read_graph(&port_context, &read_request)?;
+        super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
+        let WorkGraphReadV1::Current { snapshot, .. } = read else {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        };
+        let expected_graph_version = snapshot.verified_version().graph_version();
+        let mut mutation = WorkProductMutationIdentityV1 {
+            expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                verified_version: snapshot.verified_version().clone(),
+            },
+            command_id,
+            causation_event_id: request.causation_event_id,
+            evidence: request.evidence,
+            occurred_at,
+            revisions,
+        };
+        canonicalize_mutation_evidence(&mut mutation)?;
+        let selection = request.selection;
+        Ok(match request.change {
+            WorkProductChangeDraftV1::AddTask { item } => {
+                WorkProductMutationRequestV1::AddTask(AddWorkTaskRequestV1 {
+                    selection,
+                    item,
+                    mutation,
+                })
+            }
+            WorkProductChangeDraftV1::CreateTask {
+                initiative,
+                plan,
+                milestone,
+                item,
+            } => WorkProductMutationRequestV1::CreateTask(CreateWorkTaskRequestV1 {
+                selection,
+                initiative,
+                plan,
+                milestone,
+                item,
+                mutation,
+            }),
+            WorkProductChangeDraftV1::DecideProposal {
+                proposal,
+                disposition,
+            } => WorkProductMutationRequestV1::DecideProposal(DecideWorkProposalRequestV1 {
+                selection,
+                proposal,
+                disposition,
+                mutation,
+            }),
+            WorkProductChangeDraftV1::DecideRelationReplan {
+                proposal,
+                disposition,
+            } => WorkProductMutationRequestV1::DecideRelationReplan(
+                DecideWorkRelationReplanRequestV1 {
+                    selection,
+                    proposal,
+                    disposition,
+                    mutation,
+                },
+            ),
+            WorkProductChangeDraftV1::ApplyRelationReplan { proposal_id } => {
+                WorkProductMutationRequestV1::ApplyRelationReplan(
+                    ApplyWorkRelationReplanRequestV1 {
+                        selection,
+                        proposal_id,
+                        mutation,
+                    },
+                )
+            }
+            WorkProductChangeDraftV1::AcceptTask {
+                task_id,
+                evidence_by_criterion,
+            } => WorkProductMutationRequestV1::AcceptTask(AcceptWorkTaskRequestV1 {
+                selection,
+                task_id,
+                evidence_by_criterion,
+                mutation,
+            }),
+            WorkProductChangeDraftV1::LinkAcceptedAttempt {
+                task_id,
+                identity,
+                evidence,
+            } => WorkProductMutationRequestV1::LinkAcceptedAttempt(
+                LinkAcceptedWorkAttemptRequestV1 {
+                    selection,
+                    task_id,
+                    based_on_version: expected_graph_version,
+                    identity,
+                    evidence,
+                    mutation,
+                },
+            ),
+            WorkProductChangeDraftV1::RecordHandoff { handoff } => {
+                WorkProductMutationRequestV1::RecordHandoff(RecordWorkHandoffRequestV1 {
+                    selection,
+                    handoff,
+                    mutation,
+                })
+            }
+        })
     }
 
     pub fn create(
@@ -306,6 +596,68 @@ where
             request.mutation,
             change,
         )
+    }
+
+    pub fn add_task(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        request: AddWorkTaskRequestV1,
+    ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+        self.commit_change(
+            context,
+            binding,
+            request.selection,
+            request.mutation,
+            WorkGraphChangeV1::TaskAdded {
+                item: Box::new(request.item),
+            },
+        )
+    }
+
+    /// Creates one exact task and its declared hierarchy. The first task owns
+    /// graph bootstrap; later tasks use the same version-checked event path
+    /// and may reuse byte-identical containers. No daemon-side default
+    /// hierarchy or separate bootstrap authority exists.
+    pub fn create_task(
+        &self,
+        context: &RequestContext,
+        binding: &WorkProductBindingV1,
+        request: CreateWorkTaskRequestV1,
+    ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+        let CreateWorkTaskRequestV1 {
+            selection,
+            initiative,
+            plan,
+            milestone,
+            item,
+            mutation,
+        } = request;
+        match &mutation.expected_authority {
+            WorkProductExpectedAuthorityV1::NoPriorGraph => {
+                let graph = WorkProductGraphV1::new(
+                    WorkGraphVersionV1::initial(),
+                    vec![initiative],
+                    vec![plan],
+                    vec![milestone],
+                    vec![item],
+                )
+                .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+                self.commit_create(context, binding, selection, mutation, graph)
+            }
+            WorkProductExpectedAuthorityV1::Verified { .. } => self.commit_change(
+                context,
+                binding,
+                selection,
+                mutation,
+                WorkGraphChangeV1::TaskCreated {
+                    initiative,
+                    plan,
+                    milestone,
+                    item: Box::new(item),
+                },
+            ),
+        }
     }
 
     pub fn decide_relation_replan(
@@ -431,8 +783,8 @@ where
         {
             return Err(WorkProductApplicationErrorV1::InvalidRequest);
         }
-        if let Some(event) = self.replay(&port_context, &mutation, &payload, &digest)? {
-            return self.publish(&port_context, event, true);
+        if let Some(commit) = self.replay(&port_context, &mutation, &payload, &digest)? {
+            return mutation_receipt(commit, true);
         }
         let draft = event_draft(
             context,
@@ -443,7 +795,7 @@ where
             WorkGraphVersionV1::initial(),
             payload,
         )?;
-        self.append_and_publish(&port_context, draft)
+        self.append_atomically(&port_context, draft)
     }
 
     fn commit_change(
@@ -467,8 +819,8 @@ where
         };
         let expected_graph_version = expected_verified_version.graph_version();
         validate_change_request(&change, expected_graph_version, mutation.occurred_at)?;
-        if let Some(event) = self.replay(&port_context, &mutation, &payload, &digest)? {
-            return self.publish(&port_context, event, true);
+        if let Some(commit) = self.replay(&port_context, &mutation, &payload, &digest)? {
+            return mutation_receipt(commit, true);
         }
 
         let read_request = WorkGraphReadRequestV1::current(selection.clone(), mutation.occurred_at);
@@ -494,7 +846,7 @@ where
             result_graph.version(),
             payload,
         )?;
-        self.append_and_publish(&port_context, draft)
+        self.append_atomically(&port_context, draft)
     }
 
     fn prepare(
@@ -513,7 +865,9 @@ where
         WorkProductApplicationErrorV1,
     > {
         authorize_and_admit(context, binding, mutation.occurred_at)?;
-        selection.validate()?;
+        selection
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
         let authorized_scope = self
             .owner_authority
             .authorize_scope(context, selection, mutation.occurred_at)
@@ -542,61 +896,53 @@ where
         mutation: &WorkProductMutationIdentityV1,
         payload: &WorkProductEventPayloadV1,
         digest: &ManifestDigest,
-    ) -> Result<Option<WorkProductEventV1>, WorkProductApplicationErrorV1> {
-        let event = self
+    ) -> Result<Option<WorkProductEventCommitV1>, WorkProductApplicationErrorV1> {
+        let commit = self
             .events
             .replay(port_context, &mutation.command_id, digest)
             .map_err(map_event_error)?;
-        if let Some(event) = event {
+        if let Some(commit) = commit {
+            commit.validate().map_err(map_event_error)?;
             validate_replayed_event(
-                &event,
+                commit.event(),
                 port_context,
                 mutation,
                 payload,
                 digest,
                 &selected_relations(port_context.authorized_scope().selection()),
             )?;
-            return Ok(Some(event));
+            return Ok(Some(commit));
         }
         Ok(None)
     }
 
-    fn append_and_publish(
+    fn append_atomically(
         &self,
         port_context: &WorkProductPortContextV1,
         draft: WorkProductEventDraftV1,
     ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
-        let (event, replayed) = self
+        let (commit, replayed) = self
             .events
-            .append_with_outbox(port_context, &draft)
+            .append_atomically(port_context, &draft)
             .map_err(map_event_error)?
             .into_parts();
-        validate_appended_event(&event, &draft)?;
-        self.publish(port_context, event, replayed)
+        commit.validate().map_err(map_event_error)?;
+        validate_appended_event(commit.event(), &draft)?;
+        mutation_receipt(commit, replayed)
     }
+}
 
-    fn publish(
-        &self,
-        context: &WorkProductPortContextV1,
-        event: WorkProductEventV1,
-        replayed: bool,
-    ) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
-        let verified_graph_version = self
-            .publisher
-            .publish_event(context, &event)
-            .map_err(map_publish_error)?;
-        if verified_graph_version.graph_version() != event.result_graph_version()
-            || verified_graph_version.event_sequence() != event.sequence()
-            || verified_graph_version.source_watermark() != event.source_watermark()
-        {
-            return Err(WorkProductApplicationErrorV1::ReconciliationRequired);
-        }
-        Ok(WorkProductMutationReceiptV1 {
-            event,
-            verified_graph_version,
-            replayed,
-        })
-    }
+fn mutation_receipt(
+    commit: WorkProductEventCommitV1,
+    replayed: bool,
+) -> Result<WorkProductMutationReceiptV1, WorkProductApplicationErrorV1> {
+    commit.validate().map_err(map_event_error)?;
+    let (event, verified_graph_version) = commit.into_parts();
+    Ok(WorkProductMutationReceiptV1 {
+        event,
+        verified_graph_version,
+        replayed,
+    })
 }
 
 fn canonical_work_product_mutation_digest(
@@ -783,18 +1129,6 @@ fn map_event_error(error: WorkProductEventPortErrorV1) -> WorkProductApplication
         }
         WorkProductEventPortErrorV1::Cancelled => WorkProductApplicationErrorV1::Cancelled,
         WorkProductEventPortErrorV1::TimedOut => WorkProductApplicationErrorV1::TimedOut,
-    }
-}
-
-fn map_publish_error(error: WorkGraphPublishPortErrorV1) -> WorkProductApplicationErrorV1 {
-    match error {
-        WorkGraphPublishPortErrorV1::VersionConflict
-        | WorkGraphPublishPortErrorV1::Unavailable
-        | WorkGraphPublishPortErrorV1::DurabilityUncertain
-        | WorkGraphPublishPortErrorV1::Cancelled
-        | WorkGraphPublishPortErrorV1::TimedOut => {
-            WorkProductApplicationErrorV1::ReconciliationRequired
-        }
     }
 }
 

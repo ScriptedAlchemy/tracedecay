@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,6 +21,8 @@ pub enum WorkProductApplicationErrorV1 {
     NotFoundOrNotAuthorized,
     #[error("Work graph version changed")]
     VersionConflict,
+    #[error("Work policy, configuration, or catalog revision changed")]
+    RevisionConflict,
     #[error("Work idempotency key was reused with different input")]
     IdempotencyConflict,
     #[error("Work request is invalid")]
@@ -35,50 +35,10 @@ pub enum WorkProductApplicationErrorV1 {
     EvidenceAuthorityUnavailable,
     #[error("Work proposal authority is unavailable")]
     ProposalAuthorityUnavailable,
-    #[error("Work graph publication is pending reconciliation")]
-    ReconciliationRequired,
 }
 
 pub use tracedecay_domain::WorkProductAuthorizedRelationScopeV1 as WorkRelationScopeV1;
-
-/// The relation subset selected for one request. `ProfileOwnedNoGit` is an
-/// explicit no-Git selection, not an empty set that bypasses authorization.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "selection", rename_all = "snake_case")]
-pub enum WorkProductSelectionScopeV1 {
-    ProfileOwnedNoGit,
-    Relations {
-        relation_scopes: BTreeSet<WorkRelationScopeV1>,
-    },
-}
-
-impl WorkProductSelectionScopeV1 {
-    pub fn relations(
-        relation_scopes: BTreeSet<WorkRelationScopeV1>,
-    ) -> Result<Self, WorkProductApplicationErrorV1> {
-        if relation_scopes.is_empty() {
-            return Err(WorkProductApplicationErrorV1::InvalidRequest);
-        }
-        Ok(Self::Relations { relation_scopes })
-    }
-
-    pub const fn relation_scopes(&self) -> Option<&BTreeSet<WorkRelationScopeV1>> {
-        match self {
-            Self::ProfileOwnedNoGit => None,
-            Self::Relations { relation_scopes } => Some(relation_scopes),
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
-        if matches!(
-            self,
-            Self::Relations { relation_scopes } if relation_scopes.is_empty()
-        ) {
-            return Err(WorkProductApplicationErrorV1::InvalidRequest);
-        }
-        Ok(())
-    }
-}
+pub use tracedecay_domain::WorkProductSelectionScopeV1;
 
 /// Owner identity resolved by the registered profile authority. It is never
 /// accepted from a Work request.
@@ -102,7 +62,9 @@ impl AuthorizedWorkProductScopeV1 {
         owner_profile_id
             .validate()
             .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
-        selection.validate()?;
+        selection
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
         Ok(Self {
             owner_brain_id,
             owner_profile_id,

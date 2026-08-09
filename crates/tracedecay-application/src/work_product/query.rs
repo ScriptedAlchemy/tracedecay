@@ -370,7 +370,9 @@ fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
         RequestAdmission::Cancelled => return Err(WorkProductApplicationErrorV1::Cancelled),
         RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
     }
-    selection.validate()?;
+    selection
+        .validate()
+        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
     let scope = owner_authority
         .authorize_scope(context, selection, observed_at)
         .map_err(|error| match error {

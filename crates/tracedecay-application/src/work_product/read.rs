@@ -106,7 +106,9 @@ impl WorkGraphReadRequestV1 {
     }
 
     fn validate(&self) -> Result<(), WorkProductApplicationErrorV1> {
-        self.selection.validate()?;
+        self.selection
+            .validate()
+            .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
         let valid = match self.mode {
             WorkGraphReadModeV1::Current => self.continuation.is_none(),
             WorkGraphReadModeV1::AsOf { valid_at } => {
