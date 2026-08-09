@@ -145,17 +145,13 @@ async fn publish_lifecycle_runtime(
     runtime: Arc<ShardRuntime>,
     attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
-    let schema_initialized = if request.mode == StoreRuntimeOpenMode::Initialize {
-        match install_final_schema_before_publication(&request, attachment.as_physical()).await {
-            Ok(schema_initialized) => schema_initialized,
-            Err(error) => {
-                attachment.abort(request.locator.is_prospective());
-                return Err(error);
-            }
-        }
-    } else {
-        false
-    };
+    if request.mode == StoreRuntimeOpenMode::Initialize
+        && let Err(error) =
+            install_final_schema_before_publication(&request, attachment.as_physical()).await
+    {
+        attachment.abort(request.locator.is_prospective());
+        return Err(error);
+    }
     if request.mode == StoreRuntimeOpenMode::Existing
         && runtime_core_final_schema_applies(&request.binding.shard_id.scope)
         && let Err(error) =
@@ -178,11 +174,7 @@ async fn publish_lifecycle_runtime(
             message: error,
         });
     }
-    Ok(PublishedShardRuntime::new_with_schema_initialization(
-        runtime,
-        attachment.into_arc(),
-        schema_initialized,
-    ))
+    Ok(PublishedShardRuntime::new(runtime, attachment.into_arc()))
 }
 
 fn runtime_core_final_schema_applies(scope: &StoreShardScopeV1) -> bool {
@@ -342,7 +334,7 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
 async fn install_final_schema_before_publication(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
-) -> Result<bool, StoreRuntimeRegistryFailure> {
+) -> Result<(), StoreRuntimeRegistryFailure> {
     let authority = request.database_authority.clone().ok_or_else(|| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
             operation: "install final schema for initialized SQLite runtime",
@@ -424,7 +416,7 @@ async fn install_final_schema_before_publication(
                 })?;
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {

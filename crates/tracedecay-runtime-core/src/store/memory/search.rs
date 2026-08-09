@@ -425,7 +425,7 @@ pub(super) async fn related_project_memory_facts_tx(
              JOIN memory_v2_facts AS mappings
                ON mappings.fact_id = projections.canonical_fact_id
              WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3 AND ?4 = 'legacy-memory-v1'
+               AND mappings.owner_json = ?3 AND ?4 = 'persisted-numeric-fact-id'
                AND (
                     entities.normalized_name = ?5
                     OR (
@@ -487,7 +487,7 @@ pub(super) async fn related_project_memory_facts_tx(
          JOIN memory_v2_facts AS mappings
            ON mappings.fact_id = projections.canonical_fact_id
          WHERE mappings.owner_kind = ? AND mappings.project_id = ?
-           AND mappings.owner_json = ? AND ? = 'legacy-memory-v1'
+           AND mappings.owner_json = ? AND ? = 'persisted-numeric-fact-id'
            AND source_links.entity_id IN ({placeholders})
            AND co_links.entity_id NOT IN ({placeholders})
          ORDER BY co_entities.name ASC, co_entities.entity_id ASC
@@ -541,7 +541,7 @@ pub(super) async fn related_project_memory_facts_tx(
                        ON mappings.fact_id = legacy_facts.canonical_fact_id
                      WHERE links.entity_id = ?1
                        AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND ?5 = 'legacy-memory-v1'
+                       AND mappings.owner_json = ?4 AND ?5 = 'persisted-numeric-fact-id'
                        AND legacy_facts.category = ?6 AND legacy_facts.trust_score >= ?7
                      ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?8",
                         params![
@@ -567,7 +567,7 @@ pub(super) async fn related_project_memory_facts_tx(
                        ON mappings.fact_id = legacy_facts.canonical_fact_id
                      WHERE links.entity_id = ?1
                        AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND ?5 = 'legacy-memory-v1'
+                       AND mappings.owner_json = ?4 AND ?5 = 'persisted-numeric-fact-id'
                        AND legacy_facts.trust_score >= ?6
                      ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?7",
                         params![

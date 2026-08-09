@@ -156,7 +156,7 @@ async fn compatibility_owner_bank_count_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
                AND current_facts.payload_access = 'eligible'
                AND legacy_facts.hrr_vector IS NOT NULL
                AND legacy_facts.hrr_algebra = 'amari_fhrr'
@@ -216,7 +216,7 @@ pub(super) async fn project_memory_status_tx(
              JOIN memory_fact_entities AS relations
                ON relations.fact_id = projections.fact_id
              WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
-               AND facts.owner_json = ?3 AND ?4 = 'legacy-memory-v1'",
+               AND facts.owner_json = ?3 AND ?4 = 'persisted-numeric-fact-id'",
             params![
                 key.kind,
                 key.project_id.as_str(),
@@ -255,7 +255,7 @@ pub(super) async fn project_memory_status_tx(
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
              WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
-               AND facts.owner_json = ?3 AND ?4 = 'legacy-memory-v1'
+               AND facts.owner_json = ?3 AND ?4 = 'persisted-numeric-fact-id'
                AND current_facts.payload_access = 'eligible'
                AND (legacy_facts.hrr_vector IS NULL
                     OR legacy_facts.hrr_algebra <> 'amari_fhrr'

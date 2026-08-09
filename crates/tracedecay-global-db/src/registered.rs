@@ -373,9 +373,7 @@ impl RegisteredGlobalDb {
             &expected_binding,
         )
         .await?;
-        if !runtime.schema_migrated() {
-            super::ensure_registered_schema(&write_connection).await?;
-        }
+        super::ensure_registered_schema(&write_connection).await?;
         Self::finish_attach(runtime, write_connection, authority).await
     }
 
@@ -388,7 +386,7 @@ impl RegisteredGlobalDb {
         authority: DatabaseAuthority,
     ) -> tracedecay_runtime_core::errors::Result<(
         Self,
-        Option<super::schema_stages::RegisteredSchemaConvergence>,
+        super::schema_stages::RegisteredSchemaConvergence,
     )> {
         let write_connection =
             registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
@@ -397,14 +395,8 @@ impl RegisteredGlobalDb {
             &expected_binding,
         )
         .await?;
-        let convergence = if runtime.schema_migrated() {
-            None
-        } else {
-            Some(
-                super::schema_stages::ensure_registered_schema_for_admission(&write_connection)
-                    .await?,
-            )
-        };
+        let convergence =
+            super::schema_stages::ensure_registered_schema_for_admission(&write_connection).await?;
         let database = Self::finish_attach(runtime, write_connection, authority).await?;
         Ok((database, convergence))
     }

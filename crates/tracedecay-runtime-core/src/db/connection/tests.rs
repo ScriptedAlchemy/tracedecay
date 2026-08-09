@@ -265,7 +265,7 @@ async fn retained_reader_never_observes_uncommitted_writer_state() {
 }
 
 #[tokio::test]
-async fn opaque_memory_writer_serializes_and_mutates_without_raw_connection_access() {
+async fn memory_transactions_serialize_and_commit_through_the_final_writer() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");
     let authority = DatabaseAuthority::acquire_test(&path, "memory writer capability").unwrap();
@@ -277,8 +277,11 @@ async fn opaque_memory_writer_serializes_and_mutates_without_raw_connection_acce
     )
     .await
     .unwrap();
-    let first = db.memory_writer().await.unwrap();
-    let mut second = Box::pin(db.memory_writer());
+    let first = db
+        .begin_memory_write_transaction("hold final memory writer")
+        .await
+        .unwrap();
+    let mut second = Box::pin(db.begin_memory_write_transaction("commit final memory write"));
 
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
@@ -288,31 +291,30 @@ async fn opaque_memory_writer_serializes_and_mutates_without_raw_connection_acce
     drop(first);
     let second = second.await.unwrap();
     second
-        .store()
-        .add_fact(
-            crate::memory::types::AddFactRequest {
-                content: "opaque writer fixture".to_string(),
-                category: crate::memory::types::MemoryCategory::General,
-                source: Some("test".to_string()),
-                tags: Vec::new(),
-                entities: Vec::new(),
-                trust: None,
-                metadata: serde_json::json!({}),
-            },
-            crate::memory::trust::DEFAULT_TRUST,
+        .execute(
+            "INSERT INTO metadata(key, value) VALUES(?1, ?2)",
+            crate::db::engine::params!["final-memory-writer", "committed"],
         )
         .await
         .unwrap();
-    drop(second);
+    second.commit().await.unwrap();
 
     let mut rows = db
         .conn()
-        .query("SELECT COUNT(*) FROM memory_facts", ())
+        .query(
+            "SELECT value FROM metadata WHERE key = ?1",
+            crate::db::engine::params!["final-memory-writer"],
+        )
         .await
         .unwrap();
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        1
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "committed"
     );
 }
 

@@ -31,7 +31,7 @@ pub use access::{
 pub use connection::Database;
 pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseWriteTransaction, MemoryRelationGraphRuntime,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};

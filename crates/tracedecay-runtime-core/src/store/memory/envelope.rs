@@ -77,28 +77,12 @@ pub(super) async fn project_memory_lookup_operation_receipt_tx(
              FROM memory_v2_operation_receipts
              WHERE owner_kind = ?1
                AND project_id = ?2
-               AND (
-                    operation_id = ?3
-                    OR (
-                        ?6 = 1
-                        AND operation_kind = ?4
-                        AND request_digest = ?5
-                        AND operation_id LIKE 'memory-operation.v1.%'
-                    )
-               )
+               AND operation_id = ?3
              ORDER BY
-                CASE WHEN operation_id = ?3 THEN 0 ELSE 1 END,
                 recorded_at ASC,
                 operation_id ASC
              LIMIT 1",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                operation_id.as_str(),
-                expected_kind,
-                request_digest,
-                i64::from(operation_id.as_str().starts_with("memory-operation.v2.")),
-            ],
+            params![key.kind, key.project_id.as_str(), operation_id.as_str(),],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
@@ -114,7 +98,7 @@ pub(super) async fn project_memory_lookup_operation_receipt_tx(
     if operation_kind != expected_kind || stored_digest != request_digest {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility operation id was reused with a different request",
+            "operation id was reused with a different request",
         ));
     }
     let fact_id = row_optional_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?

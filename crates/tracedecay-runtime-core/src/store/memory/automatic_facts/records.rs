@@ -10,7 +10,7 @@ use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionId, FactCategoryV1, FactEventId, FactId, FactOwnerV1,
-    PayloadAccessState, ProvenanceId, SanitizationReceiptV1, UtcMicros,
+    ProvenanceId, SanitizationReceiptV1, UtcMicros,
 };
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryAutomaticFactEffectV1,

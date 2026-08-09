@@ -170,7 +170,7 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
                AND current_facts.payload_access = 'eligible'
                AND (
                     legacy_facts.hrr_vector IS NULL

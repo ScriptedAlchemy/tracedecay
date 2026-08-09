@@ -171,7 +171,7 @@ pub use tracedecay_domain::source_path_policy::{GENERATED_DIR_SEGMENTS, is_gener
 
 // Deliberately unconditional (not gated behind `cfg(test)` /
 // `feature = "test-helpers"`): some non-test call sites — e.g. the root
-// crate's `src/sessions/session_temporal_benchmark.rs`, which backs
+// crate's `src/session_temporal_benchmark.rs`, which backs
 // `cargo bench` and is always compiled as part of the lib — need this lock
 // outside a test build. The mutex and accessor are trivial and side-effect
 // free, so keeping them unconditional costs nothing while guaranteeing every

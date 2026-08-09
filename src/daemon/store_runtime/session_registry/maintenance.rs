@@ -264,13 +264,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|failure| registry_open_error(operation, failure))?;
         let long_lived = self.long_lived_session_maintenance();
         let (database, convergence) = if long_lived {
-            RegisteredGlobalDb::migrate_and_attach_for_daemon(
+            let (database, convergence) = RegisteredGlobalDb::migrate_and_attach_for_daemon(
                 runtime,
                 expected_binding,
                 expected_locator,
                 authority,
             )
-            .await?
+            .await?;
+            (database, Some(convergence))
         } else {
             (
                 RegisteredGlobalDb::migrate_and_attach(

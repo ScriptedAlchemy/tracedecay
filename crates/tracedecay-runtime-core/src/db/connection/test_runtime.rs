@@ -306,7 +306,6 @@ impl Database {
                 }
             }
         };
-        let _schema_initialized = runtime.schema_migrated();
         let access = if mode == TestDatabaseRuntimeMode::ReadOnly {
             DatabaseAccessMode::ReadOnly
         } else {

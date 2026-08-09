@@ -500,7 +500,7 @@ pub(super) async fn project_memory_required_mapping_tx(
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility fact has no fixed legacy-memory-v1 mapping",
+                "persisted numeric fact has no fixed source mapping",
             )
         })
 }

@@ -213,14 +213,6 @@ pub struct FactRelationRecord {
     pub updated_at: i64,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EntityGroomingResult {
-    pub winner_entity_id: i64,
-    pub merged_entity_ids: Vec<i64>,
-    pub aliases: Vec<String>,
-    pub rewired_fact_count: usize,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum MemoryGroomingOperation {

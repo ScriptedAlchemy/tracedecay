@@ -685,7 +685,7 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
     // was concurrently removed by another operation just before this one --
     // surface as the idempotent no-op outcome below instead of a hard
     // authority error. Callers no longer need a separate pre-read
-    // transaction to get that idempotency (see `remove_fact_v1`).
+    // transaction to get that idempotency (see `remove_fact`).
     let Some(fact_id) = resolve_project_memory_target_tx(transaction, request.target()).await?
     else {
         let remaining_fact_count =

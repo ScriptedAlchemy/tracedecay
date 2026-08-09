@@ -1,5 +1,6 @@
 //! Shared row helpers, storage-error plumbing, and owner-key handling.
 
+use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::privacy::sanitize_provider_metadata_text;
@@ -20,7 +21,7 @@ pub(super) const PROJECT_MEMORY_READ_OPERATION: &str = "read compatibility memor
 
 pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write compatibility memory facts";
 
-const COMPATIBILITY_SOURCE_STORE: &str = "legacy-memory-v1";
+const COMPATIBILITY_SOURCE_STORE: &str = "persisted-numeric-fact-id";
 
 pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResult<u64> {
     u64::try_from(value).map_err(|_| {

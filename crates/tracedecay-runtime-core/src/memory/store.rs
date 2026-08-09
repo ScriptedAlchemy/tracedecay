@@ -17,7 +17,6 @@ use crate::tracedecay::current_timestamp;
 
 mod facts;
 mod feedback;
-mod grooming;
 mod queries;
 mod relations;
 mod vectors;
@@ -40,22 +39,6 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-    pub const fn new_engine_transaction(transaction: &'a crate::db::engine::Transaction) -> Self {
-        Self {
-            conn: MemoryConnection::runtime_transaction(transaction),
-            encoder: HolographicEncoder::new(),
-        }
-    }
-
-    pub const fn new_database_transaction(
-        transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
-    ) -> Self {
-        Self {
-            conn: MemoryConnection::database_transaction(transaction),
-            encoder: HolographicEncoder::new(),
-        }
-    }
-
     /// Runs `work` through the transaction executor, committing on success and
     /// rolling back on error or cancellation. Caller-owned transactions remain
     /// caller-owned and provide the surrounding atomic boundary.
@@ -67,12 +50,7 @@ impl<'a> MemoryStore<'a> {
                 &'tx MemoryStore<'tx>,
             ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'tx>>,
     {
-        if matches!(
-            self.conn,
-            MemoryConnection::RuntimeTransaction(_)
-                | MemoryConnection::Transaction(_)
-                | MemoryConnection::DatabaseTransaction(_)
-        ) {
+        if matches!(self.conn, MemoryConnection::Transaction(_)) {
             return work(self).await;
         }
         let transaction = self
@@ -846,61 +824,5 @@ mod cancellation_tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
         );
-    }
-
-    #[tokio::test]
-    async fn database_transaction_memory_store_uses_ambient_transaction() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("database-memory-transaction.db");
-        let authority =
-            crate::db::DatabaseAuthority::acquire_test(&path, "database memory transaction")
-                .unwrap();
-        let (database, _) = crate::db::Database::publish_test_runtime(
-            &path,
-            &authority,
-            crate::db::TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .unwrap();
-        let transaction = database
-            .begin_memory_write_transaction("database memory transaction")
-            .await
-            .unwrap();
-        let store = MemoryStore::new_database_transaction(&transaction);
-
-        let outcome = store
-            .add_fact(
-                AddFactRequest {
-                    content: "ambient database transaction fact".to_owned(),
-                    category: MemoryCategory::Project,
-                    tags: Vec::new(),
-                    entities: Vec::new(),
-                    trust: Some(DEFAULT_TRUST),
-                    source: Some("database-transaction-test".to_owned()),
-                    metadata: serde_json::Value::Null,
-                },
-                DEFAULT_TRUST,
-            )
-            .await
-            .unwrap();
-        assert!(outcome.fact.is_some());
-
-        transaction.rollback().await.unwrap();
-        let read = database
-            .begin_memory_read_transaction("verify database memory rollback")
-            .await
-            .unwrap();
-        let mut rows = read
-            .query(
-                "SELECT COUNT(*) FROM memory_facts WHERE content = ?1",
-                params!["ambient database transaction fact"],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0
-        );
-        read.commit().await.unwrap();
     }
 }

@@ -22,7 +22,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryAutomaticFactEffectV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAddCommandV1, ProjectMemoryResult,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryResult, ProjectMemoryStoreError,
 };
 
 pub(in crate::store::memory) fn project_memory_automatic_fact_request_digest(
@@ -258,4 +258,5 @@ pub(in crate::store::memory) async fn project_memory_record_automatic_fact_opera
         project_memory_now()?,
     )
     .await
+    .map_err(ProjectMemoryStoreError::Store)
 }

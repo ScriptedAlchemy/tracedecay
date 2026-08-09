@@ -427,7 +427,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     };
     let remote_authority =
         crate::db::DatabaseAuthority::acquire_test(&remote_path, "initialize remote node").unwrap();
-    let remote = open_published(
+    open_published(
         &registry,
         StoreRuntimeOpenRequest::new_initialize_authorized(
             StoreShardIdV1::remote_node(
@@ -442,7 +442,6 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     )
     .await;
 
-    assert!(remote.schema_initialized());
     let tables: Vec<String> = Connection::open(&remote_path)
         .unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")

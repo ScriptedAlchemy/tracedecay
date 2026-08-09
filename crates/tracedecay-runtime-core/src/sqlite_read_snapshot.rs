@@ -1394,7 +1394,7 @@ mod tests {
             .await
             .unwrap();
 
-        for directory in [&first, &second, &scratch_root, &snapshots.scratch.path] {
+        for directory in [&first, &second, &scratch_root, &snapshots._scratch.path] {
             assert_eq!(
                 fs::metadata(directory).unwrap().permissions().mode() & 0o777,
                 0o700,
@@ -1493,14 +1493,14 @@ mod tests {
             0o700
         );
         assert_eq!(
-            fs::metadata(&snapshots.scratch.path)
+            fs::metadata(&snapshots._scratch.path)
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777,
             0o700
         );
-        let live = snapshots.scratch.path.clone();
+        let live = snapshots._scratch.path.clone();
         drop(snapshots);
         assert!(
             !live.exists(),

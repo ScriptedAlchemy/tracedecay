@@ -27,7 +27,6 @@ mod runtime_lifecycle;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 mod test_runtime;
 
-pub use graph_binding::MemoryRelationGraphRuntime;
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 use registry::{DatabaseInner, database_slot};

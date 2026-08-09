@@ -107,7 +107,6 @@ struct StoreRuntimeHandleInner {
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
-    schema_migrated: bool,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -235,10 +234,6 @@ impl StoreRuntimeHandle {
 
     pub fn opened_file_identity(&self) -> Option<u64> {
         Some(self.inner.opened_file_identity)
-    }
-
-    pub fn schema_migrated(&self) -> bool {
-        self.inner.schema_migrated
     }
 
     pub fn database_authority(
@@ -598,6 +593,10 @@ impl fmt::Debug for StoreRuntimeHandle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreRuntimeRegistryFailure {
+    ResetRequired {
+        authority: String,
+        reason: String,
+    },
     InvalidProjectCodeBudget {
         requested: usize,
         maximum: usize,

@@ -96,7 +96,7 @@ one-line join.
 
 The duplication is pinned rather than trusted: `src/daemon/store_runtime.rs`
 carries two `#[cfg(test)]` assertions that the kernel's value equals
-`crate::sessions::`'s, so a divergence fails the root suite. When
+`tracedecay_sessions::runtime`'s, so a divergence fails the root suite. When
 `tracedecay-sessions` repoints at the kernel, it should re-export
 `profile_paths::USER_SESSIONS_DB_FILENAME` and the assertions can go.
 

@@ -53,7 +53,7 @@ async fn dashboard_project_memory_fact_summaries_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              ORDER BY legacy_facts.trust_score DESC,
                       legacy_facts.updated_at DESC,
                       mappings.fact_id ASC
@@ -133,7 +133,7 @@ async fn dashboard_project_memory_entities_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              GROUP BY entities.entity_id, entities.name, entities.entity_type,
                       entities.aliases, entities.created_at
              ORDER BY COUNT(DISTINCT legacy_facts.fact_id) DESC,
@@ -204,7 +204,7 @@ async fn dashboard_project_memory_fact_entity_links_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              ORDER BY legacy_facts.trust_score DESC,
                       legacy_facts.updated_at DESC,
                       mappings.fact_id ASC, relations.entity_id ASC
@@ -261,7 +261,7 @@ async fn dashboard_project_memory_owner_count_tx(
          WHERE mappings.owner_kind = ?1
            AND mappings.project_id = ?2
            AND mappings.owner_json = ?3
-           AND ?4 = 'legacy-memory-v1'"
+           AND ?4 = 'persisted-numeric-fact-id'"
     } else {
         "SELECT COUNT(*)
          FROM memory_facts AS legacy_facts
@@ -270,7 +270,7 @@ async fn dashboard_project_memory_owner_count_tx(
          WHERE mappings.owner_kind = ?1
            AND mappings.project_id = ?2
            AND mappings.owner_json = ?3
-           AND ?4 = 'legacy-memory-v1'"
+           AND ?4 = 'persisted-numeric-fact-id'"
     };
     let mut rows = transaction
         .query(
@@ -324,7 +324,7 @@ async fn dashboard_project_memory_named_counts_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              GROUP BY legacy_facts.category
              ORDER BY COUNT(*) DESC, legacy_facts.category ASC
              LIMIT 128",
@@ -342,7 +342,7 @@ async fn dashboard_project_memory_named_counts_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              GROUP BY entities.entity_type
              ORDER BY COUNT(DISTINCT entities.entity_id) DESC, entities.entity_type ASC
              LIMIT 128",
@@ -361,7 +361,7 @@ async fn dashboard_project_memory_named_counts_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              GROUP BY bucket
              ORDER BY bucket ASC
              LIMIT 10",
@@ -455,7 +455,7 @@ async fn dashboard_compatibility_hrr_coverage_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              GROUP BY legacy_facts.category
              ORDER BY COUNT(*) DESC, legacy_facts.category ASC
              LIMIT 128",
@@ -577,7 +577,7 @@ async fn dashboard_compatibility_memory_banks_tx(
                  WHERE mappings.owner_kind = ?1
                    AND mappings.project_id = ?2
                    AND mappings.owner_json = ?3
-                   AND ?4 = 'legacy-memory-v1'
+                   AND ?4 = 'persisted-numeric-fact-id'
                    AND current_facts.payload_access = 'eligible'
                    AND legacy_facts.hrr_vector IS NOT NULL
                    AND legacy_facts.hrr_algebra = 'amari_fhrr'
@@ -642,7 +642,7 @@ async fn dashboard_project_memory_growth_tx(
                  WHERE mappings.owner_kind = ?1
                    AND mappings.project_id = ?2
                    AND mappings.owner_json = ?3
-                   AND ?4 = 'legacy-memory-v1'
+                   AND ?4 = 'persisted-numeric-fact-id'
                    AND legacy_facts.created_at > 0
                  GROUP BY period
                  ORDER BY period DESC
@@ -655,7 +655,7 @@ async fn dashboard_project_memory_growth_tx(
                  WHERE mappings.owner_kind = ?5
                    AND mappings.project_id = ?6
                    AND mappings.owner_json = ?7
-                   AND ?8 = 'legacy-memory-v1'
+                   AND ?8 = 'persisted-numeric-fact-id'
                    AND legacy_facts.created_at > 0
                    AND date(legacy_facts.created_at, 'unixepoch') < (
                        SELECT MIN(period) FROM latest_days
@@ -794,11 +794,11 @@ async fn dashboard_project_memory_entities_for_fact_tx(
               AND related_mappings.owner_kind = ?1
               AND related_mappings.project_id = ?2
               AND related_mappings.owner_json = ?3
-              AND ?4 = 'legacy-memory-v1'
+              AND ?4 = 'persisted-numeric-fact-id'
              WHERE target_mappings.owner_kind = ?1
                AND target_mappings.project_id = ?2
                AND target_mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
                AND target_mappings.fact_id = ?5
              GROUP BY entities.entity_id, entities.name, entities.entity_type,
                       entities.aliases, entities.created_at
@@ -912,7 +912,7 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
                AND (
                     ?5 IS NULL
                     OR legacy_facts.content LIKE ?5 ESCAPE '\\'
@@ -1041,7 +1041,7 @@ pub(super) async fn dashboard_project_memory_oplog_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND ?4 = 'legacy-memory-v1'
+               AND ?4 = 'persisted-numeric-fact-id'
              ORDER BY oplog.id DESC
              LIMIT ?5",
             params![
