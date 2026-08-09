@@ -3,8 +3,8 @@
 
 Seeds a throwaway fixture project, points a REAL agent (Hermes by default,
 optionally `cursor-agent`) at it through the generated tracedecay plugin /
-MCP server, sends the scenario prompts, then asserts on end-state with plain
-SQL against the TraceDecay store resolved by the CLI.
+MCP server, sends the scenario prompts, then reads end-state through exact
+FactId/FactRecordV1 fact-store operations.
 
 Real model turns consume credits/quota, so the run is gated behind BOTH
 `--agent-turn` and `--i-understand-model-cost` (pattern adopted from the
@@ -209,28 +209,39 @@ def run(cmd, cwd=None, env=None, timeout=None, check=True):
     return result
 
 
-def resolve_store_db_path(tracedecay_bin, fixture, env):
+class ExactFactStoreError(RuntimeError):
+    pass
+
+
+def call_exact_tool(tracedecay_bin, fixture, env, tool, args):
+    if not tool.startswith("tracedecay_"):
+        raise ExactFactStoreError(f"tool name is not canonical: {tool}")
+    payload = dict(args)
+    payload.setdefault("format", "json")
     result = run(
-        [tracedecay_bin, "status", "--runtime", "--json"],
+        [tracedecay_bin, "tool", tool, "--args", json.dumps(payload)],
         cwd=fixture,
         env=env,
         timeout=120,
         check=False,
     )
     if result.returncode != 0:
-        sys.exit(
-            "failed to resolve TraceDecay store path with status --runtime --json\n"
-            f"{result.stdout}"
+        raise ExactFactStoreError(
+            f"{tool} failed ({result.returncode}): {result.stdout.strip()}"
         )
     try:
-        payload = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        sys.exit(f"invalid status --runtime --json output while resolving store path: {exc}")
+        raise ExactFactStoreError(f"{tool} returned invalid JSON: {exc}") from exc
 
-    db_path = payload.get("database", {}).get("db_path") or payload.get("db_path")
-    if not db_path:
-        sys.exit("status --runtime --json did not report database.db_path")
-    return Path(db_path)
+
+def require_fact_record(response, operation):
+    fact = response.get("fact") if isinstance(response, dict) else None
+    if not isinstance(fact, dict) or not isinstance(fact.get("fact_id"), str):
+        raise ExactFactStoreError(
+            f"{operation} did not return a canonical FactRecordV1 with string fact_id"
+        )
+    return fact
 
 
 def build_fixture(scenario, tracedecay_bin, env):
@@ -241,26 +252,44 @@ def build_fixture(scenario, tracedecay_bin, env):
         (fixture / name).write_text(contents)
     run([tracedecay_bin, "init"], cwd=fixture, env=env, timeout=300)
     for fact in scenario["setup"].get("facts", []):
-        args = json.dumps(
-            {"action": "add", "content": fact["content"], "category": fact["category"]}
+        response = call_exact_tool(
+            tracedecay_bin,
+            fixture,
+            env,
+            "tracedecay_fact_store_add",
+            {
+                "content": fact["content"],
+                "category": fact["category"],
+                "source": fact["source"],
+                "trust": fact["trust"],
+            },
         )
-        run(
-            [tracedecay_bin, "tool", "fact_store", "--args", args],
-            cwd=fixture,
-            env=env,
-            timeout=120,
-        )
-    db_path = resolve_store_db_path(tracedecay_bin, fixture, env)
-    db = sqlite3.connect(db_path)
-    with db:
-        for fact in scenario["setup"].get("facts", []):
-            db.execute(
-                "UPDATE memory_facts SET trust_score = ?, retrieval_count = ?, source = ? "
-                "WHERE content = ?",
-                (fact["trust"], fact["retrieval_count"], fact["source"], fact["content"]),
+        seeded_fact = require_fact_record(response, "fixture setup")
+        preload_query = fact.get("preload_query")
+        for _ in range(fact.get("preload_searches", 0)):
+            if not preload_query:
+                raise ValueError(
+                    f"{scenario['id']} sets preload_searches without preload_query"
+                )
+            search_response = call_exact_tool(
+                tracedecay_bin,
+                fixture,
+                env,
+                "tracedecay_fact_store_search",
+                {"query": preload_query, "limit": 1},
             )
-    db.close()
-    return fixture, db_path
+            returned_ids = {
+                record["fact_id"]
+                for record in fact_records_from_collection(
+                    search_response, "fixture preload search"
+                )
+            }
+            if seeded_fact["fact_id"] not in returned_ids:
+                raise ExactFactStoreError(
+                    f"fixture preload search `{preload_query}` did not return "
+                    f"FactId {seeded_fact['fact_id']}"
+                )
+    return fixture
 
 
 def provider_env_passthrough(env):
@@ -375,9 +404,9 @@ def read_hermes_usage(profile_dir, started_after):
 
 
 def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
-    """Experimental: drives `cursor-agent -p` against the fixture's local MCP setup."""
+    """Experimental: drives `cursor-agent -p` against the profile MCP setup."""
     run(
-        [args.tracedecay_bin, "install", "--agent", "cursor", "--local"],
+        [args.tracedecay_bin, "install", "--agent", "cursor"],
         cwd=fixture,
         env=eval_env,
         timeout=120,
@@ -465,91 +494,182 @@ def compare_assertion_value(actual, expected, op):
     return None
 
 
-def evaluate_assertions(scenario, db_path):
-    outcomes = []
-    assertions = [
-        assertion
-        for assertion in scenario["assertions"]
-        if assertion_applies_to_real_model(assertion)
-    ]
-    if not assertions:
-        return outcomes
-
-    try:
-        db = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
-        return [
-            failed_assertion(
-                assertion,
-                f"failed to open TraceDecay store: {exc}",
-                error_type="sqlite",
+def fact_records_from_collection(response, operation):
+    entries = response.get("facts") if isinstance(response, dict) else None
+    if not isinstance(entries, list):
+        raise ExactFactStoreError(f"{operation} omitted its FactRecordV1 collection")
+    records = []
+    for entry in entries:
+        record = entry.get("fact", entry) if isinstance(entry, dict) else None
+        if not isinstance(record, dict) or not isinstance(record.get("fact_id"), str):
+            raise ExactFactStoreError(
+                f"{operation} returned a collection entry without a string FactId"
             )
-            for assertion in assertions
-        ]
+        records.append(record)
+    return records
 
+
+def list_fact_records(tracedecay_bin, fixture, env):
+    response = call_exact_tool(
+        tracedecay_bin,
+        fixture,
+        env,
+        "tracedecay_fact_store_list",
+        {"limit": 200},
+    )
+    return fact_records_from_collection(response, "tracedecay_fact_store_list")
+
+
+def search_fact_records(tracedecay_bin, fixture, env, query, limit):
+    response = call_exact_tool(
+        tracedecay_bin,
+        fixture,
+        env,
+        "tracedecay_fact_store_search",
+        {"query": query, "limit": limit},
+    )
+    return fact_records_from_collection(response, "tracedecay_fact_store_search")
+
+
+def source_record(records, source):
+    matches = [record for record in records if record.get("source") == source]
+    if len(matches) != 1:
+        raise ExactFactStoreError(
+            f"source `{source}` resolved to {len(matches)} FactRecordV1 values, expected one"
+        )
+    return matches[0]
+
+
+def assertion_outcome(assertion, actual, passed):
+    return {
+        "name": assertion["name"],
+        "kind": assertion["kind"],
+        "passed": passed,
+        "actual": actual,
+        "op": assertion.get("op", "contains"),
+        "expected": assertion.get("value", assertion.get("source")),
+    }
+
+
+def compare_or_failure(assertion, actual):
+    expected = assertion["value"]
+    op = assertion["op"]
+    try:
+        passed = compare_assertion_value(actual, expected, op)
+    except TypeError as exc:
+        return failed_assertion(
+            assertion,
+            f"could not compare assertion values: {exc}",
+            actual=actual,
+            op=op,
+            expected=expected,
+        )
+    if passed is None:
+        return failed_assertion(
+            assertion,
+            f"unsupported assertion op: {op}",
+            actual=actual,
+            op=op,
+            expected=expected,
+        )
+    return assertion_outcome(assertion, actual, passed)
+
+
+def evaluate_assertions(scenario, tracedecay_bin, fixture, env):
+    outcomes = []
     for assertion in scenario["assertions"]:
         if not assertion_applies_to_real_model(assertion):
             continue
-        if assertion["kind"] != "sql":
-            outcomes.append(
-                failed_assertion(
-                    assertion,
-                    f"unsupported assertion kind for real-model eval: {assertion['kind']}",
-                )
-            )
-            continue
-        expected = assertion["value"]
-        op = assertion["op"]
         try:
-            row = db.execute(assertion["sql"]).fetchone()
-            actual = row[0] if row is not None else None
-        except sqlite3.Error as exc:
-            outcomes.append(
-                failed_assertion(
-                    assertion,
-                    str(exc),
-                    error_type="sqlite",
-                    actual=None,
-                    op=op,
-                    expected=expected,
+            kind = assertion["kind"]
+            if kind == "fact-count":
+                outcomes.append(
+                    compare_or_failure(
+                        assertion, len(list_fact_records(tracedecay_bin, fixture, env))
+                    )
                 )
-            )
-            continue
-        try:
-            passed = compare_assertion_value(actual, expected, op)
-        except TypeError as exc:
-            outcomes.append(
-                failed_assertion(
-                    assertion,
-                    f"could not compare assertion values: {exc}",
-                    actual=actual,
-                    op=op,
-                    expected=expected,
+            elif kind == "source-count":
+                records = list_fact_records(tracedecay_bin, fixture, env)
+                actual = sum(record.get("source") == assertion["source"] for record in records)
+                outcomes.append(compare_or_failure(assertion, actual))
+            elif kind == "content-count":
+                records = list_fact_records(tracedecay_bin, fixture, env)
+                actual = sum(
+                    assertion["contains"] in record.get("content", "") for record in records
                 )
-            )
-            continue
-        if passed is None:
-            outcomes.append(
-                failed_assertion(
-                    assertion,
-                    f"unsupported assertion op: {op}",
-                    actual=actual,
-                    op=op,
-                    expected=expected,
+                outcomes.append(compare_or_failure(assertion, actual))
+            elif kind == "source-trust":
+                records = list_fact_records(tracedecay_bin, fixture, env)
+                matching = [
+                    record for record in records if record.get("source") == assertion["source"]
+                ]
+                values = [record.get("trust_score") for record in matching]
+                if not values or not all(isinstance(value, (int, float)) for value in values):
+                    raise ExactFactStoreError(
+                        f"source `{assertion['source']}` did not yield typed FactRecordV1 trust"
+                    )
+                passed = all(
+                    compare_assertion_value(value, assertion["value"], assertion["op"])
+                    for value in values
                 )
-            )
-            continue
-        outcomes.append(
-            {
-                "name": assertion["name"],
-                "kind": assertion["kind"],
-                "passed": passed,
-                "actual": actual,
-                "op": op,
-                "expected": expected,
-            }
-        )
-    db.close()
+                outcomes.append(assertion_outcome(assertion, values, passed))
+            elif kind == "retrieval-total":
+                records = list_fact_records(tracedecay_bin, fixture, env)
+                actual = sum(
+                    record.get("retrieval_count", 0)
+                    for record in records
+                    if record.get("source") == assertion["source"]
+                )
+                outcomes.append(compare_or_failure(assertion, actual))
+            elif kind == "feedback-history":
+                record = source_record(
+                    list_fact_records(tracedecay_bin, fixture, env), assertion["source"]
+                )
+                response = call_exact_tool(
+                    tracedecay_bin,
+                    fixture,
+                    env,
+                    "tracedecay_fact_store_get",
+                    {"fact_id": record["fact_id"]},
+                )
+                history = response.get("trust_history")
+                if not isinstance(history, list):
+                    raise ExactFactStoreError("fact-store get omitted typed trust_history")
+                actual = sum(item.get("action") == assertion["action"] for item in history)
+                outcomes.append(compare_or_failure(assertion, actual))
+            elif kind in ("search-rank", "search-source"):
+                records = search_fact_records(
+                    tracedecay_bin,
+                    fixture,
+                    env,
+                    assertion["query"],
+                    assertion.get("limit", 5),
+                )
+                sources = [record.get("source") for record in records]
+                expected_source = assertion.get("top_fact_source", assertion.get("source"))
+                if kind == "search-source":
+                    outcomes.append(assertion_outcome(assertion, sources, expected_source in sources))
+                else:
+                    try:
+                        target = sources.index(expected_source)
+                    except ValueError:
+                        outcomes.append(assertion_outcome(assertion, sources, False))
+                        continue
+                    rival = next(
+                        (index for index, source in enumerate(sources) if source != expected_source),
+                        None,
+                    )
+                    passed = rival is not None and rival - target >= assertion["min_rank_gap"]
+                    outcomes.append(assertion_outcome(assertion, sources, passed))
+            else:
+                outcomes.append(
+                    failed_assertion(
+                        assertion,
+                        f"unsupported assertion kind for real-model eval: {kind}",
+                    )
+                )
+        except ExactFactStoreError as exc:
+            outcomes.append(failed_assertion(assertion, str(exc), error_type="fact-store"))
     return outcomes
 
 
@@ -590,12 +710,14 @@ def main(argv):
         eval_env = create_eval_environment(scenario["id"])
         fixture = None
         try:
-            fixture, db_path = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
+            fixture = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
             if args.driver == "hermes":
                 transcripts = drive_hermes(args, scenario, fixture, run_dir, eval_env.env)
             else:
                 transcripts = drive_cursor_agent(args, scenario, fixture, run_dir, eval_env.env)
-            outcomes = evaluate_assertions(scenario, db_path)
+            outcomes = evaluate_assertions(
+                scenario, args.tracedecay_bin, fixture, eval_env.env
+            )
             failed = [o for o in outcomes if not o["passed"]]
             status = "pass" if not failed else "fail"
             if failed and scenario.get("contract") == "pending-sibling":

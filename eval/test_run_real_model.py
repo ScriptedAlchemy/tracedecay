@@ -3,7 +3,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -71,31 +70,6 @@ class EvalStorageIsolationTest(unittest.TestCase):
         self.assertTrue(env.data_dir.is_relative_to(env.root))
         self.assertNotEqual(env.global_db, Path.home() / ".tracedecay/global.db")
 
-    def test_store_path_is_resolved_from_runtime_status_json(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            fixture = Path(tmp) / "fixture"
-            fixture.mkdir()
-            db_path = Path(tmp) / "profile" / "projects" / "eval" / "tracedecay.db"
-            db_path.parent.mkdir(parents=True)
-            db_path.write_text("")
-            env = {"TRACEDECAY_DATA_DIR": str(Path(tmp) / "profile")}
-            completed = subprocess.CompletedProcess(
-                ["tracedecay", "status", "--runtime", "--json"],
-                0,
-                stdout=json.dumps({"database": {"db_path": str(db_path)}}),
-                stderr="",
-            )
-
-            with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
-                resolved = run_real_model.resolve_store_db_path("tracedecay", fixture, env)
-
-            self.assertEqual(resolved, db_path)
-            run_mock.assert_called_once()
-            cmd = run_mock.call_args.args[0]
-            self.assertEqual(cmd, ["tracedecay", "status", "--runtime", "--json"])
-            self.assertEqual(run_mock.call_args.kwargs["cwd"], fixture)
-            self.assertEqual(run_mock.call_args.kwargs["env"], env)
-
     def test_keep_fixture_preserves_isolated_eval_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / "fixture"
@@ -122,80 +96,156 @@ class EvalStorageIsolationTest(unittest.TestCase):
             self.assertFalse(eval_env.root.exists())
 
 
-class AssertionEvaluationTest(unittest.TestCase):
-    def make_db(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        db_path = Path(tmp.name) / "tracedecay.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE memory_facts (content TEXT)")
-        conn.execute("INSERT INTO memory_facts VALUES ('kept')")
-        conn.commit()
-        conn.close()
-        return db_path
+class ExactFactStoreEvaluationTest(unittest.TestCase):
+    def test_fixture_seeds_through_exact_fact_store_add(self):
+        scenario = {
+            "id": "exact-fixture",
+            "setup": {
+                "facts": [
+                    {
+                        "content": "Kept through the public fact-store path",
+                        "category": "project",
+                        "source": "fixture",
+                        "trust": 0.8,
+                    }
+                ]
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps({"fact": {"fact_id": "fact.project.fixture"}}),
+            stderr="",
+        )
+        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
+            fixture = run_real_model.build_fixture(scenario, "tracedecay", {})
+        self.addCleanup(run_real_model.shutil.rmtree, fixture, ignore_errors=True)
 
-    def test_unsupported_assertion_kind_is_structured_failure(self):
-        db_path = self.make_db()
+        tool_call = next(
+            call.args[0]
+            for call in run_mock.call_args_list
+            if call.args[0][1:3] == ["tool", "tracedecay_fact_store_add"]
+        )
+        payload = json.loads(tool_call[-1])
+        self.assertEqual(payload["source"], "fixture")
+        self.assertEqual(payload["trust"], 0.8)
+        self.assertEqual(payload["format"], "json")
+
+    def test_fixture_preload_requires_the_seeded_fact_in_search_results(self):
+        scenario = {
+            "id": "exact-preload",
+            "setup": {
+                "facts": [
+                    {
+                        "content": "Warm this fact through exact search",
+                        "category": "project",
+                        "source": "hot",
+                        "trust": 0.8,
+                        "preload_query": "warm",
+                        "preload_searches": 1,
+                    }
+                ]
+            },
+        }
+        responses = iter(
+            [
+                subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                subprocess.CompletedProcess(
+                    [], 0, stdout=json.dumps({"fact": {"fact_id": "fact.hot"}}), stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    [], 0, stdout=json.dumps({"facts": []}), stderr=""
+                ),
+            ]
+        )
+        with mock.patch.object(
+            run_real_model,
+            "run",
+            side_effect=lambda *args, **kwargs: next(responses),
+        ):
+            with self.assertRaisesRegex(
+                run_real_model.ExactFactStoreError, "did not return FactId"
+            ):
+                run_real_model.build_fixture(scenario, "tracedecay", {})
+
+    def test_source_count_reads_exact_fact_store_list(self):
         scenario = {
             "assertions": [
                 {
-                    "kind": "search-rank",
-                    "name": "unsupported_search_rank",
-                    "phase": "both",
+                    "kind": "source-count",
+                    "name": "one_kept_fact",
+                    "source": "kept",
+                    "op": "eq",
+                    "value": 1,
                 }
             ]
         }
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "facts": [
+                        {
+                            "fact_id": "fact.project.kept",
+                            "content": "kept",
+                            "source": "kept",
+                            "trust_score": 0.8,
+                            "retrieval_count": 0,
+                        }
+                    ]
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
+            outcomes = run_real_model.evaluate_assertions(
+                scenario, "tracedecay", Path("/fixture"), {}
+            )
 
-        outcomes = run_real_model.evaluate_assertions(scenario, db_path)
+        self.assertEqual(outcomes[0]["actual"], 1)
+        self.assertTrue(outcomes[0]["passed"])
+        self.assertEqual(run_mock.call_args.args[0][2], "tracedecay_fact_store_list")
 
-        self.assertEqual(len(outcomes), 1)
-        self.assertFalse(outcomes[0]["passed"])
-        self.assertEqual(outcomes[0]["kind"], "search-rank")
-        self.assertIn("unsupported assertion kind", outcomes[0]["error"])
-
-    def test_assertions_for_other_phases_are_skipped(self):
-        db_path = self.make_db()
+    def test_non_real_model_assertions_are_skipped_without_a_store_read(self):
         scenario = {
             "assertions": [
                 {
-                    "kind": "search-rank",
-                    "name": "violation_only_rank",
+                    "kind": "fact-count",
+                    "name": "violation_only_count",
                     "phase": "violation-only",
-                },
-                {
-                    "kind": "sql",
-                    "name": "deterministic_sql",
-                    "sql": "SELECT 1",
-                    "op": "eq",
-                    "value": 1,
-                    "deterministic_only": True,
-                },
-            ]
-        }
-
-        self.assertEqual(run_real_model.evaluate_assertions(scenario, db_path), [])
-
-    def test_sql_errors_are_reported_as_assertion_failures(self):
-        db_path = self.make_db()
-        scenario = {
-            "assertions": [
-                {
-                    "kind": "sql",
-                    "name": "missing_table",
-                    "sql": "SELECT COUNT(*) FROM missing_table",
                     "op": "eq",
                     "value": 0,
                 }
             ]
         }
+        with mock.patch.object(run_real_model, "run") as run_mock:
+            outcomes = run_real_model.evaluate_assertions(
+                scenario, "tracedecay", Path("/fixture"), {}
+            )
 
-        outcomes = run_real_model.evaluate_assertions(scenario, db_path)
+        self.assertEqual(outcomes, [])
+        run_mock.assert_not_called()
 
-        self.assertEqual(len(outcomes), 1)
+    def test_public_tool_errors_are_structured_failures(self):
+        scenario = {
+            "assertions": [
+                {
+                    "kind": "fact-count",
+                    "name": "list_unavailable",
+                    "op": "eq",
+                    "value": 0,
+                }
+            ]
+        }
+        failed = subprocess.CompletedProcess([], 1, stdout="unavailable", stderr="")
+        with mock.patch.object(run_real_model, "run", return_value=failed):
+            outcomes = run_real_model.evaluate_assertions(
+                scenario, "tracedecay", Path("/fixture"), {}
+            )
+
         self.assertFalse(outcomes[0]["passed"])
-        self.assertEqual(outcomes[0]["name"], "missing_table")
-        self.assertEqual(outcomes[0]["error_type"], "sqlite")
-        self.assertIn("missing_table", outcomes[0]["error"])
+        self.assertEqual(outcomes[0]["error_type"], "fact-store")
 
 
 class BenchmarkRunnerTest(unittest.TestCase):
