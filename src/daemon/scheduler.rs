@@ -114,6 +114,10 @@ fn log_daemon_scheduler_record(
     );
 }
 
+mod automation_observation;
+
+use automation_observation::{record_combined_scheduler_run, record_scheduler_run};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AutomationSchedulerLifecycle {
     Running,
@@ -1380,7 +1384,7 @@ pub(super) async fn run_automation_scheduler_tick(
     )
     .await
     {
-        Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+        Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
         Err(e) => {
             log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &e);
             first_error.get_or_insert(e);
@@ -1410,13 +1414,11 @@ pub(super) async fn run_automation_scheduler_tick(
         .await
         {
             Ok(CombinedReviewDispatch::Ran(run)) => {
-                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+                record_combined_scheduler_run(engine, &project_id, project_path, &run);
                 combined_handled = true;
             }
             Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
-                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+                record_combined_scheduler_run(engine, &project_id, project_path, &run);
                 log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
                 first_error.get_or_insert(error);
                 combined_handled = true;
@@ -1452,7 +1454,7 @@ pub(super) async fn run_automation_scheduler_tick(
         )
         .await
         {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
             Err(e) => {
                 log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
                 first_error.get_or_insert(e);
@@ -1473,7 +1475,7 @@ pub(super) async fn run_automation_scheduler_tick(
         )
         .await
         {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
             Err(e) => {
                 log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
                 first_error.get_or_insert(e);
@@ -1481,6 +1483,8 @@ pub(super) async fn run_automation_scheduler_tick(
         }
     }
     run_user_jobs_scheduler_pass(
+        engine,
+        &project_id,
         project_path,
         &handshake.client_identity.profile_root,
         cg,
@@ -1603,8 +1607,7 @@ async fn run_host_receipt_review(
     .await?;
     match result {
         CombinedReviewDispatch::Ran(run) => {
-            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+            record_combined_scheduler_run(engine, &project_id, project_path, &run);
             if run.session_reflector.ledger_record.status
                 == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
                 && run.skill_writer.ledger_record.status
@@ -1619,8 +1622,7 @@ async fn run_host_receipt_review(
             }
         }
         CombinedReviewDispatch::RecordedFailure { run, error } => {
-            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+            record_combined_scheduler_run(engine, &project_id, project_path, &run);
             return Err(error);
         }
         CombinedReviewDispatch::NotCombined { reason } => {
@@ -1718,6 +1720,8 @@ async fn automation_scheduler_has_work(
 /// Ticks every schedulable user-defined job with the same lock/cooldown
 /// discipline as the fixed tasks (enforced inside the job runner).
 async fn run_user_jobs_scheduler_pass(
+    engine: &DaemonEngine,
+    project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
     cg: &crate::tracedecay::TraceDecay,
@@ -1764,7 +1768,7 @@ async fn run_user_jobs_scheduler_pass(
         )
         .await
         {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
+            Ok(run) => record_scheduler_run(engine, project_id, project_path, &run.ledger_record),
             Err(e) => {
                 log_scheduler_task_error(
                     project_path,
