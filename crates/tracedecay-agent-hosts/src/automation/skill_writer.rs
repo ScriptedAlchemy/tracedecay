@@ -18,8 +18,10 @@ use super::skill_usage::{
 };
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::ToolFamilySignal;
-use crate::errors::{Result, config_error};
+use crate::errors::Result;
 use crate::ports::session_evidence::LcmGrepHit;
+
+use super::config_error;
 
 mod consolidation;
 

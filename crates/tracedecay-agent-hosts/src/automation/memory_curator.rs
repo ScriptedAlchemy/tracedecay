@@ -2,11 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use tracedecay_application::memory::{
-    VerifiedMemorySimilarityPairQueryV1, VerifiedMemorySimilarityReadV1,
-};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_domain::{ActorId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, Confidence, FactId, FactOwnerV1, ManifestDigest, canonical_sha256,
+};
 
 use super::artifacts::sha256_json;
 use super::backend::{
@@ -25,15 +24,17 @@ use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
-use tracedecay_runtime_core::memory::types::MemoryGroomingOperation;
-use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
+use tracedecay_runtime_core::memory::types::FactRelationKind;
+use tracedecay_store::ProjectMemoryFactRelationV1;
+use tracedecay_usecases::memory::{
+    CanonicalMemoryGroomingOperation, MemoryApplication, MemoryOperationContext,
+};
 
 const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.72;
-// The removed classifier admitted `merge_candidate` at 0.90 and
-// `likely_duplicate` at 0.95. The canonical pair authority therefore uses
-// the lower durable classification floor as its bounded review prefilter.
-const CURATION_SIMILARITY_THRESHOLD_MILLIONTHS: u32 = 900_000;
+
+mod review;
+use review::memory_curator_review;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryCuratorAutomationOptions {
@@ -171,18 +172,6 @@ impl MemoryCuratorStore<'_> {
         })
     }
 
-    async fn read_similarity_pairs(
-        &self,
-        query: VerifiedMemorySimilarityPairQueryV1,
-    ) -> Result<VerifiedMemorySimilarityReadV1> {
-        match self {
-            Self::Project { cg, .. } => cg.read_verified_memory_similarity_pairs(query).await,
-            Self::User { runtime, .. } => {
-                runtime.read_verified_memory_similarity_pairs(query).await
-            }
-        }
-    }
-
     async fn open_memory_database(&self) -> Result<crate::db::Database> {
         match self {
             Self::Project { cg, .. } => cg.open_project_store_db().await,
@@ -225,17 +214,14 @@ async fn run_memory_curator_for_store(
     };
 
     let owner = store.owner()?;
-    let query = VerifiedMemorySimilarityPairQueryV1::new(
-        owner.clone(),
-        None,
-        max_clusters,
-        CURATION_SIMILARITY_THRESHOLD_MILLIONTHS,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid memory curator similarity query: {error}"),
-    })?;
+    let database = store.open_memory_database().await?;
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("initialize memory curator authority: {error}"),
+        },
+    )?;
     let (llm_review, allowed_fact_ids) =
-        memory_curator_review(store.read_similarity_pairs(query).await?)?;
+        memory_curator_review(&memory, &owner, max_clusters).await?;
     let evidence_hash = Some(sha256_json(&llm_review));
     if llm_review.get("status").and_then(Value::as_str) != Some("needs_llm_review") {
         let reason = match llm_review.get("status").and_then(Value::as_str) {
@@ -333,7 +319,7 @@ async fn run_memory_curator_for_store(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report.extend(&repair_retry_report);
+                retry_report = repair_retry_report;
                 finalizer
                     .append_failed_record(
                         None,
@@ -346,7 +332,7 @@ async fn run_memory_curator_for_store(
                 return Err(error);
             }
         };
-        retry_report.extend(&repair_retry_report);
+        retry_report = repair_retry_report;
         proposed_ops = finalizer
             .response_output_json(&response, evidence_hash.clone(), &retry_report)
             .await?;
@@ -358,12 +344,8 @@ async fn run_memory_curator_for_store(
         &accepted_ops,
     )?;
     let (applied_count, receipts) = if curation_decision.allows_apply() {
-        let database = store.open_memory_database().await?;
-        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("initialize memory curator authority: {error}"),
-            })?;
-        let result = apply_memory_curation_ops(&memory, &run.run_id, &accepted_ops).await;
+        let result =
+            apply_memory_curation_ops(&memory, &run.run_id, &accepted_ops, min_confidence).await;
         let (applied_count, receipts) = match result {
             Ok(result) => result,
             Err(err) => {
@@ -456,7 +438,7 @@ async fn skipped_run(
 }
 
 fn build_memory_curator_prompt() -> String {
-    "Review only the generation-bound memory pairs in context.llm_review. Return {\"ops\":[]} with zero or more bounded operations described by the system message. Never invent or rewrite a fact id.".to_string()
+    "Review only the canonical current-fact pairs in context.llm_review. Return {\"ops\":[]} with zero or more bounded operations described by the system message. Never invent or rewrite a fact id.".to_string()
 }
 
 fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Value {
@@ -467,98 +449,9 @@ fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Va
     })
 }
 
-fn memory_curator_review(
-    read: VerifiedMemorySimilarityReadV1,
-) -> Result<(Value, BTreeSet<String>)> {
-    match read {
-        VerifiedMemorySimilarityReadV1::Unavailable { state, .. } => Ok((
-            json!({
-                "status": "unavailable",
-                "reason": state.reason(),
-                "pairs": [],
-                "allowed_fact_ids": [],
-            }),
-            BTreeSet::new(),
-        )),
-        VerifiedMemorySimilarityReadV1::Available {
-            projection_generation_id,
-            watermark,
-            model_config_digest,
-            pairs,
-            coverage,
-            next_cursor,
-            ..
-        } => {
-            let mut allowed_fact_ids = BTreeSet::new();
-            let pairs = pairs
-                .iter()
-                .map(|pair| {
-                    allowed_fact_ids.insert(pair.left().fact_id().as_str().to_owned());
-                    allowed_fact_ids.insert(pair.right().fact_id().as_str().to_owned());
-                    json!({
-                        "left": similarity_fact_json(pair.left()),
-                        "right": similarity_fact_json(pair.right()),
-                        "similarity_millionths": pair.similarity_millionths(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let status = match (pairs.is_empty(), coverage.state()) {
-                (true, tracedecay_application::memory::VerifiedMemorySimilarityCoverageStateV1::Partial) => {
-                    "partial_coverage_no_candidates"
-                }
-                (true, tracedecay_application::memory::VerifiedMemorySimilarityCoverageStateV1::Complete) => {
-                    "up_to_date"
-                }
-                (false, _) => "needs_llm_review",
-            };
-            let allowed_fact_id_values = allowed_fact_ids.iter().cloned().collect::<Vec<_>>();
-            let review = json!({
-                "status": status,
-                "clusters_reviewed": pairs.len(),
-                "projection_generation_id": projection_generation_id,
-                "watermark": watermark,
-                "model_config_digest": model_config_digest,
-                "coverage": {
-                    "active_facts_scanned": coverage.active_facts_scanned(),
-                    "active_facts_eligible": coverage.active_facts_eligible(),
-                    "active_facts_total": coverage.active_facts_total(),
-                    "state": match coverage.state() {
-                        tracedecay_application::memory::VerifiedMemorySimilarityCoverageStateV1::Complete => "complete",
-                        tracedecay_application::memory::VerifiedMemorySimilarityCoverageStateV1::Partial => "partial",
-                    },
-                },
-                "page_truncated": next_cursor.is_some(),
-                "allowed_fact_ids": allowed_fact_id_values,
-                "pairs": pairs,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Return strict JSON {\"ops\":[]}. Supported operations are delete, merge, normalize_tags, merge_entities, add_alias, and link_facts. Every fact id and evidence fact id must be copied exactly from allowed_fact_ids. Every operation requires confidence in [min_confidence,1]. A batch may contain at most one destructive delete/merge and must not mix a destructive operation with grooming operations. Never use updated_at as truth or freshness evidence."
-                    }
-                ],
-            });
-            Ok((review, allowed_fact_ids))
-        }
-    }
-}
-
-fn similarity_fact_json(
-    fact: &tracedecay_application::memory::VerifiedMemorySimilarityFactV1,
-) -> Value {
-    json!({
-        "fact_id": fact.fact_id().as_str(),
-        "content": fact.content(),
-        "category": fact.category(),
-        "tags": fact.tags(),
-        "trust": fact.trust(),
-        "updated_at": fact.updated_at(),
-        "metadata": fact.metadata(),
-    })
-}
-
 fn validate_memory_curation_ops(
     output: &Value,
-    allowed_fact_ids: &BTreeSet<String>,
+    allowed_fact_ids: &BTreeSet<FactId>,
     min_confidence: f64,
 ) -> (Vec<Value>, Vec<Value>) {
     let Some(ops) = output.get("ops").and_then(Value::as_array) else {
@@ -639,11 +532,11 @@ fn validate_memory_curation_ops(
     (accepted, rejected)
 }
 
-fn valid_allowed_fact_id(fact_id: &str, allowed_fact_ids: &BTreeSet<String>) -> bool {
-    allowed_fact_ids.contains(fact_id) && FactId::new(fact_id.to_owned()).is_ok()
+fn valid_allowed_fact_id(fact_id: &str, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
+    FactId::new(fact_id.to_owned()).is_ok_and(|fact_id| allowed_fact_ids.contains(&fact_id))
 }
 
-fn valid_merge_op(raw: &Value, allowed_fact_ids: &BTreeSet<String>) -> bool {
+fn valid_merge_op(raw: &Value, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
     let Some(winner_id) = raw.get("winner_id").and_then(Value::as_str) else {
         return false;
     };
@@ -665,12 +558,107 @@ fn valid_merge_op(raw: &Value, allowed_fact_ids: &BTreeSet<String>) -> bool {
             .is_none_or(|content| content.as_str().is_some())
 }
 
-fn valid_grooming_op(raw: &Value, allowed_fact_ids: &BTreeSet<String>) -> bool {
-    let Ok(operation) = serde_json::from_value::<MemoryGroomingOperation>(raw.clone()) else {
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum CanonicalGroomingWire {
+    NormalizeTags {
+        fact_id: FactId,
+        tags: Vec<String>,
+        evidence_fact_ids: Vec<FactId>,
+        confidence: Confidence,
+    },
+    MergeEntities {
+        winner_entity_id: i64,
+        loser_entity_ids: Vec<i64>,
+        evidence_fact_ids: Vec<FactId>,
+        confidence: Confidence,
+    },
+    AddAlias {
+        entity_id: i64,
+        alias: String,
+        evidence_fact_ids: Vec<FactId>,
+        confidence: Confidence,
+    },
+    LinkFacts {
+        source_fact_id: FactId,
+        target_fact_id: FactId,
+        relation: FactRelationKind,
+        evidence_fact_ids: Vec<FactId>,
+        confidence: Confidence,
+        source: String,
+        #[serde(default)]
+        metadata: Value,
+    },
+}
+
+impl CanonicalGroomingWire {
+    fn into_operation(self) -> CanonicalMemoryGroomingOperation {
+        match self {
+            Self::NormalizeTags {
+                fact_id,
+                tags,
+                evidence_fact_ids,
+                confidence,
+            } => CanonicalMemoryGroomingOperation::NormalizeTags {
+                fact_id,
+                tags,
+                evidence_fact_ids,
+                confidence,
+            },
+            Self::MergeEntities {
+                winner_entity_id,
+                loser_entity_ids,
+                evidence_fact_ids,
+                confidence,
+            } => CanonicalMemoryGroomingOperation::MergeEntities {
+                winner_entity_id,
+                loser_entity_ids,
+                evidence_fact_ids,
+                confidence,
+            },
+            Self::AddAlias {
+                entity_id,
+                alias,
+                evidence_fact_ids,
+                confidence,
+            } => CanonicalMemoryGroomingOperation::AddAlias {
+                entity_id,
+                alias,
+                evidence_fact_ids,
+                confidence,
+            },
+            Self::LinkFacts {
+                source_fact_id,
+                target_fact_id,
+                relation,
+                evidence_fact_ids,
+                confidence,
+                source,
+                metadata,
+            } => CanonicalMemoryGroomingOperation::LinkFacts {
+                source_fact_id,
+                target_fact_id,
+                relation: match relation {
+                    FactRelationKind::Supports => ProjectMemoryFactRelationV1::Supports,
+                    FactRelationKind::Contradicts => ProjectMemoryFactRelationV1::Contradicts,
+                    FactRelationKind::Supersedes => ProjectMemoryFactRelationV1::Supersedes,
+                    FactRelationKind::DerivedFrom => ProjectMemoryFactRelationV1::DerivedFrom,
+                },
+                evidence_fact_ids,
+                confidence,
+                source,
+                metadata,
+            },
+        }
+    }
+}
+
+fn valid_grooming_op(raw: &Value, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
+    let Ok(operation) = serde_json::from_value::<CanonicalGroomingWire>(raw.clone()) else {
         return false;
     };
     match operation {
-        MemoryGroomingOperation::NormalizeTags {
+        CanonicalGroomingWire::NormalizeTags {
             fact_id,
             evidence_fact_ids,
             ..
@@ -678,13 +666,13 @@ fn valid_grooming_op(raw: &Value, allowed_fact_ids: &BTreeSet<String>) -> bool {
             valid_allowed_fact_id(fact_id.as_str(), allowed_fact_ids)
                 && valid_typed_evidence_ids(&evidence_fact_ids, allowed_fact_ids)
         }
-        MemoryGroomingOperation::MergeEntities {
+        CanonicalGroomingWire::MergeEntities {
             evidence_fact_ids, ..
         }
-        | MemoryGroomingOperation::AddAlias {
+        | CanonicalGroomingWire::AddAlias {
             evidence_fact_ids, ..
         } => valid_typed_evidence_ids(&evidence_fact_ids, allowed_fact_ids),
-        MemoryGroomingOperation::LinkFacts {
+        CanonicalGroomingWire::LinkFacts {
             source_fact_id,
             target_fact_id,
             evidence_fact_ids,
@@ -698,7 +686,7 @@ fn valid_grooming_op(raw: &Value, allowed_fact_ids: &BTreeSet<String>) -> bool {
     }
 }
 
-fn valid_typed_evidence_ids(ids: &[FactId], allowed_fact_ids: &BTreeSet<String>) -> bool {
+fn valid_typed_evidence_ids(ids: &[FactId], allowed_fact_ids: &BTreeSet<FactId>) -> bool {
     !ids.is_empty()
         && ids
             .iter()
@@ -722,6 +710,7 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     run_id: &str,
     operations: &[Value],
+    min_confidence: f64,
 ) -> Result<(usize, Vec<Value>)> {
     let actor = ActorId::new("automation:memory-curator").map_err(memory_contract_error)?;
     let context = MemoryOperationContext::from_logical_effect(
@@ -742,15 +731,15 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
                 .ok_or_else(|| memory_validation_error("validated delete lost fact_id"))?;
             let fact_id = FactId::new(fact_id.to_owned()).map_err(memory_contract_error)?;
             let removed = memory
-                .remove_fact(fact_id.clone(), context)
+                .remove_canonical_fact(fact_id.clone(), context)
                 .await
                 .map_err(memory_application_error)?;
             Ok((
-                usize::from(removed),
+                usize::from(removed.removed()),
                 vec![json!({
                     "op": "delete",
                     "fact_id": fact_id,
-                    "status": if removed { "deleted" } else { "not_found" },
+                    "status": if removed.removed() { "deleted" } else { "not_found" },
                 })],
             ))
         }
@@ -779,7 +768,7 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let outcome = memory
-                .dashboard_merge_fact_ids(
+                .merge_canonical_facts(
                     winner_id.clone(),
                     loser_ids.clone(),
                     merged_content,
@@ -807,16 +796,19 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
                 .iter()
                 .cloned()
                 .map(|operation| {
-                    serde_json::from_value::<MemoryGroomingOperation>(operation).map_err(|error| {
-                        memory_validation_error(format!(
-                            "validated grooming operation could not be reconstructed: {error}"
-                        ))
-                    })
+                    serde_json::from_value::<CanonicalGroomingWire>(operation)
+                        .map(CanonicalGroomingWire::into_operation)
+                        .map_err(|error| {
+                            memory_validation_error(format!(
+                                "validated grooming operation could not be reconstructed: {error}"
+                            ))
+                        })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let count = grooming.len();
+            let minimum = Confidence::new(min_confidence).map_err(memory_contract_error)?;
             let report = memory
-                .dashboard_apply_grooming(grooming, 0.0, context)
+                .apply_canonical_grooming(grooming, minimum, context)
                 .await
                 .map_err(memory_application_error)?;
             Ok((
@@ -825,7 +817,13 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
                     "op": "grooming_batch",
                     "status": "applied",
                     "operation_count": count,
-                    "receipt": report,
+                    "receipt": {
+                        "changed_fact_ids": report.changed_facts().iter().map(|mapping| mapping.fact_id()).collect::<Vec<_>>(),
+                        "normalized_tags": report.normalized_tags(),
+                        "merged_entities": report.merged_entities(),
+                        "aliases_added": report.aliases_added(),
+                        "facts_linked": report.facts_linked(),
+                    },
                 })],
             ))
         }
@@ -963,7 +961,7 @@ mod tests {
         );
         let backend_message = request.backend_message().unwrap();
 
-        assert!(prompt.contains("generation-bound memory pairs"));
+        assert!(prompt.contains("canonical current-fact pairs"));
         assert_eq!(backend_message.matches(marker).count(), 1);
         assert_eq!(request.context["apply"], json!(true));
     }

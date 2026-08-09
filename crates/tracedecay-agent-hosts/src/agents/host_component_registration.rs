@@ -169,6 +169,7 @@ impl CatalogHostComponentRegistrationAuthority {
                 home: home.to_path_buf(),
                 tracedecay_bin,
                 tool_permissions: crate::agents::expected_tool_perms(),
+                project_root: None,
                 dashboard,
             },
             health_context: crate::agents::HealthcheckContext {

@@ -185,6 +185,41 @@ async fn automatic_apply_collapses_semantic_duplicates_without_losing_first_evid
     );
 }
 
+#[tokio::test]
+async fn invalid_automatic_command_uses_the_memory_application_error_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = database(
+        &temp.path().join("memory.db"),
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
+    let mut invalid_request = request("Reject invalid automatic fact trust at the typed boundary");
+    invalid_request.trust = Some(1.1);
+    let admitted = serde_json::json!({
+        "add_fact_request": invalid_request,
+        "validation": {"status": "accepted"},
+    });
+
+    let error = match record_session_automatic_facts(
+        &memory,
+        "run-invalid-command",
+        Some("evidence-hash-invalid-command"),
+        &[admitted],
+    )
+    .await
+    {
+        Ok(_) => panic!("invalid automatic command must fail before authority apply"),
+        Err(error) => error,
+    };
+
+    let TraceDecayError::Database { operation, message } = error else {
+        panic!("memory application error must retain its canonical classification");
+    };
+    assert_eq!(operation, "memory application");
+    assert!(message.contains("trust must be between 0.0 and 1.0"));
+}
+
 #[test]
 fn automatic_fact_state_serializes_only_terminal_values() {
     for (state, wire) in [

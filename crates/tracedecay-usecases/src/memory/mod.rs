@@ -22,6 +22,7 @@ mod tests;
 
 pub use anchors::{EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchor};
 pub use context::MemoryOperationContext;
+pub use dashboard::CanonicalMemoryGroomingOperation;
 pub use error::{MemoryApplicationError, PERSISTED_FACT_ID_SOURCE_STORE, PersistedFactIdScope};
 pub use legacy_fact_ids::{FactTrustHistory, MemoryStatusWithRepair, UpdateFactOutcome};
 pub use project_memory::{automatic_fact_add_command, with_automation_run_id};

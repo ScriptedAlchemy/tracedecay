@@ -166,6 +166,20 @@ pub struct AutomationRunLedgerRecord {
     pub completed_at: String,
 }
 
+impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
+    fn accepted_count(&self) -> usize {
+        self.accepted_count
+    }
+
+    fn validation_report(&self) -> Option<&Value> {
+        self.validation_report.as_ref()
+    }
+
+    fn applied_ops(&self) -> Option<&Value> {
+        self.applied_ops.as_ref()
+    }
+}
+
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(RUN_LEDGER_FILENAME)
 }
@@ -638,6 +652,39 @@ mod tests {
         body.push('\n');
         std::fs::write(&path, body).unwrap();
         (temp, path)
+    }
+
+    #[test]
+    fn automation_policy_reads_canonical_ledger_evidence() {
+        let mut record: AutomationRunLedgerRecord =
+            serde_json::from_str(&ledger_line("policy-evidence", 1)).unwrap();
+        let validation_report = serde_json::json!({"status": "failed_after_partial_effects"});
+        let applied_ops = serde_json::json!({
+            "deployment": {"status": "partial_failure", "retry_required": true}
+        });
+        record.accepted_count = 2;
+        record.validation_report = Some(validation_report.clone());
+        record.applied_ops = Some(applied_ops.clone());
+
+        let next_actions = tracedecay_automation::artifact_policy::artifact_policy(record.task)
+            .next_actions(&record);
+
+        assert_eq!(
+            tracedecay_automation::AutomationRunRecord::accepted_count(&record),
+            2
+        );
+        assert_eq!(
+            tracedecay_automation::AutomationRunRecord::validation_report(&record),
+            Some(&validation_report)
+        );
+        assert_eq!(
+            tracedecay_automation::AutomationRunRecord::applied_ops(&record),
+            Some(&applied_ops)
+        );
+        assert_eq!(
+            next_actions.first().copied(),
+            Some("inspect autonomously applied memory curation outcomes")
+        );
     }
 
     #[test]

@@ -446,17 +446,15 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
                         ))
                     })?,
                 );
-                Some(
-                    application
-                        .get_project_memory_fact(target)
-                        .await
-                        .map_err(|error| {
-                            config_error(format!(
-                                "read applied automatic fact receipt '{}': {error}",
-                                receipt.apply_id().as_str()
-                            ))
-                        })?,
-                )
+                application
+                    .get_project_memory_fact(target)
+                    .await
+                    .map_err(|error| {
+                        config_error(format!(
+                            "read applied automatic fact receipt '{}': {error}",
+                            receipt.apply_id().as_str()
+                        ))
+                    })?
             } else {
                 None
             };

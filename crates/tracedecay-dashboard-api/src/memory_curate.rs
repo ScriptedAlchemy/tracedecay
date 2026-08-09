@@ -135,6 +135,8 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
             store_layout.identity.project_id.as_deref(),
         ),
         graph_read_authority: None,
+        code_graph_read_admission: None,
+        code_graph_projection_read_port: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: super::project_memory_owner(cg)?,
@@ -184,6 +186,8 @@ fn user_state(
         // fails closed rather than fabricating one from the profile path.
         resolved_scope: None,
         graph_read_authority: None,
+        code_graph_read_admission: None,
+        code_graph_projection_read_port: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,

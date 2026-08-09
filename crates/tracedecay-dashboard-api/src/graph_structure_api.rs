@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -18,15 +18,19 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
+use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
-use tracedecay_domain::code_intelligence::{Edge, Node};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::memory::entities::normalize_entity;
 
@@ -74,36 +78,12 @@ pub(super) struct NodeRefV1 {
     start_line: u32,
 }
 
-impl From<&Node> for NodeRefV1 {
-    fn from(node: &Node) -> Self {
-        Self {
-            id: node.id.clone(),
-            name: node.name.clone(),
-            qualified_name: node.qualified_name.clone(),
-            kind: node.kind.as_str().to_string(),
-            file_path: node.file_path.clone(),
-            start_line: node.start_line,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct IncomingCallEdgeV1 {
     source: String,
     target: String,
     kind: &'static str,
     line: Option<u32>,
-}
-
-impl From<&Edge> for IncomingCallEdgeV1 {
-    fn from(edge: &Edge) -> Self {
-        Self {
-            source: edge.source.clone(),
-            target: edge.target.clone(),
-            kind: "calls",
-            line: edge.line,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -120,6 +100,7 @@ pub(super) struct CallChainMeasurementV1 {
     directed: bool,
     edge_kind: &'static str,
     selection: &'static str,
+    complete: bool,
     found: bool,
     hop_count: Option<usize>,
     steps: Vec<CallChainStepV1>,
@@ -294,6 +275,7 @@ contracted_graph_routes! {
 /// `GET /api/plugins/graph/call-chain`
 async fn call_chain(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
     let from = params.from.trim();
@@ -310,65 +292,88 @@ async fn call_chain(
         .max_depth
         .unwrap_or(MAX_CALL_CHAIN_DEPTH)
         .clamp(1, MAX_CALL_CHAIN_DEPTH);
-    let Some(graph) = state.project_graph.as_deref() else {
-        return unmeasured_response::<CallChainMeasurementV1>(
-            &state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            "the retained project graph is unavailable",
-        );
+    let control = match graph_control::<CallChainMeasurementV1>(&state, control) {
+        Ok(control) => control,
+        Err(response) => return response,
     };
-
-    let (from_node, to_node) = match tokio::try_join!(graph.get_node(from), graph.get_node(to)) {
-        Ok(nodes) => nodes,
+    let graph = match admitted_graph::<CallChainMeasurementV1>(
+        &state,
+        &control,
+        crate::application::retrieval::CallableCodeOperationKind::Callees,
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(response) => return response,
+    };
+    let from_occurrence = match SymbolOccurrenceId::new(from.to_owned()) {
+        Ok(occurrence) => occurrence,
         Err(error) => {
-            return failed_response::<CallChainMeasurementV1>(
+            return unmeasured_response::<CallChainMeasurementV1>(
                 &state,
-                "call_chain_endpoint_read_failed",
-                error.to_string(),
-                true,
+                StatusCode::BAD_REQUEST,
+                "invalid_node_identity",
+                &error.to_string(),
             );
         }
     };
-    if from_node.is_none() {
-        return unmeasured_response::<CallChainMeasurementV1>(
-            &state,
-            StatusCode::NOT_FOUND,
-            "node_not_found",
-            &format!("source node not found: {from}"),
-        );
+    let to_occurrence = match SymbolOccurrenceId::new(to.to_owned()) {
+        Ok(occurrence) => occurrence,
+        Err(error) => {
+            return unmeasured_response::<CallChainMeasurementV1>(
+                &state,
+                StatusCode::BAD_REQUEST,
+                "invalid_node_identity",
+                &error.to_string(),
+            );
+        }
+    };
+    let from_node = match symbol_summary(&graph, &from_occurrence) {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return unmeasured_response::<CallChainMeasurementV1>(
+                &state,
+                StatusCode::NOT_FOUND,
+                "node_not_found",
+                &format!("source node not found: {from}"),
+            );
+        }
+        Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
+    };
+    match symbol_summary(&graph, &to_occurrence) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return unmeasured_response::<CallChainMeasurementV1>(
+                &state,
+                StatusCode::NOT_FOUND,
+                "node_not_found",
+                &format!("target node not found: {to}"),
+            );
+        }
+        Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
     }
-    if to_node.is_none() {
-        return unmeasured_response::<CallChainMeasurementV1>(
-            &state,
-            StatusCode::NOT_FOUND,
-            "node_not_found",
-            &format!("target node not found: {to}"),
-        );
-    }
-
-    let path = match graph.get_call_chain(from, to, max_depth).await {
+    let path = match graph.reader.shortest_path(
+        &from_occurrence,
+        &to_occurrence,
+        &[RelationEdgeKindV1::Calls],
+        max_depth as u32,
+        STRATA_MAX_DEPENDENCY_EDGES,
+        Arc::clone(&graph.cancellation),
+    ) {
         Ok(path) => path,
         Err(error) => {
-            return failed_response::<CallChainMeasurementV1>(
+            return graph_error_response::<CallChainMeasurementV1>(
                 &state,
-                "call_chain_endpoint_read_failed",
-                error.to_string(),
-                true,
+                crate::graph::map_projection_error(error),
             );
         }
     };
-    let steps = path
-        .as_ref()
-        .map(|path| {
-            path.iter()
-                .map(|(node, edge)| CallChainStepV1 {
-                    node: NodeRefV1::from(node),
-                    incoming_edge: edge.as_ref().map(IncomingCallEdgeV1::from),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let steps = match call_chain_steps(&state, &graph, from_node, path.path.as_deref()) {
+        Ok(steps) => steps,
+        Err(error) => return graph_error_response::<CallChainMeasurementV1>(&state, error),
+    };
+    let found = path.path.is_some();
+    let hop_count = path.path.as_ref().map(Vec::len);
     measured_response(
         &state,
         CallChainMeasurementV1 {
@@ -378,67 +383,55 @@ async fn call_chain(
             directed: true,
             edge_kind: "calls",
             selection: "single_shortest_path",
-            found: path.is_some(),
-            hop_count: path.as_ref().map(|path| path.len().saturating_sub(1)),
+            complete: path.complete,
+            found,
+            hop_count,
             steps,
         },
         2,
         "endpoint nodes",
-        None,
+        Some(graph.reader.generation().as_str().to_owned()),
     )
 }
 
 /// `GET /api/plugins/graph/strata`
-async fn strata(State(state): State<DashboardState>) -> Response {
-    let Some(graph) = state.project_graph.as_deref() else {
-        return unmeasured_response::<StrataMeasurementV1>(
-            &state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            "the retained project graph is unavailable",
-        );
+async fn strata(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> Response {
+    let control = match graph_control::<StrataMeasurementV1>(&state, control) {
+        Ok(control) => control,
+        Err(response) => return response,
     };
-    let stats = match graph.get_stats().await {
-        Ok(stats) => stats,
-        Err(error) => {
-            return failed_response::<StrataMeasurementV1>(
-                &state,
-                "strata_generation_read_failed",
-                error.to_string(),
-                true,
-            );
-        }
+    let graph = match admitted_graph::<StrataMeasurementV1>(
+        &state,
+        &control,
+        crate::application::retrieval::CallableCodeOperationKind::Facets,
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(response) => return response,
     };
-    let graph_generation = format!(
-        "{}:{}:{}:{}:{}",
-        stats.last_sync_at,
-        stats.last_updated,
-        stats.node_count,
-        stats.edge_count,
-        stats.file_count
-    );
+    let graph_generation = graph.reader.generation().as_str().to_owned();
+    let cache_key = graph_generation.clone();
     let cache = STRATA_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let mut guard = cache.lock().await;
-    let (snapshot, cache_state) = if let Some(existing) = guard.get(&state.graph_db_path)
+    let (snapshot, cache_state) = if let Some(existing) = guard.get(&cache_key)
         && existing.graph_generation == graph_generation
     {
         (existing.clone(), "hit")
     } else {
         let scan = match tokio::time::timeout(
             STRATA_SCAN_BUDGET,
-            GraphQueryManager::new(graph.db())
+            GraphQueryManager::new(&graph.reader, Arc::clone(&graph.cancellation))
                 .build_file_adjacency_bounded(STRATA_MAX_FILES, STRATA_MAX_DEPENDENCY_EDGES),
         )
         .await
         {
             Ok(Ok(scan)) => scan,
             Ok(Err(error)) => {
-                return failed_response::<StrataMeasurementV1>(
-                    &state,
-                    "strata_scan_failed",
-                    error.to_string(),
-                    false,
-                );
+                return graph_runtime_error_response::<StrataMeasurementV1>(&state, error);
             }
             Err(_) => {
                 return failed_response::<StrataMeasurementV1>(
@@ -495,7 +488,7 @@ async fn strata(State(state): State<DashboardState>) -> Response {
             files_examined: scan.files_examined,
             dependency_edges_examined: scan.dependency_edges_examined,
         });
-        guard.insert(state.graph_db_path.clone(), computed.clone());
+        guard.insert(cache_key, computed.clone());
         (computed, "miss")
     };
     drop(guard);
@@ -531,17 +524,28 @@ async fn strata(State(state): State<DashboardState>) -> Response {
 /// `GET /api/plugins/graph/node/{node_id}/facts`
 async fn node_facts(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    let Some(graph) = state.project_graph.as_deref() else {
-        return unmeasured_response::<FactMatchesMeasurementV1>(
-            &state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            "the retained project graph is unavailable",
-        );
+    let control = match graph_control::<FactMatchesMeasurementV1>(&state, control) {
+        Ok(control) => control,
+        Err(response) => return response,
     };
-    let node = match graph.get_node(&node_id).await {
+    let graph = match admitted_graph::<FactMatchesMeasurementV1>(
+        &state,
+        &control,
+        crate::application::retrieval::CallableCodeOperationKind::ExactOccurrence,
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(response) => return response,
+    };
+    let occurrence = match parse_occurrence::<FactMatchesMeasurementV1>(&state, &node_id) {
+        Ok(occurrence) => occurrence,
+        Err(response) => return response,
+    };
+    let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
         Ok(None) => {
             return unmeasured_response::<FactMatchesMeasurementV1>(
@@ -552,13 +556,12 @@ async fn node_facts(
             );
         }
         Err(error) => {
-            return failed_response::<FactMatchesMeasurementV1>(
-                &state,
-                "fact_node_read_failed",
-                error.to_string(),
-                true,
-            );
+            return graph_error_response::<FactMatchesMeasurementV1>(&state, error);
         }
+    };
+    let node = match node_ref(&state, &symbol) {
+        Ok(node) => node,
+        Err(error) => return graph_error_response::<FactMatchesMeasurementV1>(&state, error),
     };
     let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
     let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
@@ -622,9 +625,10 @@ async fn node_facts(
     fts_rows.truncate(FACT_MATCH_LIMIT);
     let entity_coverage = fact_arm_coverage(entity_rows.len(), entity_truncated);
     let fts_coverage = fact_arm_coverage(fts_rows.len(), fts_truncated);
+    let node_name = node.name.clone();
     let measurement = FactMatchesMeasurementV1 {
-        node: NodeRefV1::from(&node),
-        name: node.name.clone(),
+        node,
+        name: node_name,
         normalized_name,
         granularity: "name_match",
         identity_semantics: "not_symbol_identity",
@@ -649,23 +653,40 @@ async fn node_facts(
             },
         ],
     };
-    measured_response(&state, measurement, 2, "name-match arms", None)
+    measured_response(
+        &state,
+        measurement,
+        2,
+        "name-match arms",
+        Some(graph.reader.generation().as_str().to_owned()),
+    )
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/tests`
 async fn node_tests(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    let Some(graph) = state.project_graph.as_deref() else {
-        return unmeasured_response::<TestMapMeasurementV1>(
-            &state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            "the retained project graph is unavailable",
-        );
+    let control = match graph_control::<TestMapMeasurementV1>(&state, control) {
+        Ok(control) => control,
+        Err(response) => return response,
     };
-    let node = match graph.get_node(&node_id).await {
+    let graph = match admitted_graph::<TestMapMeasurementV1>(
+        &state,
+        &control,
+        crate::application::retrieval::CallableCodeOperationKind::Callers,
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(response) => return response,
+    };
+    let occurrence = match parse_occurrence::<TestMapMeasurementV1>(&state, &node_id) {
+        Ok(occurrence) => occurrence,
+        Err(response) => return response,
+    };
+    let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
         Ok(None) => {
             return unmeasured_response::<TestMapMeasurementV1>(
@@ -675,20 +696,18 @@ async fn node_tests(
                 &format!("node not found: {node_id}"),
             );
         }
-        Err(error) => {
-            return failed_response::<TestMapMeasurementV1>(
-                &state,
-                "test_map_node_read_failed",
-                error.to_string(),
-                true,
-            );
-        }
+        Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
     };
-    if !node.kind.is_callable_kind() {
+    let node = match node_ref(&state, &symbol) {
+        Ok(node) => node,
+        Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
+    };
+    let graph_version = Some(graph.reader.generation().as_str().to_owned());
+    if !is_callable_kind(&node.kind) {
         return measured_response(
             &state,
             TestMapMeasurementV1 {
-                node: NodeRefV1::from(&node),
+                node,
                 granularity: "symbol",
                 algorithm: "callers_depth_3_intersect_test_files_or_test_annotations",
                 caller_depth: TEST_CALLER_DEPTH,
@@ -699,55 +718,83 @@ async fn node_tests(
             },
             1,
             "source symbols",
-            None,
+            graph_version,
         );
     }
 
-    let callers = match graph.get_callers(&node.id, TEST_CALLER_DEPTH).await {
+    let callers = match graph.reader.impact(
+        std::slice::from_ref(&occurrence),
+        &[RelationEdgeKindV1::Calls],
+        TEST_CALLER_DEPTH as u32,
+        STRATA_MAX_FILES,
+        STRATA_MAX_DEPENDENCY_EDGES,
+        Arc::clone(&graph.cancellation),
+    ) {
         Ok(callers) => callers,
         Err(error) => {
-            return failed_response::<TestMapMeasurementV1>(
+            return graph_error_response::<TestMapMeasurementV1>(
                 &state,
-                "test_map_callers_read_failed",
-                error.to_string(),
-                true,
+                crate::graph::map_projection_error(error),
             );
         }
     };
-    let caller_ids: Vec<String> = callers
+    if !callers.complete && callers.impacted.len() == STRATA_MAX_FILES {
+        return graph_error_response::<TestMapMeasurementV1>(
+            &state,
+            crate::graph::CodeGraphReadError::BudgetExhausted {
+                detail: "test-map caller expansion exceeded its complete-symbol budget".to_owned(),
+            },
+        );
+    }
+    let caller_occurrences = callers
+        .impacted
         .iter()
-        .map(|(caller, _)| caller.id.clone())
-        .collect();
-    let annotated = match graph.get_test_annotated_node_ids(&caller_ids).await {
-        Ok(annotated) => annotated,
+        .map(|caller| caller.summary.occurrence.clone())
+        .collect::<Vec<_>>();
+    let annotations = match graph.reader.callers(
+        &caller_occurrences,
+        &[RelationEdgeKindV1::Annotates],
+        STRATA_MAX_DEPENDENCY_EDGES,
+        Arc::clone(&graph.cancellation),
+    ) {
+        Ok(annotations) => annotations,
         Err(error) => {
-            return failed_response::<TestMapMeasurementV1>(
+            return graph_error_response::<TestMapMeasurementV1>(
                 &state,
-                "test_map_annotations_read_failed",
-                error.to_string(),
-                true,
+                crate::graph::map_projection_error(error),
             );
         }
     };
-    let mut tests: Vec<CoveringTestV1> = callers
-        .iter()
-        .filter_map(|(caller, _)| {
-            let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
-                "test_file"
-            } else if annotated.contains(&caller.id) {
-                "test_annotation"
-            } else {
-                return None;
-            };
-            Some(CoveringTestV1 {
-                id: caller.id.clone(),
-                name: caller.name.clone(),
-                file_path: caller.file_path.clone(),
-                start_line: caller.start_line,
-                qualification,
-            })
-        })
-        .collect();
+    if annotations.len() != callers.impacted.len() {
+        return graph_error_response::<TestMapMeasurementV1>(
+            &state,
+            graph_reset_required("test-map annotation batches did not match their caller seeds"),
+        );
+    }
+    let mut tests = Vec::new();
+    for (caller, annotations) in callers.impacted.iter().zip(annotations) {
+        let caller = match node_ref(&state, &caller.summary) {
+            Ok(caller) => caller,
+            Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
+        };
+        let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
+            "test_file"
+        } else if match has_test_annotation(&annotations) {
+            Ok(has_test_annotation) => has_test_annotation,
+            Err(error) => return graph_error_response::<TestMapMeasurementV1>(&state, error),
+        } {
+            "test_annotation"
+        } else {
+            continue;
+        };
+        tests.push(CoveringTestV1 {
+            id: caller.id,
+            name: caller.name,
+            file_path: caller.file_path,
+            start_line: caller.start_line,
+            qualification,
+        });
+    }
     tests.sort_by(|left, right| {
         left.file_path
             .cmp(&right.file_path)
@@ -763,7 +810,7 @@ async fn node_tests(
     measured_response(
         &state,
         TestMapMeasurementV1 {
-            node: NodeRefV1::from(&node),
+            node,
             granularity: "symbol",
             algorithm: "callers_depth_3_intersect_test_files_or_test_annotations",
             caller_depth: TEST_CALLER_DEPTH,
@@ -774,24 +821,35 @@ async fn node_tests(
         },
         1,
         "source symbols",
-        None,
+        graph_version,
     )
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/sessions`
 async fn node_sessions(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
-    let Some(graph) = state.project_graph.as_deref() else {
-        return unmeasured_response::<NodeSessionsMeasurementV1>(
-            &state,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "graph_authority_unavailable",
-            "the retained project graph is unavailable",
-        );
+    let control = match graph_control::<NodeSessionsMeasurementV1>(&state, control) {
+        Ok(control) => control,
+        Err(response) => return response,
     };
-    let node = match graph.get_node(&node_id).await {
+    let graph = match admitted_graph::<NodeSessionsMeasurementV1>(
+        &state,
+        &control,
+        crate::application::retrieval::CallableCodeOperationKind::ExactOccurrence,
+    )
+    .await
+    {
+        Ok(graph) => graph,
+        Err(response) => return response,
+    };
+    let occurrence = match parse_occurrence::<NodeSessionsMeasurementV1>(&state, &node_id) {
+        Ok(occurrence) => occurrence,
+        Err(response) => return response,
+    };
+    let symbol = match symbol_summary(&graph, &occurrence) {
         Ok(Some(node)) => node,
         Ok(None) => {
             return unmeasured_response::<NodeSessionsMeasurementV1>(
@@ -801,14 +859,11 @@ async fn node_sessions(
                 &format!("node not found: {node_id}"),
             );
         }
-        Err(error) => {
-            return failed_response::<NodeSessionsMeasurementV1>(
-                &state,
-                "session_node_read_failed",
-                error.to_string(),
-                true,
-            );
-        }
+        Err(error) => return graph_error_response::<NodeSessionsMeasurementV1>(&state, error),
+    };
+    let node = match node_ref(&state, &symbol) {
+        Ok(node) => node,
+        Err(error) => return graph_error_response::<NodeSessionsMeasurementV1>(&state, error),
     };
     let Some(database) = state.lcm_db.as_deref() else {
         return unmeasured_response::<NodeSessionsMeasurementV1>(
@@ -845,7 +900,7 @@ async fn node_sessions(
     measured_response(
         &state,
         NodeSessionsMeasurementV1 {
-            node: NodeRefV1::from(&node),
+            node,
             linkage,
             available_granularities: vec!["file"],
             symbol_granularity_available: false,
@@ -853,8 +908,232 @@ async fn node_sessions(
         },
         eligible,
         "sessions with provider-native edited-file metadata",
-        None,
+        Some(graph.reader.generation().as_str().to_owned()),
     )
+}
+
+struct AdmittedGraphReadV1 {
+    reader: CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+}
+
+fn graph_control<T: Serialize>(
+    state: &DashboardState,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> std::result::Result<DashboardHttpRequestControlV1, Response> {
+    control.map(|Extension(control)| control).ok_or_else(|| {
+        unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_request_admission_unavailable",
+            "dashboard HTTP request admission is unavailable",
+        )
+    })
+}
+
+async fn admitted_graph<T: Serialize>(
+    state: &DashboardState,
+    control: &DashboardHttpRequestControlV1,
+    operation_kind: crate::application::retrieval::CallableCodeOperationKind,
+) -> std::result::Result<AdmittedGraphReadV1, Response> {
+    let (Some(admission), Some(projection)) = (
+        state.code_graph_read_admission.as_ref(),
+        state.code_graph_projection_read_port.as_ref(),
+    ) else {
+        return Err(unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            "the exact-project verified code graph authority is unavailable",
+        ));
+    };
+    let operation = crate::application::retrieval::callable_code_operation(operation_kind)
+        .map_err(|error| {
+            graph_error_response::<T>(
+                state,
+                crate::graph::CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                },
+            )
+        })?;
+    let context = admission
+        .admit(crate::graph::CodeGraphReadAdmissionRequest::new(
+            &operation,
+            control.request_id(),
+            control.deadline(),
+            control.cancellation(),
+            control.observed_at(),
+        ))
+        .await
+        .map_err(|error| graph_error_response::<T>(state, error))?;
+    let cancellation = crate::graph::application_graph_cancellation(control.cancellation());
+    let verified = projection
+        .open(crate::graph::CodeGraphReadRequest::new(
+            &context,
+            control.observed_at(),
+            Arc::clone(&cancellation),
+        ))
+        .await
+        .map_err(|error| graph_error_response::<T>(state, error))?;
+    let reader = verified
+        .reader_with_cancellation(&context, control.observed_at(), Arc::clone(&cancellation))
+        .map_err(|error| graph_error_response::<T>(state, error))?;
+    Ok(AdmittedGraphReadV1 {
+        reader,
+        cancellation,
+    })
+}
+
+fn parse_occurrence<T: Serialize>(
+    state: &DashboardState,
+    node_id: &str,
+) -> std::result::Result<SymbolOccurrenceId, Response> {
+    SymbolOccurrenceId::new(node_id.to_owned()).map_err(|error| {
+        unmeasured_response::<T>(
+            state,
+            StatusCode::BAD_REQUEST,
+            "invalid_node_identity",
+            &error.to_string(),
+        )
+    })
+}
+
+fn symbol_summary(
+    graph: &AdmittedGraphReadV1,
+    occurrence: &SymbolOccurrenceId,
+) -> std::result::Result<Option<CodeGraphSymbolSummaryV1>, crate::graph::CodeGraphReadError> {
+    graph
+        .reader
+        .symbol_summary(occurrence, Arc::clone(&graph.cancellation))
+        .map_err(crate::graph::map_projection_error)
+}
+
+fn node_ref(
+    state: &DashboardState,
+    symbol: &CodeGraphSymbolSummaryV1,
+) -> std::result::Result<NodeRefV1, crate::graph::CodeGraphReadError> {
+    let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+        graph_reset_required("verified graph symbol is missing its lineage metadata")
+    })?;
+    let binding = symbol.binding.as_ref().ok_or_else(|| {
+        graph_reset_required("verified graph symbol is missing its source binding")
+    })?;
+    let file_path = binding.logical_path.clone().ok_or_else(|| {
+        graph_reset_required("verified graph symbol binding is missing its logical path")
+    })?;
+    let source_span = binding.source_span.as_ref().ok_or_else(|| {
+        graph_reset_required("verified graph symbol binding is missing its source span")
+    })?;
+    let source = std::fs::read(state.project_root.join(&file_path)).map_err(|error| {
+        crate::graph::CodeGraphReadError::Stale {
+            detail: format!(
+                "verified graph source {file_path:?} cannot be read for line mapping: {error}"
+            ),
+        }
+    })?;
+    let start_line = line_for_byte_offset(&source, source_span.start_byte).ok_or_else(|| {
+        graph_reset_required(
+            "verified graph symbol source span exceeds the admitted source file bytes",
+        )
+    })?;
+    Ok(NodeRefV1 {
+        id: symbol.occurrence.as_str().to_owned(),
+        name: simple_symbol_name(&metadata.qualified_name).to_owned(),
+        qualified_name: metadata.qualified_name.clone(),
+        kind: metadata.kind.clone(),
+        file_path,
+        start_line,
+    })
+}
+
+fn call_chain_steps(
+    state: &DashboardState,
+    graph: &AdmittedGraphReadV1,
+    from: CodeGraphSymbolSummaryV1,
+    path: Option<&[tracedecay_domain::CanonicalRelationEdgeV1]>,
+) -> std::result::Result<Vec<CallChainStepV1>, crate::graph::CodeGraphReadError> {
+    let mut previous = node_ref(state, &from)?;
+    let mut steps = vec![CallChainStepV1 {
+        node: previous.clone(),
+        incoming_edge: None,
+    }];
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let mut previous_occurrence = from.occurrence;
+    for edge in path {
+        if edge.kind != RelationEdgeKindV1::Calls || edge.from_occurrence != previous_occurrence {
+            return Err(graph_reset_required(
+                "verified call path is not a contiguous directed calls path",
+            ));
+        }
+        let target = symbol_summary(graph, &edge.to_occurrence)?.ok_or_else(|| {
+            graph_reset_required("verified call path target symbol is missing from its generation")
+        })?;
+        let target_ref = node_ref(state, &target)?;
+        let line = line_for_project_file(state, &previous.file_path, edge.evidence_span.start_byte);
+        steps.push(CallChainStepV1 {
+            node: target_ref.clone(),
+            incoming_edge: Some(IncomingCallEdgeV1 {
+                source: edge.from_occurrence.as_str().to_owned(),
+                target: edge.to_occurrence.as_str().to_owned(),
+                kind: "calls",
+                line,
+            }),
+        });
+        previous = target_ref;
+        previous_occurrence = edge.to_occurrence.clone();
+    }
+    Ok(steps)
+}
+
+fn line_for_project_file(state: &DashboardState, file_path: &str, byte_offset: u64) -> Option<u32> {
+    let source = std::fs::read(state.project_root.join(file_path)).ok()?;
+    line_for_byte_offset(&source, byte_offset)
+}
+
+fn line_for_byte_offset(source: &[u8], byte_offset: u64) -> Option<u32> {
+    let offset = usize::try_from(byte_offset).ok()?;
+    let prefix = source.get(..offset)?;
+    u32::try_from(prefix.iter().filter(|byte| **byte == b'\n').count()).ok()
+}
+
+fn simple_symbol_name(qualified_name: &str) -> &str {
+    match qualified_name
+        .rsplit("::")
+        .next()
+        .and_then(|name| name.rsplit('.').next())
+    {
+        Some(name) => name,
+        None => qualified_name,
+    }
+}
+
+fn is_callable_kind(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "function" | "method" | "constructor" | "lambda" | "closure"
+    )
+}
+
+fn has_test_annotation(
+    annotations: &[CodeGraphSemanticEdgeV1],
+) -> std::result::Result<bool, crate::graph::CodeGraphReadError> {
+    for annotation in annotations {
+        let metadata = annotation.neighbor.metadata.as_ref().ok_or_else(|| {
+            graph_reset_required("verified annotation edge is missing source-symbol metadata")
+        })?;
+        if simple_symbol_name(&metadata.qualified_name).eq_ignore_ascii_case("test") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn graph_reset_required(detail: &str) -> crate::graph::CodeGraphReadError {
+    crate::graph::CodeGraphReadError::ResetRequired {
+        detail: detail.to_owned(),
+    }
 }
 
 fn fact_arm_coverage(returned: usize, truncated: bool) -> FactArmCoverageV1 {
@@ -864,6 +1143,112 @@ fn fact_arm_coverage(returned: usize, truncated: bool) -> FactArmCoverageV1 {
         truncated,
         limit: FACT_MATCH_LIMIT,
     }
+}
+
+fn graph_error_response<T: Serialize>(
+    state: &DashboardState,
+    error: crate::graph::CodeGraphReadError,
+) -> Response {
+    use crate::graph::CodeGraphReadError;
+
+    match error {
+        CodeGraphReadError::MissingRegistry => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_registry_missing",
+            "the exact-project code graph registry is unavailable",
+        ),
+        CodeGraphReadError::Unavailable { detail } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            &detail,
+        ),
+        CodeGraphReadError::Stale { detail } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_generation_stale",
+            &detail,
+        ),
+        CodeGraphReadError::Cancelled => unmeasured_response::<T>(
+            state,
+            StatusCode::REQUEST_TIMEOUT,
+            "graph_request_cancelled",
+            "the verified code graph request was cancelled",
+        ),
+        CodeGraphReadError::TimedOut => unmeasured_response::<T>(
+            state,
+            StatusCode::GATEWAY_TIMEOUT,
+            "graph_request_timed_out",
+            "the verified code graph request exceeded its admitted deadline",
+        ),
+        CodeGraphReadError::BudgetExhausted { detail } => unmeasured_response::<T>(
+            state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_read_budget_exhausted",
+            &detail,
+        ),
+        CodeGraphReadError::Denied => unmeasured_response::<T>(
+            state,
+            StatusCode::FORBIDDEN,
+            "graph_read_denied",
+            "the request is not authorized for this exact project graph",
+        ),
+        CodeGraphReadError::InvalidRequest { detail } => unmeasured_response::<T>(
+            state,
+            StatusCode::BAD_REQUEST,
+            "invalid_graph_request",
+            &detail,
+        ),
+        CodeGraphReadError::ResetRequired { detail } => {
+            failed_response::<T>(state, "graph_reset_required", detail, false)
+        }
+        CodeGraphReadError::Corrupt { detail } => {
+            failed_response::<T>(state, "graph_projection_corrupt", detail, false)
+        }
+    }
+}
+
+fn graph_runtime_error_response<T: Serialize>(
+    state: &DashboardState,
+    error: tracedecay_runtime_core::errors::TraceDecayError,
+) -> Response {
+    if let Some((_authority, reason)) = error.reset_required_context() {
+        return graph_error_response::<T>(
+            state,
+            crate::graph::CodeGraphReadError::ResetRequired {
+                detail: reason.to_owned(),
+            },
+        );
+    }
+    if let Some((reason_code, _retryable, detail)) = error.project_route_context() {
+        let graph_error = match reason_code {
+            "code-graph-registry-missing" => crate::graph::CodeGraphReadError::MissingRegistry,
+            "code-graph-stale" => crate::graph::CodeGraphReadError::Stale {
+                detail: detail.to_owned(),
+            },
+            "code-graph-cancelled" => crate::graph::CodeGraphReadError::Cancelled,
+            "code-graph-timed-out" => crate::graph::CodeGraphReadError::TimedOut,
+            "code-graph-budget-exhausted" => crate::graph::CodeGraphReadError::BudgetExhausted {
+                detail: detail.to_owned(),
+            },
+            "code-graph-denied" => crate::graph::CodeGraphReadError::Denied,
+            "code-graph-invalid-request" => crate::graph::CodeGraphReadError::InvalidRequest {
+                detail: detail.to_owned(),
+            },
+            "code-graph-corrupt" => crate::graph::CodeGraphReadError::Corrupt {
+                detail: detail.to_owned(),
+            },
+            "code-graph-reset-required" => crate::graph::CodeGraphReadError::ResetRequired {
+                detail: detail.to_owned(),
+            },
+            _ => crate::graph::CodeGraphReadError::Unavailable {
+                detail: detail.to_owned(),
+            },
+        };
+        return graph_error_response::<T>(state, graph_error);
+    }
+    failed_response::<T>(state, "strata_scan_failed", error.to_string(), false)
 }
 
 fn measured_response<T: Serialize>(

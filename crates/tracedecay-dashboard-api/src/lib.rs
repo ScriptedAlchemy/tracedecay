@@ -137,6 +137,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Body;
@@ -234,6 +235,15 @@ pub struct DashboardStateCompositionV1 {
     /// Daemon/application-owned verified graph read authority. HTTP adapters
     /// receive bounded read models and never a graph store handle.
     pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
+    /// Exact-project admission for generation-pinned code-graph reads. This
+    /// stays separate from the projection port so the HTTP boundary must
+    /// present real request identity, deadline, and live cancellation on each
+    /// read instead of retaining an already-open reader.
+    pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
+    /// Daemon-owned resolver of the latest complete verified projection for
+    /// this exact project. Standalone dashboards leave it absent and graph
+    /// structure routes report typed unavailable.
+    pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Daemon-owned typed read over the verified session-git-evidence graph
@@ -297,6 +307,10 @@ pub struct DashboardState {
     pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
     /// Exact verified-generation graph reader retained by the daemon.
     pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
+    /// Canonical per-request admission for the verified code graph.
+    pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
+    /// Canonical exact-project verified projection resolver.
+    pub code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
@@ -594,6 +608,8 @@ async fn build_state_inner(
     let DashboardStateCompositionV1 {
         project_graph_resolver,
         graph_read_authority,
+        code_graph_read_admission,
+        code_graph_projection_read_port,
         registered_project_session_db,
         lcm_read_authority,
         git_correlation_read_authority,
@@ -615,14 +631,22 @@ async fn build_state_inner(
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
-    let code_diagnostics_authority = code_diagnostics_broker.map(|broker| {
-        crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-            cg.project_root().to_path_buf(),
-            dashboard_root.clone(),
-            Arc::clone(&mem_db),
-            broker,
-        )
-    });
+    let code_diagnostics_authority = match (
+        code_diagnostics_broker,
+        code_graph_read_admission.as_ref(),
+        code_graph_projection_read_port.as_ref(),
+    ) {
+        (Some(broker), Some(graph_admission), Some(graph_projection)) => Some(
+            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
+                cg.project_root().to_path_buf(),
+                dashboard_root.clone(),
+                Arc::clone(graph_admission),
+                Arc::clone(graph_projection),
+                broker,
+            ),
+        ),
+        _ => None,
+    };
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
@@ -641,6 +665,8 @@ async fn build_state_inner(
             cg.store_layout().identity.project_id.as_deref(),
         ),
         graph_read_authority,
+        code_graph_read_admission,
+        code_graph_projection_read_port,
         project_graph,
         project_graph_resolver,
         memory_owner,
@@ -706,6 +732,11 @@ pub async fn build_selected_project_state(
         DashboardStateCompositionV1 {
             project_graph_resolver: active.project_graph_resolver.clone(),
             graph_read_authority: active.graph_read_authority.clone(),
+            // Both verified code-graph ports are exact-project authorities;
+            // the active project's admission must never be reused for a
+            // selected project.
+            code_graph_read_admission: None,
+            code_graph_projection_read_port: None,
             registered_project_session_db: None,
             lcm_read_authority: None,
             git_correlation_read_authority: None,
@@ -893,6 +924,8 @@ where
             project_graph_resolver: test_project_graph_resolver,
             graph_read_authority: test_authority
                 .and_then(|authority| authority.graph_read_authority.clone()),
+            code_graph_read_admission: None,
+            code_graph_projection_read_port: None,
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
             lcm_read_authority: test_authority
@@ -988,6 +1021,53 @@ struct DashboardHttpAdmission {
     port: u16,
 }
 
+const DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS: i64 = 30_000_000;
+static DASHBOARD_HTTP_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Transport-owned controls attached to one admitted dashboard HTTP request.
+/// Graph adapters pass these values intact to canonical application admission;
+/// they never manufacture an actor, grant, scope, or projection generation.
+#[derive(Clone, Debug)]
+pub(crate) struct DashboardHttpRequestControlV1 {
+    request_id: tracedecay_application::RequestId,
+    deadline: tracedecay_application::Deadline,
+    cancellation: tracedecay_application::CancellationSignal,
+    observed_at: tracedecay_domain::UtcMicros,
+}
+
+impl DashboardHttpRequestControlV1 {
+    pub(crate) fn request_id(&self) -> tracedecay_application::RequestId {
+        self.request_id.clone()
+    }
+
+    pub(crate) fn deadline(&self) -> tracedecay_application::Deadline {
+        self.deadline.clone()
+    }
+
+    pub(crate) fn cancellation(&self) -> &tracedecay_application::CancellationSignal {
+        &self.cancellation
+    }
+
+    pub(crate) const fn observed_at(&self) -> tracedecay_domain::UtcMicros {
+        self.observed_at
+    }
+}
+
+struct DashboardHttpCancellationGuard {
+    cancellation: tracedecay_application::CancellationSignal,
+    completed: bool,
+}
+
+impl Drop for DashboardHttpCancellationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = self
+                .cancellation
+                .cancel(crate::application::context::application_observed_at());
+        }
+    }
+}
+
 pub fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) -> Router {
     app.layer(middleware::from_fn_with_state(
         DashboardHttpAdmission { port: addr.port() },
@@ -998,7 +1078,7 @@ pub fn with_dashboard_http_admission(app: Router, addr: std::net::SocketAddr) ->
 async fn admit_dashboard_http_request(
     State(admission): State<DashboardHttpAdmission>,
     headers: HeaderMap,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let Some(host) = headers
@@ -1035,7 +1115,53 @@ async fn admit_dashboard_http_request(
         }
     }
 
-    next.run(request).await
+    let observed_at = crate::application::context::application_observed_at();
+    let sequence = DASHBOARD_HTTP_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
+    let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
+        Ok(request_id) => request_id,
+        Err(error) => return internal_error_response(error),
+    };
+    let cancellation =
+        match tracedecay_application::CancellationSignal::active(format!("cancel.{identity}")) {
+            Ok(cancellation) => cancellation,
+            Err(error) => return internal_error_response(error),
+        };
+    let deadline_at = tracedecay_domain::UtcMicros(
+        observed_at
+            .0
+            .saturating_add(DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS),
+    );
+    let deadline = match tracedecay_application::Deadline::new(deadline_at) {
+        Ok(deadline) => deadline,
+        Err(error) => return internal_error_response(error),
+    };
+    request
+        .extensions_mut()
+        .insert(DashboardHttpRequestControlV1 {
+            request_id,
+            deadline,
+            cancellation: cancellation.clone(),
+            observed_at,
+        });
+    let mut cancellation_guard = DashboardHttpCancellationGuard {
+        cancellation,
+        completed: false,
+    };
+    let response = next.run(request).await;
+    cancellation_guard.completed = true;
+    response
+}
+
+fn internal_error_response(error: impl std::fmt::Display) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "dashboard_request_admission_failed",
+            "detail": error.to_string(),
+        })),
+    )
+        .into_response()
 }
 
 fn dashboard_request_forbidden(detail: &'static str) -> Response {
@@ -1638,7 +1764,14 @@ async fn forward_project_request(
     req: Request<Body>,
 ) -> Response {
     let (mut parts, body) = req.into_parts();
+    let request_control = parts
+        .extensions
+        .get::<DashboardHttpRequestControlV1>()
+        .cloned();
     parts.extensions.clear();
+    if let Some(request_control) = request_control {
+        parts.extensions.insert(request_control);
+    }
     let req = Request::from_parts(parts, body);
     match project_api.with_state(state).oneshot(req).await {
         Ok(response) => response,
@@ -1753,6 +1886,26 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 mod authority_tests {
     use super::*;
 
+    struct UnavailableCodeGraphPort;
+
+    impl crate::graph::CodeGraphReadAdmissionPort for UnavailableCodeGraphPort {
+        fn admit<'a>(
+            &'a self,
+            _request: crate::graph::CodeGraphReadAdmissionRequest<'a>,
+        ) -> crate::graph::CodeGraphReadAdmissionFuture<'a> {
+            Box::pin(async { Err(crate::graph::CodeGraphReadError::MissingRegistry) })
+        }
+    }
+
+    impl crate::graph::CodeGraphProjectionReadPort for UnavailableCodeGraphPort {
+        fn open<'a>(
+            &'a self,
+            _request: crate::graph::CodeGraphReadRequest<'a>,
+        ) -> crate::graph::CodeGraphReadFuture<'a> {
+            Box::pin(async { Err(crate::graph::CodeGraphReadError::MissingRegistry) })
+        }
+    }
+
     struct FakeDashboardLcmRead;
 
     impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
@@ -1849,6 +2002,8 @@ mod authority_tests {
                     layout.identity.project_id.as_deref(),
                 ),
                 graph_read_authority: None,
+                code_graph_read_admission: None,
+                code_graph_projection_read_port: None,
                 project_graph: None,
                 project_graph_resolver: None,
                 memory_owner,
@@ -1986,12 +2141,14 @@ mod authority_tests {
                 tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
             ),
         ));
+        let code_graph = Arc::new(UnavailableCodeGraphPort);
         fixture.state.retain_admitted_authorities(
             Some(
                 crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
                     fixture.layout.project_root.clone(),
                     fixture.layout.dashboard_root.clone(),
-                    Arc::clone(&fixture.state.mem_db),
+                    Arc::clone(&code_graph) as Arc<dyn crate::graph::CodeGraphReadAdmissionPort>,
+                    code_graph as Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
                     diagnostic_broker,
                 ),
             ),

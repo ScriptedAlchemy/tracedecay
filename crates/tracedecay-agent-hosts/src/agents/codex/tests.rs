@@ -426,6 +426,7 @@ fn install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: TEST_BIN.to_string(),
         tool_permissions: Vec::new(),
+        project_root: None,
         dashboard: false,
     }
 }

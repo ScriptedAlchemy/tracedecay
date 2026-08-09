@@ -176,7 +176,7 @@ pub(super) fn codex_mcp_remove_with(codex_cli: &Path, home: &Path) -> Result<()>
 fn run_codex_mcp_step(codex_cli: &Path, args: &[&str], home: &Path) -> Result<()> {
     let config_path = codex_config_path(home);
     let regions_before = preserved_regions(&config_path)?;
-    let outcome = crate::agents::host_cli::run_host_cli(codex_cli, args, home, None)?;
+    let outcome = crate::agents::host_cli::run_host_cli(codex_cli, args, home)?;
     // Snapshot once after the child exits. The bytes that pass the region guard
     // are the bytes recorded for rollback; reading again after recording would
     // create a race in which a foreign writer could be absorbed into the

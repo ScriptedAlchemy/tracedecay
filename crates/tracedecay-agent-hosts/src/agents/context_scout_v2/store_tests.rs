@@ -234,6 +234,168 @@ async fn delivery_requires_the_current_claim_after_lease_takeover() {
 }
 
 #[tokio::test]
+async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let stale_lease = lease(51, 20);
+    assert!(matches!(
+        store
+            .claim(pending.work.address, UtcMicros(10), stale_lease)
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(_)
+    ));
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [52; 16],
+        envelope_id: pending.envelope.envelope_id,
+        delivered_at: UtcMicros(15),
+        outcome: ContextScoutOutcomeV1::Displayed,
+    };
+
+    assert_eq!(
+        store
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                lease(53, 20),
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+    assert!(matches!(
+        store.startup(UtcMicros(21), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready { .. }
+    ));
+    let current_lease = lease(54, 40);
+    assert!(matches!(
+        store
+            .claim(pending.work.address, UtcMicros(22), current_lease)
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(_)
+    ));
+    assert_eq!(
+        store
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                stale_lease,
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+    assert_eq!(
+        store
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                current_lease,
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+}
+
+#[tokio::test]
+async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+            .unwrap();
+    let pending = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let delivery_lease = lease(61, 40);
+    assert!(matches!(
+        store
+            .claim(pending.work.address, UtcMicros(10), delivery_lease)
+            .await,
+        ContextScoutDurableClaimOutcomeV1::Claimed(_)
+    ));
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [62; 16],
+        envelope_id: pending.envelope.envelope_id,
+        delivered_at: UtcMicros(30),
+        outcome: ContextScoutOutcomeV1::Displayed,
+    };
+    assert_eq!(
+        store
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                delivery_lease,
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    drop(store);
+
+    let restarted =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    assert_eq!(
+        restarted
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                delivery_lease,
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate
+    );
+    assert_eq!(
+        restarted
+            .record_delivery_by_lease(
+                pending.work,
+                pending.envelope.envelope_id,
+                lease(63, 40),
+                pending.envelope.configuration_revision,
+                &receipt,
+            )
+            .await,
+        ContextScoutDurableStoreOutcomeV1::Superseded
+    );
+    assert_eq!(
+        restarted
+            .recent(
+                pending.work.address,
+                pending.envelope.configuration_revision,
+                UtcMicros(31),
+                8,
+            )
+            .await,
+        ContextScoutRecentReadOutcomeV1::Ready(ContextScoutRecentStateV1 {
+            configuration_revision: pending.envelope.configuration_revision,
+            observed_at: UtcMicros(31),
+            pending: Vec::new(),
+            deliveries: vec![ContextScoutRecentDeliveryV1 {
+                entry: pending,
+                receipt,
+                feedback: None,
+            }],
+            omitted: 0,
+        })
+    );
+}
+
+#[tokio::test]
 async fn restart_generation_snapshot_includes_a_live_claim_without_requeueing_it() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];

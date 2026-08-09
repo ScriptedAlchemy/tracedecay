@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::super::managed_skills::{
     ManagedSkill, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    apply_managed_skill_consolidation,
+    apply_managed_skill_consolidation, preview_managed_skill_update,
 };
 use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
@@ -122,10 +122,8 @@ pub(super) fn skill_merge_from_proposal(
         || update.targets.is_some()
         || update.body_markdown.is_some()
         || update.support_files.is_some();
-    if has_update && !merge_update_changes_target(&update, target) {
-        return Err(format!(
-            "merge proposal does not change managed skill id '{target_skill_id}'"
-        ));
+    if has_update {
+        preview_managed_skill_update(target, &update).map_err(|error| error.to_string())?;
     }
     Ok(SkillMergeProposal {
         target_skill_id,
@@ -135,33 +133,6 @@ pub(super) fn skill_merge_from_proposal(
         reason,
         update: has_update.then_some(update),
     })
-}
-
-fn merge_update_changes_target(update: &ManagedSkillUpdate, target: &ManagedSkill) -> bool {
-    update
-        .title
-        .as_ref()
-        .is_some_and(|title| target.metadata.title != *title)
-        || update
-            .summary
-            .as_ref()
-            .is_some_and(|summary| target.metadata.summary != *summary)
-        || update
-            .category
-            .as_ref()
-            .is_some_and(|category| target.metadata.category != *category)
-        || update
-            .targets
-            .as_ref()
-            .is_some_and(|targets| target.metadata.targets != *targets)
-        || update
-            .body_markdown
-            .as_ref()
-            .is_some_and(|body| target.body_markdown != *body)
-        || update
-            .support_files
-            .as_ref()
-            .is_some_and(|support_files| target.support_files != *support_files)
 }
 
 /// Applies a merge as one checksum-fenced, crash-recoverable lifecycle
@@ -229,8 +200,8 @@ pub(super) fn applied_consolidation_record(
 #[cfg(test)]
 mod tests {
     use super::super::super::managed_skills::{
-        ManagedSkillDraft, ManagedSkillProvenance, create_managed_skill,
-        default_managed_skill_targets,
+        ManagedSkillDraft, ManagedSkillProvenance, ManagedSupportFile, apply_managed_skill_update,
+        create_managed_skill, default_managed_skill_targets, load_managed_skill,
     };
     use super::super::skill_proposal_action;
     use super::*;
@@ -249,22 +220,31 @@ mod tests {
         }
     }
 
-    fn fixture_skill(id: &str, source: ManagedSkillSource, pinned: bool) -> ManagedSkill {
-        let draft = ManagedSkillDraft {
+    fn fixture_draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
+        ManagedSkillDraft {
             id: id.to_string(),
             title: format!("{id} guidance"),
             summary: format!("Guidance for {id}."),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: format!("Follow the {id} workflow before applying changes."),
-            support_files: Vec::new(),
+            support_files: vec![
+                ManagedSupportFile::new(
+                    format!("references/{id}.md"),
+                    format!("Reference material for {id}.").into_bytes(),
+                )
+                .unwrap(),
+            ],
             provenance: ManagedSkillProvenance {
                 source,
-                actor: "test".to_string(),
-                run_id: None,
+                actor: format!("{id}-author"),
+                run_id: Some(format!("{id}-run")),
             },
-        };
-        let mut skill = match draft.materialize() {
+        }
+    }
+
+    fn fixture_skill(id: &str, source: ManagedSkillSource, pinned: bool) -> ManagedSkill {
+        let mut skill = match fixture_draft(id, source).materialize() {
             Ok(skill) => skill,
             Err(err) => panic!("test fixture skill should materialize: {err}"),
         };
@@ -502,7 +482,7 @@ mod tests {
                 }),
                 &skills,
             ),
-            "merge proposal does not change managed skill id 'workflow-a'",
+            "config error: managed skill 'workflow-a' update does not change the active revision",
         );
     }
 
@@ -525,14 +505,20 @@ mod tests {
     #[tokio::test]
     async fn merge_applies_target_update_and_source_archive_together() {
         let profile = tempfile::tempdir().unwrap();
-        let target = fixture_skill("workflow-a", ManagedSkillSource::AutomationRun, false);
-        let source = fixture_skill("workflow-b", ManagedSkillSource::AutomationRun, false);
-        create_managed_skill(profile.path(), target.clone())
-            .await
-            .unwrap();
-        create_managed_skill(profile.path(), source.clone())
-            .await
-            .unwrap();
+        let target = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-a", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let source = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let target_before = target.clone();
+        let source_before = source.clone();
         let skills = [
             (target.metadata.id.clone(), target),
             (source.metadata.id.clone(), source),
@@ -552,14 +538,99 @@ mod tests {
             &skills,
         )
         .unwrap();
+        let expected_target = preview_managed_skill_update(
+            &target_before,
+            merge.update.as_ref().expect("merge should update target"),
+        )
+        .unwrap();
 
         let (source, target) = apply_skill_merge(profile.path(), &merge).await.unwrap();
+        let target = target.expect("merge should return updated target");
 
         assert_eq!(source.metadata.state, ManagedSkillState::Archived);
         assert_eq!(source.metadata.absorbed_into.as_deref(), Some("workflow-a"));
+        assert_eq!(source.metadata.id, source_before.metadata.id);
         assert_eq!(
-            target.unwrap().body_markdown,
+            source.metadata.provenance,
+            source_before.metadata.provenance
+        );
+        assert_eq!(source.support_files, source_before.support_files);
+        assert_eq!(target.metadata.id, expected_target.metadata.id);
+        assert_eq!(target.metadata.checksum, expected_target.metadata.checksum);
+        assert_eq!(
+            target.metadata.provenance,
+            target_before.metadata.provenance
+        );
+        assert_eq!(target.support_files, target_before.support_files);
+        assert_eq!(
+            target.body_markdown,
             "Merged workflow guidance covering both variants."
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_rejects_a_concurrent_source_update_without_changing_target() {
+        let profile = tempfile::tempdir().unwrap();
+        let target = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-a", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let source = create_managed_skill(
+            profile.path(),
+            fixture_draft("workflow-b", ManagedSkillSource::AutomationRun),
+        )
+        .await
+        .unwrap();
+        let skills = [
+            (target.metadata.id.clone(), target.clone()),
+            (source.metadata.id.clone(), source.clone()),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+        let merge = skill_merge_from_proposal(
+            &json!({
+                "action": "merge",
+                "id": "workflow-a",
+                "base_checksum": checksum(&skills, "workflow-a"),
+                "source_skill_id": "workflow-b",
+                "source_base_checksum": checksum(&skills, "workflow-b"),
+                "body_markdown": "Merged workflow guidance covering both variants.",
+                "reason": "duplicate guidance"
+            }),
+            &skills,
+        )
+        .unwrap();
+        let concurrent_source = apply_managed_skill_update(
+            profile.path(),
+            &source.metadata.id,
+            &source.metadata.checksum,
+            ManagedSkillUpdate {
+                body_markdown: Some("Concurrent source revision.".to_string()),
+                ..ManagedSkillUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let error = apply_skill_merge(profile.path(), &merge).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "config error: base_checksum for managed skill id 'workflow-b' is stale"
+        );
+        assert_eq!(
+            load_managed_skill(profile.path(), "workflow-a")
+                .await
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            load_managed_skill(profile.path(), "workflow-b")
+                .await
+                .unwrap(),
+            concurrent_source
         );
     }
 }

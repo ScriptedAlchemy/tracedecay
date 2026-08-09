@@ -364,7 +364,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         apply_batch.retry_error.is_some(),
         &automatic_fact_receipts,
     );
-    let applied_receipt_ids = automatic_fact_receipts
+    let applied_receipt_ids: Vec<String> = automatic_fact_receipts
         .iter()
         .filter(|record| record.state == AutomaticFactState::Applied)
         .map(|record| record.apply_id.clone())
@@ -601,7 +601,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report.extend(&repair_retry_report);
+                retry_report = repair_retry_report;
                 let receipt = SessionFactCurationReceipt {
                     schema_version: 1,
                     outcome: SessionFactCurationOutcome::classify(
@@ -639,7 +639,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                 return Err(error);
             }
         };
-        retry_report.extend(&repair_retry_report);
+        retry_report = repair_retry_report;
         (proposed_ops, proposals) = finalizer
             .response_output_array(
                 &response,
