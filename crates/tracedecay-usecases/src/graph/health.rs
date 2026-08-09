@@ -7,7 +7,102 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
+use super::queries::GraphQueryManager;
 use super::scc::tarjan_scc;
+use tracedecay_runtime_core::errors::Result;
+
+#[derive(Clone, Debug)]
+pub struct VerifiedHealthSnapshotV1 {
+    pub quality_signal: u32,
+    pub files_analyzed: usize,
+    pub acyclicity: f64,
+    pub depth: f64,
+    pub equality: f64,
+    pub redundancy: f64,
+    pub modularity: f64,
+    pub coverage_discipline: f64,
+    pub gini: f64,
+    pub edges_in_cycles: usize,
+    pub total_edges: usize,
+    pub max_chain: usize,
+    pub ideal_chain: usize,
+    pub complexity_files: usize,
+    pub modularity_components: usize,
+    pub dead_count: usize,
+    pub total_fns: usize,
+    pub skip_coverage_count: usize,
+}
+
+pub async fn compute_verified_health_snapshot(
+    graph: &GraphQueryManager<'_>,
+    path_prefix: Option<&str>,
+) -> Result<VerifiedHealthSnapshotV1> {
+    let adjacency = graph.build_file_adjacency(path_prefix).await?;
+    let files_analyzed = adjacency.len();
+    let total_edges = adjacency.values().map(HashSet::len).sum();
+    let (acyclicity, edges_in_cycles) = acyclicity_score(&adjacency);
+    let depth_result = dependency_depth(&adjacency, 1);
+    let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
+    let aggregates = graph.health_file_aggregates(path_prefix).await?;
+    let complexity_values = aggregates
+        .iter()
+        .map(|aggregate| aggregate.complexity)
+        .collect::<Vec<_>>();
+    let complexity_files = complexity_values.len();
+    let total_fns = aggregates
+        .iter()
+        .map(|aggregate| aggregate.function_methods)
+        .sum::<usize>();
+    let skip_coverage_count = aggregates
+        .iter()
+        .map(|aggregate| aggregate.skipped_function_methods)
+        .sum::<usize>();
+    let dead_count = aggregates
+        .iter()
+        .map(|aggregate| aggregate.dead_function_methods)
+        .sum::<usize>();
+    let gini = gini_coefficient(&complexity_values);
+    let equality = (1.0 - gini).clamp(0.0, 1.0);
+    let redundancy = if total_fns == 0 {
+        1.0
+    } else {
+        (1.0 - dead_count as f64 / total_fns as f64).clamp(0.0, 1.0)
+    };
+    let (modularity, modularity_components) = modularity_score(&adjacency);
+    let coverage_discipline = if total_fns == 0 {
+        1.0
+    } else {
+        (1.0 - skip_coverage_count as f64 / total_fns as f64).clamp(0.0, 1.0)
+    };
+    let quality_signal = compute_composite_health(&HealthDimensions {
+        acyclicity,
+        depth,
+        equality,
+        redundancy,
+        modularity,
+        coverage_discipline,
+    });
+    Ok(VerifiedHealthSnapshotV1 {
+        quality_signal,
+        files_analyzed,
+        acyclicity,
+        depth,
+        equality,
+        redundancy,
+        modularity,
+        coverage_discipline,
+        gini,
+        edges_in_cycles,
+        total_edges,
+        max_chain: depth_result.max_depth,
+        ideal_chain: depth_result.ideal_depth,
+        complexity_files,
+        modularity_components,
+        dead_count,
+        total_fns,
+        skip_coverage_count,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Task 2: Gini Coefficient

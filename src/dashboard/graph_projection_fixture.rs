@@ -151,7 +151,22 @@ fn project(
             occurrence: occurrence.clone(),
             identity: fixture_digest("symbol-identity", &node.id)?,
             qualified_name,
+            simple_name: node.name.clone(),
             kind: node.kind.as_str().to_owned(),
+            visibility: node.visibility.as_str().to_owned(),
+            branches: node.branches,
+            loops: node.loops,
+            max_nesting: node.max_nesting,
+            line_span: node
+                .end_line
+                .saturating_sub(node.start_line)
+                .saturating_add(1),
+            start_line: node.start_line,
+            signature: node.signature.clone(),
+            skip_test_coverage: node
+                .docstring
+                .as_deref()
+                .is_some_and(|doc| doc.contains("skip-test-coverage")),
             file_identity: fixture_digest("file-identity", &node.file_path)?,
             content_digest: fixture_digest("symbol-content", &node.id)?,
         });
@@ -266,4 +281,27 @@ pub(crate) async fn interactive_resolver_for_test(
         let store = Arc::clone(&store);
         Box::pin(async move { Some(store) }) as crate::mcp::server::DashboardGraphInteractiveFuture
     }))
+}
+
+pub(crate) async fn verified_graph_query_for_test(
+    cg: &TraceDecay,
+) -> Result<crate::tracedecay::queries::graph::VerifiedGraphQuery> {
+    let resolver = interactive_resolver_for_test(cg).await?;
+    let store = resolver(cg.project_root().to_path_buf())
+        .await
+        .ok_or_else(|| fixture_error("verified query store", "projection is unavailable"))?;
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancellation.graph-query-fixture")
+            .map_err(|error| fixture_error("query cancellation", error))?;
+    let graph_cancellation =
+        tracedecay_usecases::graph::application_graph_cancellation(&cancellation);
+    let reader = store
+        .interactive_reader_with_cancellation(store.generation(), Arc::clone(&graph_cancellation))
+        .map_err(|error| fixture_error("interactive query reader", error))?;
+    Ok(
+        crate::tracedecay::queries::graph::VerifiedGraphQuery::from_reader(
+            reader,
+            graph_cancellation,
+        ),
+    )
 }

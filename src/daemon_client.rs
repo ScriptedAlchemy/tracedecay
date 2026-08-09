@@ -876,6 +876,9 @@ pub(crate) fn application_response(
                 crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
                     InvocationError::Unavailable
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+                    InvocationError::Unavailable
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     InvocationError::Unavailable
                 }

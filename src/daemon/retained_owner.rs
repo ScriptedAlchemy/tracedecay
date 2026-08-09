@@ -24,8 +24,8 @@ mod session_receipts;
 pub(crate) mod session_refresh;
 
 pub(crate) use profile::{
-    ProfileRetainedAdmissionV1, ProfileRetainedAuthoritiesV1, execute_profile_retained_application,
-    issue_profile_retained_policy_admission, profile_retained_configuration_digest,
+    ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
+    execute_profile_retained_application, profile_retained_connection_authority,
 };
 
 /// Exact authorities used by independently mounted project retained families.

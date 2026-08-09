@@ -377,6 +377,8 @@ pub enum RelationEdgeKindV1 {
     Implements,
     Extends,
     Annotates,
+    Returns,
+    Receives,
 }
 
 /// One lineage candidate for a symbol across generations (Plan 25: record

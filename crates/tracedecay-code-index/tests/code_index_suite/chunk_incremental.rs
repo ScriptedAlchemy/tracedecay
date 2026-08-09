@@ -254,6 +254,20 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                     }
                     .to_owned(),
                     kind: "function".to_owned(),
+                    simple_name: if chunk.sanitized_text.as_str().contains("alpha") {
+                        "alpha"
+                    } else {
+                        "beta"
+                    }
+                    .to_owned(),
+                    visibility: "private".to_owned(),
+                    branches: 0,
+                    loops: 0,
+                    max_nesting: 0,
+                    line_span: 1,
+                    start_line: 0,
+                    signature: None,
+                    skip_test_coverage: false,
                     file_identity: id::<FileIdentityDigest>(&format!("sha256:{}", "f".repeat(64))),
                     content_digest: chunk.content_digest.clone(),
                 })

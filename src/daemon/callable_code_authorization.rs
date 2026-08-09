@@ -4,9 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::{
-    ApplicationOperation, ApplicationProblem, AuthorityReceipt, CallableCodeAuthorizationAdmission,
-    CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, RequestAdmission,
-    RequestContext, ResolvedScope, RetryDirective,
+    ApplicationOperation, ApplicationProblem, ApplicationProblemKind, AuthorityReceipt,
+    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    CallableCodeAuthorizationPort, RequestAdmission, RequestContext, ResolvedScope, RetryDirective,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
@@ -88,6 +88,95 @@ impl DaemonCallableCodeAuthorizationSource {
             source: self.clone(),
             admitted_access,
         }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct DaemonCodeGraphReadAdmission {
+    scope: ResolvedScope,
+    authorization: DaemonCallableCodeAuthorizationSource,
+}
+
+impl DaemonCodeGraphReadAdmission {
+    pub(crate) fn production(
+        project_root: PathBuf,
+        scope: ResolvedScope,
+        configuration: Arc<ProjectConfigurationRuntime>,
+    ) -> Self {
+        Self::new(
+            scope.clone(),
+            DaemonCallableCodeAuthorizationSource::production(project_root, scope, configuration),
+        )
+    }
+
+    fn new(scope: ResolvedScope, authorization: DaemonCallableCodeAuthorizationSource) -> Self {
+        Self {
+            scope,
+            authorization,
+        }
+    }
+}
+
+impl tracedecay_usecases::graph::CodeGraphReadAdmissionPort for DaemonCodeGraphReadAdmission {
+    fn admit<'a>(
+        &'a self,
+        request: tracedecay_usecases::graph::CodeGraphReadAdmissionRequest<'a>,
+    ) -> tracedecay_usecases::graph::CodeGraphReadAdmissionFuture<'a> {
+        Box::pin(async move {
+            let access = self
+                .authorization
+                .current(request.observed_at)
+                .await
+                .map_err(map_graph_admission_problem)?;
+            if access.scope != self.scope {
+                return Err(tracedecay_usecases::graph::CodeGraphReadError::Denied);
+            }
+            let context = crate::daemon::service::invocation::callable_code_request_context(
+                &self.scope,
+                &access,
+                request.request_id.as_str(),
+                request.operation,
+                request.observed_at,
+                request.deadline,
+                request.cancellation.context(),
+            )
+            .map_err(map_graph_admission_problem)?;
+            self.authorization
+                .authorize(access)
+                .admit(&context, request.operation, request.observed_at)
+                .await
+                .map_err(map_graph_admission_problem)?;
+            Ok(context)
+        })
+    }
+}
+
+fn map_graph_admission_problem(
+    problem: ApplicationProblem,
+) -> tracedecay_usecases::graph::CodeGraphReadError {
+    use tracedecay_usecases::graph::CodeGraphReadError;
+
+    match problem.kind() {
+        ApplicationProblemKind::InvalidRequest => CodeGraphReadError::InvalidRequest {
+            detail: "the code-graph read admission request is invalid".to_owned(),
+        },
+        ApplicationProblemKind::NotFoundOrNotAuthorized => CodeGraphReadError::Denied,
+        ApplicationProblemKind::Stale | ApplicationProblemKind::Conflict => {
+            CodeGraphReadError::Stale {
+                detail: "the code-graph read authority changed before admission".to_owned(),
+            }
+        }
+        ApplicationProblemKind::ResetRequired => CodeGraphReadError::ResetRequired {
+            detail: "the code-graph read authority requires reset".to_owned(),
+        },
+        ApplicationProblemKind::Cancelled => CodeGraphReadError::Cancelled,
+        ApplicationProblemKind::TimedOut => CodeGraphReadError::TimedOut,
+        ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::Unsupported
+        | ApplicationProblemKind::Unavailable
+        | ApplicationProblemKind::Saturated => CodeGraphReadError::Unavailable {
+            detail: "the code-graph read authority is unavailable".to_owned(),
+        },
     }
 }
 
@@ -190,8 +279,8 @@ mod tests {
     use std::sync::Mutex;
 
     use tracedecay_application::{
-        CallableCodeOperationKind, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-        Deadline, DisclosureClass, RequestId, callable_code_operations,
+        CallableCodeOperationKind, CancellationContext, CancellationSignal, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestId, callable_code_operations,
     };
     use tracedecay_domain::configuration::{
         AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceKindV1,
@@ -327,5 +416,43 @@ mod tests {
                 .is_err(),
             "a later call must not reuse project-open access"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_read_admission_preserves_exact_scope_and_caller_control() {
+        let operation =
+            tracedecay_application::retrieval::catalog::primitive_read_operation("health_read")
+                .expect("health operation")
+                .expect("registered health operation");
+        let observed_at = tracedecay_application::now_micros();
+        let mut mounted = access(&operation);
+        mounted.grant_expires_at = UtcMicros(observed_at.0.saturating_add(60_000_000));
+        let source = DaemonCallableCodeAuthorizationSource {
+            access: Arc::new(MutableAccess {
+                current: Mutex::new(mounted.clone()),
+            }),
+        };
+        let admission = DaemonCodeGraphReadAdmission::new(mounted.scope.clone(), source);
+        let request_id = RequestId::new("request.graph-read-admission").expect("request id");
+        let cancellation =
+            CancellationSignal::active("cancel.graph-read-admission").expect("cancellation");
+
+        let context = tracedecay_usecases::graph::CodeGraphReadAdmissionPort::admit(
+            &admission,
+            tracedecay_usecases::graph::CodeGraphReadAdmissionRequest::new(
+                &operation,
+                request_id.clone(),
+                Deadline::new(mounted.grant_expires_at).expect("deadline"),
+                &cancellation,
+                observed_at,
+            ),
+        )
+        .await
+        .expect("admitted graph read");
+
+        assert_eq!(context.scope(), &mounted.scope);
+        assert_eq!(context.request_id(), &request_id);
+        assert_eq!(context.cancellation(), &cancellation.context());
+        assert!(context.allows(operation.capability_id(), operation.use_case_id()));
     }
 }

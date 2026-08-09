@@ -263,6 +263,9 @@ fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
         },
+        DaemonInvocationProblem::ApplicationContractViolation => {
+            unavailable("multi_root.application_contract_violation")
+        }
         DaemonInvocationProblem::Unavailable => unavailable("multi_root.unavailable"),
     }
 }

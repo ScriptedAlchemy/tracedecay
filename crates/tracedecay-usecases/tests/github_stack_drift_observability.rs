@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ExecutionDurationBucketV1, ExecutionIntervalStateV1, ExecutionStackDriftKindV1,
     ExecutionTopologyDimensionV1, ExecutionTopologyMetricsRequestV1, ObservabilityHorizonV1,
     ObservabilityQueryPort, ObservabilityQueryV1, RequestContext, RequestId, ResolvedScope,
@@ -29,7 +29,7 @@ use tracedecay_usecases::{
     },
 };
 
-fn scope(name: &str) -> ResolvedScope {
+fn resolved_scope(name: &str) -> ResolvedScope {
     ResolvedScope::new(
         ProjectId::new(format!("project.github-stack-drift.{name}")).expect("project id"),
         RepositoryId::new(format!("repository.github-stack-drift.{name}")).expect("repository id"),
@@ -65,7 +65,7 @@ fn producer_identity(project_id: &ProjectId) -> ObservabilityProducerIdentityV1 
 
 fn read_context(scope: ResolvedScope) -> RequestContext {
     let grant = CapabilityGrantSnapshot::new(
-        tracedecay_domain::GrantId::new("grant.github-stack-drift").expect("grant"),
+        CapabilityGrantId::new("grant.github-stack-drift").expect("grant"),
         1,
         ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
         ActorId::new("actor.github-stack-drift.issuer").expect("issuer"),
@@ -115,7 +115,7 @@ fn drift(
 async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_nothing() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project");
-    let scope = scope("durable");
+    let scope = resolved_scope("durable");
     let runtime = RegisteredGlobalDbTestRuntime::project(
         tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
@@ -195,7 +195,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     );
 
     let mut denied = observation.clone();
-    denied.scope = scope("denied");
+    denied.scope = resolved_scope("denied");
     assert_eq!(
         record_github_stack_drifts(
             database.as_ref(),
@@ -261,7 +261,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
     assert_eq!(cell.value.value, Some(5.0));
     assert_eq!(cell.value.denominator, "observed_stack_drifts");
 
-    drop(port);
+    let _ = port;
     drop(database);
     drop(runtime);
     let restarted_runtime = RegisteredGlobalDbTestRuntime::project(

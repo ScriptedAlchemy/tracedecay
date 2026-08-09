@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use super::DashboardState;
 use super::util::{JsonError, http_detail, internal_error};
+use super::{DashboardHttpRequestControlV1, DashboardState};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
@@ -49,9 +49,14 @@ enum CommandOverridePatch {
     Value(String),
 }
 
-pub async fn overview(State(state): State<DashboardState>) -> ApiResult {
+pub async fn overview(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> ApiResult {
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
-        .overview()
+        .overview(request)
         .await
         .map_err(authority_error)?;
     snapshot_response(&snapshot)
@@ -59,13 +64,16 @@ pub async fn overview(State(state): State<DashboardState>) -> ApiResult {
 
 pub async fn patch_settings(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
         bad_request(&format!("invalid code diagnostics settings patch: {error}"))
     })?;
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
-        .update_settings(&patch.expected_revision, |settings| {
+        .update_settings(&request, &patch.expected_revision, |settings| {
             if let Some(mode) = patch.idle_backfill {
                 settings.idle_backfill = mode;
             }
@@ -91,9 +99,14 @@ pub async fn patch_settings(
     snapshot_response(&snapshot)
 }
 
-pub async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
+pub async fn refresh_all(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> ApiResult {
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
-        .refresh_all()
+        .refresh_all(&request)
         .await
         .map_err(authority_error)?;
     snapshot_response(&snapshot)
@@ -101,10 +114,13 @@ pub async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
 
 pub async fn refresh_language(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
+    let control = request_control(control)?;
+    let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
-        .refresh_language(&language)
+        .refresh_language(&request, &language)
         .await
         .map_err(authority_error)?;
     snapshot_response(&snapshot)
@@ -128,6 +144,40 @@ fn authority(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(http_detail(
                 "canonical daemon diagnostics authority is unavailable",
+            )),
+        )
+    })
+}
+
+fn diagnostics_request(
+    control: &DashboardHttpRequestControlV1,
+) -> std::result::Result<
+    crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1,
+    JsonError,
+> {
+    let operation = crate::application::retrieval::callable_code_operation(
+        crate::application::retrieval::CallableCodeOperationKind::SourceMetadata,
+    )
+    .map_err(internal_error)?;
+    Ok(
+        crate::application::dashboard_diagnostics::DashboardDiagnosticsGraphRequestV1::new(
+            operation,
+            control.request_id(),
+            control.deadline(),
+            control.cancellation().clone(),
+            control.observed_at(),
+        ),
+    )
+}
+
+fn request_control(
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> std::result::Result<DashboardHttpRequestControlV1, JsonError> {
+    control.map(|Extension(control)| control).ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "dashboard HTTP request admission is unavailable",
             )),
         )
     })
@@ -167,7 +217,37 @@ fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
                 "actual_revision": actual,
             })),
         ),
-        DashboardDiagnosticsErrorV1::Runtime(_) => internal_error(error),
+        DashboardDiagnosticsErrorV1::Runtime(runtime) => {
+            if let Some((authority, reason)) = runtime.reset_required_context() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "code": "code_graph_reset_required",
+                        "detail": reason,
+                        "authority": authority,
+                        "retryable": false,
+                    })),
+                );
+            }
+            if let Some((reason_code, retryable, detail)) = runtime.project_route_context() {
+                let status = match reason_code {
+                    "code-graph-denied" => StatusCode::FORBIDDEN,
+                    "code-graph-invalid-request" => StatusCode::BAD_REQUEST,
+                    "code-graph-cancelled" => StatusCode::REQUEST_TIMEOUT,
+                    "code-graph-timed-out" => StatusCode::GATEWAY_TIMEOUT,
+                    _ => StatusCode::SERVICE_UNAVAILABLE,
+                };
+                return (
+                    status,
+                    Json(json!({
+                        "code": reason_code,
+                        "detail": detail,
+                        "retryable": retryable,
+                    })),
+                );
+            }
+            internal_error(error)
+        }
     }
 }
 
@@ -178,34 +258,82 @@ mod tests {
 
     use super::*;
     use crate::application::dashboard_diagnostics::diagnostic_broker;
+    use crate::graph::{
+        CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
+        CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture,
+        CodeGraphReadRequest,
+    };
+    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_domain::UtcMicros;
     use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
+
+    struct UnavailableGraphPort;
+
+    impl CodeGraphReadAdmissionPort for UnavailableGraphPort {
+        fn admit<'a>(
+            &'a self,
+            _request: CodeGraphReadAdmissionRequest<'a>,
+        ) -> CodeGraphReadAdmissionFuture<'a> {
+            Box::pin(async {
+                Err(CodeGraphReadError::Unavailable {
+                    detail: "test graph admission is intentionally unavailable".to_owned(),
+                })
+            })
+        }
+    }
+
+    impl CodeGraphProjectionReadPort for UnavailableGraphPort {
+        fn open<'a>(&'a self, _request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+            Box::pin(async {
+                Err(CodeGraphReadError::Unavailable {
+                    detail: "test graph projection is intentionally unavailable".to_owned(),
+                })
+            })
+        }
+    }
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
         crate::events_api::dashboard_state_fixture("project.dashboard-code-diagnostics").await
     }
 
-    #[tokio::test]
-    async fn overview_delegates_to_the_exact_mounted_diagnostics_authority() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, mut state) = state_for_test().await;
+    fn request_control() -> DashboardHttpRequestControlV1 {
+        let observed_at = UtcMicros(1_000_000);
+        DashboardHttpRequestControlV1 {
+            request_id: RequestId::new("request.dashboard-diagnostics-test")
+                .expect("request identity"),
+            deadline: Deadline::new(UtcMicros(2_000_000)).expect("request deadline"),
+            cancellation: CancellationSignal::active("cancel.dashboard-diagnostics-test")
+                .expect("request cancellation"),
+            observed_at,
+        }
+    }
+
+    fn authority_with_settings(
+        state: &DashboardState,
+        settings: CodeDiagnosticsSettings,
+    ) -> DashboardDiagnosticsAuthorityV1 {
+        let graph = Arc::new(UnavailableGraphPort);
+        DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&graph) as Arc<dyn CodeGraphReadAdmissionPort>,
+            graph as Arc<dyn CodeGraphProjectionReadPort>,
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                settings,
+            ))),
+        )
+    }
+
+    #[test]
+    fn snapshot_response_publishes_the_exact_settings_revision() {
         let mut settings = CodeDiagnosticsSettings {
             idle_backfill: IdleBackfillMode::Off,
             ..CodeDiagnosticsSettings::default()
         };
         settings.set_language_enabled("rust", false);
-        let authority = DashboardDiagnosticsAuthorityV1::new(
-            state.project_root.clone(),
-            state.dashboard_root.clone(),
-            Arc::clone(&state.mem_db),
-            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
-                state.project_root.clone(),
-                settings,
-            ))),
-        );
-        let expected = authority.overview().await.expect("authority snapshot");
-        state.code_diagnostics_authority = Some(authority);
-
-        let Json(actual) = overview(State(state)).await.expect("diagnostics overview");
+        let expected = diagnostic_broker(std::path::PathBuf::from("project"), settings).snapshot();
+        let Json(actual) = snapshot_response(&expected).expect("diagnostics overview");
 
         assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
         assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
@@ -227,18 +355,14 @@ mod tests {
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
-        state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
-            state.project_root.clone(),
-            state.dashboard_root.clone(),
-            Arc::clone(&state.mem_db),
-            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
-                state.project_root.clone(),
-                CodeDiagnosticsSettings::default(),
-            ))),
+        state.code_diagnostics_authority = Some(authority_with_settings(
+            &state,
+            CodeDiagnosticsSettings::default(),
         ));
 
         let (status, Json(body)) = patch_settings(
             State(state),
+            Some(Extension(request_control())),
             Json(json!({
                 "expected_revision": format!("sha256:{}", "0".repeat(64)),
                 "idle_backfill": "off",
@@ -256,20 +380,18 @@ mod tests {
     async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, mut state) = state_for_test().await;
-        state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
-            state.project_root.clone(),
-            state.dashboard_root.clone(),
-            Arc::clone(&state.mem_db),
-            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
-                state.project_root.clone(),
-                CodeDiagnosticsSettings::default(),
-            ))),
+        state.code_diagnostics_authority = Some(authority_with_settings(
+            &state,
+            CodeDiagnosticsSettings::default(),
         ));
 
-        let (status, Json(body)) =
-            patch_settings(State(state), Json(json!({ "idle_backfill": "off" })))
-                .await
-                .expect_err("a write with no revision must not apply");
+        let (status, Json(body)) = patch_settings(
+            State(state),
+            Some(Extension(request_control())),
+            Json(json!({ "idle_backfill": "off" })),
+        )
+        .await
+        .expect_err("a write with no revision must not apply");
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
@@ -285,7 +407,7 @@ mod tests {
         let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, state) = state_for_test().await;
 
-        let (status, Json(body)) = overview(State(state))
+        let (status, Json(body)) = overview(State(state), Some(Extension(request_control())))
             .await
             .expect_err("unmounted authority must fail closed");
 

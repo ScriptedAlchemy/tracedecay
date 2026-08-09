@@ -335,6 +335,13 @@ pub(super) async fn production_project_server(
             canonical_project_path.to_path_buf(),
             code_search_scope.clone(),
         );
+    let code_graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
+        crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
+            canonical_project_path.to_path_buf(),
+            code_search_scope.clone(),
+            Arc::clone(cg.configuration_runtime()),
+        ),
+    );
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,
@@ -594,6 +601,7 @@ pub(super) async fn production_project_server(
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
     .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
+    .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
@@ -969,6 +977,7 @@ pub(super) async fn production_project_server(
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
             .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
+            .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)

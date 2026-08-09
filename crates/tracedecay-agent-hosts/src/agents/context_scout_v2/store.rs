@@ -32,6 +32,8 @@ struct StoredDeliveryAddressV1 {
     address: ContextScoutAddressV1,
     #[serde(default)]
     entry: Option<ContextScoutDurableQueueEntryV1>,
+    #[serde(default)]
+    lease: Option<ContextScoutLeaseV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +116,9 @@ impl StoredContextScoutStateV1 {
                         && entry.work.address == binding.address
                         && entry.envelope.envelope_id == binding.envelope_id
                 })
+                && binding
+                    .lease
+                    .is_none_or(|lease| lease.lease_id != [0; 16] && lease.expires_at.0 > 0)
                 && self
                     .receipts
                     .iter()
@@ -188,6 +193,80 @@ impl StoredContextScoutStateV1 {
             self.delivery_addresses
                 .retain(|binding| retained_envelopes.contains(&binding.envelope_id));
         }
+    }
+
+    fn record_delivery(
+        &mut self,
+        claim: &ContextScoutDurableClaimV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        if let Some(existing) = self
+            .receipts
+            .iter()
+            .find(|existing| existing.receipt_id == receipt.receipt_id)
+        {
+            if existing != receipt {
+                return ContextScoutDurableStoreOutcomeV1::Superseded;
+            }
+            if let Some(binding) = self
+                .delivery_addresses
+                .iter_mut()
+                .find(|binding| binding.envelope_id == receipt.envelope_id)
+            {
+                if binding.address != claim.entry.work.address
+                    || binding
+                        .entry
+                        .as_ref()
+                        .is_some_and(|stored| stored != &claim.entry)
+                    || binding.lease.is_some_and(|stored| stored != claim.lease)
+                {
+                    return ContextScoutDurableStoreOutcomeV1::Superseded;
+                }
+                if binding.entry.as_ref() == Some(&claim.entry)
+                    && binding.lease == Some(claim.lease)
+                {
+                    return ContextScoutDurableStoreOutcomeV1::Duplicate;
+                }
+                binding.entry = Some(claim.entry.clone());
+                binding.lease = Some(claim.lease);
+            } else {
+                self.delivery_addresses.push(StoredDeliveryAddressV1 {
+                    envelope_id: claim.entry.envelope.envelope_id,
+                    address: claim.entry.work.address,
+                    entry: Some(claim.entry.clone()),
+                    lease: Some(claim.lease),
+                });
+            }
+            self.refresh_delivery_provenance();
+            return ContextScoutDurableStoreOutcomeV1::Stored;
+        }
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|stored| stored.entry == claim.entry && stored.lease == Some(claim.lease))
+        else {
+            return if self
+                .entries
+                .iter()
+                .any(|stored| stored.entry.work.address == claim.entry.work.address)
+            {
+                ContextScoutDurableStoreOutcomeV1::Superseded
+            } else {
+                ContextScoutDurableStoreOutcomeV1::Unavailable
+            };
+        };
+        self.entries.remove(index);
+        self.add_tombstone(claim.entry.work);
+        self.receipts.push(receipt.clone());
+        self.delivery_addresses.push(StoredDeliveryAddressV1 {
+            envelope_id: claim.entry.envelope.envelope_id,
+            address: claim.entry.work.address,
+            entry: Some(claim.entry.clone()),
+            lease: Some(claim.lease),
+        });
+        self.trim_receipts();
+        self.refresh_delivery_provenance();
+        ContextScoutDurableStoreOutcomeV1::Stored
     }
 }
 
@@ -651,67 +730,69 @@ impl ProjectContextScoutDurableStoreV1 {
         let claim = claim.clone();
         let receipt = receipt.clone();
         self.update_state("record Context Scout delivery", move |state| {
-            if let Some(existing) = state
-                .receipts
+            state.record_delivery(&claim, &receipt)
+        })
+        .await
+        .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
+    }
+
+    async fn record_delivery_by_lease_inner(
+        &self,
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        if work.generation == 0
+            || work.input_watermark == [0; 32]
+            || !self.in_scope(work.address)
+            || envelope_id == [0; 16]
+            || configuration_revision == [0; 32]
+            || receipt.envelope_id != envelope_id
+            || validate_receipt_shape(receipt).is_err()
+            || lease.validate(receipt.delivered_at).is_err()
+        {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        }
+        let receipt = receipt.clone();
+        self.update_state("record Context Scout delivery by lease", move |state| {
+            let entry = state
+                .entries
                 .iter()
-                .find(|existing| existing.receipt_id == receipt.receipt_id)
-            {
-                if existing != &receipt {
-                    return ContextScoutDurableStoreOutcomeV1::Superseded;
-                }
-                if let Some(binding) = state
-                    .delivery_addresses
-                    .iter_mut()
-                    .find(|binding| binding.envelope_id == receipt.envelope_id)
-                {
-                    if binding.address != claim.entry.work.address {
-                        return ContextScoutDurableStoreOutcomeV1::Superseded;
-                    }
-                    if binding
-                        .entry
-                        .as_ref()
-                        .is_some_and(|stored| stored != &claim.entry)
-                    {
-                        return ContextScoutDurableStoreOutcomeV1::Superseded;
-                    }
-                    if binding.entry.as_ref() == Some(&claim.entry) {
-                        return ContextScoutDurableStoreOutcomeV1::Duplicate;
-                    }
-                    binding.entry = Some(claim.entry.clone());
-                } else {
-                    state.delivery_addresses.push(StoredDeliveryAddressV1 {
-                        envelope_id: claim.entry.envelope.envelope_id,
-                        address: claim.entry.work.address,
-                        entry: Some(claim.entry.clone()),
-                    });
-                }
-                state.refresh_delivery_provenance();
-                return ContextScoutDurableStoreOutcomeV1::Stored;
-            }
-            let Some(index) = state.entries.iter().position(|stored| {
-                stored.entry == claim.entry && stored.lease == Some(claim.lease)
-            }) else {
+                .map(|stored| &stored.entry)
+                .chain(
+                    state
+                        .delivery_addresses
+                        .iter()
+                        .filter(|binding| binding.lease == Some(lease))
+                        .filter_map(|binding| binding.entry.as_ref()),
+                )
+                .find(|entry| {
+                    entry.work == work
+                        && entry.envelope.envelope_id == envelope_id
+                        && entry.envelope.configuration_revision == configuration_revision
+                })
+                .cloned();
+            let Some(entry) = entry else {
                 return if state
                     .entries
                     .iter()
-                    .any(|stored| stored.entry.work.address == claim.entry.work.address)
+                    .any(|stored| stored.entry.work.address == work.address)
+                    || state
+                        .delivery_addresses
+                        .iter()
+                        .any(|binding| binding.address == work.address)
                 {
                     ContextScoutDurableStoreOutcomeV1::Superseded
                 } else {
                     ContextScoutDurableStoreOutcomeV1::Unavailable
                 };
             };
-            state.entries.remove(index);
-            state.add_tombstone(claim.entry.work);
-            state.receipts.push(receipt);
-            state.delivery_addresses.push(StoredDeliveryAddressV1 {
-                envelope_id: claim.entry.envelope.envelope_id,
-                address: claim.entry.work.address,
-                entry: Some(claim.entry.clone()),
-            });
-            state.trim_receipts();
-            state.refresh_delivery_provenance();
-            ContextScoutDurableStoreOutcomeV1::Stored
+            if validate_context_scout_delivery_receipt(&entry.envelope, &receipt).is_err() {
+                return ContextScoutDurableStoreOutcomeV1::Unavailable;
+            }
+            state.record_delivery(&ContextScoutDurableClaimV1 { entry, lease }, &receipt)
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
@@ -796,6 +877,23 @@ impl ContextScoutDurableStoreV1 for ProjectContextScoutDurableStoreV1 {
         receipt: &'a ContextScoutDeliveryReceiptV1,
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
         Box::pin(self.record_delivery_inner(claim, receipt))
+    }
+
+    fn record_delivery_by_lease<'a>(
+        &'a self,
+        work: ContextScoutWorkV1,
+        envelope_id: [u8; 16],
+        lease: ContextScoutLeaseV1,
+        configuration_revision: [u8; 32],
+        receipt: &'a ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
+        Box::pin(self.record_delivery_by_lease_inner(
+            work,
+            envelope_id,
+            lease,
+            configuration_revision,
+            receipt,
+        ))
     }
 
     fn record_feedback<'a>(

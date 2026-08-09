@@ -364,10 +364,6 @@ impl<'a> AgentRunFinalizer<'a> {
         self.run_id
     }
 
-    pub(crate) fn config(&self) -> &AutomationConfig {
-        self.config
-    }
-
     pub(crate) async fn append_backend_fallback_record(
         &self,
         evidence_hash: Option<String>,

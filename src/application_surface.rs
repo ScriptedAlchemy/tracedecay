@@ -1235,6 +1235,14 @@ where
                         message: format!("The {family} store requires an explicit reset"),
                     })
                 }
+                crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: problem_code("application_contract_violation"),
+                        message: format!(
+                            "The {family} application result violated its canonical contract"
+                        ),
+                    })
+                }
                 crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: problem_code("unavailable"),
@@ -4232,6 +4240,12 @@ fn invocation_problem(
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.reset_required",
                 "The application store requires an explicit reset",
+            )?)
+        }
+        crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+            ApplicationProblem::unavailable(SafeDiagnostic::new(
+                "application.surface.contract_violation",
+                "The application result violated its canonical contract",
             )?)
         }
         crate::daemon_contract::DaemonInvocationProblem::Unavailable => {

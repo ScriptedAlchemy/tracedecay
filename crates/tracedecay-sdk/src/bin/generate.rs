@@ -391,11 +391,12 @@ fn render_schema_type_at(
                 .map(|items| render_schema_type_at(root, items, resolving, named))
                 .transpose()?
                 .unwrap_or_else(|| "unknown".to_owned());
-            let item = if item.contains(" | ") || item.contains(" & ") {
-                format!("({item})")
-            } else {
-                item
-            };
+            let item =
+                if item.starts_with("readonly ") || item.contains(" | ") || item.contains(" & ") {
+                    format!("({item})")
+                } else {
+                    item
+                };
             Ok(format!("readonly {item}[]"))
         }
         Some("object") => render_object_type(root, object, resolving, named),
@@ -925,6 +926,27 @@ mod tests {
         assert_eq!(
             render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
             "{ readonly name: string; readonly state: \"available\" | \"partial\" | \"unavailable\"; readonly tags?: readonly string[] }"
+        );
+    }
+
+    #[test]
+    fn array_of_tuple_schema_parenthesizes_the_readonly_tuple_item() {
+        let schema = json!({
+            "type": "array",
+            "items": {
+                "type": "array",
+                "prefixItems": [
+                    { "type": "string" },
+                    { "type": "string" }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+            }
+        });
+
+        assert_eq!(
+            render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
+            "readonly (readonly [string, string])[]"
         );
     }
 

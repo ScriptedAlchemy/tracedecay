@@ -7,10 +7,10 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceOperation, RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, RetainedSurfacePortsV1, RetainedSurfaceServiceV1, RetryDirective,
-    SafeDiagnostic, now_micros,
+    ApplicationEnvelope, ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope,
+    ApplicationResult, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestContext, RequestId, RetainedSurfacePortsV1, RetainedSurfaceServiceV1,
+    RetryDirective, SafeDiagnostic, now_micros,
 };
 use tracedecay_domain::{
     ActorId, BrainId, ManifestDigest, UserProfileId, UtcMicros, canonical_sha256,
@@ -31,44 +31,25 @@ pub(crate) struct ProfileRetainedAuthoritiesV1<'a> {
     pub(crate) lcm_authority: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
 }
 
-const PROFILE_RETAINED_POLICY_REVISION_V1: u64 = 1;
+const PROFILE_RETAINED_REQUEST_GRANT_REVISION_V1: u64 = 1;
 const PROFILE_RETAINED_ACTOR_DOMAIN_V1: &str =
-    "tracedecay.daemon.profile-retained.authenticated-actor.v1";
-const PROFILE_RETAINED_OPERATIONS_V1: [RetainedSurfaceOperation; 20] = [
-    RetainedSurfaceOperation::FactStoreAdd,
-    RetainedSurfaceOperation::FactStoreSearch,
-    RetainedSurfaceOperation::FactStoreProbe,
-    RetainedSurfaceOperation::FactStoreRelated,
-    RetainedSurfaceOperation::FactStoreReason,
-    RetainedSurfaceOperation::FactStoreContradict,
-    RetainedSurfaceOperation::FactStoreGet,
-    RetainedSurfaceOperation::FactStoreUpdate,
-    RetainedSurfaceOperation::FactStoreRemove,
-    RetainedSurfaceOperation::FactStoreList,
-    RetainedSurfaceOperation::FactFeedback,
-    RetainedSurfaceOperation::MemoryStatus,
-    RetainedSurfaceOperation::MessageSearch,
-    RetainedSurfaceOperation::LcmStatus,
-    RetainedSurfaceOperation::LcmDoctor,
-    RetainedSurfaceOperation::LcmLoadSession,
-    RetainedSurfaceOperation::LcmGrep,
-    RetainedSurfaceOperation::LcmDescribe,
-    RetainedSurfaceOperation::LcmExpand,
-    RetainedSurfaceOperation::LcmExpandQuery,
-];
+    "tracedecay.daemon.profile-retained.local-profile-actor.v1";
+const PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1: &str =
+    "tracedecay.daemon.profile-retained.request-grant.v1";
 
-/// Policy admission retained for the lifetime of a mounted profile connection.
-/// Request handlers may narrow its deadline but never issue or widen this grant.
+/// Durable identity authority retained for one authenticated local-profile
+/// connection. Grants are deliberately absent: each request is admitted for
+/// one operation under its exact controls.
 #[derive(Clone)]
-pub(crate) struct ProfileRetainedAdmissionV1 {
-    pub(crate) user_profile_id: UserProfileId,
-    pub(crate) actor: ActorId,
-    pub(crate) grant: CapabilityGrantSnapshot,
+pub(crate) struct ProfileRetainedConnectionAuthorityV1 {
+    brain_id: BrainId,
+    user_profile_id: UserProfileId,
+    actor: ActorId,
     session_identity: ResolvedSessionIdentity,
     configuration_digest: ManifestDigest,
 }
 
-impl ProfileRetainedAdmissionV1 {
+impl ProfileRetainedConnectionAuthorityV1 {
     pub(crate) fn session_identity(&self) -> &ResolvedSessionIdentity {
         &self.session_identity
     }
@@ -76,9 +57,84 @@ impl ProfileRetainedAdmissionV1 {
     pub(crate) fn configuration_digest(&self) -> &ManifestDigest {
         &self.configuration_digest
     }
+
+    fn admit_request(
+        &self,
+        operation: &ApplicationOperation,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: &CancellationSignal,
+        observed_at: UtcMicros,
+    ) -> Result<RequestContext, TraceDecayError> {
+        if deadline.is_elapsed_at(observed_at) {
+            return Err(TraceDecayError::Config {
+                message: "profile retained request deadline elapsed before admission".to_owned(),
+            });
+        }
+        let scope = self
+            .session_identity
+            .session_request_scope()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("profile retained request scope is invalid: {error}"),
+            })?;
+        let cancellation_context = cancellation.context();
+        let capabilities = BTreeSet::from([operation.capability_id().clone()]);
+        let use_cases = BTreeSet::from([operation.use_case_id().clone()]);
+        let grant_digest = canonical_sha256(&(
+            PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1,
+            &self.brain_id,
+            &self.user_profile_id,
+            self.session_identity.store_id(),
+            self.session_identity.root_id(),
+            &scope,
+            &self.actor,
+            &self.configuration_digest,
+            operation.capability_id(),
+            operation.use_case_id(),
+            &request_id,
+            &deadline,
+            &cancellation_context,
+            observed_at,
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("profile retained request grant digest failed: {error}"),
+        })?;
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!(
+                "grant.tracedecay-daemon.profile-retained.request.{}",
+                grant_digest.as_str().trim_start_matches("sha256:")
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("profile retained request grant identity is invalid: {error}"),
+            })?,
+            PROFILE_RETAINED_REQUEST_GRANT_REVISION_V1,
+            grant_digest,
+            self.actor.clone(),
+            observed_at,
+            deadline.expires_at,
+            scope.clone(),
+            capabilities,
+            use_cases,
+            DisclosureClass::Sensitive,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("profile retained request grant is invalid: {error}"),
+        })?;
+        RequestContext::new(
+            self.actor.clone(),
+            scope,
+            grant,
+            request_id,
+            deadline,
+            cancellation_context,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("profile retained request context is invalid: {error}"),
+        })
+    }
 }
 
-pub(crate) fn profile_retained_configuration_digest(
+fn profile_retained_configuration_digest(
     brain_id: &BrainId,
     user_profile_id: &UserProfileId,
     session_identity: &ResolvedSessionIdentity,
@@ -95,46 +151,39 @@ pub(crate) fn profile_retained_configuration_digest(
     })
 }
 
-pub(crate) fn issue_profile_retained_policy_admission(
-    brain_id: &BrainId,
-    user_profile_id: UserProfileId,
+pub(crate) fn profile_retained_connection_authority(
+    identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     session_identity: &ResolvedSessionIdentity,
-    configuration_digest: &ManifestDigest,
-    issued_at: UtcMicros,
-    expires_at: UtcMicros,
-) -> Result<ProfileRetainedAdmissionV1, TraceDecayError> {
+) -> Result<ProfileRetainedConnectionAuthorityV1, TraceDecayError> {
+    profile_retained_connection_authority_from_persisted_identity(
+        identity.brain_id(),
+        identity.profile_id(),
+        session_identity,
+    )
+}
+
+fn profile_retained_connection_authority_from_persisted_identity(
+    brain_id: &BrainId,
+    user_profile_id: &UserProfileId,
+    session_identity: &ResolvedSessionIdentity,
+) -> Result<ProfileRetainedConnectionAuthorityV1, TraceDecayError> {
     if session_identity.project_id().is_some()
         || session_identity.profile_id().as_str() != user_profile_id.as_str()
     {
         return Err(TraceDecayError::Config {
-            message:
-                "profile retained policy admission requires the exact profile session identity"
-                    .to_owned(),
+            message: "profile retained connection requires the exact profile session identity"
+                .to_owned(),
         });
     }
-    let scope =
-        session_identity
-            .session_request_scope()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("profile retained policy scope is invalid: {error}"),
-            })?;
-    let operations = PROFILE_RETAINED_OPERATIONS_V1
-        .into_iter()
-        .map(tracedecay_application::retained_surface_application_operation)
-        .collect::<std::result::Result<Vec<_>, _>>()
+    session_identity
+        .session_request_scope()
         .map_err(|error| TraceDecayError::Config {
-            message: format!("profile retained policy catalog is invalid: {error}"),
+            message: format!("profile retained connection scope is invalid: {error}"),
         })?;
-    let capabilities = operations
-        .iter()
-        .map(|operation| operation.capability_id().clone())
-        .collect::<BTreeSet<_>>();
-    let use_cases = operations
-        .iter()
-        .map(|operation| operation.use_case_id().clone())
-        .collect::<BTreeSet<_>>();
+    let configuration_digest =
+        profile_retained_configuration_digest(brain_id, user_profile_id, session_identity)?;
     let actor_digest =
-        canonical_sha256(&(PROFILE_RETAINED_ACTOR_DOMAIN_V1, brain_id, &user_profile_id)).map_err(
+        canonical_sha256(&(PROFILE_RETAINED_ACTOR_DOMAIN_V1, brain_id, user_profile_id)).map_err(
             |error| TraceDecayError::Config {
                 message: format!("profile retained actor digest failed: {error}"),
             },
@@ -146,48 +195,12 @@ pub(crate) fn issue_profile_retained_policy_admission(
     .map_err(|error| TraceDecayError::Config {
         message: format!("profile retained policy actor is invalid: {error}"),
     })?;
-    let grant_digest = canonical_sha256(&(
-        "tracedecay.daemon.profile-retained.policy-grant.v1",
-        brain_id,
-        &user_profile_id,
-        &scope,
-        &actor,
-        configuration_digest,
-        &capabilities,
-        &use_cases,
-        issued_at,
-        expires_at,
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("profile retained policy grant digest failed: {error}"),
-    })?;
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new(format!(
-            "grant.tracedecay-daemon.profile-open.{}",
-            grant_digest.as_str().trim_start_matches("sha256:")
-        ))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("profile retained policy grant identity is invalid: {error}"),
-        })?,
-        PROFILE_RETAINED_POLICY_REVISION_V1,
-        grant_digest,
-        actor.clone(),
-        issued_at,
-        expires_at,
-        scope,
-        capabilities,
-        use_cases,
-        DisclosureClass::Sensitive,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("profile retained policy grant is invalid: {error}"),
-    })?;
-    Ok(ProfileRetainedAdmissionV1 {
-        user_profile_id,
+    Ok(ProfileRetainedConnectionAuthorityV1 {
+        brain_id: brain_id.clone(),
+        user_profile_id: user_profile_id.clone(),
         actor,
-        grant,
         session_identity: session_identity.clone(),
-        configuration_digest: configuration_digest.clone(),
+        configuration_digest,
     })
 }
 
@@ -195,7 +208,7 @@ pub(crate) fn issue_profile_retained_policy_admission(
 /// render the typed application result only after execution has completed.
 pub(crate) async fn execute_profile_retained_application(
     authorities: ProfileRetainedAuthoritiesV1<'_>,
-    admission: &ProfileRetainedAdmissionV1,
+    connection: &ProfileRetainedConnectionAuthorityV1,
     request: RetainedSurfaceRequestV1,
     request_id: RequestId,
     deadline: Deadline,
@@ -213,9 +226,6 @@ pub(crate) async fn execute_profile_retained_application(
         .map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
         })?;
-    let deadline = Deadline {
-        expires_at: UtcMicros(deadline.expires_at.0.min(admission.grant.expires_at.0)),
-    };
     if deadline.is_elapsed_at(observed_at) {
         return Ok(Err(ApplicationProblemEnvelope::new(
             operation.result_contract().clone(),
@@ -223,17 +233,8 @@ pub(crate) async fn execute_profile_retained_application(
             ApplicationProblem::timed_out_before_admission(),
         )));
     }
-    if admission.user_profile_id.as_str() != authorities.session_identity.profile_id().as_str()
-        || admission.grant.scope != scope
-        || admission.grant.issuer != admission.actor
-        || !admission
-            .grant
-            .allowed_capabilities
-            .contains(operation.capability_id())
-        || !admission
-            .grant
-            .allowed_use_cases
-            .contains(operation.use_case_id())
+    if connection.user_profile_id.as_str() != authorities.session_identity.profile_id().as_str()
+        || connection.session_identity != authorities.session_identity
     {
         return Ok(Err(ApplicationProblemEnvelope::new(
             operation.result_contract().clone(),
@@ -241,7 +242,7 @@ pub(crate) async fn execute_profile_retained_application(
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
         )));
     }
-    if admission.configuration_digest != authorities.configuration_digest {
+    if connection.configuration_digest != authorities.configuration_digest {
         return Ok(Err(ApplicationProblemEnvelope::new(
             operation.result_contract().clone(),
             request_id,
@@ -252,17 +253,13 @@ pub(crate) async fn execute_profile_retained_application(
             }),
         )));
     }
-    let context = RequestContext::new(
-        admission.actor.clone(),
-        scope.clone(),
-        admission.grant.clone(),
+    let context = connection.admit_request(
+        &operation,
         request_id.clone(),
         deadline,
-        cancellation.context(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
+        &cancellation,
+        observed_at,
+    )?;
     let ports = profile_retained_surface_ports(&authorities)?;
     let service = RetainedSurfaceServiceV1::new(ports);
     Ok(
@@ -343,34 +340,28 @@ mod tests {
         })
     }
 
-    fn admission(
-        identity: &ResolvedSessionIdentity,
-        configuration_digest: &ManifestDigest,
-    ) -> ProfileRetainedAdmissionV1 {
-        issue_profile_retained_policy_admission(
+    fn connection(identity: &ResolvedSessionIdentity) -> ProfileRetainedConnectionAuthorityV1 {
+        profile_retained_connection_authority_from_persisted_identity(
             &BrainId::new("brain.profile-retained-test").expect("brain id"),
-            UserProfileId::new(identity.profile_id().as_str()).expect("user profile id"),
+            &UserProfileId::new(identity.profile_id().as_str()).expect("user profile id"),
             identity,
-            configuration_digest,
-            UtcMicros(1),
-            UtcMicros(i64::MAX),
         )
-        .expect("profile admission")
+        .expect("profile connection authority")
     }
 
     async fn denied_kind(
         authorities: ProfileRetainedAuthoritiesV1<'_>,
-        admission: &ProfileRetainedAdmissionV1,
+        connection: &ProfileRetainedConnectionAuthorityV1,
         request_id: &str,
     ) -> ApplicationProblemKind {
         let cancellation =
             CancellationSignal::active(format!("cancellation.{request_id}")).expect("cancellation");
         execute_profile_retained_application(
             authorities,
-            admission,
+            connection,
             request(),
             RequestId::new(request_id).expect("request id"),
-            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            Deadline::new(UtcMicros(now_micros().0.saturating_add(30_000_000))).expect("deadline"),
             cancellation,
         )
         .await
@@ -384,16 +375,15 @@ mod tests {
     async fn connection_admission_denies_a_different_profile_scope() {
         let admitted_identity = identity("profile.retained-admitted");
         let requested_identity = identity("profile.retained-other");
-        let configuration_digest = digest('a');
-        let admission = admission(&admitted_identity, &configuration_digest);
+        let connection = connection(&admitted_identity);
         let kind = denied_kind(
             ProfileRetainedAuthoritiesV1 {
                 runtime_registry: None,
                 session_identity: requested_identity,
-                configuration_digest,
+                configuration_digest: connection.configuration_digest().clone(),
                 lcm_authority: None,
             },
-            &admission,
+            &connection,
             "request.profile-retained-scope-denial",
         )
         .await;
@@ -403,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn connection_admission_reports_changed_configuration_as_stale() {
         let session_identity = identity("profile.retained-stale");
-        let admission = admission(&session_identity, &digest('b'));
+        let connection = connection(&session_identity);
         let kind = denied_kind(
             ProfileRetainedAuthoritiesV1 {
                 runtime_registry: None,
@@ -411,10 +401,89 @@ mod tests {
                 configuration_digest: digest('c'),
                 lcm_authority: None,
             },
-            &admission,
+            &connection,
             "request.profile-retained-stale-configuration",
         )
         .await;
         assert_eq!(kind, ApplicationProblemKind::Stale);
+    }
+
+    #[test]
+    fn request_admission_binds_one_operation_and_exact_request_controls() {
+        let session_identity = identity("profile.retained-request-bound");
+        let connection = connection(&session_identity);
+        let operation = tracedecay_application::retained_surface_application_operation(
+            RetainedSurfaceOperation::MemoryStatus,
+        )
+        .expect("retained operation");
+        let observed_at = UtcMicros(100);
+        let deadline = Deadline::new(UtcMicros(200)).expect("deadline");
+        let cancellation = CancellationSignal::active("cancellation.profile-retained-bound")
+            .expect("cancellation");
+        let request_id = RequestId::new("request.profile-retained-bound").expect("request id");
+
+        let context = connection
+            .admit_request(
+                &operation,
+                request_id.clone(),
+                deadline.clone(),
+                &cancellation,
+                observed_at,
+            )
+            .expect("request admission");
+        let other_request = connection
+            .admit_request(
+                &operation,
+                RequestId::new("request.profile-retained-other").expect("other request id"),
+                deadline.clone(),
+                &cancellation,
+                observed_at,
+            )
+            .expect("other request admission");
+        let other_cancellation =
+            CancellationSignal::active("cancellation.profile-retained-bound-other")
+                .expect("other cancellation");
+        let other_cancellation_context = connection
+            .admit_request(
+                &operation,
+                request_id.clone(),
+                deadline.clone(),
+                &other_cancellation,
+                observed_at,
+            )
+            .expect("other cancellation admission");
+        let other_deadline_context = connection
+            .admit_request(
+                &operation,
+                request_id.clone(),
+                Deadline::new(UtcMicros(201)).expect("other deadline"),
+                &cancellation,
+                observed_at,
+            )
+            .expect("other deadline admission");
+
+        assert_eq!(context.request_id(), &request_id);
+        assert_eq!(context.deadline(), &deadline);
+        assert_eq!(context.cancellation(), &cancellation.context());
+        assert_eq!(context.grant().issued_at, observed_at);
+        assert_eq!(context.grant().expires_at, deadline.expires_at);
+        assert_eq!(
+            context.grant().allowed_capabilities,
+            BTreeSet::from([operation.capability_id().clone()])
+        );
+        assert_eq!(
+            context.grant().allowed_use_cases,
+            BTreeSet::from([operation.use_case_id().clone()])
+        );
+        assert_ne!(context.grant().grant_id, other_request.grant().grant_id);
+        assert_ne!(context.grant().digest, other_request.grant().digest);
+        assert_ne!(
+            context.grant().digest,
+            other_cancellation_context.grant().digest
+        );
+        assert_ne!(
+            context.grant().digest,
+            other_deadline_context.grant().digest
+        );
     }
 }

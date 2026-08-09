@@ -816,7 +816,6 @@ fn is_symbol_kind(kind: &NodeKind) -> bool {
             | NodeKind::PreprocessorDef
             | NodeKind::GenericParam
             | NodeKind::Annotation
-            | NodeKind::AnnotationUsage
             | NodeKind::StructTag
             | NodeKind::Export
             | NodeKind::Decorator
@@ -830,6 +829,14 @@ struct SymbolRow {
     name: String,
     qualified_name: String,
     kind: String,
+    visibility: String,
+    branches: u32,
+    loops: u32,
+    max_nesting: u32,
+    line_span: u32,
+    start_line: u32,
+    signature: Option<String>,
+    skip_test_coverage: bool,
     parent: Option<usize>,
     identity: SymbolIdentityDigest,
     occurrence: SymbolOccurrenceId,
@@ -1462,6 +1469,14 @@ impl DeterministicCodeChunker {
             name: String,
             qualified_name: String,
             span: SourceSpan,
+            visibility: String,
+            branches: u32,
+            loops: u32,
+            max_nesting: u32,
+            line_span: u32,
+            start_line: u32,
+            signature: Option<String>,
+            skip_test_coverage: bool,
         }
 
         let mut raw: Vec<Raw> = nodes
@@ -1479,6 +1494,20 @@ impl DeterministicCodeChunker {
                     kind: node.kind.as_str().to_owned(),
                     name: node.name.clone(),
                     qualified_name: node.qualified_name.clone(),
+                    visibility: node.visibility.as_str().to_owned(),
+                    branches: node.branches,
+                    loops: node.loops,
+                    max_nesting: node.max_nesting,
+                    line_span: node
+                        .end_line
+                        .saturating_sub(node.start_line)
+                        .saturating_add(1),
+                    start_line: node.start_line,
+                    signature: node.signature.clone(),
+                    skip_test_coverage: node
+                        .docstring
+                        .as_deref()
+                        .is_some_and(|doc| doc.contains("skip-test-coverage")),
                     span: SourceSpan {
                         start_byte: start.min(end),
                         end_byte: start.max(end),
@@ -1537,6 +1566,14 @@ impl DeterministicCodeChunker {
                 name: node.name.clone(),
                 qualified_name: node.qualified_name.clone(),
                 kind: node.kind.clone(),
+                visibility: node.visibility.clone(),
+                branches: node.branches,
+                loops: node.loops,
+                max_nesting: node.max_nesting,
+                line_span: node.line_span,
+                start_line: node.start_line,
+                signature: node.signature.clone(),
+                skip_test_coverage: node.skip_test_coverage,
                 parent,
                 identity,
                 occurrence,
@@ -1572,7 +1609,16 @@ impl DeterministicCodeChunker {
                 occurrence: row.occurrence.clone(),
                 identity: row.identity.clone(),
                 qualified_name: row.qualified_name.clone(),
+                simple_name: row.name.clone(),
                 kind: row.kind.clone(),
+                visibility: row.visibility.clone(),
+                branches: row.branches,
+                loops: row.loops,
+                max_nesting: row.max_nesting,
+                line_span: row.line_span,
+                start_line: row.start_line,
+                signature: row.signature.clone(),
+                skip_test_coverage: row.skip_test_coverage,
                 file_identity: file_identity.clone(),
                 content_digest: content_digest(text.as_bytes()),
             });
@@ -1949,7 +1995,9 @@ fn canonical_relation_kind(kind: &EdgeKind) -> Option<RelationEdgeKindV1> {
         EdgeKind::TypeOf => Some(RelationEdgeKindV1::TypeOf),
         EdgeKind::Extends => Some(RelationEdgeKindV1::Extends),
         EdgeKind::Annotates => Some(RelationEdgeKindV1::Annotates),
-        EdgeKind::Returns | EdgeKind::DerivesMacro | EdgeKind::Receives => None,
+        EdgeKind::Returns => Some(RelationEdgeKindV1::Returns),
+        EdgeKind::Receives => Some(RelationEdgeKindV1::Receives),
+        EdgeKind::DerivesMacro => None,
     }
 }
 

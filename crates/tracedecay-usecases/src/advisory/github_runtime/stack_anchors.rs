@@ -9,20 +9,24 @@ use tracedecay_application::feedback::{
     FeedbackPortFuture, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
     GitHubReviewReadRequestV1,
 };
+use tracedecay_application::retrieval::{
+    GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2,
+    GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
+    GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
+};
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV3, AnchorOwnerBindingV1,
-    AnchorProvenanceRelationV2, AnchorSourceGenerationV3, CapabilityId, CoverageReportV1,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorOwnerBindingV1,
+    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, CapabilityId, CoverageReportV1,
     EvidenceClass, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1,
-    GitTopologySourceRoleV1, OrderedGitTopologySourceV1, PayloadAccessState,
+    GitTopologySourceRoleV1, ObservationScopeV1, OrderedGitTopologySourceV1, PayloadAccessState,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, ProviderId,
     PullRequestSnapshotAnchorRefV1, RepositoryId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorId, RetrievalAnchorRecordV3, RetrievalAnchorRecordV3Parts,
-    RetrievalAnchorTargetV3, ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    RetrievalAnchorTargetV2, ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark,
     canonical_sha256,
 };
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_store::{RetrievalAnchorOwnerV1, StoredRetrievalAnchorRecordV1};
+use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthorityV2, RegisteredGlobalDb};
 use tracedecay_tool_catalog::{CapabilityId as GrantCapabilityId, UseCaseId as GrantUseCaseId};
 
 use super::stack::DecodedGitHubStackSnapshotV1;
@@ -46,7 +50,7 @@ pub enum GitHubStackAnchorPublicationOutcomeV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubStackAnchorReadOutcomeV1 {
-    Current(RetrievalAnchorRecordV3),
+    Current(RetrievalAnchorRecordV2),
     Denied,
     Stale,
     Unavailable,
@@ -68,21 +72,27 @@ pub(super) trait GitHubStackReadAuthorityV1: Sync {
 #[serde(deny_unknown_fields)]
 pub struct GitHubStackDurableObservationV1 {
     pub observation: GitHubStackObservationV1,
-    pub capability_anchor: RetrievalAnchorRecordV3,
-    pub snapshot_anchor: Option<RetrievalAnchorRecordV3>,
+    pub capability_anchor: RetrievalAnchorRecordV2,
+    pub snapshot_anchor: Option<RetrievalAnchorRecordV2>,
 }
 
 #[derive(Clone)]
 pub struct ProjectGitHubStackAnchorAuthorityV1 {
     database: Arc<RegisteredGlobalDb>,
+    anchors: Arc<dyn GitTopologyAnchorAuthorityV2>,
     scope: FeedbackScopeV1,
 }
 
 impl ProjectGitHubStackAnchorAuthorityV1 {
     pub fn new(database: Arc<RegisteredGlobalDb>, scope: FeedbackScopeV1) -> Option<Self> {
         scope.validate().ok()?;
-        (database.binding().shard_id.scope.project_id() == Some(&scope.project_id))
-            .then_some(Self { database, scope })
+        (database.binding().shard_id.scope.project_id() == Some(&scope.project_id)).then(|| Self {
+            anchors: Arc::new(RegisteredGitTopologyAnchorAuthorityV2::new(Arc::clone(
+                &database,
+            ))),
+            database,
+            scope,
+        })
     }
 
     pub fn privacy_domain_id(
@@ -102,26 +112,26 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             .map(|authorization| authorization.privacy_domain_id)
     }
 
-    pub fn resolve_published_observation(
-        database: &RegisteredGlobalDb,
+    pub async fn resolve_published_observation(
+        &self,
         scope: &tracedecay_application::ResolvedScope,
         observation: GitHubStackObservationV1,
     ) -> Option<GitHubStackDurableObservationV1> {
         if observation.scope != *scope {
             return None;
         }
-        let privacy_domain_id =
-            privacy_domain_for_scope(&database.binding().shard_id.profile_id, scope)?;
-        let owner = AnchorOwnerBindingV1::for_project(
-            database.binding().shard_id.profile_id.clone(),
-            scope.project_id.clone(),
-            privacy_domain_id,
+        let owner = ObservationScopeV1::Project {
+            project_id: scope.project_id.clone(),
+        };
+        let capability_anchor = resolve_v2(
+            self.anchors.as_ref(),
+            &owner,
+            &observation.capability_anchor_id,
         )
-        .ok()?;
-        let capability_anchor = resolve_v3(database, &owner, &observation.capability_anchor_id)?;
+        .await?;
         if capability_anchor.owner() != &owner
             || capability_anchor.target()
-                != &RetrievalAnchorTargetV3::GitTopology(Box::new(
+                != &RetrievalAnchorTargetV2::GitTopology(Box::new(
                     GitTopologyAnchorTargetV1::GitHubStackCapability(
                         observation.capability.clone(),
                     ),
@@ -131,10 +141,10 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
         }
         let snapshot_anchor = match (&observation.snapshot, &observation.snapshot_anchor_id) {
             (Some(snapshot), Some(anchor_id)) => {
-                let record = resolve_v3(database, &owner, anchor_id)?;
+                let record = resolve_v2(self.anchors.as_ref(), &owner, anchor_id).await?;
                 if record.owner() != &owner
                     || record.target()
-                        != &RetrievalAnchorTargetV3::GitTopology(Box::new(
+                        != &RetrievalAnchorTargetV2::GitTopology(Box::new(
                             GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone()),
                         ))
                 {
@@ -163,6 +173,12 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             return None;
         }
         let (owner, authorization) = self.owner_and_authorization(context, request)?;
+        let source_owner = AnchorOwnerBindingV1::for_project(
+            self.database.binding().shard_id.profile_id.clone(),
+            self.scope.project_id.clone(),
+            authorization.privacy_domain_id.clone(),
+        )
+        .ok()?;
         let capability_source = exact_commit_source_record(
             &owner,
             &authorization,
@@ -194,7 +210,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             | GitHubStackProviderOutcomeV1::Degraded { .. } => None,
         };
         Some(GitHubStackProviderSourceBindingV1 {
-            owner,
+            owner: source_owner,
             capability_source_anchor_id: capability_source.anchor_id().clone(),
             snapshot_source_anchor_id,
         })
@@ -226,32 +242,22 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             ) else {
                 return GitHubStackAnchorPublicationOutcomeV1::Unavailable;
             };
-            let expected = records.clone();
-            let publication = match self
-                .database
-                .publish_retrieval_anchor_records(records)
-                .await
-            {
-                Ok(tracedecay_global_db::RetrievalAnchorPublicationOutcomeV1::Published) => {
+            let owner = ObservationScopeV1::Project {
+                project_id: self.scope.project_id.clone(),
+            };
+            let Ok(publication) = GitTopologyAnchorPublicationV2::new(owner, records) else {
+                return GitHubStackAnchorPublicationOutcomeV1::Unavailable;
+            };
+            let publication = match self.anchors.publish(publication).await {
+                Ok(GitTopologyAnchorPublicationOutcomeV2::Published) => {
                     GitHubStackAnchorPublicationOutcomeV1::Published
                 }
-                Ok(tracedecay_global_db::RetrievalAnchorPublicationOutcomeV1::Replayed) => {
+                Ok(GitTopologyAnchorPublicationOutcomeV2::Replayed) => {
                     GitHubStackAnchorPublicationOutcomeV1::Replayed
                 }
                 Err(_) => GitHubStackAnchorPublicationOutcomeV1::Unavailable,
             };
-            if publication == GitHubStackAnchorPublicationOutcomeV1::Unavailable
-                || !expected.iter().all(|candidate| {
-                    self.database
-                        .resolve_retrieval_anchor_record(
-                            RetrievalAnchorOwnerV1::from(candidate.owner().clone()),
-                            candidate.anchor_id().clone(),
-                        )
-                        .ok()
-                        .flatten()
-                        .is_some_and(|resolved| semantic_replay(&resolved, candidate))
-                })
-            {
+            if publication == GitHubStackAnchorPublicationOutcomeV1::Unavailable {
                 return GitHubStackAnchorPublicationOutcomeV1::Unavailable;
             }
             if let Some(outcome) =
@@ -287,19 +293,20 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             ) else {
                 return GitHubStackAnchorReadOutcomeV1::Denied;
             };
-            let Ok(owner) = AnchorOwnerBindingV1::for_project(
-                self.database.binding().shard_id.profile_id.clone(),
-                self.scope.project_id.clone(),
-                expected_authorization.privacy_domain_id.clone(),
-            ) else {
+            let owner = ObservationScopeV1::Project {
+                project_id: self.scope.project_id.clone(),
+            };
+            let Ok(resolution) =
+                GitTopologyAnchorResolutionV2::new(owner.clone(), anchor_id.clone())
+            else {
                 return GitHubStackAnchorReadOutcomeV1::Denied;
             };
-            let record = match self.database.resolve_retrieval_anchor_record(
-                RetrievalAnchorOwnerV1::from(owner.clone()),
-                anchor_id.clone(),
-            ) {
-                Ok(Some(StoredRetrievalAnchorRecordV1::V3(record))) => record,
-                Ok(Some(StoredRetrievalAnchorRecordV1::V2(_))) | Ok(None) | Err(_) => {
+            let record = match self.anchors.resolve(resolution).await {
+                Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(record)) => record,
+                Ok(GitTopologyAnchorResolutionOutcomeV2::Unavailable)
+                | Err(GitTopologyAnchorAuthorityErrorV2::Unavailable)
+                | Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired)
+                | Err(GitTopologyAnchorAuthorityErrorV2::Conflict) => {
                     return GitHubStackAnchorReadOutcomeV1::Unavailable;
                 }
             };
@@ -320,18 +327,15 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
         &self,
         context: &RequestContext,
         request: &GitHubReviewReadRequestV1,
-    ) -> Option<(AnchorOwnerBindingV1, ResolutionAuthorizationV1)> {
+    ) -> Option<(ObservationScopeV1, ResolutionAuthorizationV1)> {
         let authorization = authorization(
             &self.database.binding().shard_id.profile_id,
             context,
             request,
         )?;
-        let owner = AnchorOwnerBindingV1::for_project(
-            self.database.binding().shard_id.profile_id.clone(),
-            self.scope.project_id.clone(),
-            authorization.privacy_domain_id.clone(),
-        )
-        .ok()?;
+        let owner = ObservationScopeV1::Project {
+            project_id: self.scope.project_id.clone(),
+        };
         Some((owner, authorization))
     }
 
@@ -445,30 +449,25 @@ impl GitHubStackReadAuthorityV1 for ProjectGitHubStackAnchorAuthorityV1 {
     }
 }
 
-fn resolve_v3(
-    database: &RegisteredGlobalDb,
-    owner: &AnchorOwnerBindingV1,
+async fn resolve_v2(
+    authority: &dyn GitTopologyAnchorAuthorityV2,
+    owner: &ObservationScopeV1,
     anchor_id: &RetrievalAnchorId,
-) -> Option<RetrievalAnchorRecordV3> {
-    match database
-        .resolve_retrieval_anchor_record(
-            RetrievalAnchorOwnerV1::from(owner.clone()),
-            anchor_id.clone(),
-        )
-        .ok()??
-    {
-        StoredRetrievalAnchorRecordV1::V3(record) => Some(record),
-        StoredRetrievalAnchorRecordV1::V2(_) => None,
+) -> Option<RetrievalAnchorRecordV2> {
+    let resolution = GitTopologyAnchorResolutionV2::new(owner.clone(), anchor_id.clone()).ok()?;
+    match authority.resolve(resolution).await.ok()? {
+        GitTopologyAnchorResolutionOutcomeV2::Resolved(record) => Some(record),
+        GitTopologyAnchorResolutionOutcomeV2::Unavailable => None,
     }
 }
 
 fn exact_commit_source_record(
-    owner: &AnchorOwnerBindingV1,
+    owner: &ObservationScopeV1,
     authorization: &ResolutionAuthorizationV1,
     repository_id: &RepositoryId,
     commit_id: &tracedecay_domain::CommitId,
     ingested_at: UtcMicros,
-) -> Option<RetrievalAnchorRecordV3> {
+) -> Option<RetrievalAnchorRecordV2> {
     let digest = canonical_sha256(&(
         "tracedecay.github-stack.provider-commit-source.v1",
         owner,
@@ -480,8 +479,8 @@ fn exact_commit_source_record(
     let mut source_authorization = authorization.clone();
     source_authorization.canonical_request_digest =
         PrivacyDomainBoundLocatorDigest::new(digest.as_str()).ok()?;
-    RetrievalAnchorRecordV3::new(RetrievalAnchorRecordV3Parts {
-        target: RetrievalAnchorTargetV3::ExactRepositoryCommit {
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::ExactRepositoryCommit {
             repository_id: repository_id.clone(),
             commit_id: commit_id.clone(),
         },
@@ -490,7 +489,7 @@ fn exact_commit_source_record(
         occurred_at: None,
         ingested_at,
         evidence_class: EvidenceClass::ProviderDeclared,
-        source_generation: AnchorSourceGenerationV3::Unknown,
+        source_generation: AnchorSourceGenerationV2::Unknown,
         projection_generation: ProjectionGenerationId::new(format!(
             "generation.github-stack-source.{suffix}"
         ))
@@ -520,36 +519,16 @@ fn privacy_domain_for_scope(
     .ok()
 }
 
-fn semantic_replay(
-    resolved: &StoredRetrievalAnchorRecordV1,
-    expected: &StoredRetrievalAnchorRecordV1,
-) -> bool {
-    match (resolved, expected) {
-        (
-            StoredRetrievalAnchorRecordV1::V2(resolved),
-            StoredRetrievalAnchorRecordV1::V2(expected),
-        ) => resolved.is_semantic_replay_of(expected),
-        (
-            StoredRetrievalAnchorRecordV1::V3(resolved),
-            StoredRetrievalAnchorRecordV1::V3(expected),
-        ) => resolved.is_semantic_replay_of(expected),
-        _ => resolved == expected,
-    }
-}
-
 fn build_records(
     profile_id: &UserProfileId,
     context: &RequestContext,
     request: &GitHubReviewReadRequestV1,
     observation: &GitHubStackObservationV1,
-) -> Option<Vec<StoredRetrievalAnchorRecordV1>> {
+) -> Option<Vec<RetrievalAnchorRecordV2>> {
     let authorization = authorization(profile_id, context, request)?;
-    let owner = AnchorOwnerBindingV1::for_project(
-        profile_id.clone(),
-        observation.scope.project_id.clone(),
-        authorization.privacy_domain_id.clone(),
-    )
-    .ok()?;
+    let owner = ObservationScopeV1::Project {
+        project_id: observation.scope.project_id.clone(),
+    };
     let mut records = BTreeMap::new();
     let capability_source = exact_commit_source_record(
         &owner,
@@ -561,10 +540,7 @@ fn build_records(
     if capability_source.anchor_id() != &observation.capability.source_anchor_id {
         return None;
     }
-    insert_record(
-        &mut records,
-        StoredRetrievalAnchorRecordV1::V3(capability_source),
-    )?;
+    insert_record(&mut records, capability_source)?;
     if let Some(snapshot) = &observation.snapshot {
         for layer in &snapshot.layers {
             let source = exact_commit_source_record(
@@ -577,17 +553,14 @@ fn build_records(
             if source.anchor_id() != &layer.pull_request.source_anchor_id {
                 return None;
             }
-            insert_record(&mut records, StoredRetrievalAnchorRecordV1::V3(source))?;
+            insert_record(&mut records, source)?;
             let pull_request = retrieval_record(
                 owner.clone(),
                 GitTopologyAnchorTargetV1::PullRequestSnapshot(layer.pull_request.clone()),
                 observation.observed_at,
                 authorization.clone(),
             )?;
-            insert_record(
-                &mut records,
-                StoredRetrievalAnchorRecordV1::V3(pull_request),
-            )?;
+            insert_record(&mut records, pull_request)?;
         }
         if !records.contains_key(&snapshot.source_anchor_id) {
             return None;
@@ -604,7 +577,7 @@ fn build_records(
     if capability.anchor_id() != &observation.capability_anchor_id {
         return None;
     }
-    insert_record(&mut records, StoredRetrievalAnchorRecordV1::V3(capability))?;
+    insert_record(&mut records, capability)?;
     match (&observation.snapshot, &observation.snapshot_anchor_id) {
         (Some(snapshot), Some(_))
             if observation.capability.state == GitHubStackCapabilityStateV1::Enabled =>
@@ -618,10 +591,7 @@ fn build_records(
             if snapshot_record.anchor_id() != observation.snapshot_anchor_id.as_ref()? {
                 return None;
             }
-            insert_record(
-                &mut records,
-                StoredRetrievalAnchorRecordV1::V3(snapshot_record),
-            )?;
+            insert_record(&mut records, snapshot_record)?;
         }
         (None, None) => {}
         _ => return None,
@@ -633,22 +603,21 @@ fn build_records(
         .collect::<BTreeSet<_>>();
     records
         .iter()
-        .all(|record| match record {
-            StoredRetrievalAnchorRecordV1::V3(record) => record
+        .all(|record| {
+            record
                 .source_anchors()
                 .iter()
-                .all(|source| published_ids.contains(source.anchor_id())),
-            StoredRetrievalAnchorRecordV1::V2(_) => false,
+                .all(|source| published_ids.contains(source.anchor_id()))
         })
         .then_some(records)
 }
 
 fn insert_record(
-    records: &mut BTreeMap<RetrievalAnchorId, StoredRetrievalAnchorRecordV1>,
-    record: StoredRetrievalAnchorRecordV1,
+    records: &mut BTreeMap<RetrievalAnchorId, RetrievalAnchorRecordV2>,
+    record: RetrievalAnchorRecordV2,
 ) -> Option<()> {
     match records.get(record.anchor_id()) {
-        Some(existing) if semantic_replay(existing, &record) => Some(()),
+        Some(existing) if existing.is_semantic_replay_of(&record) => Some(()),
         Some(_) => None,
         None => {
             records.insert(record.anchor_id().clone(), record);
@@ -658,20 +627,18 @@ fn insert_record(
 }
 
 fn retrieval_record(
-    owner: AnchorOwnerBindingV1,
+    owner: ObservationScopeV1,
     target: GitTopologyAnchorTargetV1,
     ingested_at: UtcMicros,
     authorization: ResolutionAuthorizationV1,
-) -> Option<RetrievalAnchorRecordV3> {
+) -> Option<RetrievalAnchorRecordV2> {
     let mut seen = BTreeSet::new();
     let source_anchors = target
         .ordered_sources()
         .iter()
         .filter(|source| seen.insert(source.anchor_id.clone()))
-        .enumerate()
-        .map(|(ordinal, source)| {
-            AnchorLineageRefV3::new(
-                u64::try_from(ordinal).ok()?,
+        .map(|source| {
+            AnchorLineageRefV2::new(
                 AnchorProvenanceRelationV2::Observed,
                 source.anchor_id.clone(),
                 owner.clone(),
@@ -679,9 +646,9 @@ fn retrieval_record(
             .ok()
         })
         .collect::<Option<Vec<_>>>()?;
-    let source_generation = AnchorSourceGenerationV3::GitTopology(target.generation());
+    let source_generation = AnchorSourceGenerationV2::GitTopology(target.generation());
     let projection_generation = match &source_generation {
-        AnchorSourceGenerationV3::GitTopology(
+        AnchorSourceGenerationV2::GitTopology(
             tracedecay_domain::GitTopologyGenerationRefV1::GitHubStackCapability {
                 generation_id,
                 ..
@@ -691,7 +658,7 @@ fn retrieval_record(
                 ..
             },
         ) => generation_id.clone(),
-        AnchorSourceGenerationV3::GitTopology(
+        AnchorSourceGenerationV2::GitTopology(
             tracedecay_domain::GitTopologyGenerationRefV1::ProviderCommit {
                 source_anchor_id,
                 commit_id,
@@ -711,8 +678,8 @@ fn retrieval_record(
         }
         _ => return None,
     };
-    RetrievalAnchorRecordV3::new(RetrievalAnchorRecordV3Parts {
-        target: RetrievalAnchorTargetV3::GitTopology(Box::new(target)),
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::GitTopology(Box::new(target)),
         owner,
         aliases: Vec::new(),
         occurred_at: None,
@@ -783,8 +750,8 @@ fn observation_matches_scope(
         && observation.capability.worktree_id == scope.worktree_id
 }
 
-fn record_matches_scope(record: &RetrievalAnchorRecordV3, scope: &FeedbackScopeV1) -> bool {
-    let RetrievalAnchorTargetV3::GitTopology(target) = record.target() else {
+fn record_matches_scope(record: &RetrievalAnchorRecordV2, scope: &FeedbackScopeV1) -> bool {
+    let RetrievalAnchorTargetV2::GitTopology(target) = record.target() else {
         return false;
     };
     target.project_id() == &scope.project_id && target.repository_id() == &scope.repository_id

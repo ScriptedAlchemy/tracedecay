@@ -1,1065 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+
 use tempfile::TempDir;
-use tracedecay::db::Database;
 use tracedecay::graph::git::file_churn;
-use tracedecay::graph::queries::GraphQueryManager;
-use tracedecay::graph::traversal::GraphTraverser;
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay::types::*;
-
-/// Helper: create a temp database and return (Database, TempDir).
-async fn setup_db() -> (Database, TempDir) {
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let db_path = dir.path().join("test.db");
-    let (db, _) = crate::common::initialize_test_database(&db_path)
-        .await
-        .expect("failed to initialize database");
-    (db, dir)
-}
-
-/// Helper: create a function node with sensible defaults.
-fn make_node(id: &str, name: &str, file_path: &str, visibility: Visibility) -> Node {
-    Node {
-        id: id.to_string(),
-        kind: NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("crate::{name}"),
-        file_path: file_path.to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 10,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: None,
-        visibility,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1000,
-        parent_id: None,
-    }
-}
-
-async fn seed_dead_code_marker_perf_fixture(db: &Database) {
-    db.execute_write_batch(
-        "seed dead-code marker performance fixture",
-        "WITH RECURSIVE seq(i) AS (
-                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 49999
-             )
-             INSERT OR REPLACE INTO nodes (
-                 id, kind, name, qualified_name, file_path,
-                 start_line, end_line, start_column, end_column,
-                 docstring, signature, visibility, is_async,
-                 branches, loops, returns, max_nesting,
-                 unsafe_blocks, unchecked_calls, assertions,
-                 updated_at, attrs_start_line, parent_id
-             )
-             SELECT
-                 printf('n-noise-%d', i),
-                 'annotation_usage',
-                 printf('derive_Foo_%d', i),
-                 printf('crate::derive_Foo_%d', i),
-                 'src/noise.rs',
-                 1, 10, 0, 1, NULL,
-                 printf('fn derive_Foo_%d()', i),
-                 'private',
-                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
-             FROM seq;
-
-             WITH RECURSIVE seq(i) AS (
-                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 999
-             )
-             INSERT OR REPLACE INTO nodes (
-                 id, kind, name, qualified_name, file_path,
-                 start_line, end_line, start_column, end_column,
-                 docstring, signature, visibility, is_async,
-                 branches, loops, returns, max_nesting,
-                 unsafe_blocks, unchecked_calls, assertions,
-                 updated_at, attrs_start_line, parent_id
-             )
-             SELECT
-                 printf('n-marker-%d', i),
-                 'annotation_usage',
-                 CASE i % 4
-                     WHEN 0 THEN 'test'
-                     WHEN 1 THEN 'tokio::test'
-                     WHEN 2 THEN 'wasm_bindgen_test'
-                     ELSE 'async_std::test'
-                 END,
-                 CASE i % 4
-                     WHEN 0 THEN 'crate::test'
-                     WHEN 1 THEN 'crate::tokio::test'
-                     WHEN 2 THEN 'crate::wasm_bindgen_test'
-                     ELSE 'crate::async_std::test'
-                 END,
-                 'src/markers.rs',
-                 1, 10, 0, 1, NULL,
-                 CASE i % 4
-                     WHEN 0 THEN 'fn test()'
-                     WHEN 1 THEN 'fn tokio::test()'
-                     WHEN 2 THEN 'fn wasm_bindgen_test()'
-                     ELSE 'fn async_std::test()'
-                 END,
-                 'private',
-                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
-             FROM seq;
-
-             WITH RECURSIVE seq(i) AS (
-                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 4999
-             )
-             INSERT OR REPLACE INTO nodes (
-                 id, kind, name, qualified_name, file_path,
-                 start_line, end_line, start_column, end_column,
-                 docstring, signature, visibility, is_async,
-                 branches, loops, returns, max_nesting,
-                 unsafe_blocks, unchecked_calls, assertions,
-                 updated_at, attrs_start_line, parent_id
-             )
-             SELECT
-                 printf('n-fn-%d', i),
-                 'function',
-                 printf('worker_%d', i),
-                 printf('crate::worker_%d', i),
-                 'src/fns.rs',
-                 1, 10, 0, 1, NULL,
-                 printf('fn worker_%d()', i),
-                 'private',
-                 0, 0, 0, 0, 0, 0, 0, 0, 1000, 1, NULL
-             FROM seq;
-
-             WITH RECURSIVE seq(i) AS (
-                 SELECT 2500 UNION ALL SELECT i + 1 FROM seq WHERE i < 4999
-             )
-             INSERT OR IGNORE INTO edges (source, target, kind, line)
-             SELECT 'n-fn-0', printf('n-fn-%d', i), 'calls', 1 FROM seq;
-
-             WITH RECURSIVE seq(i) AS (
-                 SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < 999
-             )
-             INSERT OR IGNORE INTO edges (source, target, kind, line)
-             SELECT printf('n-marker-%d', i), printf('n-fn-%d', i), 'annotates', 1 FROM seq;",
-    )
-    .await
-    .expect("failed to seed dead-code marker perf fixture");
-}
-
-/// Sets up a call chain: main -> process -> validate -> check.
-/// Returns the database and temp dir.
-async fn setup_call_chain() -> (Database, TempDir) {
-    let (db, dir) = setup_db().await;
-
-    let main_node = make_node("n-main", "main", "src/main.rs", Visibility::Pub);
-    let process_node = make_node("n-process", "process", "src/main.rs", Visibility::Pub);
-    let validate_node = make_node("n-validate", "validate", "src/lib.rs", Visibility::Pub);
-    let check_node = make_node("n-check", "check", "src/lib.rs", Visibility::Pub);
-
-    db.insert_nodes(&[main_node, process_node, validate_node, check_node])
-        .await
-        .expect("failed to insert nodes");
-
-    let edges = vec![
-        Edge {
-            source: "n-main".to_string(),
-            target: "n-process".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(5),
-        },
-        Edge {
-            source: "n-process".to_string(),
-            target: "n-validate".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(10),
-        },
-        Edge {
-            source: "n-validate".to_string(),
-            target: "n-check".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(15),
-        },
-    ];
-    db.insert_edges(&edges)
-        .await
-        .expect("failed to insert edges");
-
-    (db, dir)
-}
-
-// ---------------------------------------------------------------------------
-// Traversal tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_callers() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let callers = traverser
-        .get_callers("n-process", 5)
-        .await
-        .expect("get_callers failed");
-
-    // Direct caller of "process" is "main".
-    assert!(
-        !callers.is_empty(),
-        "process should have at least one caller"
-    );
-    let caller_names: Vec<&str> = callers.iter().map(|(n, _)| n.name.as_str()).collect();
-    assert!(
-        caller_names.contains(&"main"),
-        "callers of process should include main, got: {caller_names:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_get_callees() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let callees = traverser
-        .get_callees("n-process", 5)
-        .await
-        .expect("get_callees failed");
-
-    let callee_names: Vec<&str> = callees.iter().map(|(n, _)| n.name.as_str()).collect();
-    assert!(
-        callee_names.contains(&"validate"),
-        "callees of process should include validate, got: {callee_names:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_get_callees_transitive() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let callees = traverser
-        .get_callees("n-process", 5)
-        .await
-        .expect("get_callees failed");
-
-    let callee_names: Vec<&str> = callees.iter().map(|(n, _)| n.name.as_str()).collect();
-    assert!(
-        callee_names.contains(&"validate"),
-        "callees should include validate"
-    );
-    assert!(
-        callee_names.contains(&"check"),
-        "callees should transitively include check"
-    );
-}
-
-#[tokio::test]
-async fn test_impact_radius() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let subgraph = traverser
-        .get_impact_radius("n-check", 10)
-        .await
-        .expect("get_impact_radius failed");
-
-    let node_names: Vec<&str> = subgraph.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        node_names.contains(&"validate"),
-        "impact of check should include validate, got: {node_names:?}"
-    );
-    assert!(
-        node_names.contains(&"process"),
-        "impact of check should include process, got: {node_names:?}"
-    );
-    assert!(
-        node_names.contains(&"main"),
-        "impact of check should include main, got: {node_names:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_call_graph_bidirectional() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let subgraph = traverser
-        .get_call_graph("n-process", 5)
-        .await
-        .expect("get_call_graph failed");
-
-    let node_names: Vec<&str> = subgraph.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        node_names.contains(&"main"),
-        "call graph of process should include caller 'main', got: {node_names:?}"
-    );
-    assert!(
-        node_names.contains(&"validate"),
-        "call graph of process should include callee 'validate', got: {node_names:?}"
-    );
-    assert!(
-        node_names.contains(&"process"),
-        "call graph should include the center node 'process', got: {node_names:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_bfs_traversal_with_depth_limit() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let opts = TraversalOptions {
-        max_depth: 1,
-        edge_kinds: Some(vec![EdgeKind::Calls]),
-        node_kinds: None,
-        direction: TraversalDirection::Outgoing,
-        limit: 100,
-        include_start: true,
-    };
-
-    let subgraph = traverser
-        .traverse_bfs("n-main", &opts)
-        .await
-        .expect("traverse_bfs failed");
-
-    let node_names: Vec<&str> = subgraph.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        node_names.contains(&"main"),
-        "depth-1 from main should include main itself"
-    );
-    assert!(
-        node_names.contains(&"process"),
-        "depth-1 from main should include process"
-    );
-    assert!(
-        !node_names.contains(&"validate"),
-        "depth-1 from main should NOT include validate (that is depth 2)"
-    );
-    assert!(
-        !node_names.contains(&"check"),
-        "depth-1 from main should NOT include check (that is depth 3)"
-    );
-}
-
-#[tokio::test]
-async fn test_bfs_traversal_full_depth() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let opts = TraversalOptions {
-        max_depth: 10,
-        edge_kinds: Some(vec![EdgeKind::Calls]),
-        node_kinds: None,
-        direction: TraversalDirection::Outgoing,
-        limit: 100,
-        include_start: true,
-    };
-
-    let subgraph = traverser
-        .traverse_bfs("n-main", &opts)
-        .await
-        .expect("traverse_bfs failed");
-
-    assert_eq!(
-        subgraph.nodes.len(),
-        4,
-        "full-depth BFS from main should include all 4 nodes"
-    );
-}
-
-#[tokio::test]
-async fn test_dfs_traversal() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let opts = TraversalOptions {
-        max_depth: 10,
-        edge_kinds: Some(vec![EdgeKind::Calls]),
-        node_kinds: None,
-        direction: TraversalDirection::Outgoing,
-        limit: 100,
-        include_start: true,
-    };
-
-    let subgraph = traverser
-        .traverse_dfs("n-main", &opts)
-        .await
-        .expect("traverse_dfs failed");
-
-    assert_eq!(
-        subgraph.nodes.len(),
-        4,
-        "full-depth DFS from main should include all 4 nodes"
-    );
-}
-
-#[tokio::test]
-async fn test_find_path() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let path = traverser
-        .find_path("n-main", "n-check", &[EdgeKind::Calls])
-        .await
-        .expect("find_path failed")
-        .expect("path should exist from main to check");
-
-    assert!(
-        path.len() >= 2,
-        "path from main to check should have at least 2 entries"
-    );
-    assert_eq!(path[0].0.name, "main", "path should start with main");
-    assert_eq!(
-        path.last().unwrap().0.name,
-        "check",
-        "path should end with check"
-    );
-}
-
-#[tokio::test]
-async fn test_find_path_no_route() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    // check -> main has no path via outgoing Calls edges (only reverse direction).
-    // But find_path searches bidirectionally. Let's test with a disconnected node.
-    let orphan = make_node("n-orphan", "orphan", "src/orphan.rs", Visibility::Private);
-    db.insert_node(&orphan).await.expect("insert orphan failed");
-
-    let path = traverser
-        .find_path("n-main", "n-orphan", &[EdgeKind::Calls])
-        .await
-        .expect("find_path failed");
-
-    assert!(
-        path.is_none(),
-        "there should be no path from main to an orphan node"
-    );
-}
-
-#[tokio::test]
-async fn test_find_path_same_node() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let path = traverser
-        .find_path("n-main", "n-main", &[])
-        .await
-        .expect("find_path failed")
-        .expect("path from a node to itself should exist");
-
-    assert_eq!(path.len(), 1, "path from main to main should have 1 entry");
-    assert_eq!(path[0].0.name, "main");
-}
-
-// ---------------------------------------------------------------------------
-// Query tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_find_dead_code() {
-    let (db, _dir) = setup_call_chain().await;
-
-    // Add an orphan private function with no incoming edges.
-    let orphan = make_node(
-        "n-orphan",
-        "unused_helper",
-        "src/util.rs",
-        Visibility::Private,
-    );
-    db.insert_node(&orphan).await.expect("insert orphan failed");
-
-    let qm = GraphQueryManager::new(&db);
-    let dead = qm
-        .find_dead_code(&[], false, None)
-        .await
-        .expect("find_dead_code failed");
-
-    let dead_names: Vec<&str> = dead.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        dead_names.contains(&"unused_helper"),
-        "orphan private function should be detected as dead code, got: {dead_names:?}"
-    );
-    // "main" should NOT be in the dead code list.
-    assert!(
-        !dead_names.contains(&"main"),
-        "main should not be reported as dead code"
-    );
-}
-
-#[tokio::test]
-async fn test_find_dead_code_excludes_pub() {
-    let (db, _dir) = setup_db().await;
-
-    // A public function with no incoming edges should not be flagged.
-    let pub_node = make_node("n-pub", "public_api", "src/api.rs", Visibility::Pub);
-    db.insert_node(&pub_node)
-        .await
-        .expect("insert pub_node failed");
-
-    let qm = GraphQueryManager::new(&db);
-    let dead = qm
-        .find_dead_code(&[], false, None)
-        .await
-        .expect("find_dead_code failed");
-
-    let dead_names: Vec<&str> = dead.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        !dead_names.contains(&"public_api"),
-        "pub functions should not be reported as dead code"
-    );
-}
-
-/// Regression: `#[test]` functions whose name does not start with `test`
-/// (e.g. `from_measurement_slope_excludes_lfe`) must be excluded from the
-/// dead-code list. The previous filter was name-prefix only, so most tests
-/// in real Rust codebases were misreported. Detection must walk the
-/// `Annotates` edges to find a `#[test]` (or `#[tokio::test]` …) attribute.
-#[tokio::test]
-async fn test_find_dead_code_excludes_test_annotated() {
-    let (db, _dir) = setup_db().await;
-
-    // A private function annotated with #[test] but with a non-`test*` name.
-    let test_fn = make_node(
-        "n-test-fn",
-        "from_measurement_slope_excludes_lfe",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-
-    // Another private function annotated via #[tokio::test].
-    let tokio_fn = make_node(
-        "n-tokio-fn",
-        "cardioid_rejects_missing_phase",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-
-    // A function annotated with #[wasm_bindgen_test].
-    let wbg_fn = make_node(
-        "n-wbg-fn",
-        "no_nan_or_inf_in_results",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-
-    // Genuine dead helper — should remain in the report.
-    let dead_helper = make_node(
-        "n-dead-helper",
-        "approx_eq",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-
-    db.insert_nodes(&[test_fn, tokio_fn, wbg_fn, dead_helper])
-        .await
-        .expect("insert nodes failed");
-
-    // The annotation nodes themselves.
-    let mut test_annot = make_node("n-annot-test", "test", "src/lib.rs", Visibility::Private);
-    test_annot.kind = NodeKind::AnnotationUsage;
-    test_annot.signature = Some("#[test]".to_string());
-
-    let mut tokio_annot = make_node(
-        "n-annot-tokio",
-        "tokio::test",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-    tokio_annot.kind = NodeKind::AnnotationUsage;
-    tokio_annot.signature = Some("#[tokio::test]".to_string());
-
-    let mut wbg_annot = make_node(
-        "n-annot-wbg",
-        "wasm_bindgen_test",
-        "src/lib.rs",
-        Visibility::Private,
-    );
-    wbg_annot.kind = NodeKind::AnnotationUsage;
-    wbg_annot.signature = Some("#[wasm_bindgen_test]".to_string());
-
-    db.insert_nodes(&[test_annot, tokio_annot, wbg_annot])
-        .await
-        .expect("insert annotation nodes failed");
-
-    let annot_edges = vec![
-        Edge {
-            source: "n-annot-test".to_string(),
-            target: "n-test-fn".to_string(),
-            kind: EdgeKind::Annotates,
-            line: Some(1),
-        },
-        Edge {
-            source: "n-annot-tokio".to_string(),
-            target: "n-tokio-fn".to_string(),
-            kind: EdgeKind::Annotates,
-            line: Some(1),
-        },
-        Edge {
-            source: "n-annot-wbg".to_string(),
-            target: "n-wbg-fn".to_string(),
-            kind: EdgeKind::Annotates,
-            line: Some(1),
-        },
-    ];
-    db.insert_edges(&annot_edges)
-        .await
-        .expect("insert annotates edges failed");
-
-    let qm = GraphQueryManager::new(&db);
-    let dead = qm
-        .find_dead_code(&[NodeKind::Function], false, None)
-        .await
-        .expect("find_dead_code failed");
-
-    let dead_names: Vec<&str> = dead.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        !dead_names.contains(&"from_measurement_slope_excludes_lfe"),
-        "#[test]-annotated function must not be reported as dead, got: {dead_names:?}"
-    );
-    assert!(
-        !dead_names.contains(&"cardioid_rejects_missing_phase"),
-        "#[tokio::test]-annotated function must not be reported as dead, got: {dead_names:?}"
-    );
-    assert!(
-        !dead_names.contains(&"no_nan_or_inf_in_results"),
-        "#[wasm_bindgen_test]-annotated function must not be reported as dead, got: {dead_names:?}"
-    );
-    assert!(
-        dead_names.contains(&"approx_eq"),
-        "non-test dead helper must still be reported, got: {dead_names:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_find_dead_code_with_kind_filter() {
-    let (db, _dir) = setup_db().await;
-
-    let func_node = make_node("n-func", "private_func", "src/lib.rs", Visibility::Private);
-    let mut struct_node = make_node("n-struct", "MyStruct", "src/lib.rs", Visibility::Private);
-    struct_node.kind = NodeKind::Struct;
-
-    db.insert_nodes(&[func_node, struct_node])
-        .await
-        .expect("insert nodes failed");
-
-    let qm = GraphQueryManager::new(&db);
-
-    // Filter to only Function kind.
-    let dead = qm
-        .find_dead_code(&[NodeKind::Function], false, None)
-        .await
-        .expect("find_dead_code failed");
-
-    let dead_names: Vec<&str> = dead.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        dead_names.contains(&"private_func"),
-        "private_func should be dead code"
-    );
-    assert!(
-        !dead_names.contains(&"MyStruct"),
-        "MyStruct should not appear when filtering by Function kind"
-    );
-}
-
-#[tokio::test]
-async fn test_get_node_metrics() {
-    let (db, _dir) = setup_call_chain().await;
-    let qm = GraphQueryManager::new(&db);
-
-    let metrics = qm
-        .get_node_metrics("n-process")
-        .await
-        .expect("get_node_metrics failed");
-
-    // process has 1 incoming Calls (from main) and 1 outgoing Calls (to validate).
-    assert_eq!(metrics.caller_count, 1, "process should have 1 caller");
-    assert_eq!(metrics.call_count, 1, "process should have 1 callee");
-    assert_eq!(
-        metrics.incoming_edge_count, 1,
-        "process should have 1 incoming edge total"
-    );
-    assert_eq!(
-        metrics.outgoing_edge_count, 1,
-        "process should have 1 outgoing edge total"
-    );
-}
-
-#[tokio::test]
-async fn test_get_file_dependencies() {
-    let (db, _dir) = setup_call_chain().await;
-    let qm = GraphQueryManager::new(&db);
-
-    // src/main.rs has process -> validate (in src/lib.rs), so it depends on src/lib.rs.
-    let deps = qm
-        .get_file_dependencies("src/main.rs")
-        .await
-        .expect("get_file_dependencies failed");
-
-    assert!(
-        deps.contains(&"src/lib.rs".to_string()),
-        "src/main.rs should depend on src/lib.rs, got: {deps:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_get_file_dependents() {
-    let (db, _dir) = setup_call_chain().await;
-    let qm = GraphQueryManager::new(&db);
-
-    // src/lib.rs is called from src/main.rs (process -> validate).
-    let dependents = qm
-        .get_file_dependents("src/lib.rs")
-        .await
-        .expect("get_file_dependents failed");
-
-    assert!(
-        dependents.contains(&"src/main.rs".to_string()),
-        "src/lib.rs should be depended on by src/main.rs, got: {dependents:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_find_circular_dependencies() {
-    let (db, _dir) = setup_db().await;
-
-    // Set up a circular dependency: file_a -> file_b -> file_a.
-    let node_a = make_node("n-a", "func_a", "src/a.rs", Visibility::Pub);
-    let node_b = make_node("n-b", "func_b", "src/b.rs", Visibility::Pub);
-
-    db.insert_nodes(&[node_a, node_b])
-        .await
-        .expect("insert nodes failed");
-
-    // a calls b, b calls a -> circular.
-    let edges = vec![
-        Edge {
-            source: "n-a".to_string(),
-            target: "n-b".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(1),
-        },
-        Edge {
-            source: "n-b".to_string(),
-            target: "n-a".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(1),
-        },
-    ];
-    db.insert_edges(&edges).await.expect("insert edges failed");
-
-    // Register files so they show up in get_all_files.
-    let file_a = tracedecay::types::FileRecord {
-        path: "src/a.rs".to_string(),
-        content_hash: "hash_a".to_string(),
-        size: 100,
-        modified_at: 1000,
-        indexed_at: 2000,
-        node_count: 1,
-    };
-    let file_b = tracedecay::types::FileRecord {
-        path: "src/b.rs".to_string(),
-        content_hash: "hash_b".to_string(),
-        size: 100,
-        modified_at: 1000,
-        indexed_at: 2000,
-        node_count: 1,
-    };
-    db.upsert_file(&file_a).await.expect("upsert file_a failed");
-    db.upsert_file(&file_b).await.expect("upsert file_b failed");
-
-    let qm = GraphQueryManager::new(&db);
-    let cycles = qm
-        .find_circular_dependencies()
-        .await
-        .expect("find_circular_dependencies failed");
-
-    assert!(
-        !cycles.is_empty(),
-        "should detect at least one circular dependency"
-    );
-
-    // Verify the cycle contains both files.
-    let cycle_files: Vec<&str> = cycles[0].iter().map(|s| s.as_str()).collect();
-    assert!(
-        cycle_files.contains(&"src/a.rs") && cycle_files.contains(&"src/b.rs"),
-        "cycle should contain both src/a.rs and src/b.rs, got: {cycle_files:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_type_hierarchy() {
-    let (db, _dir) = setup_db().await;
-
-    let mut trait_node = make_node("n-trait", "MyTrait", "src/lib.rs", Visibility::Pub);
-    trait_node.kind = NodeKind::Trait;
-    let mut struct_node = make_node("n-struct", "MyStruct", "src/lib.rs", Visibility::Pub);
-    struct_node.kind = NodeKind::Struct;
-    let mut impl_node = make_node("n-impl", "impl_block", "src/lib.rs", Visibility::Private);
-    impl_node.kind = NodeKind::Impl;
-
-    db.insert_nodes(&[trait_node, struct_node, impl_node])
-        .await
-        .expect("insert nodes failed");
-
-    let edge = Edge {
-        source: "n-impl".to_string(),
-        target: "n-trait".to_string(),
-        kind: EdgeKind::Implements,
-        line: None,
-    };
-    db.insert_edge(&edge).await.expect("insert edge failed");
-
-    let traverser = GraphTraverser::new(&db);
-    let subgraph = traverser
-        .get_type_hierarchy("n-trait")
-        .await
-        .expect("get_type_hierarchy failed");
-
-    let node_names: Vec<&str> = subgraph.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        node_names.contains(&"MyTrait"),
-        "hierarchy should contain the trait"
-    );
-    assert!(
-        node_names.contains(&"impl_block"),
-        "hierarchy should contain the impl that implements the trait"
-    );
-}
-
-#[tokio::test]
-async fn test_traversal_with_limit() {
-    let (db, _dir) = setup_call_chain().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let opts = TraversalOptions {
-        max_depth: 10,
-        edge_kinds: Some(vec![EdgeKind::Calls]),
-        node_kinds: None,
-        direction: TraversalDirection::Outgoing,
-        limit: 2,
-        include_start: true,
-    };
-
-    let subgraph = traverser
-        .traverse_bfs("n-main", &opts)
-        .await
-        .expect("traverse_bfs with limit failed");
-
-    assert!(
-        subgraph.nodes.len() <= 2,
-        "limit=2 should cap the result to at most 2 nodes, got: {}",
-        subgraph.nodes.len()
-    );
-}
-
-#[tokio::test]
-async fn test_traversal_nonexistent_start() {
-    let (db, _dir) = setup_db().await;
-    let traverser = GraphTraverser::new(&db);
-
-    let opts = TraversalOptions::default();
-    let subgraph = traverser
-        .traverse_bfs("nonexistent", &opts)
-        .await
-        .expect("traverse_bfs should not error on missing start");
-
-    assert!(
-        subgraph.nodes.is_empty(),
-        "traversal from nonexistent node should return empty subgraph"
-    );
-}
-
-#[tokio::test]
-async fn test_node_metrics_depth() {
-    let (db, _dir) = setup_db().await;
-
-    // Build a containment hierarchy: file -> module -> function.
-    let mut file_node = make_node("n-file", "main.rs", "src/main.rs", Visibility::Pub);
-    file_node.kind = NodeKind::File;
-
-    let mut module_node = make_node("n-module", "utils", "src/main.rs", Visibility::Pub);
-    module_node.kind = NodeKind::Module;
-
-    let func_node = make_node("n-func", "helper", "src/main.rs", Visibility::Private);
-
-    db.insert_nodes(&[file_node, module_node, func_node])
-        .await
-        .expect("insert nodes failed");
-
-    let edges = vec![
-        Edge {
-            source: "n-file".to_string(),
-            target: "n-module".to_string(),
-            kind: EdgeKind::Contains,
-            line: None,
-        },
-        Edge {
-            source: "n-module".to_string(),
-            target: "n-func".to_string(),
-            kind: EdgeKind::Contains,
-            line: None,
-        },
-    ];
-    db.insert_edges(&edges).await.expect("insert edges failed");
-
-    let qm = GraphQueryManager::new(&db);
-
-    let file_metrics = qm.get_node_metrics("n-file").await.expect("metrics failed");
-    assert_eq!(file_metrics.depth, 0, "file should be at depth 0");
-    assert_eq!(
-        file_metrics.child_count, 1,
-        "file should have 1 child (module)"
-    );
-
-    let module_metrics = qm
-        .get_node_metrics("n-module")
-        .await
-        .expect("metrics failed");
-    assert_eq!(module_metrics.depth, 1, "module should be at depth 1");
-
-    let func_metrics = qm.get_node_metrics("n-func").await.expect("metrics failed");
-    assert_eq!(func_metrics.depth, 2, "function should be at depth 2");
-}
-
-// ---------------------------------------------------------------------------
-// File-level DAG tests
-// ---------------------------------------------------------------------------
-
-/// Creates a temporary Rust project with cross-file calls and indexes it.
-async fn setup_project() -> (TraceDecay, TempDir) {
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).expect("failed to create src dir");
-
-    fs::write(
-        project.join("src/main.rs"),
-        r#"
-use crate::utils::helper;
-mod utils;
-
-fn main() {
-    let result = helper();
-    println!("{}", result);
-}
-"#,
-    )
-    .expect("failed to write main.rs");
-
-    fs::write(
-        project.join("src/utils.rs"),
-        r#"
-/// Returns a greeting string.
-pub fn helper() -> String {
-    format!("Hello, world!")
-}
-"#,
-    )
-    .expect("failed to write utils.rs");
-
-    let cg = TraceDecay::init_with_options(project, crate::fixture_profile::open_options(project))
-        .await
-        .expect("failed to init TraceDecay");
-    cg.index_all().await.expect("failed to index project");
-    (cg, dir)
-}
-
-#[tokio::test]
-async fn test_build_file_adjacency() {
-    let (cg, _dir) = setup_project().await;
-    let qm = GraphQueryManager::new(cg.db());
-    let adj = qm.build_file_adjacency(None).await.unwrap();
-
-    // src/main.rs depends on src/utils.rs (calls helper)
-    assert!(
-        adj.get("src/main.rs")
-            .is_some_and(|deps| deps.contains("src/utils.rs")),
-        "main.rs should depend on utils.rs"
-    );
-
-    // Self-edges should be excluded
-    for (file, deps) in &adj {
-        assert!(
-            !deps.contains(file),
-            "file {file} should not have a self-edge"
-        );
-    }
-}
-
-/// A whole-graph adjacency read of this size exceeds what the SQLite runtime
-/// will materialize for one query, so the scan has to page. Every distinct
-/// file pair must still appear in the result.
-#[tokio::test]
-async fn test_build_file_adjacency_pages_beyond_runtime_materialization_limit() {
-    const FILES: usize = 102;
-    let (db, _dir) = setup_db().await;
-
-    let nodes: Vec<Node> = (0..FILES)
-        .map(|index| {
-            make_node(
-                &format!("paged-{index:04}"),
-                &format!("func_{index}"),
-                &format!("src/paged_{index:04}.rs"),
-                Visibility::Pub,
-            )
-        })
-        .collect();
-    db.insert_nodes(&nodes).await.expect("insert nodes");
-
-    let mut edges = Vec::new();
-    for source in 0..FILES {
-        for target in 0..FILES {
-            if source == target {
-                continue;
-            }
-            edges.push(Edge {
-                source: format!("paged-{source:04}"),
-                target: format!("paged-{target:04}"),
-                kind: EdgeKind::Calls,
-                line: Some(1),
-            });
-        }
-    }
-    let expected_pairs = edges.len();
-    assert!(
-        expected_pairs > 10_000,
-        "the fixture must exceed the runtime materialization limit"
-    );
-    db.insert_edges(&edges).await.expect("insert edges");
-
-    let qm = GraphQueryManager::new(&db);
-    let adj = qm
-        .build_file_adjacency(None)
-        .await
-        .expect("adjacency must page instead of exceeding the materialization limit");
-
-    let observed_pairs: usize = adj.values().map(HashSet::len).sum();
-    assert_eq!(observed_pairs, expected_pairs);
-    for index in 0..FILES {
-        let file = format!("src/paged_{index:04}.rs");
-        let deps = adj.get(&file).expect("every source file is present");
-        assert_eq!(deps.len(), FILES - 1, "{file}");
-        assert!(!deps.contains(&file), "{file} must not self-depend");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Health algorithm tests
-// ---------------------------------------------------------------------------
-
 use tracedecay::graph::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };
 
-// --- Gini coefficient ---
+// These tests cover the store-independent health algorithms. Code-graph read
+// behavior is covered through the verified Grafeo reader and production MCP
+// composition instead of constructing a second relational graph authority.
 
 #[test]
 fn test_gini_perfect_equality() {
-    let values = vec![5.0, 5.0, 5.0, 5.0];
-    let g = gini_coefficient(&values);
+    let g = gini_coefficient(&[5.0, 5.0, 5.0, 5.0]);
     assert!(
         g.abs() < 1e-9,
         "all-equal values should give Gini ~0.0, got {g}"
@@ -1068,8 +23,7 @@ fn test_gini_perfect_equality() {
 
 #[test]
 fn test_gini_perfect_inequality() {
-    let values = vec![0.0, 0.0, 0.0, 1000.0];
-    let g = gini_coefficient(&values);
+    let g = gini_coefficient(&[0.0, 0.0, 0.0, 1000.0]);
     assert!(
         g > 0.7,
         "extreme inequality should give Gini > 0.7, got {g}"
@@ -1078,8 +32,7 @@ fn test_gini_perfect_inequality() {
 
 #[test]
 fn test_gini_moderate() {
-    let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let g = gini_coefficient(&values);
+    let g = gini_coefficient(&[1.0, 2.0, 3.0, 4.0, 5.0]);
     assert!(
         (0.1..0.5).contains(&g),
         "moderate distribution should give Gini between 0.1 and 0.5, got {g}"
@@ -1088,14 +41,12 @@ fn test_gini_moderate() {
 
 #[test]
 fn test_gini_empty() {
-    let g = gini_coefficient(&[]);
-    assert_eq!(g, 0.0, "empty slice should give Gini 0.0");
+    assert_eq!(gini_coefficient(&[]), 0.0);
 }
 
 #[test]
 fn test_gini_single() {
-    let g = gini_coefficient(&[42.0]);
-    assert_eq!(g, 0.0, "single-element slice should give Gini 0.0");
+    assert_eq!(gini_coefficient(&[42.0]), 0.0);
 }
 
 #[test]
@@ -1106,142 +57,92 @@ fn test_gini_label_thresholds() {
     assert_eq!(gini_label(0.70), "extreme inequality (god files likely)");
 }
 
-// --- Acyclicity score ---
-
 fn make_adj(edges: &[(&str, &str)]) -> HashMap<String, HashSet<String>> {
-    let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-    for &(src, tgt) in edges {
-        adj.entry(src.to_string())
-            .or_default()
-            .insert(tgt.to_string());
-        // ensure target node key exists
-        adj.entry(tgt.to_string()).or_default();
+    let mut adjacency = HashMap::new();
+    for &(source, target) in edges {
+        adjacency
+            .entry(source.to_owned())
+            .or_insert_with(HashSet::new)
+            .insert(target.to_owned());
+        adjacency
+            .entry(target.to_owned())
+            .or_insert_with(HashSet::new);
     }
-    adj
+    adjacency
 }
 
 #[test]
 fn test_acyclicity_no_cycles() {
-    let adj = make_adj(&[("a", "b"), ("b", "c")]);
-    let (score, cycles) = acyclicity_score(&adj);
-    assert_eq!(score, 1.0, "DAG should have acyclicity score 1.0");
-    assert_eq!(cycles, 0, "DAG should have 0 cycle edges");
+    let (score, cycles) = acyclicity_score(&make_adj(&[("a", "b"), ("b", "c")]));
+    assert_eq!(score, 1.0);
+    assert_eq!(cycles, 0);
 }
 
 #[test]
 fn test_acyclicity_with_cycle() {
-    let adj = make_adj(&[("a", "b"), ("b", "a")]);
-    let (score, cycles) = acyclicity_score(&adj);
+    let (score, cycles) = acyclicity_score(&make_adj(&[("a", "b"), ("b", "a")]));
     assert!(
         score < 1.0,
-        "graph with cycle should have score < 1.0, got {score}"
+        "cyclic graph should score below 1.0, got {score}"
     );
-    assert!(
-        cycles > 0,
-        "graph with cycle should have > 0 cycle edges, got {cycles}"
-    );
+    assert!(cycles > 0, "cyclic graph should report cycle edges");
 }
 
 #[test]
 fn test_acyclicity_empty() {
-    let adj: HashMap<String, HashSet<String>> = HashMap::new();
-    let (score, cycles) = acyclicity_score(&adj);
-    assert_eq!(score, 1.0, "empty graph should have acyclicity score 1.0");
-    assert_eq!(cycles, 0);
+    let adjacency = HashMap::<String, HashSet<String>>::new();
+    assert_eq!(acyclicity_score(&adjacency), (1.0, 0));
 }
-
-// --- Dependency depth ---
 
 #[test]
 fn test_depth_linear_chain() {
-    let adj = make_adj(&[("a", "b"), ("b", "c"), ("c", "d")]);
-    let result = dependency_depth(&adj, 10);
-    assert_eq!(
-        result.max_depth, 3,
-        "linear chain a→b→c→d should have max_depth=3"
-    );
-    // The deepest chain should contain 4 nodes (a,b,c,d)
-    let deepest = result.chains.iter().find(|ch| ch.depth == 3);
-    assert!(deepest.is_some(), "should find a chain with depth 3");
-    assert_eq!(
-        deepest.unwrap().chain.len(),
-        4,
-        "chain for depth-3 path should have 4 nodes"
-    );
+    let result = dependency_depth(&make_adj(&[("a", "b"), ("b", "c"), ("c", "d")]), 10);
+    assert_eq!(result.max_depth, 3);
+    let deepest = result
+        .chains
+        .iter()
+        .find(|chain| chain.depth == 3)
+        .expect("linear graph should expose its deepest chain");
+    assert_eq!(deepest.chain.len(), 4);
 }
 
 #[test]
 fn test_depth_empty() {
-    let adj: HashMap<String, HashSet<String>> = HashMap::new();
-    let result = dependency_depth(&adj, 10);
-    assert_eq!(result.max_depth, 0, "empty graph should have max_depth=0");
+    let adjacency = HashMap::<String, HashSet<String>>::new();
+    assert_eq!(dependency_depth(&adjacency, 10).max_depth, 0);
 }
 
 #[test]
 fn test_depth_with_cycle_breaks() {
-    // a→b→a forms a cycle; b→c is an outgoing edge from the SCC
-    let adj = make_adj(&[("a", "b"), ("b", "a"), ("b", "c")]);
-    let result = dependency_depth(&adj, 10);
-    assert!(
-        result.max_depth >= 1,
-        "should find depth >= 1 even when cycle is present, got {}",
-        result.max_depth
-    );
+    let result = dependency_depth(&make_adj(&[("a", "b"), ("b", "a"), ("b", "c")]), 10);
+    assert!(result.max_depth >= 1);
 }
-
-// --- Modularity score ---
 
 #[test]
 fn test_modularity_independent_clusters() {
-    // Two disconnected clusters: {a,b} and {c,d}
-    let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-    adj.entry("a".to_string())
-        .or_default()
-        .insert("b".to_string());
-    adj.entry("b".to_string()).or_default();
-    adj.entry("c".to_string())
-        .or_default()
-        .insert("d".to_string());
-    adj.entry("d".to_string()).or_default();
-
-    let (score, components) = modularity_score(&adj);
-    assert!(
-        components >= 2,
-        "two disconnected clusters should give >= 2 components, got {components}"
-    );
-    assert!(
-        score > 0.0,
-        "two-cluster graph should have modularity > 0, got {score}"
-    );
+    let adjacency = make_adj(&[("a", "b"), ("c", "d")]);
+    let (score, components) = modularity_score(&adjacency);
+    assert!(components >= 2);
+    assert!(score > 0.0);
 }
 
 #[test]
 fn test_modularity_single_blob() {
-    // Tight cycle: a→b→c→a
-    let adj = make_adj(&[("a", "b"), ("b", "c"), ("c", "a")]);
-    let (score, components) = modularity_score(&adj);
-    assert_eq!(
-        components, 1,
-        "fully connected cycle should have 1 component"
-    );
-    assert!(
-        score < 0.5,
-        "single blob should have low modularity score, got {score}"
-    );
+    let adjacency = make_adj(&[("a", "b"), ("b", "c"), ("c", "a")]);
+    let (score, components) = modularity_score(&adjacency);
+    assert_eq!(components, 1);
+    assert!(score < 0.5);
 }
 
 #[test]
 fn test_modularity_empty() {
-    let adj: HashMap<String, HashSet<String>> = HashMap::new();
-    let (score, _components) = modularity_score(&adj);
-    assert_eq!(score, 1.0, "empty graph should have modularity score 1.0");
+    let adjacency = HashMap::<String, HashSet<String>>::new();
+    assert_eq!(modularity_score(&adjacency).0, 1.0);
 }
-
-// --- Composite health score ---
 
 #[test]
 fn test_composite_health_all_perfect() {
-    let dims = HealthDimensions {
+    let dimensions = HealthDimensions {
         acyclicity: 1.0,
         depth: 1.0,
         equality: 1.0,
@@ -1249,12 +150,12 @@ fn test_composite_health_all_perfect() {
         modularity: 1.0,
         coverage_discipline: 1.0,
     };
-    assert_eq!(compute_composite_health(&dims), 10000);
+    assert_eq!(compute_composite_health(&dimensions), 10_000);
 }
 
 #[test]
 fn test_composite_health_one_zero() {
-    let dims = HealthDimensions {
+    let dimensions = HealthDimensions {
         acyclicity: 0.0,
         depth: 1.0,
         equality: 1.0,
@@ -1262,12 +163,12 @@ fn test_composite_health_one_zero() {
         modularity: 1.0,
         coverage_discipline: 1.0,
     };
-    assert_eq!(compute_composite_health(&dims), 0);
+    assert_eq!(compute_composite_health(&dimensions), 0);
 }
 
 #[test]
 fn test_composite_health_mixed() {
-    let dims = HealthDimensions {
+    let dimensions = HealthDimensions {
         acyclicity: 0.8,
         depth: 0.7,
         equality: 0.9,
@@ -1275,62 +176,47 @@ fn test_composite_health_mixed() {
         modularity: 0.5,
         coverage_discipline: 1.0,
     };
-    let score = compute_composite_health(&dims);
-    assert!(
-        score > 0 && score < 10000,
-        "mixed health should give score between 0 and 10000, got {score}"
-    );
+    let score = compute_composite_health(&dimensions);
+    assert!((1..10_000).contains(&score));
 }
-
-// ---------------------------------------------------------------------------
-// Git churn tests
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_file_churn() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let project = dir.path();
 
-    // Init a real git repo and make two commits touching the same file
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(project)
-        .output()
-        .expect("git init failed");
-    std::process::Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(project)
-        .output()
-        .expect("git config email failed");
-    std::process::Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(project)
-        .output()
-        .expect("git config name failed");
+    for args in [
+        &["init"][..],
+        &["config", "user.email", "test@test.com"][..],
+        &["config", "user.name", "Test"][..],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("git setup command failed");
+        assert!(output.status.success(), "git {args:?} failed");
+    }
 
     fs::write(project.join("file.rs"), "fn foo() {}").expect("write failed");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .expect("git add failed");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "first"])
-        .current_dir(project)
-        .output()
-        .expect("git commit 1 failed");
+    for args in [&["add", "."][..], &["commit", "-m", "first"][..]] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("first commit command failed");
+        assert!(output.status.success(), "git {args:?} failed");
+    }
 
     fs::write(project.join("file.rs"), "fn foo() {} fn bar() {}").expect("write failed");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(project)
-        .output()
-        .expect("git add 2 failed");
-    std::process::Command::new("git")
-        .args(["commit", "-m", "second"])
-        .current_dir(project)
-        .output()
-        .expect("git commit 2 failed");
+    for args in [&["add", "."][..], &["commit", "-m", "second"][..]] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("second commit command failed");
+        assert!(output.status.success(), "git {args:?} failed");
+    }
 
     let churn = file_churn(project, 90).await.expect("file_churn failed");
     let count = churn.get("file.rs").copied().unwrap_or(0);
@@ -1345,68 +231,5 @@ async fn test_file_churn_nonexistent_dir() {
     )
     .await
     .expect("file_churn should not error for nonexistent dir");
-    assert!(
-        churn.is_empty(),
-        "should return empty map for nonexistent dir"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// find_dead_code perf regression test
-// ---------------------------------------------------------------------------
-
-/// Synthetic-scale guard for the chromium-class slowdown that motivated the
-/// 4.14.8 CTE attempt and the 4.14.12 temp-table fix.
-///
-/// Builds:
-/// - 50_000 `annotation_usage` rows whose names *don't* match any test marker
-///   (`derive_Foo_0` etc.) — these exercise the leading-wildcard `LIKE` cost.
-/// - 1_000 `annotation_usage` rows whose names DO match (`test`, `tokio::test`,
-///   `wasm_bindgen_test`, `async_std::test`).
-/// - 5_000 private function nodes, half referenced via a `calls` edge (live),
-///   half unreferenced (dead). The first 1_000 of the unreferenced functions
-///   carry a test-marker `annotates` edge so they must be excluded.
-///
-/// Asserts:
-/// - returns exactly 1_500 dead nodes (2_500 unreferenced − 1_000 test-annotated).
-/// - completes in < 5 s. The reverted 4.14.8 CTE form blew past 60 s on
-///   scirs-scale (76 K annotation_usage); the chromium-scale dead_code call
-///   timed out at the 25 s probe ceiling under the pre-4.14.8 JOIN form. The
-///   temp-table form should comfortably stay under the budget.
-#[tokio::test]
-async fn dead_code_marker_resolve_is_single_pass() {
-    let (db, _dir) = setup_db().await;
-    seed_dead_code_marker_perf_fixture(&db).await;
-
-    let qm = GraphQueryManager::new(&db);
-
-    let t0 = std::time::Instant::now();
-    let dead = qm
-        .find_dead_code(&[NodeKind::Function], false, None)
-        .await
-        .expect("find_dead_code failed");
-    let elapsed = t0.elapsed();
-
-    // The 2500..4999 set is live (calls edges). The 0..999 set has test
-    // annotations. The 1000..2499 set is genuinely dead — plus n-fn-0 itself
-    // is unreferenced, but it carries no test marker so it should also be
-    // reported (1501 total). Allow ±1 in case of off-by-one between live
-    // and dead-by-self.
-    let dead_count = dead.len();
-    assert!(
-        (1_500..=1_502).contains(&dead_count),
-        "expected ~1500 dead functions, got {dead_count}"
-    );
-
-    // The fix budget. Pre-4.14.12 the chromium-class case timed out at 25s
-    // (probe ceiling). 5s gives generous headroom for slower CI machines
-    // while still failing loudly if the per-row LIKE scan ever sneaks back.
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "find_dead_code took {:?} on 50K annotation_usage / 5K function corpus \
-         — expected <5s. The leading-wildcard LIKE is probably running per row \
-         again; see src/graph/queries.rs::find_dead_code_inner and the changelog \
-         entries for 4.14.8 → 4.14.9 → 4.14.12.",
-        elapsed
-    );
+    assert!(churn.is_empty());
 }

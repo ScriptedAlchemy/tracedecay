@@ -5,6 +5,7 @@ use super::*;
 /// Handles `tracedecay_dead_code` tool calls.
 pub(crate) async fn handle_dead_code(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -26,26 +27,47 @@ pub(crate) async fn handle_dead_code(
         .and_then(Value::as_u64)
         .map_or(100, |value| value.clamp(1, 1_000) as usize);
     let dead = cg
-        .find_dead_code_bounded(&kinds, include_public, limit)
+        .find_dead_code_bounded(graph, &kinds, include_public, limit)
         .await?;
-    let dead = filter_by_scope(dead, scope_prefix, |n| &n.file_path);
-
-    let touched_files = unique_file_paths(dead.iter().map(|n| n.file_path.as_str()));
-
-    let items: Vec<Value> = dead
-        .iter()
-        .map(|n| {
-            json!({
-                "id": n.id,
-                "name": n.name,
-                "kind": n.kind.as_str(),
-                "file": n.file_path,
-                "line": n.start_line,
-                "signature": n.signature,
-            })
-        })
-        .collect();
-
+    let mut items = Vec::with_capacity(dead.len());
+    let mut files = Vec::with_capacity(dead.len());
+    for symbol in dead {
+        let binding = symbol
+            .binding
+            .ok_or_else(|| TraceDecayError::ProjectRoute {
+                reason_code: "verified-dead-code-evidence-incomplete".to_owned(),
+                retryable: false,
+                detail: "a dead-code candidate has no generation-pinned file binding".to_owned(),
+            })?;
+        let file = binding
+            .logical_path
+            .ok_or_else(|| TraceDecayError::ProjectRoute {
+                reason_code: "verified-dead-code-evidence-incomplete".to_owned(),
+                retryable: false,
+                detail: "a dead-code candidate has no generation-pinned logical path".to_owned(),
+            })?;
+        let metadata = symbol
+            .metadata
+            .ok_or_else(|| TraceDecayError::ProjectRoute {
+                reason_code: "verified-dead-code-evidence-incomplete".to_owned(),
+                retryable: false,
+                detail: "a dead-code candidate has no extraction-attested symbol metadata"
+                    .to_owned(),
+            })?;
+        if !crate::path_scope::path_matches_scope(&file, scope_prefix) {
+            continue;
+        }
+        files.push(file.clone());
+        items.push(json!({
+            "id": symbol.occurrence.as_str(),
+            "name": metadata.simple_name,
+            "kind": metadata.kind,
+            "file": file,
+            "line": metadata.start_line,
+            "signature": metadata.signature,
+        }));
+    }
+    let touched_files = unique_file_paths(files.iter().map(String::as_str));
     let output = json!({
         "dead_code_count": items.len(),
         "symbols": items,

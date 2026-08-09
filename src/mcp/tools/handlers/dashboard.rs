@@ -317,6 +317,8 @@ pub(super) async fn handle_dashboard(
     dashboard_graph_interactive_resolver: Option<
         crate::mcp::server::DashboardGraphInteractiveResolver,
     >,
+    code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
+    code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
@@ -484,6 +486,8 @@ pub(super) async fn handle_dashboard(
                 DashboardStateCompositionV1 {
                     project_graph_resolver: dashboard_project_graph_resolver,
                     graph_read_authority,
+                    code_graph_read_admission,
+                    code_graph_projection_read_port,
                     registered_project_session_db,
                     lcm_read_authority,
                     git_correlation_read_authority,

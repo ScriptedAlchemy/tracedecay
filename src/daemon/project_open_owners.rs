@@ -1005,6 +1005,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     database: crate::db::Database,
     session_db: Arc<crate::global_db::RegisteredGlobalDb>,
     graph: Arc<crate::tracedecay::TraceDecay>,
+    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
@@ -1034,6 +1035,13 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
     let graph = server.cg().await;
+    let code_graph =
+        server
+            .code_graph_projection_read_port()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open owners require the verified code-graph projection port"
+                    .to_owned(),
+            })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -1375,6 +1383,7 @@ pub(super) async fn register_project_open_production_owners(
     let primitive_runtime =
         open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
             graph.clone(),
+            Arc::clone(&code_graph),
             Arc::clone(&session_db),
             Arc::new(invocation.code_index_schedulers.clone()),
             Arc::new(invocation.code_index_schedulers.clone()),
@@ -1491,6 +1500,7 @@ pub(super) async fn register_project_open_production_owners(
         database,
         session_db,
         graph,
+        code_graph,
         scope,
         access,
         configuration,
@@ -1822,6 +1832,7 @@ async fn register_production_feedback_cycle(
     let database = state.database.clone();
     let project_runtime_db = Arc::clone(&state.session_db);
     let graph = Arc::clone(&state.graph);
+    let code_graph = Arc::clone(&state.code_graph);
     let scope = state.scope.clone();
     let configuration = state.configuration.clone();
     let requester = state.requester.clone();
@@ -1857,6 +1868,7 @@ async fn register_production_feedback_cycle(
         requester,
         authorization,
         graph: graph.clone(),
+        code_graph,
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -1953,6 +1965,7 @@ async fn register_production_advisory_owner(
     database: crate::db::Database,
     project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
     graph: Arc<crate::tracedecay::TraceDecay>,
+    code_graph: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
     resolved_scope: ResolvedScope,
     source_access: ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
@@ -2057,6 +2070,7 @@ async fn register_production_advisory_owner(
         ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
             graph.clone(),
             feedback_scope.clone(),
+            Arc::clone(&code_graph),
             Arc::new(invocation.code_index_schedulers.clone()),
         )
         .ok_or_else(|| TraceDecayError::Config {
@@ -2086,6 +2100,7 @@ async fn register_production_advisory_owner(
     let production = AdvisoryProductionOpenV1 {
         project_runtime_db: Arc::clone(&project_runtime_db),
         graph,
+        code_graph,
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         project_root: project_root.to_path_buf(),
         feedback_scope,

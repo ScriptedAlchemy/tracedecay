@@ -196,7 +196,8 @@ fn canonical_problem_envelope_serializes_verbatim() {
             )
             .expect("safe diagnostic"),
         ),
-    );
+    )
+    .expect("construct problem envelope");
 
     let value = serde_json::to_value(envelope).expect("serialize problem envelope");
 

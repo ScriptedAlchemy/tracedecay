@@ -14,7 +14,6 @@ use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
 use same_file::Handle;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::HealthDeltaResult;
 use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
@@ -22,9 +21,8 @@ use tracedecay_application::source_edit::{
 };
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
-use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::db::{Database, DependencyImportUse};
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
@@ -178,7 +176,6 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, std::collections::HashSet<String>>;
     fn get_files_with_test_annotations(&self)
     -> GraphFuture<'_, std::collections::HashSet<String>>;
-    fn get_file_dependents<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<String>>;
     fn node_at_location<'a>(
         &'a self,
         file: &'a str,
@@ -186,13 +183,6 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, Option<Node>>;
     fn last_synced_commit(&self) -> GraphValueFuture<'_, Option<String>>;
     fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)>;
-    fn dependency_import_uses<'a>(
-        &'a self,
-        query: &'a str,
-        limit: usize,
-        path_prefix: Option<&'a str>,
-        control: GraphRequestControl<'a>,
-    ) -> GraphFuture<'a, Vec<DependencyImportUse>>;
     fn lazy_index_ignored_dependency_files<'a>(
         &'a self,
         file_paths: &'a [String],
@@ -210,12 +200,6 @@ pub trait GraphRuntimePort: Send + Sync {
         request: &'a RedundancyRequestV1,
         scope_prefix: Option<&'a str>,
     ) -> GraphFuture<'a, RedundancyResultV1>;
-    fn health_delta<'a>(
-        &'a self,
-        observation_database: &'a RegisteredGlobalDb,
-        before_cursor: Option<&'a str>,
-        path_prefix: Option<&'a str>,
-    ) -> GraphFuture<'a, HealthDeltaResult>;
     fn replace_symbol<'a>(
         &'a self,
         symbol: &'a str,

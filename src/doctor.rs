@@ -146,11 +146,6 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
                 agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
             }
         }
-        let materialization_root =
-            tracedecay_agent_hosts::automation::skill_materialization::resolve_project_root(
-                &project_path,
-            );
-        check_managed_skill_materialization(&mut dc, home, &materialization_root);
     } else {
         dc.fail("Could not determine home directory");
     }
@@ -305,106 +300,6 @@ fn doctor_result(
             })
         }
         DatabaseHealth::Healthy | DatabaseHealth::Unknown { .. } => Ok(()),
-    }
-}
-
-/// Reports drift between the active managed-skill set and the host-loadable
-/// `SKILL.md` files `TraceDecay` automation materializes into detected
-/// `.claude`/`.codex` skills directories: missing (active but not on disk),
-/// forked (user-edited a managed file — the reconciler will not clobber it),
-/// conflict (a foreign file blocks the slot), or orphan (a managed file for a
-/// no-longer-active skill). A clean scope passes silently-ish with an info line.
-fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, project_root: &Path) {
-    use tracedecay_agent_hosts::automation::skill_materialization::doctor_detected_scopes;
-
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return;
-    };
-    let scopes = match doctor_detected_scopes(&profile_root, home, project_root) {
-        Ok(scopes) => scopes,
-        Err(err) => {
-            dc.warn(&format!(
-                "Managed skill materialization check failed: {err}"
-            ));
-            return;
-        }
-    };
-    if scopes.is_empty() {
-        return;
-    }
-    eprintln!("\n\x1b[1mManaged skill materialization\x1b[0m");
-    for (scope, drift) in scopes {
-        if drift.is_empty() {
-            dc.pass(&format!(
-                "{}: materialized skills in sync",
-                scope.describe()
-            ));
-            continue;
-        }
-        let scope_desc = scope.describe();
-        for finding in drift {
-            match skill_drift_report(&scope_desc, &finding) {
-                (DriftLevel::Warn, msg) => dc.warn(&msg),
-                (DriftLevel::Info, msg) => dc.info(&msg),
-            }
-        }
-    }
-}
-
-/// Severity of a doctor materialization-drift line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DriftLevel {
-    Warn,
-    Info,
-}
-
-/// Pure classifier: maps a materialization drift finding to its doctor severity
-/// and rendered line. Split out from emission so it can be unit-tested — in
-/// particular that `ForeignOrphan` renders as `Info` and never prescribes
-/// `tracedecay update`, a remediation `update` refuses to perform on a foreign
-/// package.
-fn skill_drift_report(
-    scope_desc: &str,
-    finding: &tracedecay_agent_hosts::automation::skill_materialization::SkillDrift,
-) -> (DriftLevel, String) {
-    use tracedecay_agent_hosts::automation::skill_materialization::SkillDrift;
-    let path = finding.path().display();
-    let skill_id = finding.skill_id();
-    match finding {
-        SkillDrift::Missing { .. } => (
-            DriftLevel::Warn,
-            format!(
-                "{scope_desc}: '{skill_id}' active but not materialized ({path}); run `tracedecay update`"
-            ),
-        ),
-        SkillDrift::Forked { .. } => (
-            DriftLevel::Warn,
-            format!(
-                "{scope_desc}: '{skill_id}' materialized file was user-edited (forked); left untouched ({path})"
-            ),
-        ),
-        SkillDrift::Conflict { .. } => (
-            DriftLevel::Warn,
-            format!(
-                "{scope_desc}: '{skill_id}' cannot materialize — a non-managed file occupies {path}"
-            ),
-        ),
-        SkillDrift::Orphan { .. } => (
-            DriftLevel::Warn,
-            format!(
-                "{scope_desc}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove"
-            ),
-        ),
-        SkillDrift::ForeignOrphan { .. } => (
-            DriftLevel::Info,
-            format!(
-                "{scope_desc}: '{skill_id}' project skill from another installation; leave in place, or delete the directory manually if unwanted ({path})"
-            ),
-        ),
-        SkillDrift::Warning { message, .. } => (
-            DriftLevel::Warn,
-            format!("{scope_desc}: '{skill_id}' {message} ({path})"),
-        ),
     }
 }
 

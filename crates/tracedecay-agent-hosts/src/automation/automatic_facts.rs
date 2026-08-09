@@ -16,7 +16,7 @@ use tracedecay_store::{
 
 use super::config_error;
 use crate::application::memory::{
-    MemoryApplication, MemoryApplicationError, automatic_fact_add_command,
+    MemoryApplication, automatic_fact_add_command, memory_application_error,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{AddFactRequest, MemoryCategory};
@@ -100,7 +100,8 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
             run_id,
             &apply_id,
             Some(actor.clone()),
-        )?;
+        )
+        .map_err(memory_application_error)?;
         let semantic_key = (
             command.category(),
             normalize_fact_content(command.content()),
@@ -123,7 +124,7 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
             Err(error) => {
                 return Ok(AutomaticFactApplyBatch {
                     receipts,
-                    retry_error: Some(memory_error(error)),
+                    retry_error: Some(memory_application_error(error)),
                 });
             }
         };
@@ -154,7 +155,7 @@ pub async fn list_automatic_fact_receipts<A: ProjectMemoryFactStore>(
             limit.min(MAX_AUTOMATIC_FACT_RECEIPT_PAGE_SIZE),
         )
         .await
-        .map_err(memory_error)?;
+        .map_err(memory_application_error)?;
     page.receipts().iter().map(automatic_fact_receipt).collect()
 }
 
@@ -166,7 +167,7 @@ pub async fn load_automatic_fact_receipt<A: ProjectMemoryFactStore>(
     let receipt = memory
         .get_project_memory_automatic_fact_receipt(apply_id)
         .await
-        .map_err(memory_error)?;
+        .map_err(memory_application_error)?;
     receipt.as_ref().map(automatic_fact_receipt).transpose()
 }
 
@@ -257,10 +258,6 @@ fn normalize_fact_content(content: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
-}
-
-fn memory_error(error: MemoryApplicationError) -> TraceDecayError {
-    config_error(format!("automatic fact authority failed: {error}"))
 }
 
 fn store_error(error: impl std::fmt::Display) -> TraceDecayError {

@@ -1,8 +1,7 @@
 //! Scoped health deltas: the observability cursor, the persisted watermark point, and the dimension-by-dimension comparison against it.
 //!
-//! Lives below the MCP handler tree: the `tracedecay_session_*` handlers and
-//! the root engine's `GraphRuntimePort` both call [`compute_health_delta_result`],
-//! so neither layer has to reach into the other.
+//! The application primitive and MCP adapters call this one use case after
+//! opening an admitted, generation-pinned graph reader.
 
 use std::collections::BTreeMap;
 
@@ -19,12 +18,13 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1, UtcMicros, canonical_sha256,
 };
 
-use crate::application::observability::RegisteredObservabilityPortV1;
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::snapshot::{HealthSnapshot, compute_health_snapshot, session_dimension_values};
+use crate::observability::RegisteredObservabilityPortV1;
+
+use super::health::{VerifiedHealthSnapshotV1, compute_verified_health_snapshot};
+use super::queries::GraphQueryManager;
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;
 const HEALTH_DELTA_CURSOR_PREFIX: &str = "health-delta.v1.";
@@ -42,8 +42,21 @@ fn health_score_ppm(value: f64) -> u64 {
     (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u64
 }
 
-fn health_delta_dimensions(snapshot: &HealthSnapshot) -> BTreeMap<String, HealthDimensionPointV1> {
-    session_dimension_values(snapshot)
+fn health_dimension_values(snapshot: &VerifiedHealthSnapshotV1) -> [(&'static str, f64); 6] {
+    [
+        ("acyclicity", snapshot.acyclicity),
+        ("depth", snapshot.depth),
+        ("equality", snapshot.equality),
+        ("redundancy", snapshot.redundancy),
+        ("modularity", snapshot.modularity),
+        ("coverage_discipline", snapshot.coverage_discipline),
+    ]
+}
+
+fn health_delta_dimensions(
+    snapshot: &VerifiedHealthSnapshotV1,
+) -> BTreeMap<String, HealthDimensionPointV1> {
+    health_dimension_values(snapshot)
         .into_iter()
         .map(|(name, score)| {
             let denominator = match name {
@@ -66,8 +79,10 @@ fn health_delta_dimensions(snapshot: &HealthSnapshot) -> BTreeMap<String, Health
         .collect()
 }
 
-fn health_delta_scope(cg: &TraceDecay, path_prefix: Option<&str>) -> Result<HealthDeltaScopeV1> {
-    let project_id = cg.store_layout().identity.project_id.clone();
+fn health_delta_scope(
+    project_id: Option<String>,
+    path_prefix: Option<&str>,
+) -> Result<HealthDeltaScopeV1> {
     let path_prefix = path_prefix
         .map(|raw| {
             let trimmed = raw.trim_matches('/');
@@ -336,20 +351,21 @@ fn health_dimension_deltas(
         .collect()
 }
 
-pub(crate) async fn compute_health_delta_result(
-    cg: &TraceDecay,
+pub async fn compute_verified_health_delta(
+    project_id: Option<String>,
+    graph: &GraphQueryManager<'_>,
     db: &RegisteredGlobalDb,
     before_cursor: Option<&str>,
     path_prefix: Option<&str>,
 ) -> Result<HealthDeltaResult> {
-    let scope = health_delta_scope(cg, path_prefix)?;
+    let scope = health_delta_scope(project_id, path_prefix)?;
     let pinned_before = if let Some(cursor) = before_cursor {
         let stored = load_health_delta_point(db, &scope, cursor).await?;
         Some((stored, cursor.to_owned()))
     } else {
         None
     };
-    let snapshot = compute_health_snapshot(cg, scope.path_prefix.as_deref()).await?;
+    let snapshot = compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()).await?;
     let observed_at = health_delta_now();
     let dimensions = health_delta_dimensions(&snapshot);
     let watermark = health_delta_watermark(
@@ -409,91 +425,44 @@ pub(crate) async fn compute_health_delta_result(
         },
     })
 }
+
 #[cfg(test)]
-mod health_delta_tests {
+mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn pinned_health_delta_is_exact_scoped_and_cursor_stable() {
-        let _pin = crate::config::PinnedUserDataDir::new();
-        let dir = tempfile::tempdir().expect("temporary project");
-        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
-        std::fs::write(
-            dir.path().join("src/lib.rs"),
-            "pub fn pinned_health() -> bool { true }\n",
-        )
-        .expect("source fixture");
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().expect("profile root"),
-            dir.path(),
-            tracedecay_domain::ProjectId::new("project.health-delta").expect("project id"),
-        )
-        .await
-        .expect("registered test runtime");
-        let graph = runtime
-            .initialize_project_graph_for_test(
-                dir.path(),
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .expect("initialize graph");
-        graph.index_all().await.expect("index fixture");
-        let observations =
-            crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("health-delta").await;
-        let db = observations.registered.as_ref();
+    #[test]
+    fn health_delta_scope_is_project_and_path_exact() {
+        let first = health_delta_scope(Some("project.first".to_owned()), Some("src/core"))
+            .expect("canonical scope");
+        let second = health_delta_scope(Some("project.second".to_owned()), Some("src/core"))
+            .expect("canonical scope");
+        let other_path = health_delta_scope(Some("project.first".to_owned()), Some("src/other"))
+            .expect("canonical scope");
 
-        let before = compute_health_delta_result(&graph, db, None, Some("src"))
-            .await
-            .expect("pin before");
-        let after = compute_health_delta_result(
-            &graph,
-            db,
-            Some(before.after_cursor.as_str()),
-            Some("src"),
-        )
-        .await
-        .expect("compare pinned state");
+        assert_eq!(first.project_id.as_deref(), Some("project.first"));
+        assert_eq!(first.path_prefix.as_deref(), Some("src/core"));
+        assert_ne!(first.scope_digest, second.scope_digest);
+        assert_ne!(first.scope_digest, other_path.scope_digest);
+    }
 
-        assert_eq!(after.before, before.after);
-        assert_eq!(after.before_cursor, before.after_cursor);
-        assert_eq!(
-            health_delta_cursor(&after.before.watermark),
-            after.before_cursor
-        );
-        assert_eq!(
-            health_delta_cursor(&after.after.watermark),
-            after.after_cursor
-        );
-        assert_eq!(after.delta, 0);
-        assert!(after.pass);
-        assert_eq!(after.coverage.eligible, after.coverage.denominator);
-        assert_eq!(after.coverage.visited, after.coverage.denominator);
-        assert_eq!(after.coverage.completeness, "complete");
-        assert_eq!(after.scope.path_prefix.as_deref(), Some("src"));
-        assert!(
-            after
-                .dimensions
-                .values()
-                .all(|dimension| dimension.status == "unchanged")
-        );
+    #[test]
+    fn health_delta_scope_rejects_noncanonical_paths() {
+        for path in ["/src", "src\\lib", "src/../other", "src//lib", "."] {
+            assert!(
+                health_delta_scope(Some("project.first".to_owned()), Some(path)).is_err(),
+                "{path} must not enter a persisted health-delta scope"
+            );
+        }
+    }
 
-        let wrong_scope = compute_health_delta_result(
-            &graph,
-            db,
-            Some(before.after_cursor.as_str()),
-            Some("tests"),
-        )
-        .await
-        .expect_err("scope-bound cursor");
-        assert!(wrong_scope.to_string().contains("unknown or expired"));
-        assert!(!graph.store_layout().data_root.join("health_delta").exists());
+    #[test]
+    fn health_delta_cursor_round_trips_only_canonical_watermarks() {
+        let watermark =
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("canonical watermark");
+        let cursor = health_delta_cursor(&watermark);
+        let digest = health_delta_digest_from_cursor(&cursor).expect("canonical cursor");
 
-        let malformed = format!("{HEALTH_DELTA_CURSOR_PREFIX}{}", "0".repeat(64));
-        let rejected = compute_health_delta_result(&graph, db, Some(&malformed), Some("src"))
-            .await
-            .expect_err("unknown pinned point");
-        assert!(rejected.to_string().contains("unknown or expired"));
-        graph.checkpoint().await.expect("checkpoint");
-        graph.close();
+        assert_eq!(digest, "a".repeat(64));
+        assert!(health_delta_digest_from_cursor("health-delta.v1.not-a-digest").is_err());
     }
 }

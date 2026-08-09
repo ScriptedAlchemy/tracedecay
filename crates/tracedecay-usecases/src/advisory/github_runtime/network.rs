@@ -1882,7 +1882,7 @@ mod pagination_contract_tests {
 mod tests {
     use std::collections::BTreeSet;
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
     use static_assertions::assert_not_impl_any;

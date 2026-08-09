@@ -193,6 +193,34 @@ impl CodeGraphInteractiveReader {
         ))
     }
 
+    pub fn file_by_logical_path(
+        &self,
+        path: &str,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<SanitizedCodeFileV1>, CodeGraphProjectionError> {
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(cancellation)?;
+        Ok(catalog
+            .by_logical_path
+            .get(path)
+            .and_then(|file| catalog.files.get(file))
+            .cloned())
+    }
+
+    pub fn files(
+        &self,
+        max_files: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<SanitizedCodeFileV1>, CodeGraphProjectionError> {
+        require_positive(max_files, "code graph file census limit")?;
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        let catalog = self.catalog(cancellation)?;
+        if catalog.files.len() > max_files {
+            return Err(CodeGraphProjectionError::BudgetExhausted);
+        }
+        Ok(catalog.files.values().cloned().collect())
+    }
+
     /// Hydrates one symbol summary; `Ok(None)` means the occurrence has no
     /// symbol entity in this generation.
     pub fn symbol_summary(
@@ -641,6 +669,7 @@ impl CodeGraphInteractiveReader {
             by_simple_name: BTreeMap::new(),
             by_file: BTreeMap::new(),
             by_logical_path: BTreeMap::new(),
+            files: BTreeMap::new(),
         };
         let mut after: Option<GraphEntityId> = None;
         let mut scanned = 0_usize;
@@ -687,6 +716,9 @@ impl CodeGraphInteractiveReader {
                             )));
                         }
                     }
+                    catalog
+                        .files
+                        .insert(record.file_occurrence_id.clone(), record);
                     continue;
                 }
                 if !has_label(entity, SYMBOL_LABEL) {

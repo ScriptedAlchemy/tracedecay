@@ -750,10 +750,12 @@ mod tests {
     #[test]
     fn turn_summary_records_actual_model_from_app_server_events() {
         let (tx, rx) = mpsc::channel();
+        let thread_id = "summary-thread-actual";
         assert!(
             tx.send(Ok(json!({
                 "method": "item/completed",
                 "params": {
+                    "threadId": thread_id,
                     "model": "gpt-5.5-codex-actual",
                     "item": {"content": [{"text": "summary text"}]}
                 }
@@ -762,16 +764,25 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            tx.send(Ok(json!({"method": "turn/completed"}).to_string()))
+            tx.send(Ok(json!({
+                "method": "turn/completed",
+                "params": {"threadId": thread_id}
+            })
+            .to_string()))
                 .is_ok()
         );
 
-        let summary = match wait_for_turn_summary(&rx, Instant::now() + Duration::from_secs(1)) {
+        let summary = match wait_for_turn_summary(
+            &rx,
+            Instant::now() + Duration::from_secs(1),
+            thread_id.to_string(),
+        ) {
             Ok(summary) => summary,
             Err(err) => panic!("turn summary should be returned: {err}"),
         };
         assert_eq!(summary.text, "summary text");
         assert_eq!(summary.model.as_deref(), Some("gpt-5.5-codex-actual"));
+        assert_eq!(summary.thread_id, thread_id);
     }
 
     #[test]

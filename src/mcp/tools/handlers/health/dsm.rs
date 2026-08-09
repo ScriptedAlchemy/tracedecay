@@ -5,6 +5,7 @@ use super::*;
 /// Handles `tracedecay_dsm` tool calls.
 pub(crate) async fn handle_dsm(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -18,9 +19,7 @@ pub(crate) async fn handle_dsm(
         .and_then(serde_json::Value::as_u64)
         .map_or(30, |v| v.min(200) as usize);
 
-    let adj = GraphQueryManager::new(cg.db())
-        .build_file_adjacency(path_prefix)
-        .await?;
+    let adj = cg.build_verified_file_adjacency(graph, path_prefix).await?;
 
     let file_count = adj.len();
     let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();

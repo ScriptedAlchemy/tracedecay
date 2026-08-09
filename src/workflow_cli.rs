@@ -306,6 +306,12 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
             code: "workflow_authority_reset_required".to_owned(),
             message: "The owning Workflow authority requires an explicit reset".to_owned(),
         }),
+        DaemonInvocationProblem::ApplicationContractViolation => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "workflow_application_contract_violation".to_owned(),
+                message: "The Workflow result violated its canonical contract".to_owned(),
+            })
+        }
         DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "workflow_authority_unavailable".to_owned(),
             message: "The owning Workflow authority is unavailable".to_owned(),

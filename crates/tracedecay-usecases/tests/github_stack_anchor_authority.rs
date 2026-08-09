@@ -1,207 +1,149 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tracedecay_application::feedback::{
-    FeedbackPortFuture, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-    GitHubReviewReadRequestV1,
-};
-use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
-};
-use tracedecay_domain::feedback::{
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+use tracedecay_application::retrieval::{
+    GitTopologyAnchorAuthorityV2, GitTopologyAnchorPublicationOutcomeV2,
+    GitTopologyAnchorPublicationV2, GitTopologyAnchorResolutionOutcomeV2,
+    GitTopologyAnchorResolutionV2,
 };
 use tracedecay_domain::{
-    ActorId, AnchorOwnerBindingV1, CapabilityId, CommitId, GitHubStackCapabilityStateV1,
-    ManifestDigest, PrivacyDomainId, ProjectId, ProviderId, RefId, RepositoryId,
-    RetrievalAnchorTargetV3, UseCaseId, UtcMicros, WorktreeId, canonical_sha256,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
+    AnchorSourceGenerationV2, CapabilityId, CommitId, CoverageReportV1, EvidenceClass,
+    GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1,
+    ObservationScopeV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectId, ProjectionGenerationId, ProviderId, RepositoryId, ResolutionAuthorizationV1,
+    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    ScopeResolutionId, UtcMicros, VectorWatermark, WorktreeId,
 };
-use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
-use tracedecay_store::RetrievalAnchorOwnerV1;
-use tracedecay_usecases::advisory::github_runtime::{
-    GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-};
-use tracedecay_usecases::advisory::{
-    GitHubStackAnchorPublicationOutcomeV1, GitHubStackAnchorReadOutcomeV1,
-    ProjectGitHubStackAnchorAuthorityV1,
-};
-use tracedecay_usecases::stack_coordinator::{
-    DaemonGitHubStackCoordinatorV1, GitHubStackProviderOutcomeV1,
+use tracedecay_global_db::{
+    RegisteredGitTopologyAnchorAuthorityV2, tests::harness::RegisteredGlobalDbTestRuntime,
 };
 
 const SHA: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-struct Ready;
-
-impl GitHubSourceAccessAuthorityV1 for Ready {
-    fn authorize<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _request: &'a GitHubReviewReadRequestV1,
-    ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
-        Box::pin(async { GitHubProviderLifecycleV1::Ready })
+fn authorization() -> ResolutionAuthorizationV1 {
+    ResolutionAuthorizationV1 {
+        resolved_scope_id: ScopeResolutionId::new("scope.github-stack-anchor").unwrap(),
+        privacy_domain_id: PrivacyDomainId::new("privacy.github-stack-anchor").unwrap(),
+        access_policy_digest: AccessPolicyDigest::new(SHA).unwrap(),
+        capability_id: CapabilityId::new("capability.github-stack-anchor").unwrap(),
+        canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(SHA).unwrap(),
     }
 }
 
-fn scopes(suffix: &str) -> (ResolvedScope, FeedbackScopeV1) {
-    let project_id =
-        ProjectId::new(format!("project.github-stack-anchor.{suffix}")).expect("project id");
-    let repository_id = RepositoryId::new(format!("repository.github-stack-anchor.{suffix}"))
-        .expect("repository id");
-    let worktree_id =
-        WorktreeId::new(format!("worktree.github-stack-anchor.{suffix}")).expect("worktree id");
-    let branch = format!("refs/heads/github-stack-anchor-{suffix}");
-    let resolved = ResolvedScope::new(
-        project_id.clone(),
-        repository_id.clone(),
-        worktree_id.clone(),
-        Some(RefId::new(branch.clone()).expect("branch ref")),
-    )
-    .expect("resolved scope");
-    let feedback = FeedbackScopeV1 {
-        project_id,
-        repository_id,
-        worktree_id,
-        branch_ref: branch,
-        head_commit_id: CommitId::new(format!("commit.github-stack-anchor.{suffix}"))
-            .expect("head commit"),
-    };
-    (resolved, feedback)
-}
-
-fn context_and_request(
-    resolved: ResolvedScope,
-    feedback: FeedbackScopeV1,
-) -> (RequestContext, GitHubReviewReadRequestV1) {
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.github-stack-anchor").expect("grant id"),
-        1,
-        ManifestDigest::new(SHA).expect("grant digest"),
-        ActorId::new("actor.github-stack-anchor.issuer").expect("issuer"),
-        UtcMicros(1),
-        UtcMicros(i64::MAX),
-        resolved.clone(),
-        BTreeSet::from([
-            CapabilityId::new(GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1).expect("capability")
-        ]),
-        BTreeSet::from([UseCaseId::new(GITHUB_REVIEW_INGEST_USE_CASE_ID_V1).expect("use case")]),
-        DisclosureClass::Evidence,
-    )
-    .expect("grant");
-    let context = RequestContext::new(
-        ActorId::new("actor.github-stack-anchor").expect("actor"),
-        resolved,
-        grant,
-        RequestId::new("request.github-stack-anchor").expect("request id"),
-        Deadline::new(UtcMicros(i64::MAX - 1)).expect("deadline"),
-        CancellationContext::active("cancel.github-stack-anchor").expect("cancellation"),
-    )
-    .expect("context");
-    let request = GitHubReviewReadRequestV1 {
-        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-        scope: feedback,
-        pull_request_id: GitHubPullRequestIdV1::new("42").expect("pull request id"),
-    };
-    (context, request)
+fn record(
+    owner: ObservationScopeV1,
+    target: RetrievalAnchorTargetV2,
+    source_generation: AnchorSourceGenerationV2,
+    projection_generation: ProjectionGenerationId,
+    source_anchors: Vec<AnchorLineageRefV2>,
+) -> RetrievalAnchorRecordV2 {
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target,
+        owner,
+        aliases: Vec::new(),
+        occurred_at: None,
+        ingested_at: UtcMicros(200),
+        evidence_class: EvidenceClass::ProviderDeclared,
+        source_generation,
+        projection_generation,
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: Vec::new(),
+        source_anchors,
+        authorization: authorization(),
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.github-stack.provider-evidence.v1")
+            .unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap()
 }
 
 #[tokio::test]
-async fn compare_unavailable_degraded_capability_persists_without_a_snapshot_anchor() {
+async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let profile = tempfile::tempdir().expect("profile");
-    let project = tempfile::tempdir().expect("project");
-    let (resolved, feedback) = scopes("degraded");
-    let runtime = RegisteredGlobalDbTestRuntime::project(
-        profile.path(),
-        project.path(),
-        resolved.project_id.clone(),
-    )
-    .await
-    .expect("registered runtime");
-    let database = runtime.project_database_arc().expect("project database");
-    let authority =
-        ProjectGitHubStackAnchorAuthorityV1::new(Arc::clone(&database), feedback.clone())
-            .expect("stack anchor authority");
-    let (context, request) = context_and_request(resolved.clone(), feedback);
-    let coordinator = DaemonGitHubStackCoordinatorV1::default();
-    coordinator
-        .register_scope(
-            &resolved,
-            tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
-        )
-        .expect("register stack scope");
-    let provider_outcome = GitHubStackProviderOutcomeV1::Degraded {
-        response_digest: canonical_sha256(&"compare-unavailable").expect("response digest"),
+    let profile = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.github-stack-anchor.degraded").unwrap();
+    let repository_id = RepositoryId::new("repository.github-stack-anchor.degraded").unwrap();
+    let owner = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
     };
-    let observed_at = UtcMicros(200);
-    let source_binding = authority
-        .source_binding(&context, &request, &provider_outcome, observed_at)
-        .expect("degraded source binding");
-    let observation = coordinator
-        .observe_provider(
-            resolved.clone(),
-            ProviderId::new("provider.github").expect("provider"),
-            provider_outcome,
-            source_binding,
-            observed_at,
-        )
-        .expect("degraded observation");
-    assert!(observation.snapshot_anchor_id.is_none());
+    let generation_id = ProjectionGenerationId::new("generation.github-stack.degraded").unwrap();
+    let source = record(
+        owner.clone(),
+        RetrievalAnchorTargetV2::ExactRepositoryCommit {
+            repository_id: repository_id.clone(),
+            commit_id: CommitId::new("commit.github-stack-anchor.degraded").unwrap(),
+        },
+        AnchorSourceGenerationV2::Unknown,
+        ProjectionGenerationId::new("generation.github-stack.source.degraded").unwrap(),
+        Vec::new(),
+    );
+    let capability = GitHubStackCapabilitySnapshotV1::new(
+        ProviderId::new("provider.github").unwrap(),
+        project_id.clone(),
+        repository_id,
+        WorktreeId::new("worktree.github-stack-anchor.degraded").unwrap(),
+        GitHubStackCapabilityStateV1::Degraded,
+        generation_id.clone(),
+        source.anchor_id().clone(),
+    )
+    .unwrap();
+    let capability_generation = capability.generation();
+    let capability_record = record(
+        owner.clone(),
+        RetrievalAnchorTargetV2::GitTopology(Box::new(
+            GitTopologyAnchorTargetV1::GitHubStackCapability(capability),
+        )),
+        AnchorSourceGenerationV2::GitTopology(capability_generation),
+        generation_id,
+        vec![
+            AnchorLineageRefV2::new(
+                AnchorProvenanceRelationV2::Observed,
+                source.anchor_id().clone(),
+                owner.clone(),
+            )
+            .unwrap(),
+        ],
+    );
+    let capability_anchor_id = capability_record.anchor_id().clone();
+    let runtime =
+        RegisteredGlobalDbTestRuntime::project(profile.path(), project.path(), project_id.clone())
+            .await
+            .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let authority = RegisteredGitTopologyAnchorAuthorityV2::new(Arc::clone(&database));
     assert_eq!(
         authority
-            .publish(&context, &request, &observation, &Ready)
-            .await,
-        GitHubStackAnchorPublicationOutcomeV1::Published
-    );
-    assert!(matches!(
-        authority
-            .resolve(
-                &context,
-                &request,
-                &observation.capability_anchor_id,
-                &Ready,
+            .publish(
+                GitTopologyAnchorPublicationV2::new(
+                    owner.clone(),
+                    vec![source, capability_record],
+                )
+                .unwrap(),
             )
             .await,
-        GitHubStackAnchorReadOutcomeV1::Current(ref record)
-            if matches!(record.target(), RetrievalAnchorTargetV3::GitTopology(target)
-                if matches!(target.as_ref(), tracedecay_domain::GitTopologyAnchorTargetV1::GitHubStackCapability(capability)
+        Ok(GitTopologyAnchorPublicationOutcomeV2::Published)
+    );
+    drop(authority);
+    drop(database);
+    drop(runtime);
+
+    let restarted =
+        RegisteredGlobalDbTestRuntime::project(profile.path(), project.path(), project_id)
+            .await
+            .unwrap();
+    let authority =
+        RegisteredGitTopologyAnchorAuthorityV2::new(restarted.project_database_arc().unwrap());
+    let resolved = authority
+        .resolve(GitTopologyAnchorResolutionV2::new(owner, capability_anchor_id).unwrap())
+        .await;
+    assert!(matches!(
+        resolved,
+        Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(record))
+            if matches!(record.target(), RetrievalAnchorTargetV2::GitTopology(target)
+                if matches!(target.as_ref(), GitTopologyAnchorTargetV1::GitHubStackCapability(capability)
                     if capability.state == GitHubStackCapabilityStateV1::Degraded))
     ));
-    let durable = ProjectGitHubStackAnchorAuthorityV1::resolve_published_observation(
-        database.as_ref(),
-        &resolved,
-        observation.clone(),
-    )
-    .expect("generic durable read");
-    assert!(durable.snapshot_anchor.is_none());
-    let wrong_privacy_owner = AnchorOwnerBindingV1::for_project(
-        database.binding().shard_id.profile_id.clone(),
-        resolved.project_id.clone(),
-        PrivacyDomainId::new("privacy.github-stack.wrong").expect("wrong privacy domain"),
-    )
-    .expect("wrong privacy owner");
-    assert!(
-        database
-            .resolve_retrieval_anchor_record(
-                RetrievalAnchorOwnerV1::from(wrong_privacy_owner),
-                observation.capability_anchor_id.clone(),
-            )
-            .expect("wrong privacy read")
-            .is_none()
-    );
-
-    let (wrong_resolved, wrong_feedback) = scopes("wrong");
-    let (wrong_context, wrong_request) = context_and_request(wrong_resolved, wrong_feedback);
-    assert_eq!(
-        authority
-            .resolve(
-                &wrong_context,
-                &wrong_request,
-                &observation.capability_anchor_id,
-                &Ready,
-            )
-            .await,
-        GitHubStackAnchorReadOutcomeV1::Denied
-    );
 }

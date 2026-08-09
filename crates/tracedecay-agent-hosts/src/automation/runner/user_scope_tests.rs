@@ -17,6 +17,7 @@ use crate::automation::backend::{
 use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
 };
+use crate::automation::run_ledger::AutomationRunStatus;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::memory::types::{AddFactRequest, MemoryCategory, MemoryGroomingOperation};
 use crate::ports::project_runtime::{MemoryCurateOptions, ProfileRuntime, RuntimeFuture};

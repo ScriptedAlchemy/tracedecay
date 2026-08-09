@@ -272,6 +272,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) source_edit_rollback_executor:
         Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    pub(crate) code_graph_projection_read_port:
+        Option<crate::mcp::server::CodeGraphProjectionReadPort>,
+    pub(crate) code_graph_read_admission_port:
+        Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
     /// Daemon-owned per-request resolver of the retained interactive code
@@ -319,6 +323,8 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_reconciliation_executor: None,
             source_edit_rollback_executor: None,
             code_index_search_authority: None,
+            code_graph_projection_read_port: None,
+            code_graph_read_admission_port: None,
             retained_project_graph_resolver: None,
             dashboard_graph_interactive_resolver: None,
             session_sync_service: None,

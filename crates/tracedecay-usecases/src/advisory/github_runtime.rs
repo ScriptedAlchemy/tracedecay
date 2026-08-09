@@ -30,9 +30,8 @@ use tracedecay_application::feedback::{
     GitHubReviewReadResponseV1,
 };
 use tracedecay_domain::feedback::{
-    GitHubPullRequestIdV1, GitHubReviewCursorV1, GitHubReviewEtagV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
-    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
+    GitHubReviewCursorV1, GitHubReviewEtagV1, GitHubReviewIngressProviderOutcomeV1,
+    GitHubReviewIngressResultV1, GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
 };
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
@@ -1221,8 +1220,8 @@ mod tests {
         FeedbackScopeV1, GitHubReviewCoverageV1, GitHubReviewReadOperationV1,
     };
     use tracedecay_domain::{
-        ActorId, CommitId, ManifestDigest, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros,
-        WorktreeId,
+        ActorId, CommitId, GitHubPullRequestIdV1, ManifestDigest, ProjectId, ProviderId, RefId,
+        RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};

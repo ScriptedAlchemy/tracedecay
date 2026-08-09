@@ -166,6 +166,13 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
             | "tracedecay_git_history"
             | "tracedecay_git_blame"
             | "tracedecay_git_hunks"
+            | "tracedecay_dead_code"
+            | "tracedecay_circular"
+            | "tracedecay_affected"
+            | "tracedecay_simplify_scan"
+            | "tracedecay_dependency_depth"
+            | "tracedecay_health"
+            | "tracedecay_dsm"
     ) {
         return false;
     }
@@ -352,6 +359,13 @@ mod tests {
             "tracedecay_git_history",
             "tracedecay_git_blame",
             "tracedecay_git_hunks",
+            "tracedecay_dead_code",
+            "tracedecay_circular",
+            "tracedecay_affected",
+            "tracedecay_simplify_scan",
+            "tracedecay_dependency_depth",
+            "tracedecay_health",
+            "tracedecay_dsm",
         ] {
             assert!(
                 !tool_allows_identical_read_coalescing(controlled_read),

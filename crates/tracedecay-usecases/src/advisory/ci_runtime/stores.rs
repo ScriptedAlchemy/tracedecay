@@ -7,17 +7,14 @@ use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     CiFailureLocalizationRequestV1, FeedbackPortFuture,
 };
-use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::feedback::{
     CiCallerRelationV1, CiFailureCallerEvidenceV1, CiFailureCoverageV1,
     CiFailureGenerationEvidenceV1, CiFailureKindV1, CiFailureLocalizationStateV1,
     CiFailureSymbolEvidenceV1, CiFailureTestEvidenceV1, FeedbackScopeV1,
     MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_TEST_EVIDENCE_V1,
 };
-use tracedecay_domain::{
-    CanonicalObservationIdV1, CodeGenerationId, FileOccurrenceId, RetrievalAnchorId, SourceSpan,
-    SymbolOccurrenceId,
-};
+use tracedecay_domain::{CanonicalObservationIdV1, ContentDigest, RetrievalAnchorId, SourceSpan};
+use tracedecay_domain::{RelationEdgeKindV1, canonical_sha256};
 
 use super::GitHubCiProviderRecordV1;
 use super::production::{
@@ -25,6 +22,7 @@ use super::production::{
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
 };
 use crate::advisory::context_allows_feedback_operation;
+use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
@@ -182,16 +180,22 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
 #[derive(Clone)]
 pub struct ProjectCiCodeAnchorStoreV1 {
     graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     code_index_identity:
         Option<Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>>,
 }
 
 impl ProjectCiCodeAnchorStoreV1 {
-    pub fn new(graph: Arc<TraceDecay>, scope: FeedbackScopeV1) -> Option<Self> {
+    pub fn new(
+        graph: Arc<TraceDecay>,
+        scope: FeedbackScopeV1,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    ) -> Option<Self> {
         scope.validate().ok()?;
         Some(Self {
             graph,
+            code_graph,
             scope,
             code_index_identity: None,
         })
@@ -200,11 +204,12 @@ impl ProjectCiCodeAnchorStoreV1 {
     pub fn new_with_code_index_identity(
         graph: Arc<TraceDecay>,
         scope: FeedbackScopeV1,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         code_index_identity: Arc<
             dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
         >,
     ) -> Option<Self> {
-        let mut store = Self::new(graph, scope)?;
+        let mut store = Self::new(graph, scope, code_graph)?;
         store.code_index_identity = Some(code_index_identity);
         Some(store)
     }
@@ -240,39 +245,39 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             let Some(path) = canonical_project_relative_path(&annotation.path) else {
                 return Some(partial_code_evidence());
             };
-            let Some(synced_commit) = self.graph.last_synced_commit().await else {
+            let cancellation = request_graph_cancellation(context);
+            let Ok(verified) = self
+                .code_graph
+                .open(CodeGraphReadRequest::new(
+                    context,
+                    context.grant().issued_at,
+                    Arc::clone(&cancellation),
+                ))
+                .await
+            else {
                 return Some(partial_code_evidence());
             };
-            if synced_commit != request.scope.head_commit_id.as_str() {
-                return Some(partial_code_evidence());
-            }
-            let Ok(mut nodes) = self.graph.get_nodes_by_file(&path).await else {
+            let Ok(reader) = verified.reader_with_cancellation(
+                context,
+                context.grant().issued_at,
+                Arc::clone(&cancellation),
+            ) else {
                 return Some(partial_code_evidence());
             };
-            // GitHub annotation lines are one-based; graph node spans retain
-            // tree-sitter's zero-based rows.
-            let graph_start_line = annotation.start_line.saturating_sub(1);
-            let graph_end_line = annotation.end_line.saturating_sub(1);
-            nodes.retain(|node| {
-                node.start_line <= graph_start_line && node.end_line >= graph_end_line
-            });
-            nodes.sort_by(|left, right| {
-                left.end_line
-                    .saturating_sub(left.start_line)
-                    .cmp(&right.end_line.saturating_sub(right.start_line))
-                    .then_with(|| left.start_line.cmp(&right.start_line))
-                    .then_with(|| left.id.cmp(&right.id))
-            });
-            let Some(symbol_node) = nodes.first() else {
+            let Ok(Some(file_record)) =
+                reader.file_by_logical_path(&path, Arc::clone(&cancellation))
+            else {
                 return Some(partial_code_evidence());
             };
             let Ok(source) = std::fs::read_to_string(self.graph.project_root().join(&path)) else {
                 return Some(partial_code_evidence());
             };
-            let Ok(Some(file_record)) = self.graph.db().get_file(&path).await else {
+            let Some(source_digest) =
+                normalized_content_digest(&tracedecay_runtime_core::sync::content_hash(&source))
+            else {
                 return Some(partial_code_evidence());
             };
-            if tracedecay_runtime_core::sync::content_hash(&source) != file_record.content_hash {
+            if source_digest != file_record.content_digest {
                 return Some(partial_code_evidence());
             }
             let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
@@ -302,124 +307,100 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
                 let Some((file, digest)) = identity.file(&path) else {
                     return Some(partial_code_evidence());
                 };
-                if digest.as_str() != file_record.content_hash {
+                if digest != &file_record.content_digest {
                     return Some(partial_code_evidence());
                 }
                 file.clone()
             } else {
-                let Ok(file) = FileOccurrenceId::new(path) else {
-                    return Some(partial_code_evidence());
-                };
-                file
+                file_record.file_occurrence_id.clone()
             };
-            let Ok(symbol) = SymbolOccurrenceId::new(symbol_node.id.clone()) else {
-                return Some(partial_code_evidence());
-            };
-
-            let Ok(mut caller_nodes) = self.graph.get_callers(&symbol_node.id, 3).await else {
-                return Some(partial_code_evidence());
-            };
-            caller_nodes.sort_by(|left, right| left.0.id.cmp(&right.0.id));
-            caller_nodes.dedup_by(|left, right| left.0.id == right.0.id);
-            let callers_truncated = caller_nodes.len() > MAX_CI_FAILURE_CALLER_EVIDENCE_V1;
-            caller_nodes.truncate(MAX_CI_FAILURE_CALLER_EVIDENCE_V1);
-            let callers = caller_nodes
-                .iter()
-                .filter_map(|(node, edge)| {
-                    Some(CiFailureCallerEvidenceV1 {
-                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                        caller_symbol: SymbolOccurrenceId::new(node.id.clone()).ok()?,
-                        relation: if edge.target == symbol_node.id {
-                            CiCallerRelationV1::DirectCall
-                        } else {
-                            CiCallerRelationV1::TransitiveCall
-                        },
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            let Ok(mut impacted) = self
-                .graph
-                .get_impact_radius_multi(std::slice::from_ref(&symbol_node.id), 3)
-                .await
+            let Ok(mut symbols) =
+                reader.symbols_in_logical_file(&path, 100_000, Arc::clone(&cancellation))
             else {
                 return Some(partial_code_evidence());
             };
-            impacted.sort_by(|left, right| left.id.cmp(&right.id));
-            impacted.dedup_by(|left, right| left.id == right.id);
-            let impacted_ids = impacted
-                .iter()
-                .map(|node| node.id.clone())
-                .collect::<Vec<_>>();
-            let Ok(test_ids) = self.graph.get_test_annotated_node_ids(&impacted_ids).await else {
-                return Some(partial_code_evidence());
-            };
-            let mut test_ids = test_ids.into_iter().collect::<Vec<_>>();
-            test_ids.sort();
-            let tests_truncated = test_ids.len() > MAX_CI_FAILURE_TEST_EVIDENCE_V1;
-            test_ids.truncate(MAX_CI_FAILURE_TEST_EVIDENCE_V1);
-            let tests = test_ids
-                .iter()
-                .filter_map(|node_id| {
-                    Some(CiFailureTestEvidenceV1 {
-                        retrieval_anchor_id: record.observation.failure_anchor.clone(),
-                        test_symbol: SymbolOccurrenceId::new(node_id.clone()).ok()?,
+            symbols.retain(|symbol| {
+                symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.source_span)
+                    .is_some_and(|candidate| {
+                        candidate.start_byte <= span.start_byte
+                            && candidate.end_byte >= span.end_byte
                     })
+            });
+            symbols.sort_by(|left, right| {
+                let left_span = left
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.source_span);
+                let right_span = right
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.source_span);
+                left_span
+                    .map(|span| span.end_byte.saturating_sub(span.start_byte))
+                    .cmp(&right_span.map(|span| span.end_byte.saturating_sub(span.start_byte)))
+                    .then_with(|| left.occurrence.cmp(&right.occurrence))
+            });
+            let Some(symbol_summary) = symbols.first() else {
+                return Some(partial_code_evidence());
+            };
+            let symbol = symbol_summary.occurrence.clone();
+            let Ok(impact) = reader.impact(
+                std::slice::from_ref(&symbol),
+                &[RelationEdgeKindV1::Calls],
+                3,
+                100_000,
+                100_000,
+                Arc::clone(&cancellation),
+            ) else {
+                return Some(partial_code_evidence());
+            };
+            let callers_truncated = impact.impacted.len() > MAX_CI_FAILURE_CALLER_EVIDENCE_V1;
+            let callers = impact
+                .impacted
+                .iter()
+                .take(MAX_CI_FAILURE_CALLER_EVIDENCE_V1)
+                .map(|impacted| CiFailureCallerEvidenceV1 {
+                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                    caller_symbol: impacted.summary.occurrence.clone(),
+                    relation: if impacted.depth == 1 {
+                        CiCallerRelationV1::DirectCall
+                    } else {
+                        CiCallerRelationV1::TransitiveCall
+                    },
                 })
                 .collect::<Vec<_>>();
-            let Ok(all_nodes) = self.graph.get_all_nodes().await else {
-                return Some(partial_code_evidence());
-            };
-            let Ok(all_edges) = self.graph.get_all_edges().await else {
-                return Some(partial_code_evidence());
-            };
-            let mut generation_nodes = all_nodes
+            let test_symbols = impact
+                .impacted
                 .iter()
-                .map(|node| node.id.as_str())
-                .collect::<Vec<_>>();
-            generation_nodes.sort_unstable();
-            let mut generation_edges = all_edges
-                .iter()
-                .map(|edge| {
-                    (
-                        edge.source.as_str(),
-                        edge.target.as_str(),
-                        edge.kind.as_str(),
-                        edge.line,
-                    )
+                .filter(|impacted| {
+                    impacted
+                        .summary
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
                 })
                 .collect::<Vec<_>>();
-            generation_edges.sort_unstable();
-            let Ok(generation_digest) = canonical_sha256(&(
-                "tracedecay.advisory.ci.graph-generation.v1",
-                &request.scope.project_id,
-                &request.scope.worktree_id,
-                &request.scope.head_commit_id,
-                &generation_nodes,
-                &generation_edges,
-                &symbol_node.id,
-                &callers,
-                &tests,
-            )) else {
-                return Some(partial_code_evidence());
-            };
-            let Some(generation_suffix) = generation_digest.as_str().strip_prefix("sha256:") else {
-                return Some(partial_code_evidence());
-            };
+            let tests_truncated = test_symbols.len() > MAX_CI_FAILURE_TEST_EVIDENCE_V1;
+            let tests = test_symbols
+                .into_iter()
+                .take(MAX_CI_FAILURE_TEST_EVIDENCE_V1)
+                .map(|impacted| CiFailureTestEvidenceV1 {
+                    retrieval_anchor_id: record.observation.failure_anchor.clone(),
+                    test_symbol: impacted.summary.occurrence.clone(),
+                })
+                .collect::<Vec<_>>();
             let generation_id = if let Some(identity) = code_index_identity.as_ref() {
+                if identity.generation_id() != reader.generation() {
+                    return Some(partial_code_evidence());
+                }
                 identity.generation_id().clone()
             } else {
-                let Ok(generation_id) =
-                    CodeGenerationId::new(format!("generation.ci.graph.{generation_suffix}"))
-                else {
-                    return Some(partial_code_evidence());
-                };
-                generation_id
+                reader.generation().clone()
             };
-            let partial = callers_truncated
-                || tests_truncated
-                || callers.len() != caller_nodes.len()
-                || tests.len() != test_ids.len();
+            let partial = callers_truncated || tests_truncated || !impact.complete;
             Some(CiExactCodeEvidenceV1 {
                 state: if partial {
                     CiFailureLocalizationStateV1::Partial
@@ -456,6 +437,14 @@ fn partial_code_evidence() -> CiExactCodeEvidenceV1 {
         symbol: None,
         callers: Vec::new(),
         tests: Vec::new(),
+    }
+}
+
+fn normalized_content_digest(value: &str) -> Option<ContentDigest> {
+    if value.starts_with("sha256:") {
+        ContentDigest::new(value.to_owned()).ok()
+    } else {
+        ContentDigest::new(format!("sha256:{value}")).ok()
     }
 }
 

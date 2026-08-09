@@ -16,7 +16,7 @@ use tracedecay_graph_db::{
 
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::{
-    CODE_GRAPH_PROJECTOR_REVISION_V2, CodeGraphProjectionError, CodeGraphProjectionStore,
+    CODE_GRAPH_PROJECTOR_REVISION_V3, CodeGraphProjectionError, CodeGraphProjectionStore,
     CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
     code_graph_projection_identity, current_generation_entity, has_label,
 };
@@ -112,7 +112,20 @@ fn symbol_metadata(
         occurrence: id(occurrence),
         identity: digest(identity_byte),
         qualified_name: qualified_name.to_owned(),
+        simple_name: qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(qualified_name)
+            .to_owned(),
         kind: kind.to_owned(),
+        visibility: "private".to_owned(),
+        branches: 0,
+        loops: 0,
+        max_nesting: 0,
+        line_span: 1,
+        start_line: 0,
+        signature: None,
+        skip_test_coverage: false,
         file_identity: digest('e'),
         content_digest: digest('d'),
     }
@@ -188,7 +201,7 @@ fn production_manifest() -> GraphGenerationManifest {
             files: &files,
             symbols: &symbols,
         }),
-        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
             .expect("projector revision"),
         &|| Ok(()),
     )
@@ -635,7 +648,7 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
         &fixture_edges(),
         &fixture_chunks(),
         None,
-        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
             .expect("projector revision"),
         &|| Ok(()),
     )

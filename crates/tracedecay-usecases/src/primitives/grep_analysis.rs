@@ -220,7 +220,15 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
     }
 }
 
-graph_authority!(TraceDecayDependencyDepthAuthorityV1);
+pub struct TraceDecayDependencyDepthAuthorityV1 {
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+}
+
+impl TraceDecayDependencyDepthAuthorityV1 {
+    pub fn new(code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>) -> Self {
+        Self { code_graph }
+    }
+}
 
 impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
     fn dependency_depth<'a>(
@@ -236,7 +244,36 @@ impl DependencyDepthAuthorityV1 for TraceDecayDependencyDepthAuthorityV1 {
                 Ok(path) => path,
                 Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
             };
-            let adjacency = match GraphQueryManager::new(self.graph.db())
+            let cancellation = crate::graph::request_graph_cancellation(context.request);
+            let verified = match self
+                .code_graph
+                .open(crate::graph::CodeGraphReadRequest::new(
+                    context.request,
+                    context.observed_at,
+                    Arc::clone(&cancellation),
+                ))
+                .await
+            {
+                Ok(read) => read,
+                Err(error) => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        error.to_string(),
+                    ));
+                }
+            };
+            let reader = match verified.reader_with_cancellation(
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        error.to_string(),
+                    ));
+                }
+            };
+            let adjacency = match GraphQueryManager::new(&reader, cancellation)
                 .build_file_adjacency(path.as_deref())
                 .await
             {

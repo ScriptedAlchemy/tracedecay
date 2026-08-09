@@ -5,9 +5,8 @@ use crate::production::CodeIndexPublishedGenerationV1;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SymbolOccurrenceId,
+    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, LanguageDescriptorRevision,
+    SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationManifest,
@@ -122,6 +121,10 @@ pub(super) fn build_projection(
         };
         let candidate = CodeGraphSymbolBindingV1 {
             file: chunk.anchor.file_occurrence_id.clone(),
+            logical_path: files
+                .get(&chunk.anchor.file_occurrence_id)
+                .map(|file| file.logical_path.clone()),
+            source_span: Some(chunk.anchor.source_span),
             chunk: Some(chunk.id.clone()),
             language_descriptor_revision: chunk.language_descriptor_revision.clone(),
         };
@@ -132,6 +135,7 @@ pub(super) fn build_projection(
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let current = entry.get_mut();
                 if current.file != candidate.file
+                    || current.logical_path != candidate.logical_path
                     || current.language_descriptor_revision
                         != candidate.language_descriptor_revision
                 {
@@ -142,6 +146,13 @@ pub(super) fn build_projection(
                 if candidate.chunk < current.chunk {
                     current.chunk = candidate.chunk;
                 }
+                current.source_span = match (current.source_span, candidate.source_span) {
+                    (Some(left), Some(right)) => Some(tracedecay_domain::SourceSpan {
+                        start_byte: left.start_byte.min(right.start_byte),
+                        end_byte: left.end_byte.max(right.end_byte),
+                    }),
+                    (left, right) => left.or(right),
+                };
             }
         }
     }

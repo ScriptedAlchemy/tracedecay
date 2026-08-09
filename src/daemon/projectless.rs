@@ -15,12 +15,11 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
 
-/// Authenticated identity and retained policy state pinned once for a
-/// projectless connection. Request adapters may select an operation but cannot
-/// mint a principal, scope, or capability grant.
+/// Authenticated durable identity pinned once for a projectless connection.
+/// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
     client_identity: DaemonClientIdentity,
-    profile_admission: crate::daemon::retained_owner::ProfileRetainedAdmissionV1,
+    profile_authority: crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
 }
 
 fn admit_projectless_connection(
@@ -39,23 +38,13 @@ fn admit_projectless_connection(
         .ok_or_else(|| TraceDecayError::Config {
             message: "projectless profile session authority is unavailable".to_owned(),
         })?;
-    let configuration_digest =
-        crate::daemon::retained_owner::profile_retained_configuration_digest(
-            profile_identity.brain_id(),
-            profile_identity.profile_id(),
-            profile_session_root.identity(),
-        )?;
-    let profile_admission = crate::daemon::retained_owner::issue_profile_retained_policy_admission(
-        profile_identity.brain_id(),
-        profile_identity.profile_id().clone(),
+    let profile_authority = crate::daemon::retained_owner::profile_retained_connection_authority(
+        profile_identity,
         profile_session_root.identity(),
-        &configuration_digest,
-        tracedecay_application::now_micros(),
-        tracedecay_domain::UtcMicros(i64::MAX),
     )?;
     Ok(ProjectlessConnectionStateV1 {
         client_identity: client_identity.clone(),
-        profile_admission,
+        profile_authority,
     })
 }
 
@@ -391,7 +380,7 @@ async fn projectless_profile_retained_response(
         tool_name,
         arguments,
         runtime_registry.as_ref(),
-        &connection.profile_admission,
+        &connection.profile_authority,
         None,
         None,
         None,

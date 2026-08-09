@@ -4,8 +4,6 @@
 //! Tarjan's SCC-based acyclicity scoring, dependency depth analysis,
 //! modularity estimation, and composite health scoring.
 
-pub mod delta;
-pub mod snapshot;
 pub mod test_risk;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -15,8 +13,7 @@ use super::scc::tarjan_scc;
 
 // The four structural-health value types are the shared authority in
 // `tracedecay-usecases`; re-export them so root callers keep a single type
-// identity. The `delta`, `snapshot`, and `test_risk` submodules and the
-// algorithm functions below have no usecases counterpart and remain root-owned.
+// identity.
 pub use tracedecay_usecases::graph::health::{
     DepthChain, DepthResult, DsmCluster, HealthDimensions,
 };

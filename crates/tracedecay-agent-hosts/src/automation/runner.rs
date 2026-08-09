@@ -85,11 +85,11 @@ use evidence::{
 use retrieval::{production_project_automation_retrieval, production_user_automation_retrieval};
 use session_reflector::{
     ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
-    finalize_session_reflector_success,
+    finalize_session_reflector_success, validate_session_fact_candidates,
 };
 use skill_writer::{
-    SkillWriterFinalization, build_skill_writer_prompt, finalize_skill_writer_success,
-    rejected_skill_writer_run, skipped_skill_writer_run,
+    SkillWriterFinalization, build_skill_writer_prompt, rejected_skill_writer_run,
+    skipped_skill_writer_run,
 };
 
 #[cfg(test)]
@@ -97,16 +97,13 @@ use evidence::{
     AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS,
     serialize_automation_temporal_evidence, validate_complete_evidence,
 };
+pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
+pub use retrieval::registered_project_automation_retrieval;
 #[cfg(test)]
 use retrieval::{
     AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
     retrieve_automation_session_evidence,
 };
-#[cfg(test)]
-use session_reflector::validate_session_fact_candidates;
-
-pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
-pub use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
@@ -518,7 +515,7 @@ async fn run_skill_writer_for_store(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report.extend(&repair_retry_report);
+                retry_report = repair_retry_report;
                 finalizer
                     .append_failed_record(
                         None,
@@ -531,7 +528,7 @@ async fn run_skill_writer_for_store(
                 return Err(error);
             }
         };
-        retry_report.extend(&repair_retry_report);
+        retry_report = repair_retry_report;
         (proposed_ops, proposals) = finalizer
             .response_output_array(
                 &response,
@@ -1129,7 +1126,7 @@ async fn run_combined_review_for_retrieval(
         {
             Ok(response) => response,
             Err(err) => {
-                retry_report.extend(&repair_retry_report);
+                retry_report = repair_retry_report;
                 let (reflector_record, skill_record) = append_combined_failed_records(
                     &reflector_finalizer,
                     &skill_finalizer,
@@ -1146,7 +1143,7 @@ async fn run_combined_review_for_retrieval(
                 });
             }
         };
-        retry_report.extend(&repair_retry_report);
+        retry_report = repair_retry_report;
         (output, facts, skills) = match combined_review_output(&response) {
             Ok(output) => output,
             Err(err) => {
@@ -1362,7 +1359,6 @@ fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Val
 mod tests {
     use super::*;
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use std::path::PathBuf;
 
     struct RecordingDenyAutomationAuthorizer {
         requests: Arc<Mutex<Vec<SessionScopeAuthorizationRequest>>>,

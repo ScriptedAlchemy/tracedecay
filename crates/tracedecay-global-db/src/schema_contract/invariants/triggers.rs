@@ -1667,23 +1667,6 @@ pub async fn restore_immutability_after_canonical_repair(
     Ok(())
 }
 
-pub async fn suspend_session_invariants_for_schema_upgrade(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    for invariant in INVARIANTS {
-        for trigger in invariant
-            .triggers
-            .iter()
-            .filter(|trigger| trigger.table.starts_with("session_"))
-        {
-            conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tests::harness::RegisteredGlobalDbHarness;

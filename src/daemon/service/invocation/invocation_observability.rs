@@ -171,9 +171,9 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackO
             DaemonInvocationProblem::InvalidRequest
             | DaemonInvocationProblem::UnsupportedRevision => FeedbackOutcomeV1::Rejected,
             DaemonInvocationProblem::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
-            DaemonInvocationProblem::ResetRequired | DaemonInvocationProblem::Unavailable => {
-                FeedbackOutcomeV1::Unavailable
-            }
+            DaemonInvocationProblem::ResetRequired
+            | DaemonInvocationProblem::ApplicationContractViolation
+            | DaemonInvocationProblem::Unavailable => FeedbackOutcomeV1::Unavailable,
         },
     }
 }
@@ -211,6 +211,7 @@ pub(super) const fn invocation_problem_rejected_argument(
         )),
         DaemonInvocationProblem::NotFoundOrNotAuthorized
         | DaemonInvocationProblem::ResetRequired
+        | DaemonInvocationProblem::ApplicationContractViolation
         | DaemonInvocationProblem::Unavailable => None,
     }
 }

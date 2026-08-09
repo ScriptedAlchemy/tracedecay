@@ -1310,7 +1310,6 @@ mod graph_relation_tests;
 
 #[cfg(test)]
 mod tests {
-    use sha2::{Digest, Sha256};
     use std::fs;
     use std::future::Future;
     use std::path::PathBuf;
@@ -1320,6 +1319,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
     use tracedecay_domain::{
         CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,

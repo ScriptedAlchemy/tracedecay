@@ -6,7 +6,7 @@ use std::{
 use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION_V2, build_published_code_graph_manifest_checked,
+        CODE_GRAPH_PROJECTOR_REVISION_V3, build_published_code_graph_manifest_checked,
         code_graph_projection_identity,
     },
     production::{
@@ -470,7 +470,7 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
         .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
         .expect("generation publishes");
     let projector_revision =
-        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V2.to_owned())
+        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
             .expect("projector revision");
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph-test").expect("namespace"))

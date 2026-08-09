@@ -172,6 +172,7 @@ async fn gini_fan_values(
 /// Handles `tracedecay_dependency_depth` tool calls.
 pub(crate) async fn handle_dependency_depth(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -181,9 +182,7 @@ pub(crate) async fn handle_dependency_depth(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let adj = GraphQueryManager::new(cg.db())
-        .build_file_adjacency(path_prefix)
-        .await?;
+    let adj = cg.build_verified_file_adjacency(graph, path_prefix).await?;
 
     let result = dependency_depth(&adj, limit);
     let score = depth_score(result.max_depth, result.ideal_depth);
@@ -218,6 +217,7 @@ pub(crate) async fn handle_dependency_depth(
 /// Handles `tracedecay_health` tool calls.
 pub(crate) async fn handle_health(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -227,7 +227,11 @@ pub(crate) async fn handle_health(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let snap = compute_health_snapshot(cg, path_prefix).await?;
+    let snap = tracedecay_usecases::graph::health::compute_verified_health_snapshot(
+        &graph.manager(),
+        path_prefix,
+    )
+    .await?;
 
     let output = if details {
         let r4 = |x: f64| (x * 10000.0).round() / 10000.0;

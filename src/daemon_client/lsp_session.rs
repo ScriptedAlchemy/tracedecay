@@ -260,6 +260,9 @@ fn invocation_outcome_error(
             crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
                 InvocationError::Unavailable
             }
+            crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
+                InvocationError::Unavailable
+            }
             crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 InvocationError::Unavailable
             }

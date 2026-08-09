@@ -73,33 +73,6 @@ pub struct RedundancyMatchScore {
     pub generic_helper_downranked: bool,
 }
 
-impl Fingerprint {
-    /// Render the shingles vector as a comma-separated lowercase hex
-    /// string (suitable for storage in a TEXT column).
-    pub(crate) fn shingles_to_string(&self) -> String {
-        let mut s = String::with_capacity(self.shingles.len() * 9);
-        for (i, h) in self.shingles.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            // Use std fmt; not perf-critical, called once per persist.
-            let _ = write!(s, "{h:08x}");
-        }
-        s
-    }
-
-    /// Parse a comma-separated lowercase hex string back into a shingles
-    /// vector. Best-effort: unparseable entries are skipped.
-    pub(crate) fn shingles_from_string(s: &str) -> Vec<u32> {
-        if s.is_empty() {
-            return Vec::new();
-        }
-        s.split(',')
-            .filter_map(|hex| u32::from_str_radix(hex, 16).ok())
-            .collect()
-    }
-}
-
 /// Compute every fingerprint signal for a single function body.
 ///
 /// `full_source` is the entire file contents (tree-sitter needs context
@@ -1335,22 +1308,6 @@ mod tests {
         } else {
             sum / positives.len() as f64
         }
-    }
-
-    #[test]
-    fn shingles_roundtrip_through_string_format() {
-        let original: Vec<u32> = vec![1, 2, 0xdead_beef, 0xffff_ffff];
-        let fp = Fingerprint {
-            ast_hash: "x".into(),
-            cfg_hash: "x".into(),
-            call_seq_hash: "x".into(),
-            shingles: original.clone(),
-            body_tokens: 0,
-            source_hash: "x".into(),
-        };
-        let s = fp.shingles_to_string();
-        let parsed = Fingerprint::shingles_from_string(&s);
-        assert_eq!(parsed, original);
     }
 
     #[test]

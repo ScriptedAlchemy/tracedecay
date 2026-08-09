@@ -15,6 +15,7 @@ pub mod configuration;
 mod delivery_settlement_tests;
 mod discovery_queue;
 mod git_index_transactions;
+mod git_topology_anchor;
 mod native_integration;
 mod observability_rollup;
 pub mod observation;
@@ -26,6 +27,7 @@ mod registered_provider_usage;
 mod stack_delivery_tests;
 mod support;
 pub use discovery_queue::HostDiscoveryQueueEntry;
+pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
     ObservabilityRollupCompactionV1, ObservabilityRollupDirtyDayClaimV1,
@@ -134,11 +136,11 @@ pub use support::{
 };
 use support::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, analytics_scope_query, downrank_inventory_messages,
-    ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, ensure_table_columns, git_remote_search_alias,
-    global_db_operation_error, global_db_operation_message, interleave_workflow_search_results,
-    like_pattern, normalize_git_remote_url, push_optional_analytics_filter, repo_identity_aliases,
-    row_to_analytics_event, session_fts_query,
+    ensure_parse_offset_columns, ensure_session_parent_columns, ensure_table_columns,
+    git_remote_search_alias, global_db_operation_error, global_db_operation_message,
+    interleave_workflow_search_results, like_pattern, normalize_git_remote_url,
+    push_optional_analytics_filter, repo_identity_aliases, row_to_analytics_event,
+    session_fts_query,
 };
 /// Compatibility re-export: workflow search filters now live beside the
 /// workflow-index contracts in [`tracedecay_sessions::runtime::workflow_index`].

@@ -74,7 +74,7 @@ pub(super) async fn execute_primitive(
         Ok(admission) => admission,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
-    let mut result = dispatch
+    let mut result = match dispatch
         .dispatch(
             PrimitiveInvocation {
                 operation: operation.clone(),
@@ -83,7 +83,16 @@ pub(super) async fn execute_primitive(
             context.clone(),
             observed_at,
         )
-        .await;
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::ApplicationContractViolation,
+            );
+        }
+    };
     if result.is_ok() {
         let finished_at = current_micros();
         let publication_authority = match authorization
@@ -312,7 +321,7 @@ fn invalid_callable_code_request(wire_request_id: String) -> DaemonInvocationRes
     )
 }
 
-pub(super) fn callable_code_request_context(
+pub(crate) fn callable_code_request_context(
     scope: &ResolvedScope,
     access: &ProjectSourceAccessSnapshot,
     wire_request_id: &str,

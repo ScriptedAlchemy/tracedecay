@@ -7,9 +7,8 @@ use super::schema_contract::{
 };
 use super::{
     configuration, ensure_parse_offset_columns, ensure_session_parent_columns,
-    git_index_transactions, global_db_operation_error, global_db_operation_message,
-    observability_rollup, observation, observation_projection, project_registry, session_temporal,
-    stack_delivery,
+    git_index_transactions, global_db_operation_error, observability_rollup, observation,
+    observation_projection, project_registry, session_temporal, stack_delivery,
 };
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior,

@@ -29,8 +29,8 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::ProjectGraphRuntimePortV1;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphGenerationId, GraphGenerationManifest,
-    GraphIdempotencyKey, GraphProjectionIdentity, VerifiedGraphSnapshot,
+    GraphCancellation, GraphDbError, GraphGenerationManifest, GraphIdempotencyKey,
+    GraphProjectionIdentity, VerifiedGraphSnapshot,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::native_integration::ExactPairNativeIntegrationTopology;
@@ -96,27 +96,6 @@ impl ProjectGraphRuntimePortV1 for VerifiedSnapshotRuntime {
             .expect("snapshot mutex")
             .iter()
             .find(|snapshot| snapshot.projection() == projection)
-            .cloned())
-    }
-
-    fn verified_generation_snapshot(
-        &self,
-        projection: &GraphProjectionIdentity,
-        generation: &GraphGenerationId,
-        _idempotency_key: &GraphIdempotencyKey,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        Ok(self
-            .snapshots
-            .lock()
-            .expect("snapshot mutex")
-            .iter()
-            .find(|snapshot| {
-                snapshot.projection() == projection && snapshot.generation() == generation
-            })
             .cloned())
     }
 }

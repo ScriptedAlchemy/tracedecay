@@ -22,6 +22,7 @@ use super::{
     GitHubProviderLifecycleV1, GitHubReviewAnchorSeedV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
+use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
@@ -44,6 +45,7 @@ pub struct ProjectGitHubAnchorAuthorityV1 {
     database: Database,
     project_root: Arc<PathBuf>,
     scope: FeedbackScopeV1,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     code_index_identity:
         Option<Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>>,
 }
@@ -159,6 +161,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         database: Database,
         project_root: impl Into<PathBuf>,
         scope: FeedbackScopeV1,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     ) -> Option<Self> {
         let project_root = project_root.into();
         scope.validate().ok()?;
@@ -166,6 +169,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             database,
             project_root: Arc::new(project_root),
             scope,
+            code_graph,
             code_index_identity: None,
         })
     }
@@ -250,7 +254,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             return None;
         }
         let original = stored.anchors.original;
-        let initial_remap = self.remap_original(&original, &self.scope).await?;
+        let initial_remap = remap_state(original.clone(), self.scope.clone(), None, true)?;
         let anchors = GitHubCanonicalReviewAnchorsV1 {
             original,
             initial_remap,
@@ -285,7 +289,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         if original.retrieval_anchor_id != existing_id {
             return None;
         }
-        let initial_remap = self.remap_seed(&original, &self.scope, seed).await?;
+        let initial_remap = remap_state(original.clone(), self.scope.clone(), None, true)?;
         let anchors = GitHubCanonicalReviewAnchorsV1 {
             original,
             initial_remap,
@@ -307,6 +311,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
 
     async fn remap_original(
         &self,
+        context: &RequestContext,
         original: &GitHubReviewImmutableAnchorV1,
         current_scope: &FeedbackScopeV1,
     ) -> Option<GitHubReviewCurrentBranchRemapV1> {
@@ -317,20 +322,39 @@ impl ProjectGitHubAnchorAuthorityV1 {
         if stored.anchors.original != *original {
             return None;
         }
-        self.remap_seed(original, current_scope, &stored.seed).await
+        self.remap_seed(context, original, current_scope, &stored.seed)
+            .await
     }
 
     async fn remap_seed(
         &self,
+        context: &RequestContext,
         original: &GitHubReviewImmutableAnchorV1,
         current_scope: &FeedbackScopeV1,
         seed: &GitHubReviewAnchorSeedV1,
     ) -> Option<GitHubReviewCurrentBranchRemapV1> {
-        let current_file = self.database.get_file(&seed.path).await.ok()?;
+        let cancellation = request_graph_cancellation(context);
+        let verified = self
+            .code_graph
+            .open(CodeGraphReadRequest::new(
+                context,
+                context.grant().issued_at,
+                Arc::clone(&cancellation),
+            ))
+            .await
+            .ok()?;
+        let reader = verified
+            .reader_with_cancellation(
+                context,
+                context.grant().issued_at,
+                Arc::clone(&cancellation),
+            )
+            .ok()?;
+        let current_file = reader.file_by_logical_path(&seed.path, cancellation).ok()?;
         let Some(current_file) = current_file else {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         };
-        let current_digest = indexed_content_digest(&current_file.content_hash)?;
+        let current_digest = current_file.content_digest;
         if current_digest != original.content_digest {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         }
@@ -629,7 +653,7 @@ impl GitHubCurrentBranchRemapper for ProjectGitHubAnchorAuthorityV1 {
             if !context_matches_scope(context, current_scope) {
                 return None;
             }
-            self.remap_original(original, current_scope).await
+            self.remap_original(context, original, current_scope).await
         })
     }
 }
@@ -667,8 +691,9 @@ pub fn github_anchor_authorities_v1(
     database: Database,
     project_root: impl Into<PathBuf>,
     scope: FeedbackScopeV1,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 ) -> Option<ProjectGitHubRegistrarAuthoritiesV1<ProjectGitHubAnchorAuthorityV1>> {
-    let authority = ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope)?;
+    let authority = ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope, code_graph)?;
     Some(ProjectGitHubRegistrarAuthoritiesV1 {
         github_remapper: authority.clone(),
         github_anchors: authority,
@@ -679,12 +704,13 @@ pub fn github_anchor_authorities_arc_v1(
     database: Database,
     project_root: impl Into<PathBuf>,
     scope: FeedbackScopeV1,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     code_index_identity: Arc<
         dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
     >,
 ) -> Option<ProjectGitHubRegistrarAuthoritiesV1<Arc<ProjectGitHubAnchorAuthorityV1>>> {
     let authority = Arc::new(
-        ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope)?
+        ProjectGitHubAnchorAuthorityV1::new(database, project_root, scope, code_graph)?
             .with_code_index_identity(code_index_identity),
     );
     Some(ProjectGitHubRegistrarAuthoritiesV1 {
@@ -977,22 +1003,6 @@ fn git_historical_blob(
         return None;
     }
     blob.bytes
-}
-
-/// Converts a code-index `content_hash` into canonical content identity.
-///
-/// The index stores the hash as bare lowercase hex, while `ContentDigest` is
-/// the tagged `sha256:<hex>` form that `ContentDigest::of_bytes` produces.
-/// Requiring the tagged form here made the conversion fail for every file the
-/// project had actually indexed, and that failure propagated out of anchor
-/// resolution — so a review comment on an indexed file produced no anchors at
-/// all rather than a remapped one. Both encodings are accepted.
-fn indexed_content_digest(content_hash: &str) -> Option<ContentDigest> {
-    if content_hash.starts_with("sha256:") {
-        ContentDigest::new(content_hash.to_owned()).ok()
-    } else {
-        ContentDigest::new(format!("sha256:{content_hash}")).ok()
-    }
 }
 
 fn content_digest(bytes: &[u8]) -> Option<ContentDigest> {

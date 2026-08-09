@@ -1278,6 +1278,8 @@ mod tests {
             mode: ContextScoutConfigurationModeV1::ConfiguredModel,
             limits: ContextScoutConfigurationLimitsV1::bounded_defaults(),
             model_path: Some(ContextScoutConfiguredModelPathV1::CodexAppServer),
+            model_id: Some("gpt-5.6-mini".to_owned()),
+            model_timeout_secs: Some(60),
         };
         let configured = ContextScoutConfigurationPinV1::from_current(&configuration(
             "revision.scout.model",
