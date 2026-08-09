@@ -628,7 +628,7 @@ fn skill_proposal_action(proposal: &Value) -> std::result::Result<SkillProposalA
         return Ok(SkillProposalAction::Create);
     };
     match required_proposal_string(Some(action), "action")?.as_str() {
-        "create" | "draft" => Ok(SkillProposalAction::Create),
+        "create" => Ok(SkillProposalAction::Create),
         "update" | "patch" => Ok(SkillProposalAction::Update),
         "merge" | "consolidate" => Ok(SkillProposalAction::Merge),
         "archive" => Ok(SkillProposalAction::Archive),

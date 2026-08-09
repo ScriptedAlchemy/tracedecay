@@ -323,6 +323,14 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
                     "summary": "Unsafe id should be rejected.",
                     "category": "workflow",
                     "body_markdown": "Unsafe body."
+                },
+                {
+                    "action": "draft",
+                    "id": "retired-draft-action",
+                    "title": "Retired draft action",
+                    "summary": "Draft is not a lifecycle state or compatibility alias.",
+                    "category": "workflow",
+                    "body_markdown": "This proposal must be repaired to an explicit create."
                 }
             ]
         }),
@@ -360,6 +368,16 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     assert_eq!(run.ledger_record.rejected_count, 0);
     assert_eq!(run.report["status"], json!("applied"));
     assert_eq!(run.report["validation_repairs"][0]["attempt"], json!(1));
+    assert!(
+        run.report["validation_repairs"][0]["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| {
+                error["id"] == json!("retired-draft-action")
+                    && error["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("unsupported skill proposal action"))
+            }))
+    );
     assert_eq!(
         run.report["activation_policy"],
         json!("validate_then_activate")
