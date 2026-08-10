@@ -246,37 +246,40 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     definition.name
                 ),
                 McpToolDispatchGroup::RetainedApplication => {
-                    let operation = RetainedSurfaceOperation::from_name(&definition.name)
-                        .unwrap_or_else(|| {
-                            panic!("{} has no retained-surface handler entry", definition.name)
-                        });
                     let composition = retained_mcp_composition().unwrap_or_else(|error| {
                         panic!("{} catalog composition failed: {error}", definition.name)
                     });
                     let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                    let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                    let capability = composition
-                        .snapshot()
-                        .resolve_binding(
-                            &profile,
-                            BindingSurface::Mcp,
-                            &operation_name,
-                            1,
-                            &BTreeSet::new(),
-                        )
-                        .unwrap_or_else(|| {
-                            panic!("{} catalog binding is not callable", definition.name)
-                        });
-                    let expected = retained_surface_application_operation(operation).unwrap();
-                    assert_eq!(capability.capability_id(), expected.capability_id());
-                    assert_eq!(capability.use_case_id(), expected.use_case_id());
-                    assert!(
-                        composition
-                            .bind_handler(capability.use_case_id(), &())
-                            .is_some(),
-                        "{} application handler is not registered",
-                        definition.name
-                    );
+                    for operation in retained_operations_for_advertised_tool(&definition.name) {
+                        let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+                        let capability = composition
+                            .snapshot()
+                            .resolve_binding(
+                                &profile,
+                                BindingSurface::Mcp,
+                                &operation_name,
+                                1,
+                                &BTreeSet::new(),
+                            )
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} action {} catalog binding is not callable",
+                                    definition.name,
+                                    operation.as_str()
+                                )
+                            });
+                        let expected = retained_surface_application_operation(operation).unwrap();
+                        assert_eq!(capability.capability_id(), expected.capability_id());
+                        assert_eq!(capability.use_case_id(), expected.use_case_id());
+                        assert!(
+                            composition
+                                .bind_handler(capability.use_case_id(), &())
+                                .is_some(),
+                            "{} action {} application handler is not registered",
+                            definition.name,
+                            operation.as_str()
+                        );
+                    }
                 }
                 group => {
                     assert_eq!(
@@ -323,6 +326,32 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
         );
+    }
+}
+
+fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfaceOperation> {
+    match tool_name {
+        "tracedecay_fact_store" => vec![
+            RetainedSurfaceOperation::FactStoreAdd,
+            RetainedSurfaceOperation::FactStoreSearch,
+            RetainedSurfaceOperation::FactStoreProbe,
+            RetainedSurfaceOperation::FactStoreRelated,
+            RetainedSurfaceOperation::FactStoreReason,
+            RetainedSurfaceOperation::FactStoreContradict,
+            RetainedSurfaceOperation::FactStoreGet,
+            RetainedSurfaceOperation::FactStoreUpdate,
+            RetainedSurfaceOperation::FactStoreRemove,
+            RetainedSurfaceOperation::FactStoreList,
+        ],
+        "tracedecay_session_refresh" => vec![
+            RetainedSurfaceOperation::SessionRefreshStatus,
+            RetainedSurfaceOperation::SessionRefreshCancel,
+            RetainedSurfaceOperation::SessionRefreshBegin,
+        ],
+        _ => vec![
+            RetainedSurfaceOperation::from_name(tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} has no retained-surface handler entry")),
+        ],
     }
 }
 
