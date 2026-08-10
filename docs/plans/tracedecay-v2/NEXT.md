@@ -83,6 +83,13 @@ the commit as attribution evidence.
   registered daemon task-to-provider-session journey hydrates sealed
   TaskSession evidence in `d3b7fb959`. Registered topology equality and the
   repaired admission/synthesis/topology regressions are in `2b3ae407d`.
+- The recovered TaskSession stack now compiles cleanly through
+  `tracedecay-rusqlite-runtime`, application, query, global-db, and usecases.
+  Focused TaskSession query coverage passed 5/5, the non-vacuous rank-final
+  revocation regression passed 1/1, and mounted provider-session hydration,
+  exact continuation, and registered Work invocation journeys passed 1/1
+  each. The graph-db warnings exposed by the query/global-db checks are
+  pre-existing cleanup work, not TaskSession failures.
 - `RetrieveEvidence` is exercised through MCP/HTTP parity and the typed SDK
   route in `bb7555b1a`. The dashboard now retains the daemon-resolved scope and
   rebinds Work graph reads, commands, and evidence to its exact repository in
@@ -161,8 +168,6 @@ the commit as attribution evidence.
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
   current/as-of/evolution/forensic retrieval.
-- After the SQLite fact repair compiles, run the global-db/usecases checks and
-  the rank-final revocation regression in addition to the focused query tests.
 
 ### Typed terminal problem propagation
 
