@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_application::RequestContext;
+use tracedecay_application::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::daemon_contract::DaemonInvocationProblem;
@@ -34,6 +34,31 @@ pub(super) fn start_workflow_run(
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, DaemonInvocationProblem> {
+    match services.effects().projection(&request.run_id) {
+        Ok(existing) => {
+            let admitted = existing
+                .history()
+                .first()
+                .ok_or(DaemonInvocationProblem::ResetRequired)?;
+            if admitted.command_id() != &request.command_id
+                || admitted.input_digest() != input_digest
+            {
+                return Err(DaemonInvocationProblem::InvalidRequest);
+            }
+            return reconcile_workflow_fan_out(
+                registered,
+                services,
+                context,
+                existing,
+                observed_at,
+                attempt_processes,
+                project_root,
+                observability_producer,
+            );
+        }
+        Err(tracedecay_application::WorkflowRunStorageError::NotFound) => {}
+        Err(error) => return Err(workflow_run_storage_problem(error)),
+    }
     let definition = services
         .definitions()
         .get(&request.definition_id, request.definition_version)

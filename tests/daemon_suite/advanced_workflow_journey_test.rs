@@ -8,18 +8,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 use tracedecay_application::configuration::{
     ConfigurationGetRequestV1, ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1,
 };
 use tracedecay_application::{
     AdmitWorkSynthesisCommand, PrepareWorkProductMutationRequestV1, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptListRequestV1,
+    TaskHandoffRedeemRequest, TaskHandoffScope, WorkAttemptStatusRequestV1,
     WorkEvidenceRetrieveRequestV1, WorkEvidenceSourceV1, WorkGraphReadRequestV1,
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
-    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkSynthesisAttemptV1,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest, WorkflowExecutionFence,
-    WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
     WorkflowRunStartRequest,
 };
@@ -30,31 +29,43 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, InitiativeId, ManifestDigest,
-    MilestoneId, ProjectId, ProposalId, ProviderId, RepositoryId, RunId, TaskId, TemporalModeV1,
-    ThreadId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1,
-    WorkCommandId, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFenceEpochV1, WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1,
-    WorkItemInputV1, WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId,
-    WorkPlanV1, WorkProposalDispositionV1, WorkProposalV1, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1,
-    WorkSandboxPolicy, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
-    WorkTerminalEvidenceV1, WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut,
-    WorkflowOperationRef, WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId,
-    WorktreeId, canonical_sha256,
+    MilestoneId, ObservationSourceIdentityV1, ProjectId, ProposalId, ProviderId, RefId,
+    RepositoryId, RunId, SessionId, TaskId, TemporalModeV1, ThreadId, UtcMicros,
+    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkCommandId,
+    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
+    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
+    WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
+    WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProposalDispositionV1, WorkProposalV1, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkSandboxPolicy,
+    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1, WorkVersion,
+    WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef,
+    WorkflowOutputName, WorkflowRunStatus, WorkflowStep, WorkflowStepId, WorktreeId,
+    canonical_sha256,
 };
-use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
+use tracedecay_sdk::client::{Client, ClientError};
 use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
-    ApplicationConfigurationSet, WorkAdmitExecution, WorkListAttempts, WorkMutateGraph,
-    WorkPrepareGraphMutation, WorkRetrieveEvidence, WorkSynthesize, WorkViews,
-    WorkflowActivateDefinition, WorkflowCancelRun, WorkflowGetRun, WorkflowHandoffIssue,
-    WorkflowHandoffRedeem, WorkflowRegisterDefinition, WorkflowStartRun,
+    ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPrepareGraphMutation,
+    WorkRetrieveEvidence, WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
+    WorkflowGetRun, WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition,
+    WorkflowStartRun,
 };
 
 use super::common;
 
+#[path = "advanced_workflow_journey/daemon_fixture.rs"]
+mod daemon_fixture;
+#[path = "advanced_workflow_journey/task_session.rs"]
+mod task_session;
+
+use daemon_fixture::{
+    sdk_client, spawn_project_daemon, wait_for_application_mount, wait_for_work_mount,
+    workflow_tempdir,
+};
+
 const DAEMON_ACTOR: &str = "actor.tracedecay-daemon.project-open";
+const PROVIDER_SESSION_ID: &str = "session.advanced-workflow-provider";
 
 fn id<T>(value: &str) -> T
 where
@@ -96,7 +107,14 @@ fn sha256(bytes: &[u8]) -> ManifestDigest {
 
 fn fan_out_input(identity: &str, graph_version: u64) -> WorkflowFanOutInput {
     let input_digest = sha256(identity.as_bytes());
-    let task_id = id::<TaskId>(&format!("task.advanced-workflow.{identity}"));
+    let task_identity = match identity {
+        "fast" => "task.advanced-workflow.01-fast",
+        "crash" => "task.advanced-workflow.02-crash",
+        "cancel" => "task.advanced-workflow.03-cancel",
+        "synthesis" => "task.advanced-workflow-synthesis",
+        other => panic!("unknown advanced workflow child {other}"),
+    };
+    let task_id = id::<TaskId>(task_identity);
     let initiative_id = id::<InitiativeId>(&format!("initiative.advanced-workflow.{identity}"));
     let plan_id = id::<WorkPlanId>(&format!("plan.advanced-workflow.{identity}"));
     let milestone_id = id::<MilestoneId>(&format!("milestone.advanced-workflow.{identity}"));
@@ -166,28 +184,6 @@ fn sha256_path(path: &Path) -> String {
     hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()))
 }
 
-fn read_daemon_authority(home: &Path) -> Value {
-    serde_json::from_slice(
-        &std::fs::read(common::daemon_authority_path(&home.join(".tracedecay")))
-            .expect("daemon authority record"),
-    )
-    .expect("daemon authority JSON")
-}
-
-fn sdk_client(home: &Path, project_id: &str) -> Client {
-    let authority = read_daemon_authority(home);
-    let endpoint = authority["http_application_endpoint"]
-        .as_str()
-        .expect("HTTP application endpoint");
-    let token = authority["auth_token"].as_str().expect("daemon token");
-    let base = format!("http://{endpoint}");
-    Client::builder(ConnectionMode::local(&base, project_id, token))
-        .origin(&base)
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("canonical SDK client")
-}
-
 fn wait_until<T>(label: &str, mut observe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -210,11 +206,12 @@ fn write_provider_fixture(
     use std::os::unix::fs::PermissionsExt;
 
     let script = format!(
-        "#!/bin/sh\ninput=$(/bin/cat)\ncase \"$input\" in\n  crash)\n    : > '{first_started}'\n    while [ -e '{first_hold}' ]; do /bin/sleep 1; done\n    ;;\n  cancel)\n    : > '{cancellation_started}'\n    while [ -e '{cancellation_hold}' ]; do /bin/sleep 1; done\n    ;;\n  *)\n    printf 'fan-out evidence: %s\\n' \"$input\"\n    ;;\nesac\n",
+        "#!/bin/sh\ninput=$(/bin/cat)\ncase \"$input\" in\n  crash)\n    : > '{first_started}'\n    while [ -e '{first_hold}' ]; do /bin/sleep 1; done\n    exit 1\n    ;;\n  cancel)\n    : > '{cancellation_started}'\n    while [ -e '{cancellation_hold}' ]; do /bin/sleep 1; done\n    ;;\n  *)\n    printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}'\n    printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}'\n    printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\n    ;;\nesac\n",
         first_started = first_started.display(),
         cancellation_started = cancellation_started.display(),
         first_hold = first_hold.display(),
         cancellation_hold = cancellation_hold.display(),
+        provider_session = PROVIDER_SESSION_ID,
     )
     .into_bytes();
     let path = root.join("workflow-provider");
@@ -236,11 +233,12 @@ fn write_provider_fixture(
     cancellation_hold: &Path,
 ) -> (PathBuf, Vec<u8>) {
     let script = format!(
-        "@echo off\r\nset \"input=\"\r\nset /p \"input=\"\r\nif /I \"%input%\"==\"crash\" goto crash\r\nif /I \"%input%\"==\"cancel\" goto cancel\r\necho fan-out evidence: %input%\r\nexit /b 0\r\n:crash\r\ntype nul > \"{first_started}\"\r\n:wait_first\r\nif exist \"{first_hold}\" (timeout /t 1 /nobreak >nul & goto wait_first)\r\nexit /b 0\r\n:cancel\r\ntype nul > \"{cancellation_started}\"\r\n:wait_cancel\r\nif exist \"{cancellation_hold}\" (timeout /t 1 /nobreak >nul & goto wait_cancel)\r\nexit /b 0\r\n",
+        "@echo off\r\nset \"input=\"\r\nset /p \"input=\"\r\nif /I \"%input%\"==\"crash\" goto crash\r\nif /I \"%input%\"==\"cancel\" goto cancel\r\necho {{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{provider_session}\"}}\r\necho {{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"fan-out evidence\"}}]}}}}\r\necho {{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}\r\nexit /b 0\r\n:crash\r\ntype nul > \"{first_started}\"\r\n:wait_first\r\nif exist \"{first_hold}\" (timeout /t 1 /nobreak >nul & goto wait_first)\r\nexit /b 1\r\n:cancel\r\ntype nul > \"{cancellation_started}\"\r\n:wait_cancel\r\nif exist \"{cancellation_hold}\" (timeout /t 1 /nobreak >nul & goto wait_cancel)\r\nexit /b 0\r\n",
         first_started = first_started.display(),
         cancellation_started = cancellation_started.display(),
         first_hold = first_hold.display(),
         cancellation_hold = cancellation_hold.display(),
+        provider_session = PROVIDER_SESSION_ID,
     )
     .into_bytes();
     let path = root.join("workflow-provider.cmd");
@@ -248,18 +246,67 @@ fn write_provider_fixture(
     (path.canonicalize().expect("canonical provider"), script)
 }
 
-fn listed_attempts(client: &Client) -> Vec<tracedecay_domain::WorkAttemptV1> {
-    match client
-        .execute::<WorkListAttempts>(&WorkAttemptListRequestV1 {
-            page_size: 100,
-            cursor: None,
-        })
-        .expect("mounted Work attempt list")
-        .result
-    {
-        tracedecay_application::WorkAttemptListV1::Listed { attempts, .. } => attempts,
-        tracedecay_application::WorkAttemptListV1::Absent => Vec::new(),
+fn attempt_status(
+    client: &Client,
+    identity: &WorkAttemptIdentityV1,
+) -> Option<tracedecay_domain::WorkAttemptV1> {
+    match client.execute::<WorkAttemptStatus>(&WorkAttemptStatusRequestV1 {
+        task_id: identity.task_id().clone(),
+        run_id: identity.run_id().clone(),
+        attempt_id: identity.attempt_id().clone(),
+    }) {
+        Ok(response) => Some(response.result),
+        Err(ClientError::Problem(problem)) if problem.kind == "not_found_or_not_authorized" => None,
+        Err(error) => panic!("mounted Work attempt status failed: {error}"),
     }
+}
+
+fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttemptIdentityV1) {
+    let directory = home.join(".claude/projects/advanced-workflow-provider");
+    std::fs::create_dir_all(&directory).expect("provider transcript directory");
+    let query = format!(
+        "{} {}:{} claude {}",
+        identity.task_id().as_str(),
+        identity.run_id().as_str(),
+        identity.attempt_id().as_str(),
+        PROVIDER_SESSION_ID,
+    );
+    let cwd = project.to_string_lossy();
+    let records = [
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": PROVIDER_SESSION_ID,
+            "uuid": "advanced-workflow-provider-user",
+            "timestamp": "2026-08-09T12:00:00.000Z",
+            "message": {"role": "user", "content": query},
+        }),
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": PROVIDER_SESSION_ID,
+            "uuid": "advanced-workflow-provider-assistant",
+            "timestamp": "2026-08-09T12:00:01.000Z",
+            "message": {
+                "id": "message.advanced-workflow-provider",
+                "role": "assistant",
+                "model": "fixture-model",
+                "content": [{"type": "text", "text": format!(
+                    "{query} completed through the typed SDK provider session"
+                )}],
+            },
+        }),
+    ];
+    let contents = records
+        .into_iter()
+        .map(|record| record.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        directory.join(format!("{PROVIDER_SESSION_ID}.jsonl")),
+        format!("{contents}\n"),
+    )
+    .expect("provider transcript");
 }
 
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
@@ -310,24 +357,24 @@ fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
     .expect("commit UTF-8")
     .trim()
     .to_owned();
-    run(
-        common::tracedecay_command_with_home(home)
-            .arg("init")
-            .current_dir(project),
-        "tracedecay init",
-    );
     (commit.clone(), id(&commit))
 }
 
 #[test]
 fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
-    let scratch = TempDir::new().expect("advanced workflow isolation");
+    let scratch = workflow_tempdir();
     let home = scratch.path().join("home");
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
     let project = project.canonicalize().expect("canonical project root");
 
-    let mut daemon = common::spawn_tracedecay_daemon(&home);
+    let mut daemon = spawn_project_daemon(&home, &project);
+    run(
+        common::tracedecay_command_with_home(&home)
+            .arg("init")
+            .current_dir(&project),
+        "tracedecay init",
+    );
     let context: Value = serde_json::from_slice(&run(
         common::tracedecay_command_with_home(&home)
             .args(["projects", "context"])
@@ -341,6 +388,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .as_str()
         .expect("registered project id"));
     let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
 
     let first_started = scratch.path().join("first-started");
     let cancellation_started = scratch.path().join("cancellation-started");
@@ -395,12 +444,10 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     daemon
         .kill_and_wait()
         .expect("restart after provider configuration");
-    daemon = common::spawn_tracedecay_daemon(&home);
+    daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let observed = client
-        .execute::<ApplicationConfigurationObservedState>(&ConfigurationObservedStateRequestV1 {})
-        .expect("restarted configuration observed state")
-        .result;
+    let observed = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
     let configuration_revision_id: ConfigurationRevisionId = observed
         .first()
         .expect("configuration component")
@@ -417,11 +464,19 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let repository_id: RepositoryId =
         id(&format!("repository.daemon.{}", sha256_path(&common_dir)));
     let worktree_id: WorktreeId = id(&format!("worktree.daemon.{}", sha256_path(&project)));
+    let product_selection =
+        WorkProductSelectionScopeV1::relations(BTreeSet::from([WorkRelationScopeV1::Repository {
+            project_id: project_id.clone(),
+            repository_id: repository_id.clone(),
+        }]))
+        .expect("repository Work selection");
+    let reference = tracedecay::branch::current_branch(&project)
+        .map(|branch| id::<RefId>(&format!("refs/heads/{branch}")));
     let scope = tracedecay_application::ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
         worktree_id.clone(),
-        None,
+        reference,
     )
     .expect("resolved project scope");
     let policy_digest = canonical_sha256(&(
@@ -494,65 +549,94 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     })
     .expect("execution snapshot");
     let run_id: RunId = id("run.advanced-production-journey");
-    client
-        .execute::<WorkflowStartRun>(&WorkflowRunStartRequest {
-            run_id: run_id.clone(),
-            definition_id: definition_id.clone(),
-            definition_version: 1,
-            provider: WorkflowProviderRegistration::new(
-                route,
-                WorkProviderBackendV1::ClaudeCodeCli,
-                "fixture-model".to_owned(),
-                1,
-            )
-            .expect("provider registration"),
-            fan_out: Some(WorkflowFanOutStartV1 {
-                fence: WorkflowExecutionFence {
-                    attempt_id: id::<AttemptId>("attempt.workflow-controller"),
-                    lease: WorkLeaseFenceV1::new(
-                        id::<WorkLeaseId>("lease.workflow-controller"),
-                        WorkFenceEpochV1::new(1).expect("controller fence"),
-                    )
-                    .expect("controller lease"),
-                },
-                max_parallel: 1,
-                failure_policy: WorkflowFailurePolicy::Collect,
-                execution_snapshot: execution_snapshot.clone(),
-                reference: None,
-                commit: commit.clone(),
-                effect_state: WorkEffectStateV1::Observational,
-                // Each fan-out product mutation advances the graph three
-                // times: create, accept its proposal, then admit execution.
-                // The proposal fence names the exact head before its child
-                // begins rather than relying on a fabricated workflow state.
-                inputs: vec![
-                    fan_out_input("fast", 1),
-                    fan_out_input("crash", 4),
-                    fan_out_input("cancel", 7),
-                ],
-            }),
-            command_id: id::<WorkCommandId>("command.workflow.start"),
-        })
-        .expect("mounted workflow fan-out start");
+    let start_request = WorkflowRunStartRequest {
+        run_id: run_id.clone(),
+        definition_id: definition_id.clone(),
+        definition_version: 1,
+        provider: WorkflowProviderRegistration::new(
+            route,
+            WorkProviderBackendV1::ClaudeCodeCli,
+            "fixture-model".to_owned(),
+            1,
+        )
+        .expect("provider registration"),
+        fan_out: Some(WorkflowFanOutStartV1 {
+            fence: WorkflowExecutionFence {
+                attempt_id: id::<AttemptId>("attempt.workflow-controller"),
+                lease: WorkLeaseFenceV1::new(
+                    id::<WorkLeaseId>("lease.workflow-controller"),
+                    WorkFenceEpochV1::new(1).expect("controller fence"),
+                )
+                .expect("controller lease"),
+            },
+            max_parallel: 1,
+            failure_policy: WorkflowFailurePolicy::Collect,
+            execution_snapshot: execution_snapshot.clone(),
+            reference: None,
+            commit: commit.clone(),
+            effect_state: WorkEffectStateV1::Observational,
+            // Each released child advances the graph four times: create,
+            // accept its proposal, admit execution, then link the accepted
+            // attempt before the next child is released.
+            // The proposal fence names the exact head before its child
+            // begins rather than relying on a fabricated workflow state.
+            inputs: vec![
+                fan_out_input("fast", 1),
+                fan_out_input("crash", 5),
+                fan_out_input("cancel", 9),
+            ],
+        }),
+        command_id: id::<WorkCommandId>("command.workflow.start"),
+    };
+    let started_run =
+        wait_until("idempotent mounted workflow fan-out start", || match client
+            .execute::<WorkflowStartRun>(&start_request)
+        {
+            Ok(response) => Some(response.result),
+            Err(ClientError::Problem(problem)) if problem.kind == "unavailable" => {
+                std::thread::sleep(Duration::from_millis(250));
+                None
+            }
+            Err(error) => panic!("mounted workflow fan-out start failed: {error}"),
+        });
+    let fan_out_identities = started_run
+        .fan_out_plans()
+        .values()
+        .flat_map(|plan| &plan.children)
+        .map(|child| child.attempt_identity.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(fan_out_identities.len(), 3, "three fan-out children");
 
-    wait_until(
-        "crash-bound provider generation and successful sibling",
-        || {
-            let attempts = listed_attempts(&client);
-            (first_started.exists()
-                && attempts
-                    .iter()
-                    .any(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded))
-            .then_some(())
-        },
-    );
+    let first_generation_deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let attempts = fan_out_identities
+            .iter()
+            .filter_map(|identity| attempt_status(&client, identity))
+            .collect::<Vec<_>>();
+        if first_started.exists()
+            && attempts
+                .iter()
+                .any(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < first_generation_deadline,
+            "timed out waiting for crash-bound provider generation and successful sibling: \
+             crash_started={}, attempts={attempts:?}",
+            first_started.exists()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     daemon
         .kill_and_wait()
         .expect("force daemon crash during fan-out");
     std::fs::remove_file(&first_hold).expect("release orphaned first-generation provider");
 
-    let mut restarted = common::spawn_tracedecay_daemon(&home);
+    let mut restarted = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
     wait_until("post-recovery cancellation child", || {
         cancellation_started.exists().then_some(())
     });
@@ -570,23 +654,34 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             command_id: id::<WorkCommandId>("command.workflow.cancel-after-restart"),
         })
         .expect("mounted workflow cancellation");
-    let sources: Vec<WorkAttemptIdentityV1> = wait_until("typed fan-out cancellation", || {
-        let attempts = listed_attempts(&client);
+    let cancellation_deadline = Instant::now() + Duration::from_secs(20);
+    let sources: Vec<WorkAttemptIdentityV1> = loop {
+        let attempts = fan_out_identities
+            .iter()
+            .filter_map(|identity| attempt_status(&client, identity))
+            .collect::<Vec<_>>();
         let success = attempts
             .iter()
-            .find(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)?;
+            .find(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded);
         let failed = attempts
             .iter()
-            .find(|attempt| attempt.state() == WorkAttemptStateV1::Failed)?;
+            .find(|attempt| attempt.state() == WorkAttemptStateV1::Failed);
         let cancelled = attempts
             .iter()
-            .find(|attempt| attempt.state() == WorkAttemptStateV1::Cancelled)?;
-        Some(vec![
-            success.identity().clone(),
-            failed.identity().clone(),
-            cancelled.identity().clone(),
-        ])
-    });
+            .find(|attempt| attempt.state() == WorkAttemptStateV1::Cancelled);
+        if let (Some(success), Some(failed), Some(cancelled)) = (success, failed, cancelled) {
+            break vec![
+                success.identity().clone(),
+                failed.identity().clone(),
+                cancelled.identity().clone(),
+            ];
+        }
+        assert!(
+            Instant::now() < cancellation_deadline,
+            "timed out waiting for typed fan-out cancellation: attempts={attempts:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     let cancelled_run = wait_until("cancelled workflow run", || {
         let projection = client
             .execute::<WorkflowGetRun>(&WorkflowRunGetRequest {
@@ -601,7 +696,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let synthesis_seed = fan_out_input("synthesis", 1);
     let prepared_synthesis_create = client
         .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
-            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            selection: product_selection.clone(),
             change: WorkProductChangeDraftV1::CreateTask {
                 initiative: synthesis_seed.initiative,
                 plan: synthesis_seed.plan,
@@ -626,7 +721,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     );
     let prepared_proposal_acceptance = client
         .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
-            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            selection: product_selection.clone(),
             change: WorkProductChangeDraftV1::DecideProposal {
                 proposal: synthesis_input.proposal,
                 disposition: WorkProposalDispositionV1::Accepted,
@@ -642,7 +737,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .result;
     let prepared_execution_admission = client
         .execute::<WorkPrepareGraphMutation>(&PrepareWorkProductMutationRequestV1 {
-            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            selection: product_selection.clone(),
             change: WorkProductChangeDraftV1::AdmitExecution {
                 task_id: synthesis_task.clone(),
             },
@@ -661,9 +756,15 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         "synthesis admission must use the exact graph version that accepted its proposal"
     );
     client
-        .execute::<WorkAdmitExecution>(&admission)
+        .execute::<WorkMutateGraph>(&WorkProductMutationRequestV1::AdmitExecution(admission))
         .expect("admit synthesis execution through the canonical product request");
     let synthesis_attempt_id: AttemptId = id("attempt.advanced-workflow-synthesis");
+    let synthesis_identity = WorkAttemptIdentityV1::new(
+        synthesis_task.clone(),
+        run_id.clone(),
+        synthesis_attempt_id.clone(),
+    )
+    .expect("synthesis attempt identity");
     let synthesis = client
         .execute::<WorkSynthesize>(&AdmitWorkSynthesisCommand {
             start: tracedecay_application::StartWorkAttemptCommand {
@@ -691,14 +792,20 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     assert_eq!(admission.uncited, sources[1..].to_vec());
     assert_eq!(admission.draft.cited_source_digests.len(), 1);
     let completed_synthesis = wait_until("synthesis provider completion", || {
-        listed_attempts(&client)
-            .into_iter()
-            .find(|attempt| attempt.identity().attempt_id() == &synthesis_attempt_id)
+        attempt_status(&client, &synthesis_identity)
             .filter(|attempt| attempt.state() == WorkAttemptStateV1::Succeeded)
     });
+    write_provider_transcript(&home, &project, completed_synthesis.identity());
+    run(
+        common::tracedecay_command_with_home(&home)
+            .args(["sessions", "import", "--project-path"])
+            .arg(&project)
+            .current_dir(&project),
+        "tracedecay sessions import",
+    );
     let graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
-            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            product_selection.clone(),
             now(),
         ))
         .expect("read synthesis product graph")
@@ -711,7 +818,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .clone();
     let sealed_receipt = client
         .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
-            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            selection: product_selection.clone(),
             task_id: synthesis_task.clone(),
             verified_version,
             temporal: TemporalModeV1::Current,
@@ -744,6 +851,17 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .as_ref()
         .expect("sealed synthesis receipt contains evidence");
     assert_eq!(
+        sealed_evidence.provider_session,
+        Some(
+            ObservationSourceIdentityV1::for_provider(
+                id::<ProviderId>("claude"),
+                id::<SessionId>(PROVIDER_SESSION_ID),
+            )
+            .expect("provider-qualified synthesis session"),
+        ),
+        "the CLI session-start frame must survive the typed SDK receipt",
+    );
+    assert_eq!(
         sealed_evidence
             .digest()
             .expect("sealed synthesis evidence digest"),
@@ -754,11 +872,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     restarted
         .kill_and_wait()
         .expect("physically restart daemon after accepted synthesis settlement");
-    let _restarted_evidence = common::spawn_tracedecay_daemon(&home);
+    let _restarted_evidence = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
     let restored_graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
-            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            product_selection.clone(),
             now(),
         ))
         .expect("read product graph after physical restart")
@@ -779,30 +899,13 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .contains(completed_synthesis.identity()),
         "the accepted-attempt relation must survive physical daemon restart"
     );
-    let restored_receipt = client
-        .execute::<WorkRetrieveEvidence>(&WorkEvidenceRetrieveRequestV1 {
-            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
-            task_id: synthesis_task.clone(),
-            verified_version: restored_entry.verified_version().clone(),
-            temporal: TemporalModeV1::Current,
-            page_size: 100,
-            expansion: None,
-            continuation: None,
-            observed_at: now(),
-        })
-        .expect("retrieve synthesis evidence after restart")
-        .result
-        .sources
-        .into_iter()
-        .find_map(|source| match source {
-            WorkEvidenceSourceV1::AttemptReceipt { receipt }
-                if receipt.identity == completed_synthesis.identity().clone() =>
-            {
-                Some(receipt)
-            }
-            _ => None,
-        })
-        .expect("restored synthesis accepted-attempt receipt");
+    let restored_receipt = task_session::assert_restored_provider_session_unavailable(
+        &client,
+        &product_selection,
+        &synthesis_task,
+        restored_entry.verified_version(),
+        completed_synthesis.identity(),
+    );
     assert_eq!(
         restored_receipt, sealed_receipt,
         "the accepted-attempt receipt must survive restart exactly"
@@ -861,7 +964,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .execute::<WorkflowHandoffRedeem>(&redeem)
         .expect_err("host handoff must be single-use");
     assert!(
-        matches!(replay, ClientError::Problem(problem) if problem.kind == "invalid_request"),
+        matches!(replay, ClientError::Problem(ref problem) if problem.kind == "invalid_request"),
         "handoff replay must be a typed refusal: {replay}"
     );
 }

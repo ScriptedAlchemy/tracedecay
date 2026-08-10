@@ -775,6 +775,13 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     );
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+    let settled = fixture.current_attempt();
+    assert_eq!(settled.artifacts().len(), 1);
+    assert_eq!(
+        settled.artifacts()[0].artifact_id().as_str(),
+        "artifact.provider.stdout"
+    );
+    assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
     let scheduled = std::time::Instant::now();
     let admitted = scheduled + std::time::Duration::from_micros(5);
     let started = scheduled + std::time::Duration::from_micros(10);

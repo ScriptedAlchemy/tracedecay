@@ -60,9 +60,9 @@ use tracedecay_application::{
     WorkProviderFallbackRecordV1,
 };
 use tracedecay_domain::{
-    ObservationSourceIdentityV1, WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference,
-    WorkFallbackTopology, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1,
-    WorktreeId,
+    ObservationSourceIdentityV1, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteV1, WorktreeId,
 };
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
@@ -685,7 +685,40 @@ async fn execute_provider_with_environment<S>(
     let provider_session = provider_session(resolved.protocol, captured_stdout.as_ref());
     let stdout = stream_summary(captured_stdout);
     let stderr = stream_summary(stderr_task.await.ok().flatten());
-    let outcome = overflow_outcome(outcome, &stdout, &stderr);
+    let mut outcome = overflow_outcome(outcome, &stdout, &stderr);
+    let artifacts = match stdout
+        .as_ref()
+        .filter(|summary| summary.byte_length > 0 && !summary.truncated)
+    {
+        None => Vec::new(),
+        Some(summary) => match WorkArtifactId::new("artifact.provider.stdout".to_owned()) {
+            Ok(artifact_id) => match WorkArtifactRefV1::new(
+                artifact_id,
+                summary.digest.clone(),
+                summary.byte_length,
+            ) {
+                Ok(artifact) => vec![artifact],
+                Err(error) => {
+                    tracing::warn!(
+                        task = identity.task_id().as_str(),
+                        ?error,
+                        "work attempt provider stdout artifact could not be sealed"
+                    );
+                    outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
+                    Vec::new()
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    task = identity.task_id().as_str(),
+                    ?error,
+                    "work attempt provider stdout identity could not be sealed"
+                );
+                outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
+                Vec::new()
+            }
+        },
+    };
     let terminal = std::time::Instant::now();
     let evidence = WorkAttemptEvidenceRecordV1 {
         identity: identity.clone(),
@@ -698,7 +731,7 @@ async fn execute_provider_with_environment<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
-    match attempts.settle(context, &identity, &evidence) {
+    match attempts.settle_with_artifacts(context, &identity, &evidence, artifacts) {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
             if let Some(observation) =

@@ -15,6 +15,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod advanced_workflow_journey_test;
 mod fixture_authority_test;
 #[cfg(feature = "test-transport")]
 mod git_watch_test;
