@@ -44,7 +44,7 @@ fn session_authority_roles_fail_closed_independently() {
 
 #[tokio::test]
 async fn terminal_review_operation_stops_when_its_receipt_is_superseded() {
-    let cancellation = crate::application::observation::ObservationCancellation::default();
+    let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
     cancellation.cancel();
 
     let output = super::terminal::await_terminal_operation(&cancellation, async {

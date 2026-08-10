@@ -21,13 +21,13 @@ use tracedecay_domain::{
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_tool_catalog::CapabilityId;
 
-use crate::application::ProjectSourceAccessSnapshot;
-use crate::application::configuration::ConfigurationControlStore;
 use crate::catalog_composition::build_application_catalog_snapshot;
 #[cfg(test)]
 use crate::db::engine::{TestConnection, TransactionBehavior};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 use super::{
     CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
@@ -388,7 +388,7 @@ impl DaemonGitInvocationOwner {
 
     pub(crate) fn current_read_authority(
         &self,
-        request: &crate::application::git_reads::GitReadRequestV1,
+        request: &tracedecay_usecases::git_reads::GitReadRequestV1,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let capability = CapabilityId::new(request.capability_id().to_owned())
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;

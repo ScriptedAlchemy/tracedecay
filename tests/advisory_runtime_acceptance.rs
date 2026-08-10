@@ -8,30 +8,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
-#[cfg(feature = "test-transport")]
-use tracedecay::application::advisory::ci_runtime::{
-    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
-    ProjectCiCodeAnchorStoreV1,
-};
-use tracedecay::application::advisory::github_runtime::{
-    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
-    ProjectGitHubAnchorAuthorityV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay::application::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
-    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay::application::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
-use tracedecay::application::advisory::{
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
-    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
-    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
-    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
-};
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::feedback::{
@@ -63,22 +39,35 @@ use tracedecay_domain::{
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::advisory::ci_runtime::{
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
+    ProjectCiCodeAnchorStoreV1,
+};
+use tracedecay_usecases::advisory::github_runtime::{
+    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
+    ProjectGitHubAnchorAuthorityV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::advisory::github_runtime::{
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
+use tracedecay_usecases::advisory::{
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
+    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
+    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
+    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+};
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
 
-#[cfg(feature = "test-transport")]
-use tracedecay::application::ProjectSourceAccessSnapshot;
-#[cfg(feature = "test-transport")]
-use tracedecay::application::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
-#[cfg(feature = "test-transport")]
-use tracedecay::application::advisory::proximity_runtime::{
-    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay::application::feedback::concrete::open_feedback_runtime;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
@@ -114,6 +103,17 @@ use tracedecay_domain::{
     ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, SessionId,
     SymbolOccurrenceId,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::advisory::proximity_runtime::{
+    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
 mod common;
 
@@ -315,7 +315,7 @@ impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
         &'a self,
         _context: &'a RequestContext,
         _request: &'a GitHubReviewReadRequestV1,
-    ) -> FeedbackPortFuture<'a, tracedecay::application::advisory::GitHubProviderLifecycleV1> {
+    ) -> FeedbackPortFuture<'a, tracedecay_usecases::advisory::GitHubProviderLifecycleV1> {
         Box::pin(async { panic!("denied GitHub request reached source access authority") })
     }
 }
@@ -828,7 +828,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
-        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = CiFailureLocalizationRequestV1 {
@@ -891,7 +891,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     graph.index_all().await.expect("canonical graph index");
     let graph = Arc::new(graph);
     let mut provider_record =
-        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
             .ci_provider_record;
     provider_record.workflow_run.head_sha = scope.head_commit_id.as_str().to_owned();
@@ -986,7 +986,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 #[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
-        tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = GitHubReviewReadRequestV1 {
@@ -1689,8 +1689,9 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // it re-verifies the recorded capture metadata, body digests, and
     // cross-response identity, so a drifted or hand-edited fixture fails here
     // rather than silently weakening the assertions.
-    let fixture = tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
-        .expect("checked-in composite provider capture");
+    let fixture =
+        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+            .expect("checked-in composite provider capture");
 
     // ---- Pillar 2: a localized CI failure, through the production store ----
     let mut provider_record = fixture.ci_provider_record.clone();

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{read_repository_identity_marker, write_repository_identity_marker};
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectId,
@@ -19,6 +19,7 @@ use tracedecay_sessions::runtime::cursor::{
 use tracedecay_sessions::runtime::source::{TranscriptIngestError, TranscriptSource};
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionProvider};
 use tracedecay_store::ObservationReplayRequest;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{vscode_storage_root, write_task};

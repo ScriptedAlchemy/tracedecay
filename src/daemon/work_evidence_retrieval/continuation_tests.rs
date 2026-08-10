@@ -22,7 +22,7 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
     let project_id = id::<ProjectId>("project.work-task-session-continuation");
     let repository_id = id::<RepositoryId>("repository.work-task-session-continuation");
     let worktree_id = id::<WorktreeId>("worktree.work-task-session-continuation");
-    let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
         profile.path(),
         &project,
         project_id.clone(),
@@ -30,7 +30,7 @@ async fn continuation_resumes_the_same_provider_session_without_repeating_eviden
     .await
     .expect("registered project session runtime");
     let database = runtime
-        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
         .expect("registered project session database");
     let session_id = id::<SessionId>("session.work-task-session-continuation");
     let task_id = id::<TaskId>("task.work-task-session-continuation");

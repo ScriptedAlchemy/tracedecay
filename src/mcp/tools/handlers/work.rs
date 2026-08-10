@@ -217,7 +217,7 @@ mod tests {
             &self,
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: UtcMicros,
-            _event: crate::application::feedback::observations::FeedbackSourceEventV1,
+            _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
         ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>>
         {
             Box::pin(async { Ok(()) })

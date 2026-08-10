@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
-use crate::application::memory::{MemoryApplication, MemoryApplicationError};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
@@ -14,6 +13,7 @@ use crate::memory::user::open_user_memory_db;
 use crate::store::DatabaseFactStore;
 use crate::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
+use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
@@ -137,8 +137,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::application::memory::MemoryOperationContext;
     use crate::memory::types::{AddFactRequest, MemoryCategory};
+    use tracedecay_usecases::memory::MemoryOperationContext;
 
     fn fact(content: &str) -> AddFactRequest {
         AddFactRequest {
@@ -178,7 +178,7 @@ mod tests {
         tempfile::TempDir,
         TraceDecay,
         TraceDecay,
-        std::sync::Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+        std::sync::Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let profile_root = tmp.path().join("profile");

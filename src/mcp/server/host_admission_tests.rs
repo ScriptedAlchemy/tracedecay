@@ -11,16 +11,17 @@ use super::writer_test_support::{
     WriterTestFixtureAuthority, init_indexed_repo, registered_context, registered_runtime,
 };
 use super::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
-use crate::application::host_admission::{
-    HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionScope,
-    HostAdmissionStatus, HostAdmissionTestRuntimeV1, SharedHostAdmissionBroker, SpoolBounds,
-};
 use crate::daemon::{DaemonHookEvent, HookAgent, HookRouteMetadata, HookTerminalReceipt};
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::{
+    HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionScope,
+    HostAdmissionStatus, SharedHostAdmissionBroker, SpoolBounds,
+};
 
 fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()

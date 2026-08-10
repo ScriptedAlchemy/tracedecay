@@ -1,7 +1,7 @@
-use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::errors::TraceDecayError;
 use serde_json::{Value, json};
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestError;
+use tracedecay_usecases::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 
 pub(super) fn map_transcript_ingest_error(
     error: &tracedecay_sessions::runtime::source::TranscriptIngestError,

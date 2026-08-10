@@ -10,8 +10,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 
-use crate::application::ProjectSourceAccessSnapshot;
-use crate::application::configuration::{ConfigurationControlStore, ProjectConfigurationRuntime};
+use tracedecay_usecases::ProjectSourceAccessSnapshot;
+use tracedecay_usecases::configuration::{ConfigurationControlStore, ProjectConfigurationRuntime};
 
 type CurrentAccessFuture<'a> = Pin<
     Box<dyn Future<Output = Result<ProjectSourceAccessSnapshot, ApplicationProblem>> + Send + 'a>,

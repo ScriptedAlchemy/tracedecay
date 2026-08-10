@@ -78,20 +78,6 @@ use tracedecay_tool_catalog::{
     IdentifierError, ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
 };
 
-use crate::application::feedback::observations::{
-    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
-};
-use crate::application::operation_stream::{
-    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
-    OperationRequestControls,
-};
-use crate::application::primitives::{
-    CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
-    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, PrimitiveRequest,
-    QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
-    StorageStatusPrimitiveRequest,
-};
 use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
@@ -102,6 +88,20 @@ use crate::daemon_client::{
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_usecases::feedback::observations::{
+    FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
+};
+use tracedecay_usecases::operation_stream::{
+    OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationRequestControls,
+};
+use tracedecay_usecases::primitives::{
+    CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
+    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, PrimitiveRequest,
+    QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
+    StorageStatusPrimitiveRequest,
+};
 
 mod configuration_wire;
 mod handoff;
@@ -3355,7 +3355,7 @@ pub async fn execute_application_surface(
             crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
                 operation,
-                crate::application::primitives::PrimitiveRequest::RecentTestResults(
+                tracedecay_usecases::primitives::PrimitiveRequest::RecentTestResults(
                     invocation.page,
                 ),
                 observed_at,

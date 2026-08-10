@@ -3,7 +3,7 @@
 //! The implementation lives in `tracedecay-semantic`. Only the two contracts
 //! that genuinely need the root binary stay here: user-data-directory
 //! discovery (owned by `crate::config`) and the Doctor/status projection
-//! (owned by `crate::application::semantic_runtime`). Re-exports stay
+//! (owned by `tracedecay_usecases::semantic_runtime`). Re-exports stay
 //! `pub(crate)` so extraction does not widen the root's public API.
 
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 pub(crate) use tracedecay_semantic::*;
 
-use crate::application::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
+use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1 as Runtime;
 
 /// Resolve the lifecycle store root under the user data directory.
 pub(crate) fn default_lifecycle_root() -> Option<PathBuf> {

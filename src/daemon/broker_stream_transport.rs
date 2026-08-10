@@ -64,14 +64,14 @@ impl BrokerStreamTransport {
     }
 
     pub(super) fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > crate::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
+        if line.len() > tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
             let prefix = line.as_bytes()[..line
                 .len()
-                .min(crate::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                .min(tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                 .to_vec();
-            return Err(crate::host_admission::wire_oversized_io_error_with_prefix(
-                prefix,
-            ));
+            return Err(
+                tracedecay_usecases::host_admission::wire_oversized_io_error_with_prefix(prefix),
+            );
         }
         self.replay.push_back(line);
         Ok(())
@@ -250,7 +250,7 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
         }
-        crate::host_admission::read_bounded_mcp_line(&mut self.reader).await
+        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut self.reader).await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -364,7 +364,9 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     self.peer_fully_closed_after_eof().await;
                     return None;
                 }
-                Err(error) if crate::host_admission::is_wire_oversized_io_error(&error) => {
+                Err(error)
+                    if tracedecay_usecases::host_admission::is_wire_oversized_io_error(&error) =>
+                {
                     let _ =
                         crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
                     return None;

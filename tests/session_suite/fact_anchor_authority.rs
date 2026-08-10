@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::db::{Database, DatabaseAuthority};
 #[cfg(feature = "test-transport")]
 use tracedecay::db::{
     DatabaseAuthorityRole, TestDatabaseRuntimeMode, enter_maintenance_database_scope,
 };
 use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::store::DatabaseFactStore;

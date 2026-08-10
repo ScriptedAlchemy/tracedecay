@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use tracedecay_sessions::admission::HostAdmission;
 use tracedecay_sessions::runtime::ingest::{IngestAdmissionBinding, SessionIngestAuthority};
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::global_db::RegisteredGlobalDb;
 use crate::store::{GlobalDbGitCorrelationStore, GlobalDbTranscriptStore, GlobalDbWorkflowStore};
+use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 
 /// Session-ingest authority over one registered database.
 ///

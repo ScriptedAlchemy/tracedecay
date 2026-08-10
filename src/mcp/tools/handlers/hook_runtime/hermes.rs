@@ -1,6 +1,3 @@
-use crate::application::host_admission::{
-    HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
-};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
@@ -10,6 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus;
+use tracedecay_usecases::host_admission::{
+    HostAdmissionOutcome, HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
+};
 
 use super::errors::map_host_admission_outcome;
 use super::required_str;

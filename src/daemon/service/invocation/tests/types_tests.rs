@@ -15,7 +15,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let _pin = crate::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
-    let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
         crate::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),

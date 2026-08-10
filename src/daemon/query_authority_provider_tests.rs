@@ -1,9 +1,4 @@
 use super::*;
-use crate::application::semantic_runtime::{
-    CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
-    SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
-    project_semantic_redundancy_revision,
-};
 use crate::config::retrieval::{
     PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1, RetrievalProfileAuditEventV1,
     RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
@@ -30,6 +25,11 @@ use tracedecay_domain::{
     SanitizerRevision, SingleRootScopeV1, TemporalModeV1, VectorWatermark, WorktreeId,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
+use tracedecay_usecases::semantic_runtime::{
+    CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
+    SemanticActivationRequestV1, SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
+    project_semantic_redundancy_revision,
+};
 
 fn id<T>(value: &str) -> T
 where

@@ -2,10 +2,8 @@
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::application::anchor_resolution::EvidenceAnchorReportResolver;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::application::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, ClaudeSourceCursorV1,
     FactOwnerV1, ObservationScopeV1, ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId,
@@ -15,6 +13,9 @@ use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationStoreError, ObservationWrite,
 };
+use tracedecay_usecases::anchor_resolution::EvidenceAnchorReportResolver;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_usecases::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 
 use super::{
     GENERATION, ProviderObservationFixture, anchor_with_aliases, cursor,

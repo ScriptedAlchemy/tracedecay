@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
 use crate::branch_meta;
 use crate::config::{
@@ -16,6 +15,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StoreLayout;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
+use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 

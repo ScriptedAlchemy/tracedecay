@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::application::operation_stream::OperationRequestControls;
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::errors::{Result, TraceDecayError};
+use tracedecay_usecases::operation_stream::OperationRequestControls;
 
 use super::*;
 
@@ -366,7 +366,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     after_sequence,
                 } => {
                     let operation_id =
-                        crate::application::operation_stream::OperationId::from_request(
+                        tracedecay_usecases::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
                     let observed_at = crate::daemon_client::invocation_now_micros();
@@ -455,7 +455,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                 }
                 tracedecay_application::ApplicationRequest::OperationCancel { operation_id } => {
                     let operation_id =
-                        crate::application::operation_stream::OperationId::from_request(
+                        tracedecay_usecases::operation_stream::OperationId::from_request(
                             operation_id.clone(),
                         );
                     let observed_at = crate::daemon_client::invocation_now_micros();
@@ -479,9 +479,9 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         .await
                         .map_err(map_operation_event_invocation_error)?
                     {
-                        crate::application::operation_stream::OperationCancelOutcome::Requested
-                        | crate::application::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
-                        crate::application::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
+                        tracedecay_usecases::operation_stream::OperationCancelOutcome::Requested
+                        | tracedecay_usecases::operation_stream::OperationCancelOutcome::AlreadyRequested => true,
+                        tracedecay_usecases::operation_stream::OperationCancelOutcome::AlreadyTerminal => false,
                     };
                     Ok(tracedecay_application::ApplicationResponse::Cancellation(
                         tracedecay_application::InvocationCancellation {
@@ -496,29 +496,29 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
 }
 
 fn map_operation_event_invocation_error(
-    error: crate::application::operation_stream::OperationEventError,
+    error: tracedecay_usecases::operation_stream::OperationEventError,
 ) -> tracedecay_application::InvocationError {
     match error {
-        crate::application::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
+        tracedecay_usecases::operation_stream::OperationEventError::NotFoundOrNotAuthorized => {
             tracedecay_application::InvocationError::Denied
         }
-        crate::application::operation_stream::OperationEventError::RequestNotAdmitted => {
+        tracedecay_usecases::operation_stream::OperationEventError::RequestNotAdmitted => {
             tracedecay_application::InvocationError::DeadlineExceeded
         }
-        crate::application::operation_stream::OperationEventError::InvalidFrontier
-        | crate::application::operation_stream::OperationEventError::FrontierExpired
-        | crate::application::operation_stream::OperationEventError::ResumeExpired => {
+        tracedecay_usecases::operation_stream::OperationEventError::InvalidFrontier
+        | tracedecay_usecases::operation_stream::OperationEventError::FrontierExpired
+        | tracedecay_usecases::operation_stream::OperationEventError::ResumeExpired => {
             tracedecay_application::InvocationError::Conflict
         }
-        crate::application::operation_stream::OperationEventError::InvalidConfiguration
-        | crate::application::operation_stream::OperationEventError::InvalidContext(_)
-        | crate::application::operation_stream::OperationEventError::AlreadyBound
-        | crate::application::operation_stream::OperationEventError::Saturated
-        | crate::application::operation_stream::OperationEventError::ResumeUnavailable
-        | crate::application::operation_stream::OperationEventError::InvalidProgress
-        | crate::application::operation_stream::OperationEventError::TerminalAlreadyPublished
-        | crate::application::operation_stream::OperationEventError::InvalidTerminal(_)
-        | crate::application::operation_stream::OperationEventError::InvalidTestRunEvent => {
+        tracedecay_usecases::operation_stream::OperationEventError::InvalidConfiguration
+        | tracedecay_usecases::operation_stream::OperationEventError::InvalidContext(_)
+        | tracedecay_usecases::operation_stream::OperationEventError::AlreadyBound
+        | tracedecay_usecases::operation_stream::OperationEventError::Saturated
+        | tracedecay_usecases::operation_stream::OperationEventError::ResumeUnavailable
+        | tracedecay_usecases::operation_stream::OperationEventError::InvalidProgress
+        | tracedecay_usecases::operation_stream::OperationEventError::TerminalAlreadyPublished
+        | tracedecay_usecases::operation_stream::OperationEventError::InvalidTerminal(_)
+        | tracedecay_usecases::operation_stream::OperationEventError::InvalidTestRunEvent => {
             tracedecay_application::InvocationError::Unavailable
         }
     }
@@ -597,7 +597,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
         &self,
         subject_digest: tracedecay_domain::ManifestDigest,
         observed_at: tracedecay_domain::UtcMicros,
-        event: crate::application::feedback::observations::FeedbackSourceEventV1,
+        event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
         Box::pin(async move {
             let request_id = crate::request_identity::mint_global_request_id(

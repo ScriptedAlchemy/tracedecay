@@ -250,7 +250,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     let project_id = id::<ProjectId>("project.work.evidence-journey");
     let repository_id = id::<RepositoryId>("repository.work.evidence-journey");
     let worktree_id = id::<WorktreeId>("worktree.work.evidence-journey");
-    let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
         profile.path(),
         &project,
         project_id.clone(),
@@ -258,7 +258,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     .await
     .expect("registered project runtime");
     let database = host
-        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
         .expect("registered project database");
     let session_id = id::<SessionId>("session.work.evidence-journey");
     let task_id = id::<TaskId>("task.work.evidence-journey");

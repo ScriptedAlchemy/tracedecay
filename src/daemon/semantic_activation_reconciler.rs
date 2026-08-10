@@ -4,10 +4,10 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::application::semantic_runtime::{
+use crate::semantic_code::SemanticLifecycleVerifiedReadyEventV1;
+use tracedecay_usecases::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
 };
-use crate::semantic_code::SemanticLifecycleVerifiedReadyEventV1;
 
 const REOBSERVATION_UNIT_DEADLINE: Duration = Duration::from_secs(15);
 const REOBSERVATION_INITIAL_BACKOFF: Duration = Duration::from_millis(50);

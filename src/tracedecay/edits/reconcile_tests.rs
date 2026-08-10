@@ -6,7 +6,7 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 
 use super::test_support::effect_unknown_fixture;
-use crate::application::edit::{
+use tracedecay_usecases::edit::{
     SourceEditEffectControlV1, execute_source_edit,
     reconcile_source_edit_effect_unknown_with_control,
 };

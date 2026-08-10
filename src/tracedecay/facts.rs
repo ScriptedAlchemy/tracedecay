@@ -1,6 +1,6 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
-use crate::application::memory::{MemoryApplication, MemoryOperationContext, UpdateFactOutcome};
+use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext, UpdateFactOutcome};
 // The shared resolvers live in `tracedecay_usecases::memory` (the crate that
 // owns `MemoryApplication`/`MemoryApplicationError`) rather than in
 // `tracedecay-runtime-core` — that crate is a *dependency* of
@@ -8,7 +8,6 @@ use crate::application::memory::{MemoryApplication, MemoryOperationContext, Upda
 // crate dependency. Both this module and
 // `tracedecay-dashboard-api::tracedecay::facts` delegate to the same
 // functions instead of keeping independent copies.
-pub(crate) use crate::application::memory::{memory_application_error, memory_application_for_db};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, FactRecord, FactSearchResult, FeedbackRequest, FeedbackResult,
@@ -16,6 +15,7 @@ use crate::memory::types::{
 };
 use crate::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
+pub(crate) use tracedecay_usecases::memory::{memory_application_error, memory_application_for_db};
 
 use super::TraceDecay;
 

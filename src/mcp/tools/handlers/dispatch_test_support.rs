@@ -202,12 +202,12 @@ impl SelectorRegistry {
 /// runtime's daemon session registry instead of constructing another runtime
 /// on the same profile.
 pub(super) async fn init_sibling_registered_fixture(
-    runtime: &crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
     project_root: &Path,
     project_id: &str,
 ) -> (
     TraceDecay,
-    Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
     let profile_root = crate::storage::default_profile_root().expect("sibling profile root");
     let project_id =

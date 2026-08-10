@@ -19,13 +19,13 @@ use tracedecay_graph_db::NeverCancelled;
 use tracedecay_semantic::projector::{PreparedVectorGenerationV1, ProjectedChunkVectorV1};
 
 use super::*;
-use crate::application::semantic_runtime::project_semantic_retained_vector_generations;
 use crate::retention::code_index_generations::{
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
 };
 use crate::store::vector_generations::{
     GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
 };
+use tracedecay_usecases::semantic_runtime::project_semantic_retained_vector_generations;
 
 fn id<T>(value: &str) -> T
 where
@@ -329,7 +329,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     assert!(first_source_file.is_file());
 
     let observations = resources.store_administration.store_telemetry_sampling();
-    let cancellation = crate::application::context::CancellationToken::new();
+    let cancellation = tracedecay_usecases::context::CancellationToken::new();
     assert!(
         !crate::daemon::maintenance::generation::run_project_generation_maintenance(
             graph.as_ref(),
@@ -408,7 +408,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let restarted_observations = restarted_resources
         .store_administration
         .store_telemetry_sampling();
-    let restarted_cancellation = crate::application::context::CancellationToken::new();
+    let restarted_cancellation = tracedecay_usecases::context::CancellationToken::new();
     let mut converged = false;
     for _ in 0..4 {
         converged = crate::daemon::maintenance::generation::run_project_generation_maintenance(
@@ -568,7 +568,7 @@ async fn run_generation_cadence(
         graph.as_ref(),
         &resources.invocation.code_index_schedulers,
         &resources.store_administration.store_telemetry_sampling(),
-        &crate::application::context::CancellationToken::new(),
+        &tracedecay_usecases::context::CancellationToken::new(),
         &crate::config::RetentionConfig::default(),
     )
     .await
@@ -764,7 +764,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
     let (newest_linked_code, newest_linked_vector) =
         wait_for_semantic_generation(&released, &linked, &newest_linked_code_id).await;
     assert!(
-        crate::application::semantic_runtime::project_semantic_retained_code_generation(
+        tracedecay_usecases::semantic_runtime::project_semantic_retained_code_generation(
             &linked,
             &newer_linked_code_id,
         )
@@ -818,7 +818,7 @@ async fn linked_worktree_scope_retention_crash_replay_and_pure_inventory_journey
         ));
     }
     assert!(
-        crate::application::semantic_runtime::project_semantic_retained_code_generation(
+        tracedecay_usecases::semantic_runtime::project_semantic_retained_code_generation(
             &linked,
             &newer_linked_code_id,
         )

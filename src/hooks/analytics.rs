@@ -6,12 +6,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::application::host_admission::{
+use crate::errors::TraceDecayError;
+use tracedecay_hooks::HookTransportDispositionV1;
+use tracedecay_usecases::host_admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
     HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };
-use crate::errors::TraceDecayError;
-use tracedecay_hooks::HookTransportDispositionV1;
 
 use super::tool_hints::{HintAgent, ToolHint};
 use super::{HookWorkspaceStatus, claude, prompt_like_text};

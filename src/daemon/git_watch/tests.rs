@@ -533,7 +533,7 @@ async fn currently_watch_limited(repo: &Path) -> bool {
     else {
         return false;
     };
-    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let daemon_cancellation = tracedecay_usecases::context::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
     matches!(
         install_watches(&mut probe, state, cancellation).await,

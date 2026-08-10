@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::project_registry::ReapEntryKind;
 use tracedecay::storage::{default_profile_project_id, repository_identity_path, resolve_layout};
 

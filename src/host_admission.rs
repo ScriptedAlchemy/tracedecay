@@ -5,7 +5,14 @@ use std::sync::{Arc, LazyLock};
 
 use tokio::sync::Mutex as AsyncMutex;
 
-pub use tracedecay_usecases::host_admission::*;
+use tracedecay_usecases::host_admission::{
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
+    HostAdmissionStatus,
+};
+#[cfg(test)]
+use tracedecay_usecases::host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker,
+};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};

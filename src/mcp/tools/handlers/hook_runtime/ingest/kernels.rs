@@ -14,14 +14,14 @@ use std::pin::Pin;
 use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
+use tracedecay_usecases::host_admission::HostAdmissionFacade;
+use tracedecay_usecases::observation::ObservationCancellation;
 
 use super::super::super::SessionAuthorities;
 use super::super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};

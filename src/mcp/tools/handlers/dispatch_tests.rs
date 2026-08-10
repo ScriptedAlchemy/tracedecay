@@ -59,7 +59,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecut
         &self,
         _subject_digest: tracedecay_domain::ManifestDigest,
         _observed_at: tracedecay_domain::UtcMicros,
-        _event: crate::application::feedback::observations::FeedbackSourceEventV1,
+        _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -538,7 +538,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     .await
     .unwrap();
     let database = runtime
-        .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+        .registered_database(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
         .unwrap();
     let cursor_path = dir.path().join("cursor.jsonl");
     let claude_path = dir.path().join("claude.jsonl");
@@ -592,7 +592,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         .unwrap();
     let options = || ToolCallRegistryOptions {
         registered_project_session_db: runtime.registered_database_arc(
-            crate::application::host_admission::HostAdmissionScope::Project,
+            tracedecay_usecases::host_admission::HostAdmissionScope::Project,
         ),
         ..Default::default()
     };

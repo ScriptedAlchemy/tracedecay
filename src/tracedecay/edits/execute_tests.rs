@@ -13,7 +13,7 @@ use super::test_support::{
     CancelBeforeEffectAuthorization, FixtureSourceEditAuthorization, fixture_authorization,
     fixture_graph, fixture_request, fixture_request_for_edit, fixture_symbol_code_graph, git,
 };
-use crate::application::edit::{
+use tracedecay_usecases::edit::{
     SourceEditEffectControlV1, execute_source_edit, execute_source_edit_rollback,
     execute_source_edit_with_control, preview_source_edit_expected_state,
 };

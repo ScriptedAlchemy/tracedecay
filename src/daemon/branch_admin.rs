@@ -301,7 +301,7 @@ struct ProfileHostAdmissionBootstrapContext {
     >,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
-            HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
+            HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
         >,
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
@@ -365,7 +365,7 @@ impl ProfileHostAdmissionBootstrapContext {
     async fn open_broker(
         &self,
         path: &Path,
-    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
             return Ok(broker);
         }
@@ -378,7 +378,7 @@ impl ProfileHostAdmissionBootstrapContext {
         drop(brokers);
         let open_path = path.to_path_buf();
         let (runtime, _) = tokio::task::spawn_blocking(move || {
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&open_path)
         })
         .await
         .map_err(|_| {
@@ -389,7 +389,7 @@ impl ProfileHostAdmissionBootstrapContext {
             )
         })??;
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         self.host_admission_brokers
             .lock()
             .await
@@ -421,7 +421,7 @@ pub(super) struct StoreAdministration {
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
-            HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
+            HashMap<PathBuf, tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
         >,
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
@@ -756,7 +756,7 @@ impl StoreAdministration {
     pub(super) async fn host_admission_broker(
         &self,
         database: &Arc<crate::global_db::RegisteredGlobalDb>,
-    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -776,7 +776,7 @@ impl StoreAdministration {
     async fn host_admission_broker_for_path(
         &self,
         database_path: &Path,
-    ) -> Result<crate::application::host_admission::SharedHostAdmissionBroker> {
+    ) -> Result<tracedecay_usecases::host_admission::SharedHostAdmissionBroker> {
         let path = authority::canonical_identity_path(database_path)?;
         if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
             self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
@@ -795,7 +795,7 @@ impl StoreAdministration {
                 drop(brokers);
                 let open_path = path.clone();
                 let (runtime, _) = tokio::task::spawn_blocking(move || {
-                    crate::application::host_admission::HostAdmissionRuntime::open_for_database(
+                    tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(
                         &open_path,
                     )
                 })
@@ -807,8 +807,9 @@ impl StoreAdministration {
                         "host-admission spool runtime task failed",
                     )
                 })??;
-                let broker =
-                    Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+                let broker = Arc::new(
+                    tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime),
+                );
                 self.host_admission_brokers
                     .lock()
                     .await
@@ -825,7 +826,7 @@ impl StoreAdministration {
     pub(super) async fn ensure_user_profile_host_admission_replay(
         &self,
         profile_root: &Path,
-        broker: &crate::application::host_admission::SharedHostAdmissionBroker,
+        broker: &tracedecay_usecases::host_admission::SharedHostAdmissionBroker,
         broker_path: &Path,
     ) {
         self.profile_host_admission_replay
@@ -893,7 +894,7 @@ impl StoreAdministration {
     async fn maybe_ensure_user_profile_host_admission_replay(
         &self,
         broker_path: &Path,
-        broker: &crate::application::host_admission::SharedHostAdmissionBroker,
+        broker: &tracedecay_usecases::host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
             == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);

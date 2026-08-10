@@ -253,8 +253,8 @@ pub(crate) async fn handle_runtime(
         .await
         .ok()
         .and_then(|pinned| {
-            crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
-                &crate::application::configuration::ConfigurationCurrentStateV1 {
+            tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1::from_current(
+                &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
                     revision_id: pinned.revision_id,
                     snapshot: pinned.snapshot,
                 },
@@ -262,7 +262,7 @@ pub(crate) async fn handle_runtime(
             .ok()
         });
     if let Some(semantic) =
-        crate::application::semantic_runtime::project_semantic_application_status(
+        tracedecay_usecases::semantic_runtime::project_semantic_application_status(
             cg.project_root(),
             semantic_configuration,
         )

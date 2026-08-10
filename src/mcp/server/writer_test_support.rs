@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use crate::application::host_admission::HostAdmissionTestRuntimeV1;
 use crate::config::PinnedUserDataDir;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::TraceDecay;
 

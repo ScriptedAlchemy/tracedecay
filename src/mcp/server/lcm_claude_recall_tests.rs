@@ -15,11 +15,12 @@ use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 
 use super::McpServer;
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::transport::JsonRpcRequest;
 use crate::tracedecay::TraceDecayOpenOptions;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_usecases::observation::ObservationCancellation;
 
 const PROJECT_ID: &str = "project.claude-recall";
 const SESSION: &str = "claude-recall-session";

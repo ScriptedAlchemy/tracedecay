@@ -943,7 +943,7 @@ fn feedback_observation_invocation_accepts_only_content_free_events() {
         subject,
         UtcMicros(1),
         FeedbackSourceEventV1::SseLifecycle {
-            lifecycle: crate::application::feedback::observations::FeedbackSseLifecycleV1::Gap,
+            lifecycle: tracedecay_usecases::feedback::observations::FeedbackSseLifecycleV1::Gap,
             sequence: Some(1),
             item_count: 0,
             duration_micros: None,

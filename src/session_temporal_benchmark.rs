@@ -31,7 +31,6 @@ use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_runtime_core::storage::{
@@ -49,6 +48,7 @@ use tracedecay_usecases::context::{
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
+use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_usecases::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRequestBinding,

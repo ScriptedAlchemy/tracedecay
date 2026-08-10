@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::lcm::compression_decision::{
     AssemblyCapInput, CompressionPlanInput, OverflowRecoveryCapInput, PreflightDecisionInput,
     compression_plan, effective_assembly_token_cap, overflow_recovery_assembly_cap,
@@ -15,6 +15,7 @@ use tracedecay_sessions::runtime::lcm::{
     LcmSummaryNodeDraft, MAX_DERIVED_SNIPPET_CHARS,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{self, LcmTestRuntime, open_lcm_db};
 

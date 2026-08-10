@@ -522,9 +522,9 @@ impl SessionSyncProjectContext {
         journal_key: &str,
         admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
-        shutdown: &crate::application::observation::ObservationCancellation,
+        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
     ) -> SessionSyncWorkResult {
-        let cancellation = crate::application::observation::ObservationCancellation::default();
+        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
         let pass_cancellation = cancellation.clone();
         let pass = async {
             let project_authority =
@@ -718,7 +718,7 @@ impl SessionSyncProjectContext {
     async fn publish_git_topology(
         &self,
         request: &SessionSyncRequestV1,
-        shutdown: &crate::application::observation::ObservationCancellation,
+        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
     ) -> Result<(), super::git_topology::GitTopologySyncFailure> {
         let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
             &self.project_root,
@@ -772,7 +772,7 @@ impl SessionSyncProjectContext {
         &self,
         request: &SessionSyncRequestV1,
         options: SessionGitSyncV1,
-        shutdown: &crate::application::observation::ObservationCancellation,
+        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
     ) -> SessionSyncWorkResult {
         if shutdown.is_cancelled() {
             return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Shutdown);
@@ -783,7 +783,7 @@ impl SessionSyncProjectContext {
         if request.deadline().is_elapsed_at(now_micros()) {
             return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::TimedOut);
         }
-        let cancellation = crate::application::observation::ObservationCancellation::default();
+        let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
         let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,

@@ -9,7 +9,7 @@ pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
 pub(crate) use tracedecay::errors::TraceDecayError;
-pub(crate) use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+pub(crate) use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 pub(crate) use tracedecay_agent_hosts::automation::automatic_facts::{
@@ -40,6 +40,7 @@ pub(crate) use tracedecay_agent_hosts::automation::runner::{
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

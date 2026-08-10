@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, MessageOccurrenceRecordV1, RetrievalGrainV1, SessionId,
     TemporalModeV1,
@@ -14,6 +14,7 @@ use tracedecay_store::{
     SessionTemporalSnapshotRequestV1,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::temporal_projection::{
     assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,

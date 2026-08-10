@@ -19,8 +19,8 @@ use tracedecay_lsp::{
     SemanticProviderPort, UnavailableSemanticProvider,
 };
 
-use crate::application::lsp_runtime::DaemonSemanticProviderAdapter;
 use crate::errors::{Result, TraceDecayError};
+use tracedecay_usecases::lsp_runtime::DaemonSemanticProviderAdapter;
 
 #[derive(Clone)]
 pub struct ProductionSemanticAuthorities {

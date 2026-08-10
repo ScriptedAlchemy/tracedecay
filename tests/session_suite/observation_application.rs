@@ -1,12 +1,6 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::application::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
-    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    GetObservationRequest, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation, ReplayObservationsRequest,
-};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::privacy::{
     ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
     PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
@@ -25,6 +19,13 @@ use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdva
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
+};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_usecases::observation::{
+    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
+    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
+    GetObservationRequest, ObservationApplication, ObservationApplicationError,
+    ObservationCancellation, ReplayObservationsRequest,
 };
 
 const GENERATION: u64 = 17;

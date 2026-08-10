@@ -6,11 +6,11 @@ use std::path::Path;
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
-use crate::application::memory::{MemoryApplication, MemoryApplicationError};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
+use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::super::ToolResult;
 use super::json_result;
@@ -523,7 +523,7 @@ mod tests {
         let db = cg.open_project_store_db().await.unwrap();
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
-        let request = crate::application::memory::automatic_fact_add_command(
+        let request = tracedecay_usecases::memory::automatic_fact_add_command(
             owner,
             AddFactRequest {
                 content: content.to_owned(),

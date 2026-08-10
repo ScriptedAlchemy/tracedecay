@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::storage::resolve_response_handle_root;
@@ -252,7 +252,7 @@ pub(crate) async fn settled_ledger_total(
     expected_calls: u64,
 ) -> tracedecay::global_db::SavingsTotal {
     server.ledger_writes_settled().await;
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
         global_db_path
             .parent()
             .expect("global db has a profile root"),
@@ -365,7 +365,7 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
         global_db_path
             .parent()
             .expect("global db has a profile root"),

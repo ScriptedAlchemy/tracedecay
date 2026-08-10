@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
-use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
@@ -26,6 +25,7 @@ use tracedecay_usecases::config::{
     open_runtime_configuration_for_registered_database,
     open_runtime_configuration_for_registered_database_read_only,
 };
+use tracedecay_usecases::configuration::ProjectConfigurationRuntime;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
@@ -57,12 +57,7 @@ static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
 /// fresh mounts.
 #[cfg(any(test, feature = "test-transport"))]
 static STANDALONE_TEST_RUNTIMES: LazyLock<
-    AsyncMutex<
-        WeakRegistry<
-            (PathBuf, PathBuf),
-            crate::application::host_admission::HostAdmissionTestRuntimeV1,
-        >,
-    >,
+    AsyncMutex<WeakRegistry<(PathBuf, PathBuf), crate::host_admission::HostAdmissionTestRuntimeV1>>,
 > = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
 impl TraceDecay {
@@ -107,7 +102,7 @@ impl TraceDecay {
     async fn standalone_test_runtime(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
-    ) -> Result<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
+    ) -> Result<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
         let profile_root = open_options.resolved_profile_root()?;
         if !crate::db::is_isolated_test_path(project_root)
             || !crate::db::is_isolated_test_path(&profile_root)
@@ -131,7 +126,7 @@ impl TraceDecay {
             return Ok(runtime);
         }
         let runtime = Arc::new(
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -267,10 +262,7 @@ impl TraceDecay {
     pub(crate) async fn init_test_fixture_with_registered_runtime(
         project_root: &Path,
         project_id: &str,
-    ) -> Result<(
-        Self,
-        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
-    )> {
+    ) -> Result<(Self, Arc<crate::host_admission::HostAdmissionTestRuntimeV1>)> {
         let profile_root = crate::storage::default_profile_root()?;
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
             TraceDecayError::Config {
@@ -278,7 +270,7 @@ impl TraceDecay {
             }
         })?;
         let runtime = Arc::new(
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::host_admission::HostAdmissionTestRuntimeV1::project(
                 &profile_root,
                 project_root,
                 project_id,

@@ -21,9 +21,6 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use crate::application::operation_stream::{
-    OperationEmitter, OperationEventError, operation_event_authority,
-};
 use crate::diagnose::{Severity, parse_cargo_output};
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::DiagnosticsQuery;
@@ -32,6 +29,9 @@ use crate::errors::{Result, TraceDecayError};
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, is_test_file};
+use tracedecay_usecases::operation_stream::{
+    OperationEmitter, OperationEventError, operation_event_authority,
+};
 
 use super::super::ToolResult;
 use super::super::render;

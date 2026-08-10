@@ -554,5 +554,5 @@ pub(super) fn session_refresh_retry_delay(
         SessionTemporalRefreshRetryClass::Projector => 16,
         SessionTemporalRefreshRetryClass::Deadline => 6,
     };
-    crate::application::host_admission::replay_backoff(attempt, shift_cap)
+    tracedecay_usecases::host_admission::replay_backoff(attempt, shift_cap)
 }

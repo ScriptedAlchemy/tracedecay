@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowEvidenceKindV1,
@@ -19,6 +19,7 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::global_message;
 

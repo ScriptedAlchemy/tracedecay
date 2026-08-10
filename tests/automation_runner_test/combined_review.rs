@@ -102,7 +102,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     }
 
     // Empty combined effects leave no automatic fact receipts behind.
-    let memory = tracedecay::application::memory::MemoryApplication::new(
+    let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
@@ -161,7 +161,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
         run.skill_writer.ledger_record.status,
         AutomationRunStatus::Succeeded
     );
-    let memory = tracedecay::application::memory::MemoryApplication::new(
+    let memory = tracedecay_usecases::memory::MemoryApplication::new(
         project_memory_owner(&cg),
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )

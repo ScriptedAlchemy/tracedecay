@@ -1,5 +1,5 @@
 use tempfile::tempdir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
@@ -14,6 +14,7 @@ use tracedecay_agent_hosts::automation::scheduler::{
     schedule_decision, scheduler_control_path,
 };
 use tracedecay_domain::ProjectId;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
 

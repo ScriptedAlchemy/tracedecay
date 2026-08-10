@@ -11,11 +11,6 @@ use tokio_util::sync::CancellationToken;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::CodeGenerationId;
 
-use crate::application::semantic_runtime::{
-    SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
-    SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
-    SemanticEvaluationPublicationSnapshotV1, SemanticRuntimeFuture,
-};
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::search_eval::semantic_native::{
     SemanticNativePendingReasonV1, SemanticNativeResourceProvenanceV1,
@@ -25,6 +20,11 @@ use crate::search_eval::{
     CandidateOutputError, ProductionCandidateNativeExecutionAuthorityV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
     ProductionCandidateNativeResourceContextV1, evaluate_default_activation_candidate,
+};
+use tracedecay_usecases::semantic_runtime::{
+    SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
+    SemanticEvaluationProfileCandidateV1, SemanticEvaluationPublicationSnapshotPortV1,
+    SemanticEvaluationPublicationSnapshotV1, SemanticRuntimeFuture,
 };
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -359,7 +359,7 @@ pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
         Mutex<
             BTreeMap<
                 CodeGenerationId,
-                Arc<crate::application::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
+                Arc<tracedecay_usecases::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
             >,
         >,
     >,
@@ -418,7 +418,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
         })?;
         if !prepared.contains_key(context.code_generation) {
             let runtime =
-                crate::application::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -486,7 +486,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             })?;
             if !prepared.contains_key(context.code_generation) {
                 let runtime =
-                    crate::application::semantic_runtime::project_semantic_production_runtime(
+                    tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                         &self.project_root,
                     )
                     .ok_or_else(|| {
@@ -527,7 +527,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
             })?;
             let runtime =
-                crate::application::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -668,7 +668,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
             ) = match self.candidate.compatibility.semantic.as_ref() {
                 Some(required) => {
                     let runtime =
-                        crate::application::semantic_runtime::project_semantic_production_runtime(
+                        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                             &self.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
@@ -774,7 +774,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 expected.vector_generation_id.as_ref(),
             ) {
                 (Some(_), Some(revision), Some(generation)) => Some((
-                    crate::application::semantic_runtime::project_semantic_production_runtime(
+                    tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                         &self.project_root,
                     )
                     .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?,

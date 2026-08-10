@@ -14,7 +14,6 @@ pub(crate) use crate::common::{
 pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
-pub(crate) use tracedecay::application::host_admission::HostAdmissionScope;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
 pub(crate) use tracedecay::memory::types::{
@@ -25,6 +24,7 @@ pub(crate) use tracedecay::tracedecay::TraceDecay;
 pub(crate) use tracedecay_domain::ProjectId;
 pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) struct MessageDetails<'a> {
     pub(crate) timestamp: i64,
@@ -268,12 +268,12 @@ pub(crate) async fn record_dashboard_automatic_fact(
     run_id: &str,
     content: &str,
 ) -> DashboardAutomaticFactReceipt {
-    use tracedecay::application::memory::MemoryApplication;
     use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
     use tracedecay_agent_hosts::automation::automatic_facts::{
         AutomaticFactState, record_session_automatic_facts,
     };
+    use tracedecay_usecases::memory::MemoryApplication;
 
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db()))
@@ -321,13 +321,13 @@ pub(crate) async fn delete_dashboard_automatic_fact(
     cg: &TraceDecay,
     receipt: &DashboardAutomaticFactReceipt,
 ) {
-    use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
     use tracedecay::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactId;
     use tracedecay_store::{
         ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
         ProjectMemoryFactTargetV1,
     };
+    use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
 
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))

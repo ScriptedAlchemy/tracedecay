@@ -38,7 +38,7 @@
 //! The daemon may compose one or two authorities without exposing either
 //! handle to this policy. The production caller is the daemon transcript
 //! ingest: every project-scope `ingest_transcript` ends with a best-effort
-//! settlement pass (`application::hint_outcomes::settle_project_hint_outcomes`)
+//! settlement pass (`hint_outcomes::settle_project_hint_outcomes`)
 //! because freshly ingested activity is exactly what resolves open hints.
 
 use std::collections::HashSet;

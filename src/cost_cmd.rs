@@ -1,8 +1,6 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracedecay::application::provider_usage::{
-    ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
-};
+use tracedecay_usecases::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
 
 pub(crate) async fn handle_cost(
     range: String,

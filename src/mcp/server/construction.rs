@@ -38,7 +38,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker:
-        Option<crate::application::host_admission::SharedHostAdmissionBroker>,
+        Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     pub(crate) user_session_refresh_wake:
@@ -79,7 +79,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
-        Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+        Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 pub(crate) struct McpServerWriters {
@@ -100,7 +100,7 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker:
-        Option<crate::application::host_admission::SharedHostAdmissionBroker>,
+        Option<tracedecay_usecases::host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:

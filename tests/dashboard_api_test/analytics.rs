@@ -12,7 +12,6 @@ use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
@@ -21,6 +20,7 @@ use tracedecay_domain::{
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 struct Fixture {
     _tmp: TempDir,

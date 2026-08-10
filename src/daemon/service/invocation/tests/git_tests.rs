@@ -25,7 +25,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
     )
     .expect("scope");
-    let request = crate::application::git_reads::GitReadRequestV1::Status;
+    let request = tracedecay_usecases::git_reads::GitReadRequestV1::Status;
     let capability =
         tracedecay_tool_catalog::CapabilityId::new(request.capability_id()).expect("capability");
     let digest =
@@ -42,7 +42,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         privacy_digest: digest(),
         evaluated_at: UtcMicros(1),
     };
-    let result = crate::application::git_reads::GitReadResultV1::Status(
+    let result = tracedecay_usecases::git_reads::GitReadResultV1::Status(
         crate::git_query::GitQueryEnvelopeV1 {
             value: crate::git_query::GitStatusSummaryV1 {
                 repository: scope.repository_id.clone(),
@@ -91,7 +91,7 @@ fn git_read_packet_binds_catalog_authority_and_native_coverage() {
         "request.git-read-packet-partial",
         &request,
         &authority,
-        crate::application::git_reads::GitReadResultV1::Status(
+        tracedecay_usecases::git_reads::GitReadResultV1::Status(
             crate::git_query::GitQueryEnvelopeV1 {
                 value: crate::git_query::GitStatusSummaryV1 {
                     repository: scope.repository_id,

@@ -20,9 +20,9 @@ pub(super) enum ProjectVectorRetentionFailure {
 
 impl ProjectVectorRetentionFailure {
     pub(super) fn from_configuration(
-        error: crate::application::semantic_runtime::SemanticConfigurationBackendErrorV1,
+        error: tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1,
     ) -> Self {
-        use crate::application::semantic_runtime::SemanticConfigurationBackendErrorV1;
+        use tracedecay_usecases::semantic_runtime::SemanticConfigurationBackendErrorV1;
         match error {
             SemanticConfigurationBackendErrorV1::Conflict => Self::ResetRequired(
                 "semantic configuration inventory changed during retention".to_owned(),
@@ -112,12 +112,12 @@ impl From<crate::store::vector_generations::VectorGenerationStoreErrorV1>
 }
 
 pub(super) async fn complete_configuration_inventory(
-    configuration: &crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
 ) -> Result<
-    crate::application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+    tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
     ProjectVectorRetentionFailure,
 > {
-    use crate::application::semantic_runtime::{
+    use tracedecay_usecases::semantic_runtime::{
         MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
         SemanticConfigurationInventoryPageRequestV1,
     };
@@ -149,19 +149,19 @@ pub(super) async fn complete_configuration_inventory(
 }
 
 pub(super) async fn validate_configured_vector_roots(
-    configuration: &crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     store: &GraphVectorGenerationStoreV1,
     retained: &RetainedSemanticVectorGraphV1,
     stage_revision: tracedecay_store::SemanticVectorStageCensusRevision,
-    inventory: crate::application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+    inventory: tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
 ) -> Result<
     (
-        crate::application::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
+        tracedecay_usecases::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
         BTreeSet<CodeGenerationId>,
     ),
     ProjectVectorRetentionFailure,
 > {
-    use crate::application::semantic_runtime::{
+    use tracedecay_usecases::semantic_runtime::{
         MAX_SEMANTIC_CONFIGURATION_INVENTORY_SCOPES_PER_PAGE,
         SemanticConfiguredVectorRootPageRequestV1,
     };

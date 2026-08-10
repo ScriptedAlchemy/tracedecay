@@ -41,7 +41,7 @@ pub(super) fn identity_discovery_disposition(
 
 pub(super) async fn resolve_watch_identity(
     project_root: PathBuf,
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_usecases::context::CancellationToken,
 ) -> WatchIdentityResolution {
     let Some(deadline) = Instant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
         return WatchIdentityResolution::Unknown;

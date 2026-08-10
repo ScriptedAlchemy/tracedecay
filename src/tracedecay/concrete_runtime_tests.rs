@@ -25,7 +25,7 @@ use tracedecay_usecases::graph::{
 };
 
 use super::{TraceDecay, TraceDecayOpenOptions};
-use crate::application::primitives::SourceReadAdapter;
+use tracedecay_usecases::primitives::SourceReadAdapter;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 

@@ -34,11 +34,11 @@ use tracedecay_usecases::graph::{
     VerifiedCodeGraphRead,
 };
 
-use crate::application::edit::{
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_usecases::edit::{
     SourceEditApplicationResult, SourceEditOutcome, execute_source_edit,
     preview_source_edit_expected_state,
 };
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub(super) const SHA256_A: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

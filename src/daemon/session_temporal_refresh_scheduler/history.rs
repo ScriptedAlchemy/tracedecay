@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::application::observation::ObservationCancellation;
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::global_db::RegisteredGlobalDb;
+use tracedecay_usecases::observation::ObservationCancellation;
 
 pub(in crate::daemon) type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
@@ -194,10 +194,10 @@ fn classify_transcript_ingest_outcome(
 #[cfg(test)]
 mod tests {
     use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
-    use crate::application::observation::ObservationCancellation;
     use tracedecay_sessions::runtime::{
         IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
     };
+    use tracedecay_usecases::observation::ObservationCancellation;
 
     fn ingest_outcome_with_failure(
         reason_code: &'static str,

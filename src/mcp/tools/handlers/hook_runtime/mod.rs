@@ -1,4 +1,3 @@
-use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
@@ -8,6 +7,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use tracedecay_agent_hosts::automation::config_error;
+use tracedecay_usecases::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
 
 use super::SessionAuthorities;
 use super::support::tool_json;
@@ -126,9 +126,9 @@ async fn opencode_lsp_updated(
         .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
     tracedecay_hooks::decode_opencode_lsp_event(&payload)
         .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
-    crate::application::event_lane::publish(
+    tracedecay_usecases::event_lane::publish(
         project_sessions,
-        crate::application::event_lane::ActivityFamilyV1::Hook,
+        tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
         cg.project_root(),
         None,
         1,

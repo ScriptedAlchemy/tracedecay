@@ -10,7 +10,7 @@
 //! the already-authorized registry context, into the transport-neutral
 //! `tracedecay_application::ResolvedScope`. The resolution itself is the
 //! single consolidated canonical path
-//! (`crate::application::context::RegisteredScopeResolver`); this module
+//! (`tracedecay_usecases::context::RegisteredScopeResolver`); this module
 //! only adapts the registry context into that path and preserves the MCP
 //! error taxonomy. Every failure state stays explicit: a CWD-relative root, a
 //! non-canonical registry identity, an unauthorized sibling root, or an
@@ -20,9 +20,9 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::application::context::ApplicationScopeError;
 use crate::global_db::ProjectRegistryContext;
 use crate::mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
+use tracedecay_usecases::context::ApplicationScopeError;
 
 /// The explicit failure states when a query-facing MCP entry point resolves
 /// its exact application scope. Every variant fails closed: no path, CWD, or
@@ -147,7 +147,7 @@ pub(crate) fn resolve_query_scope(
                 project_id: owner.project.project_id.clone(),
             }
         })?;
-    let resolved = crate::application::context::RegisteredScopeResolver::resolve(
+    let resolved = tracedecay_usecases::context::RegisteredScopeResolver::resolve(
         Path::new(&owner.project.canonical_root),
         requested_root,
         &project_id,

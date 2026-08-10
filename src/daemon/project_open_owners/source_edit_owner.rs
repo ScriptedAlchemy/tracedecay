@@ -7,9 +7,9 @@ use tracedecay_application::{
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 
 use super::{POLICY_REVISION_V1, ProjectOpenSourceEditAuthorizationV1};
-use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
+use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 pub(super) fn source_edit_request_context(
     access: &ProjectSourceAccessSnapshot,
@@ -78,7 +78,7 @@ pub(super) fn source_edit_authority_error() -> TraceDecayError {
 }
 
 pub(super) fn source_edit_surface_result(
-    result: crate::application::edit::SourceEditApplicationResult,
+    result: tracedecay_usecases::edit::SourceEditApplicationResult,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
     let replayed = result.replayed;
     let mut value = result.value();
@@ -100,7 +100,7 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
     invocation: crate::mcp::server::SourceEditRollbackInvocationV1,
 ) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
-    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+    let effect_control = tracedecay_usecases::edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
         invocation.cancellation.clone(),
     );
@@ -133,7 +133,7 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
         proof: current.proof,
         observed_at,
     };
-    crate::application::edit::execute_source_edit_rollback_with_control(
+    tracedecay_usecases::edit::execute_source_edit_rollback_with_control(
         &*graph,
         &operation,
         request,

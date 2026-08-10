@@ -26,9 +26,6 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::application::semantic_runtime::{
-    SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
-};
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
@@ -36,6 +33,9 @@ use crate::redundancy::{
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::SourceSpan;
+use tracedecay_usecases::semantic_runtime::{
+    SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
+};
 
 /// Extraction-attested symbol evidence consumed by redundancy scoring.
 ///
@@ -1135,11 +1135,11 @@ mod tests {
         find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
         semantic_pairs,
     };
-    use crate::application::semantic_runtime::{
-        SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
-    };
     use crate::redundancy::{Fingerprint, RedundancyMatchScore};
     use tracedecay_domain::SourceSpan;
+    use tracedecay_usecases::semantic_runtime::{
+        SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
+    };
 
     #[test]
     fn generated_paths_are_excluded_from_candidates_by_default() {

@@ -126,9 +126,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) query_activation_transition_digest: Option<ManifestDigest>,
     pub(super) query_activation_attempt: u64,
     pub(super) query_activation_redundancy:
-        Option<crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1>,
+        Option<tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1>,
     pub(super) semantic_vector_graph_provider:
-        Option<Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>>,
+        Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     hints: Arc<Mutex<PendingHintsV1>>,
@@ -612,7 +612,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         store_root: PathBuf,
         semantic_schedule: Option<
-            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
         graph_runtime: Arc<
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
@@ -639,7 +639,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         store_root: PathBuf,
         semantic_schedule: Option<
-            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         self.mount_worktree_inner(
@@ -658,7 +658,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         store_root: PathBuf,
         semantic_schedule: Option<
-            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+            tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
         graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
@@ -1037,7 +1037,7 @@ impl CodeIndexSchedulerRegistryV1 {
         epoch: i64,
         result_revision: &ConfigurationRevisionId,
         transition_digest: &ManifestDigest,
-        prepared_redundancy: &crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+        prepared_redundancy: &tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
     ) -> Result<QueryActivationAttemptV1, CodeIndexSchedulerErrorV1> {
         if epoch <= 0 || prepared_redundancy.configuration_revision() != result_revision {
             return Err(CodeIndexSchedulerErrorV1::Identity(
@@ -1071,7 +1071,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         }
         let activation =
-            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
         let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1088,7 +1088,7 @@ impl CodeIndexSchedulerRegistryV1 {
         worktree.query_activation_transition_digest = Some(transition_digest.clone());
         worktree.query_activation_redundancy = Some(prepared_redundancy.clone());
         worktree.semantic_query_authority = None;
-        crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+        tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
             project_root,
             prepared_redundancy,
             false,
@@ -1107,10 +1107,10 @@ impl CodeIndexSchedulerRegistryV1 {
         prepared: crate::daemon::query_authority_provider::PreparedQueryActivationV1,
         semantic_authority: Option<Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>>,
         prepared_cache: Option<
-            crate::application::semantic_runtime::PreparedProductionSemanticCacheCommitV1,
+            tracedecay_usecases::semantic_runtime::PreparedProductionSemanticCacheCommitV1,
         >,
         disabled_cache_generation: Option<&tracedecay_domain::VectorGenerationIdV1>,
-        prepared_redundancy: crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+        prepared_redundancy: tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
         attempt: &QueryActivationAttemptV1,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         scope
@@ -1136,7 +1136,7 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         let activation =
-            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
         let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1155,7 +1155,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.semantic_query_authority = None;
                 worktree.query_activation_revision =
                     Some(prepared.configuration_revision().clone());
-                crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+                tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
                     project_root.clone(),
                     &prepared_redundancy,
                     false,
@@ -1167,7 +1167,7 @@ impl CodeIndexSchedulerRegistryV1 {
         } else if semantic_authority.is_none()
             && let Some(generation) = disabled_cache_generation
         {
-            crate::application::semantic_runtime::unbind_project_semantic_cache_if_current(
+            tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
                 &project_root,
                 generation,
             );
@@ -1175,14 +1175,14 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Err(error) = provider.commit_prepared_activation(&prepared) {
             worktree.semantic_query_authority = None;
             worktree.query_activation_revision = Some(prepared.configuration_revision().clone());
-            crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
                 project_root.clone(),
                 &prepared_redundancy,
                 false,
             );
             return Err(CodeIndexSchedulerErrorV1::Identity(error.to_string()));
         }
-        crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+        tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
             project_root.clone(),
             &prepared_redundancy,
             semantic_authority.is_some(),
@@ -1204,7 +1204,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_application::ResolvedScope,
         cache_generation: Option<&tracedecay_domain::VectorGenerationIdV1>,
-        failed_redundancy: crate::application::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
+        failed_redundancy: tracedecay_usecases::semantic_runtime::PreparedSemanticRedundancyAuthorityV1,
         attempt: &QueryActivationAttemptV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         scope
@@ -1225,7 +1225,7 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         let activation =
-            crate::application::semantic_runtime::project_semantic_activation_gate(&project_root);
+            tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(&project_root);
         let _activation = activation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1235,13 +1235,13 @@ impl CodeIndexSchedulerRegistryV1 {
             && worktree.query_activation_redundancy.as_ref() == Some(&failed_redundancy)
         {
             worktree.semantic_query_authority = None;
-            crate::application::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
+            tracedecay_usecases::semantic_runtime::commit_project_semantic_redundancy_authority_under_gate(
                 project_root.clone(),
                 &failed_redundancy,
                 false,
             );
             if let Some(generation) = cache_generation {
-                crate::application::semantic_runtime::unbind_project_semantic_cache_if_current(
+                tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
                     &project_root,
                     generation,
                 );
@@ -1531,7 +1531,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn install_semantic_vector_graph_provider(
         &self,
         project_root: &Path,
-        provider: Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>,
+        provider: Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>,
     ) -> bool {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
@@ -1547,7 +1547,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn semantic_vector_graph_provider(
         &self,
         project_root: &Path,
-    ) -> Option<Arc<dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1>> {
+    ) -> Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>> {
         let project_root = project_root.canonicalize().ok()?;
         self.mounted
             .lock()
@@ -2458,14 +2458,14 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
-impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityPort
+impl tracedecay_usecases::feedback::cycle_production::ProductionFeedbackDocumentIdentityPort
     for CodeIndexSchedulerRegistryV1
 {
     fn resolve(
         &self,
         project_root: PathBuf,
         document_uri: Option<String>,
-    ) -> crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityFuture
+    ) -> tracedecay_usecases::feedback::cycle_production::ProductionFeedbackDocumentIdentityFuture
     {
         let registry = self.clone();
         Box::pin(async move {
@@ -2507,7 +2507,7 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                         LspRuntimeFailure::new("feedback-code-index-generation-invalid")
                     })?;
             Ok(
-                crate::application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
+                tracedecay_usecases::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
                     generation_id: generation.manifest().generation_id.clone(),
                     generation_digest,
                     file: file.file_occurrence_id.clone(),

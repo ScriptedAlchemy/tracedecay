@@ -458,7 +458,7 @@ const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
-    cancellation: crate::application::context::CancellationToken,
+    cancellation: tracedecay_usecases::context::CancellationToken,
     wake: Arc<Notify>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
@@ -474,7 +474,7 @@ pub(super) struct MaintenanceCoordinator {
 impl Default for MaintenanceCoordinator {
     fn default() -> Self {
         Self {
-            cancellation: crate::application::context::CancellationToken::new(),
+            cancellation: tracedecay_usecases::context::CancellationToken::new(),
             wake: Arc::new(Notify::new()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
@@ -904,7 +904,7 @@ async fn run_cold_store_page(
     profile_root: &Path,
     profile_database: &crate::global_db::RegisteredGlobalDb,
     retention: &crate::config::RetentionConfig,
-    cancellation: &crate::application::context::CancellationToken,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> crate::errors::Result<ColdStorePageMetrics> {
     let checkpoint_path = checkpoint_path(profile_root);
     let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {

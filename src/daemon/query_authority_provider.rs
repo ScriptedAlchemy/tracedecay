@@ -18,16 +18,16 @@ use super::code_index_scheduler::query_runtime::{
     AcceptedQueryEvaluationV1, QueryAuthorityMaterialV1, QueryAuthorityProviderErrorV1,
     QueryAuthorityProviderV1,
 };
-use crate::application::semantic_runtime::{
+use crate::config::retrieval::{
+    AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
+};
+use tracedecay_query::retrieval::QueryAuthorityV1;
+use tracedecay_usecases::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
     prepare_project_semantic_redundancy_authority, project_semantic_production_runtime,
     project_semantic_retained_code_generation,
 };
-use crate::config::retrieval::{
-    AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,
-};
-use tracedecay_query::retrieval::QueryAuthorityV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueryAuthorityUnavailableReasonV1 {

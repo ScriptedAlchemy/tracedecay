@@ -34,14 +34,14 @@ use super::{
     resolve_application_binding, resolve_application_surface_dispatch,
     resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
-use crate::application::feedback::observations::{
+use crate::daemon_client::RequestedOutputFormat;
+use tracedecay_usecases::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
 };
-use crate::application::operation_stream::{
+use tracedecay_usecases::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use crate::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
-use crate::daemon_client::RequestedOutputFormat;
+use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
     let observed_at = current_micros().expect("current time");
@@ -1287,7 +1287,7 @@ fn sse_item_maps_to_content_free_delivery_lifecycle() {
     assert_eq!(
         feedback_sse_stream_event(&event),
         Some((
-            crate::application::feedback::observations::FeedbackSseLifecycleV1::EventDelivered,
+            tracedecay_usecases::feedback::observations::FeedbackSseLifecycleV1::EventDelivered,
             1,
             false,
         ))

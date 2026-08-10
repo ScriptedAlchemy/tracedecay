@@ -42,7 +42,6 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        use tracedecay::application::memory::{MemoryApplication, automatic_fact_add_command};
         use tracedecay::store::memory::DatabaseFactStore;
         use tracedecay_domain::{
             ActorId, ComponentVersion, Confidence, FactCategoryV1, FactOwnerV1, PayloadReferenceV1,
@@ -52,6 +51,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         use tracedecay_store::{
             ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddCommandV1,
         };
+        use tracedecay_usecases::memory::{MemoryApplication, automatic_fact_add_command};
 
         let fixture = start_dashboard_fixture(false).await;
         let cg = fixture

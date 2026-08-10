@@ -464,7 +464,7 @@ async fn apply_configuration_or_semantic_transition(
     mutation: DirectConfigurationMutation,
     expected_revision: ConfigurationRevisionId,
     now: UtcMicros,
-) -> Result<crate::application::configuration::ConfigurationMutationReceipt, ConfigurationError> {
+) -> Result<tracedecay_usecases::configuration::ConfigurationMutationReceipt, ConfigurationError> {
     let semantic_profile = semantic_profile_transition(&mutation)?;
     let current = registered.runtime.client().current().await?;
     let receipt = if current.revision_id != expected_revision {
@@ -931,7 +931,7 @@ impl DaemonSemanticRuntimeRegistrar {
                     // The process-wide table is only joined once the project slot
                     // is known to be free, so a refused registration cannot
                     // replace a live handle there.
-                    crate::application::semantic_runtime::register_project_semantic_runtime(
+                    tracedecay_usecases::semantic_runtime::register_project_semantic_runtime(
                         project_root.clone(),
                         handle.clone(),
                     );

@@ -274,13 +274,13 @@ pub(super) async fn handle_analytics(
         .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
-    let observatory = crate::application::observability::observatory_read_model(
+    let observatory = tracedecay_usecases::observability::observatory_read_model(
         gdb,
         scope.filter.as_deref(),
         since,
     )
     .await;
-    let observatory = crate::application::observability::observatory_mcp_value(&observatory)
+    let observatory = tracedecay_usecases::observability::observatory_mcp_value(&observatory)
         .map_err(config_error)?;
     let provider_scope = if all_projects {
         None
@@ -299,7 +299,7 @@ pub(super) async fn handle_analytics(
         })
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = crate::application::observability::costs_read_model(
+    let costs = tracedecay_usecases::observability::costs_read_model(
         gdb,
         provider_usage_db,
         provider_scope.as_ref(),
@@ -307,7 +307,8 @@ pub(super) async fn handle_analytics(
         since,
     )
     .await;
-    let costs = crate::application::observability::costs_mcp_value(&costs).map_err(config_error)?;
+    let costs =
+        tracedecay_usecases::observability::costs_mcp_value(&costs).map_err(config_error)?;
 
     let mut value = json!({
         "status": "ok",

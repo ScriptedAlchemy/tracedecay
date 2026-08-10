@@ -204,9 +204,9 @@ where
         provider: &'static str,
     ) -> impl Future<Output = ()> + Send {
         async move {
-            crate::application::event_lane::publish(
+            tracedecay_usecases::event_lane::publish(
                 self.db(),
-                crate::application::event_lane::ActivityFamilyV1::SessionIngest,
+                tracedecay_usecases::event_lane::ActivityFamilyV1::SessionIngest,
                 project_root,
                 None,
                 units,

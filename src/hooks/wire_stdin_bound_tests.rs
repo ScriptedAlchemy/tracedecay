@@ -1,6 +1,6 @@
 use super::{HookStdinRead, read_stdin_bounded_from};
-use crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES;
 use std::io::{self, Read};
+use tracedecay_usecases::host_admission::MAX_WIRE_MESSAGE_BYTES;
 
 struct ChunkedHostileReader {
     remaining: usize,

@@ -3,11 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::application::feedback::concrete::FeedbackRuntime;
 use crate::daemon::service::invocation::{
     DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredConfigurationRuntime,
     RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
 };
+use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
 
 use super::ProjectRuntimeRegistryV1;
 

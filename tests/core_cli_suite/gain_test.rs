@@ -1,7 +1,7 @@
 use std::fs;
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 
 async fn open_isolated_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))

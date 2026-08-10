@@ -9,8 +9,7 @@ use tracedecay_store::{
     ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
@@ -23,6 +22,8 @@ use tracedecay_sessions::runtime::cline_like::{
     ClineLikeSource, capture_cline_like_snapshot_observations,
 };
 use tracedecay_sessions::runtime::{codex, cursor, hermes, kiro};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
+use tracedecay_usecases::observation::ObservationCancellation;
 
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,

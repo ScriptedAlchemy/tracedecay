@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
-};
+use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, LcmLineageFaultForTest};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_sessions::runtime::lcm::types::{
     LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition,
@@ -13,6 +11,7 @@ use tracedecay_sessions::runtime::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 

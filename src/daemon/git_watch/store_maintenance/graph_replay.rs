@@ -30,7 +30,7 @@ pub(super) fn log_code_generation_retention_degraded(failure: &str) {
 pub(super) async fn reconcile_graph_replay_releases(
     graph: &TraceDecay,
     store_root: &Path,
-    cancellation: &crate::application::context::CancellationToken,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> ReconcileOutcome {
     let Some(project_id) = graph.hook_store_layout().identity.project_id.as_ref() else {
         log_code_generation_retention_degraded("graph_replay_project_identity_unavailable");

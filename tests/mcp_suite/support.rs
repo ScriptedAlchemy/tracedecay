@@ -20,13 +20,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
-use tracedecay::application::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
-};
-#[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::errors::TraceDecayError;
+#[cfg(feature = "test-transport")]
+use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::{McpServer, McpTransport};
@@ -57,6 +55,7 @@ use tracedecay_store::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 

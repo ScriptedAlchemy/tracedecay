@@ -136,7 +136,7 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    use crate::application::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
+    use tracedecay_usecases::host_admission::{is_wire_oversized_io_error, read_bounded_mcp_line};
 
     // Pin one frame-read future for the whole wait. Liveness polls must not
     // recreate `read_bounded_mcp_line`: that future owns the partial-frame
@@ -152,7 +152,7 @@ where
                         Err(TraceDecayError::Config {
                             message: format!(
                                 "daemon {request_label} response exceeded wire message bound ({})",
-                                crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+                                tracedecay_usecases::host_admission::WIRE_RECORD_TOO_LARGE
                             ),
                         })
                     }

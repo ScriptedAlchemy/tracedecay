@@ -50,7 +50,6 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application::operation_stream::OperationEventAuthority;
 use tracedecay::application_surface::http_application_router;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::daemon::DaemonHandshake;
@@ -59,6 +58,7 @@ use tracedecay::storage::PrivateStoreIo;
 use tracedecay_application::work_executable_binding_registry;
 use tracedecay_domain::ProjectId;
 use tracedecay_tool_catalog::RouteExposureV1;
+use tracedecay_usecases::operation_stream::OperationEventAuthority;
 
 /// Pins the global database away from the operator's profile. The production
 /// constant is crate-private, so the name is repeated here for the same reason

@@ -11,7 +11,7 @@
 //! the registry status taxonomy, and payload field extraction. The resolution
 //! guards (canonicalization, sibling-root authorization, digest revalidation)
 //! and the daemon-owned identity delegation live in the single canonical
-//! path (`tracedecay::application::context::RegisteredScopeResolver`).
+//! path (`tracedecay_usecases::context::RegisteredScopeResolver`).
 
 use std::path::{Path, PathBuf};
 
@@ -126,7 +126,7 @@ fn scope_from_registry_payload(
     // The requested-root canonicalization, sibling-root authorization, and
     // scope-digest revalidation all live in the single canonical resolver; the
     // CLI keeps only the registry brokering and selector taxonomy above.
-    tracedecay::application::context::RegisteredScopeResolver::resolve(
+    tracedecay_usecases::context::RegisteredScopeResolver::resolve(
         &canonical,
         requested,
         &project_id,

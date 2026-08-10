@@ -7,13 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::application::anchor_resolution::{
-    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
-};
-use tracedecay::application::host_admission::{
-    HostAdmissionFacade, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
-use tracedecay::application::memory::MemoryApplication;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorResolutionStateV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
@@ -33,6 +27,11 @@ use tracedecay_store::{
     StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
+use tracedecay_usecases::anchor_resolution::{
+    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
+};
+use tracedecay_usecases::host_admission::{HostAdmissionFacade, HostAdmissionScope};
+use tracedecay_usecases::memory::MemoryApplication;
 
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";

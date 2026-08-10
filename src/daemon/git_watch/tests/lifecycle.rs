@@ -138,7 +138,7 @@ fn linked_operation_marker_does_not_starve_exact_sibling_frontier() {
         WorktreeRegistration::Ready
     ));
     std::fs::create_dir(linked_git_dir.join("rebase-merge")).expect("operation marker");
-    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let daemon_cancellation = tracedecay_usecases::context::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
 
     assert!(matches!(
@@ -580,7 +580,7 @@ fn pruning_the_last_root_retires_registration_authority() {
         worktree_git_dir(repository.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     );
-    let daemon_cancellation = crate::application::context::CancellationToken::new();
+    let daemon_cancellation = tracedecay_usecases::context::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
     drop(repository);
 
@@ -729,7 +729,7 @@ async fn explicit_metadata_watch_plan_fails_closed_at_its_directory_cap() {
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     ));
-    let cancellation = state.cancellation(&crate::application::context::CancellationToken::new());
+    let cancellation = state.cancellation(&tracedecay_usecases::context::CancellationToken::new());
 
     assert_eq!(
         observe_watch_plan(state, cancellation).await,
@@ -763,7 +763,7 @@ async fn a_new_nested_ref_directory_requests_a_watch_plan_rebuild() {
     tokio::time::timeout(Duration::from_millis(50), state.reconfigure.notified())
         .await
         .expect("a nested metadata directory must rebuild the explicit watch plan");
-    let cancellation = state.cancellation(&crate::application::context::CancellationToken::new());
+    let cancellation = state.cancellation(&tracedecay_usecases::context::CancellationToken::new());
     let plan = observe_watch_plan(state, cancellation)
         .await
         .expect("rebuilt watch plan");

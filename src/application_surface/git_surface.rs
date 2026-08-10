@@ -33,7 +33,7 @@ pub struct GitApplySurfaceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitReadSurfaceRequest {
-    pub request: crate::application::git_reads::GitReadRequestV1,
+    pub request: tracedecay_usecases::git_reads::GitReadRequestV1,
     pub max_entries: u32,
     pub max_bytes: u64,
 }
@@ -106,15 +106,15 @@ pub(super) fn parse_git_read_surface_request(
     };
     let request = match operation {
         ApplicationSurfaceOperation::GitStatus => {
-            crate::application::git_reads::GitReadRequestV1::Status
+            tracedecay_usecases::git_reads::GitReadRequestV1::Status
         }
         ApplicationSurfaceOperation::GitDiff => {
-            crate::application::git_reads::GitReadRequestV1::Diff {
+            tracedecay_usecases::git_reads::GitReadRequestV1::Diff {
                 scope: scope(true)?,
             }
         }
         ApplicationSurfaceOperation::GitHistory => {
-            crate::application::git_reads::GitReadRequestV1::History {
+            tracedecay_usecases::git_reads::GitReadRequestV1::History {
                 max_count: bounded_u64("count", 100, 1_000)? as u32,
                 path: optional_string("path")?,
                 follow: boolean("follow", false)?,
@@ -122,13 +122,13 @@ pub(super) fn parse_git_read_surface_request(
             }
         }
         ApplicationSurfaceOperation::GitBlame => {
-            crate::application::git_reads::GitReadRequestV1::Blame {
+            tracedecay_usecases::git_reads::GitReadRequestV1::Blame {
                 path: string("path")?,
                 follow_renames: boolean("follow_renames", false)?,
             }
         }
         ApplicationSurfaceOperation::GitHunks => {
-            crate::application::git_reads::GitReadRequestV1::Hunks {
+            tracedecay_usecases::git_reads::GitReadRequestV1::Hunks {
                 scope: scope(false)?,
                 daemon_binding: None,
             }

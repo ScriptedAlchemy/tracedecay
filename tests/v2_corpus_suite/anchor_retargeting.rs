@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
-use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::research::{
     AttributionGap, DomainError, GitTruthManifest, LogSafeText, ResearchAnchorSubjectV1,
     ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
@@ -45,6 +45,7 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 use tracedecay_usecases::memory::EvidenceAnchorResolver;
 
 use crate::common::git_program;

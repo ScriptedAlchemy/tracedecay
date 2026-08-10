@@ -18,11 +18,6 @@ use super::CodeIndexSchedulerRegistryV1;
 use super::query_runtime::{
     ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
-use crate::application::semantic_runtime::{
-    AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,
-    ProductionProjectSemanticSearchBridgeV1, ProductionSemanticRetrievalConfigurationStoreV1,
-    SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
-};
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
 use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
@@ -35,6 +30,11 @@ use tracedecay_query::retrieval::semantic::{
     SemanticCompositionExecutionAuthorityV1, SemanticCompositionExecutionOutcomeV1,
     SemanticExecutionControl, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticRerankExecutionPortV1, SemanticRerankReadinessV1, SemanticRetrievalRequestV1,
+};
+use tracedecay_usecases::semantic_runtime::{
+    AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,
+    ProductionProjectSemanticSearchBridgeV1, ProductionSemanticRetrievalConfigurationStoreV1,
+    SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
 };
 
 #[derive(Clone)]
@@ -356,9 +356,10 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 continue;
             }
-            let activation = crate::application::semantic_runtime::project_semantic_activation_gate(
-                project_root,
-            );
+            let activation =
+                tracedecay_usecases::semantic_runtime::project_semantic_activation_gate(
+                    project_root,
+                );
             let _activation = activation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

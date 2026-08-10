@@ -1,8 +1,3 @@
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus,
-};
-use crate::application::observation::ObservationCancellation;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
@@ -12,6 +7,11 @@ use std::time::Duration;
 use tracedecay_agent_hosts::automation::config_error;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_sessions::runtime::source::TranscriptSource;
+use tracedecay_usecases::host_admission::{
+    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
+    HostAdmissionStatus,
+};
+use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
     LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol, LcmTranscriptIngestCommand,
@@ -486,17 +486,17 @@ pub(super) async fn accounting_receipt(
     let scope = ObservationScopeV1::Project {
         project_id: project_observation_id(cg)?,
     };
-    let usage = crate::application::provider_usage::provider_usage_aggregate(
+    let usage = tracedecay_usecases::provider_usage::provider_usage_aggregate(
         provider_usage_db,
         &scope,
         None,
         None,
     )
     .await;
-    let prices = crate::application::provider_pricing::load_table();
-    let priced = crate::application::provider_usage::price_provider_usage(&usage, prices, 0);
+    let prices = tracedecay_usecases::provider_pricing::load_table();
+    let priced = tracedecay_usecases::provider_usage::price_provider_usage(&usage, prices, 0);
     let complete =
-        priced.coverage == crate::application::provider_usage::ProviderUsageCoverageV1::Complete;
+        priced.coverage == tracedecay_usecases::provider_usage::ProviderUsageCoverageV1::Complete;
     let tokens_consumed = complete
         .then(|| {
             priced
@@ -663,7 +663,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     if let Some(cg) = cg
         && !user_scope
     {
-        let settlement = crate::application::hint_outcomes::settle_project_hint_outcomes(
+        let settlement = crate::hint_outcomes::settle_project_hint_outcomes(
             accounting_db,
             session_authorities.project.map(std::sync::Arc::as_ref),
             crate::analytics_bridge::hook_import_sources(Some(cg.project_root())),

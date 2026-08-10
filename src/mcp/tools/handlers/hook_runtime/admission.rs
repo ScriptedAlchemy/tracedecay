@@ -357,9 +357,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     // host. Publish it here, where the project scope is already resolved; the
     // application lane retains it across dashboard disconnects and restarts.
     if first_admission && let Some(project_sessions) = project_sessions {
-        crate::application::event_lane::publish(
+        tracedecay_usecases::event_lane::publish(
             project_sessions,
-            crate::application::event_lane::ActivityFamilyV1::Hook,
+            tracedecay_usecases::event_lane::ActivityFamilyV1::Hook,
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
             1,
@@ -404,7 +404,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         completion();
     }
     let feedback_notice = if first_admission {
-        crate::application::advisory::peek_advisory_hook_notice(
+        tracedecay_usecases::advisory::peek_advisory_hook_notice(
             envelope.project_id,
             envelope.worktree_id,
         )

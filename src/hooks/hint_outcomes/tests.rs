@@ -7,12 +7,13 @@ use tracedecay_application::{
 };
 
 use crate::analytics_bridge::HookImportSource;
-use crate::application::hint_outcomes::{
+use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
+use crate::hint_outcomes::{
     HintOutcomeSettlement, correlate_registered_hint_outcomes, settle_project_hint_outcomes,
 };
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use super::{
     HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, correlate_hint_outcomes, resolve,

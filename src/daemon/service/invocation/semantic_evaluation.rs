@@ -76,7 +76,7 @@ impl DaemonInvocationService {
         &self,
         project_root: Option<&Path>,
         request_id: String,
-        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -162,7 +162,7 @@ impl DaemonInvocationService {
 fn semantic_evaluation_response(
     request_id: String,
     evaluation: Result<
-        crate::application::semantic_runtime::SemanticEvaluatedProfilePublicationV1,
+        tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1,
         crate::daemon::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
     >,
 ) -> DaemonInvocationResponse {

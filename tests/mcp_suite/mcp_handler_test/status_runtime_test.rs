@@ -9,11 +9,11 @@ use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
-use tracedecay::application::host_admission::HostAdmissionScope;
-#[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::SessionRecord;
+#[cfg(feature = "test-transport")]
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 // ---------------------------------------------------------------------------
 // 8. tracedecay_status

@@ -525,8 +525,8 @@ impl LanguageServerDoctorPort for LanguageServerDoctorAdapterV1 {
 #[must_use]
 pub fn observability_read_from_model(
     model: Result<
-        crate::application::feedback::observations::FeedbackObservationReadModelV1,
-        crate::application::feedback::concrete::FeedbackRuntimeError,
+        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1,
+        tracedecay_usecases::feedback::concrete::FeedbackRuntimeError,
     >,
 ) -> ObservabilityReadV1 {
     match model {
@@ -539,7 +539,7 @@ pub fn observability_read_from_model(
             ObservabilityReadV1::Absent
         }
         Ok(model) => {
-            use crate::application::feedback::observations::FeedbackCoverageV1;
+            use tracedecay_usecases::feedback::observations::FeedbackCoverageV1;
             let (state, coverage) = match model.coverage {
                 FeedbackCoverageV1::Known => (
                     ObservabilityStateV1::Current,
@@ -940,7 +940,7 @@ pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
     configuration: Option<
-        &crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+        &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     >,
     code_index_store_root: &Path,
     project_root: &Path,
@@ -1242,7 +1242,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
-    configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
 ) -> crate::dashboard::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();
@@ -1399,7 +1399,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     &project_root,
                 ),
                 language_server_read_from_broker(&diagnostic_broker),
-                crate::application::feedback::concrete::feedback_observation_read_model(&graph,),
+                tracedecay_usecases::feedback::concrete::feedback_observation_read_model(&graph,),
                 advisory_feedback_read,
                 host_scan,
                 code_index_read_from_registry(&schedulers, &project_root),

@@ -74,13 +74,13 @@ impl<T: McpTransport + Send> ReplayTransport<T> {
     /// Rejects oversized lines before enqueue so the replay deque never retains
     /// attacker payload bytes.
     pub fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
+        if line.len() > tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
             let prefix = line.as_bytes()[..line
                 .len()
-                .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                .min(tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                 .to_vec();
             return Err(
-                crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix),
+                tracedecay_usecases::host_admission::wire_oversized_io_error_with_prefix(prefix),
             );
         }
         self.replay.push_back(line);
@@ -134,7 +134,7 @@ impl StdioTransport {
 
 impl McpTransport for StdioTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        crate::application::host_admission::read_bounded_mcp_line(&mut self.reader).await
+        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut self.reader).await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -150,7 +150,7 @@ impl McpTransport for StdioTransport {
 
 impl McpTransportReader for &mut tokio::io::BufReader<tokio::io::Stdin> {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        crate::application::host_admission::read_bounded_mcp_line(&mut **self).await
+        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut **self).await
     }
 }
 
@@ -208,13 +208,18 @@ impl McpTransport for ChannelTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.rx.recv().await {
             Some(line)
-                if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
+                if line.len()
+                    > tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
             {
                 let prefix = line.as_bytes()[..line
                     .len()
-                    .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                    .min(tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix))
+                Err(
+                    tracedecay_usecases::host_admission::wire_oversized_io_error_with_prefix(
+                        prefix,
+                    ),
+                )
             }
             other => Ok(other),
         }
@@ -236,13 +241,18 @@ impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         match self.recv().await {
             Some(line)
-                if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
+                if line.len()
+                    > tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES =>
             {
                 let prefix = line.as_bytes()[..line
                     .len()
-                    .min(crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
+                    .min(tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES)]
                     .to_vec();
-                Err(crate::application::host_admission::wire_oversized_io_error_with_prefix(prefix))
+                Err(
+                    tracedecay_usecases::host_admission::wire_oversized_io_error_with_prefix(
+                        prefix,
+                    ),
+                )
             }
             other => Ok(other),
         }
@@ -279,7 +289,7 @@ pub(crate) async fn write_wire_oversized_rejection(
     transport: &mut impl McpTransport,
     error: &std::io::Error,
 ) -> std::io::Result<()> {
-    use crate::application::host_admission::{
+    use tracedecay_usecases::host_admission::{
         HostAdmissionOutcome, WIRE_RECORD_TOO_LARGE, wire_oversized_inspect_prefix,
     };
 
@@ -303,10 +313,10 @@ pub(crate) async fn write_wire_oversized_rejection(
 
 /// Bounded inspection of a leading frame prefix for a top-level JSON-RPC `id`.
 ///
-/// Only examines at most [`crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES`]
+/// Only examines at most [`tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES`]
 /// bytes. Never materializes or parses the full oversized payload.
 pub(crate) fn peek_jsonrpc_request_id(prefix: &[u8]) -> Option<serde_json::Value> {
-    use crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES;
+    use tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES;
 
     let prefix = if prefix.len() > MCP_OVERSIZE_ID_INSPECT_BYTES {
         &prefix[..MCP_OVERSIZE_ID_INSPECT_BYTES]
@@ -390,20 +400,20 @@ mod tests {
         // this asserts the harness still maps oversized to the typed IO error
         // without returning payload bytes on the Result::Ok path.
         let (mut transport, tx, _rx) = ChannelTransport::new();
-        tx.send("a".repeat(crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES))
+        tx.send("a".repeat(tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES))
             .unwrap();
         assert_eq!(
             transport.read_line().await.unwrap().unwrap().len(),
-            crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+            tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
         );
         let hostile =
-            "x".repeat(crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
+            "x".repeat(tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         tx.send(hostile).unwrap();
         let err = transport.read_line().await.unwrap_err();
-        assert!(crate::application::host_admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_usecases::host_admission::is_wire_oversized_io_error(&err));
         assert_eq!(
             err.to_string(),
-            crate::application::host_admission::WIRE_RECORD_TOO_LARGE
+            tracedecay_usecases::host_admission::WIRE_RECORD_TOO_LARGE
         );
         assert!(!err.to_string().contains('x'));
     }
@@ -415,7 +425,7 @@ mod tests {
 
         use tokio::io::{AsyncRead, BufReader, ReadBuf};
 
-        use crate::application::host_admission::{
+        use tracedecay_usecases::host_admission::{
             MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE, line_outcome_to_io,
             read_bounded_line, wire_oversized_io_error,
         };
@@ -464,7 +474,7 @@ mod tests {
         // dedicated MCP helper's exact production cap is covered in wire tests.
         let first = line_outcome_to_io(read_bounded_line(&mut reader, max).await.unwrap());
         let err = first.unwrap_err();
-        assert!(crate::application::host_admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_usecases::host_admission::is_wire_oversized_io_error(&err));
         assert_eq!(err.to_string(), WIRE_RECORD_TOO_LARGE);
         assert!(!err.to_string().contains('z'));
 
@@ -495,9 +505,9 @@ mod tests {
         let (inner, _tx, _rx) = ChannelTransport::new();
         let mut replay = ReplayTransport::new(inner);
         let hostile =
-            "y".repeat(crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
+            "y".repeat(tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES + 1);
         let err = replay.push_replay(hostile).unwrap_err();
-        assert!(crate::application::host_admission::is_wire_oversized_io_error(&err));
+        assert!(tracedecay_usecases::host_admission::is_wire_oversized_io_error(&err));
         assert!(!err.to_string().contains('y'));
     }
 
@@ -525,7 +535,7 @@ mod tests {
 
     #[test]
     fn peek_jsonrpc_request_id_after_oversized_params_is_unrecoverable() {
-        use crate::application::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES;
+        use tracedecay_usecases::host_admission::MCP_OVERSIZE_ID_INSPECT_BYTES;
 
         let mut frame = br#"{"jsonrpc":"2.0","params":{"payload":""#.to_vec();
         frame.extend(std::iter::repeat_n(b'x', MCP_OVERSIZE_ID_INSPECT_BYTES));
@@ -563,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_rejection_preserves_recoverable_request_id() {
-        use crate::application::host_admission::wire_oversized_io_error_with_prefix;
+        use tracedecay_usecases::host_admission::wire_oversized_io_error_with_prefix;
 
         let (mut transport, _tx, mut rx) = ChannelTransport::new();
         let err = wire_oversized_io_error_with_prefix(
@@ -584,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_rejection_uses_parse_error_when_id_unrecoverable() {
-        use crate::application::host_admission::wire_oversized_io_error;
+        use tracedecay_usecases::host_admission::wire_oversized_io_error;
 
         let (mut transport, _tx, mut rx) = ChannelTransport::new();
         write_wire_oversized_rejection(&mut transport, &wire_oversized_io_error())
@@ -599,17 +609,17 @@ mod tests {
     #[test]
     fn mcp_frame_limit_exceeds_host_event_wire_cap() {
         assert_eq!(
-            crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES,
+            tracedecay_usecases::host_admission::MAX_WIRE_MESSAGE_BYTES,
             1024 * 1024
         );
         assert_eq!(
-            crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES,
+            tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES,
             16 * 1024 * 1024
         );
         const {
             assert!(
-                crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
-                    > crate::application::host_admission::MAX_WIRE_MESSAGE_BYTES
+                tracedecay_usecases::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES
+                    > tracedecay_usecases::host_admission::MAX_WIRE_MESSAGE_BYTES
             );
         }
     }

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tracedecay_domain::UserProfileId;
 use zeroize::Zeroizing;
 
-use crate::application::advisory::github_runtime::{
+use tracedecay_usecases::advisory::github_runtime::{
     GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
     GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
     register_profile_github_public_repository_v1,
@@ -382,7 +382,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
 
-    use crate::application::advisory::github_runtime::{
+    use tracedecay_usecases::advisory::github_runtime::{
         GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
         RegisteredGitHubReadOnlyCredentialV1,
         mount_profile_github_read_only_credential_authority_v1,

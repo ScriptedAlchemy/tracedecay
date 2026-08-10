@@ -5,7 +5,7 @@ use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]

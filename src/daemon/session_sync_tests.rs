@@ -765,7 +765,7 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     std::fs::create_dir_all(&project_root).unwrap();
     let project_id = ProjectId::new("project.cancel-alias-race").unwrap();
     let profile_id = UserProfileId::new("profile.cancel-alias-race").unwrap();
-    let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
         profile_root.path(),
         &project_root,
         project_id.clone(),
@@ -773,10 +773,10 @@ async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
     .await
     .unwrap();
     let project_sessions = runtime
-        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Project)
         .unwrap();
     let profile_sessions = runtime
-        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Profile)
+        .registered_database_arc(tracedecay_usecases::host_admission::HostAdmissionScope::Profile)
         .unwrap();
     let service = DaemonSessionSyncService::default();
     service

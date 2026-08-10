@@ -68,7 +68,7 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
 
     // The entry-point scope equals the scope the canonical resolver derives
     // for the same exact root: one resolution path, not two.
-    let expected = crate::application::context::RegisteredScopeResolver::resolve(
+    let expected = tracedecay_usecases::context::RegisteredScopeResolver::resolve(
         &project_root,
         &project_root,
         &scope.project_id,

@@ -10,11 +10,11 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
 use tracedecay_sessions::runtime::cursor::{CursorSweepSource, cursor_project_slug};
 use tracedecay_sessions::runtime::cursor_composer::CursorComposerSource;
 use tracedecay_store::ObservationReplayRequest;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{

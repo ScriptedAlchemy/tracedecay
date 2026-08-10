@@ -7,12 +7,12 @@ use tokio::time::{Duration, timeout};
 
 use super::core_lifecycle::DaemonActivity;
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use crate::application::semantic_runtime::{
+use crate::errors::Result;
+use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_usecases::semantic_runtime::{
     SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
     SemanticRuntimeStatusV1,
 };
-use crate::errors::Result;
-use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -451,7 +451,7 @@ async fn doctor_runtime_value_inner(
         .ok()
         .and_then(|pinned| {
             SemanticConfigurationPinV1::from_current(
-                &crate::application::configuration::ConfigurationCurrentStateV1 {
+                &tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
                     revision_id: pinned.revision_id,
                     snapshot: pinned.snapshot,
                 },
@@ -469,7 +469,7 @@ fn doctor_semantic_runtime_status(
 ) -> serde_json::Value {
     if let Some(project_path) = project_path
         && let Some(status) =
-            crate::application::semantic_runtime::project_semantic_application_status(
+            tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                 project_path,
                 configuration.clone(),
             )
@@ -919,14 +919,14 @@ mod doctor_runtime_route_tests {
     #[test]
     fn semantic_status_without_configuration_is_valid_unavailable() {
         let value = super::doctor_semantic_runtime_status(None, None);
-        let status: crate::application::semantic_runtime::SemanticRuntimeStatusV1 =
+        let status: tracedecay_usecases::semantic_runtime::SemanticRuntimeStatusV1 =
             serde_json::from_value(value).expect("semantic runtime status");
 
         assert_eq!(status.validate(), Ok(()));
         assert!(matches!(
             status.state,
-            crate::application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: crate::application::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
+            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+                reason: tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
             }
         ));
     }

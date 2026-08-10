@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 
 #[cfg(unix)]
 fn non_unicode_alias_paths(root: &Path) -> (PathBuf, PathBuf) {

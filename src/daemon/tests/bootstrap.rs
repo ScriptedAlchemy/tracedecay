@@ -1,12 +1,12 @@
 use super::*;
-#[cfg(unix)]
-use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
 use std::process::Command;
+#[cfg(unix)]
+use tracedecay_usecases::context::CancellationToken;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -3096,10 +3096,8 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
         .ledger_writes_settled()
         .await;
 
-    let second_owner = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
-        harness.profile_root(),
-    )
-    .await;
+    let second_owner =
+        crate::host_admission::HostAdmissionTestRuntimeV1::profile(harness.profile_root()).await;
     let error = match second_owner {
         Ok(_) => panic!("parallel profile authority must remain rejected"),
         Err(error) => error,

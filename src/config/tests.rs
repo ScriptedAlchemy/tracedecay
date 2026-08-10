@@ -545,10 +545,9 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
 
-    let gdb =
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-            .await
-            .unwrap();
+    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -623,10 +622,9 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
 async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
-    let gdb =
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-            .await
-            .unwrap();
+    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
 
     let project_dir = TempDir::new().unwrap();
     let project_root = project_dir.path().canonicalize().unwrap();
@@ -695,10 +693,9 @@ async fn config_path_with_identity_does_not_open_registry_without_enrollment() {
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let _profile = super::PinnedUserDataDir::new();
     let profile_root = crate::storage::default_profile_root().unwrap();
-    let gdb =
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-            .await
-            .unwrap();
+    let gdb = crate::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
 
     let parent_dir = TempDir::new().unwrap();
     let parent_root = parent_dir.path().canonicalize().unwrap();
@@ -1085,11 +1082,6 @@ mod runtime_configuration_cutover {
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
-    use crate::application::configuration::{
-        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
-        ProjectConfigurationRuntime,
-    };
-    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
@@ -1097,6 +1089,11 @@ mod runtime_configuration_cutover {
         TraceDecayConfig, cached_runtime_configuration, cached_sync_config,
         cached_telemetry_config, install_pinned_runtime_configuration,
         runtime_configuration_for_layout,
+    };
+    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_usecases::configuration::{
+        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+        ProjectConfigurationRuntime,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1247,7 +1244,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = host_runtime
             .registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         crate::config::install_usecase_runtime_configuration_authority()
@@ -1410,7 +1407,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         let store =
@@ -1625,7 +1622,7 @@ mod runtime_configuration_cutover {
         .expect("open retained project runtime");
         let database = runtime
             .registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             )
             .expect("bind registered project database");
         let store =

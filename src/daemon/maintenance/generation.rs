@@ -11,7 +11,7 @@ pub(in crate::daemon) async fn run_project_generation_maintenance(
     graph: &crate::tracedecay::TraceDecay,
     code_index_schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &StoreTelemetrySamplingRegistry,
-    cancellation: &crate::application::context::CancellationToken,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
     retention: &crate::config::RetentionConfig,
 ) -> bool {
     let mut unit_succeeded =

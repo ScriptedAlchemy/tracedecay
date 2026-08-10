@@ -1369,15 +1369,11 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
-            &primary
-        )
+        crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&primary)
     );
     assert!(context.aliases.iter().any(|alias| {
         alias.alias_path
-            == crate::application::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
-                &linked,
-            )
+            == crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
     }));
 }
 

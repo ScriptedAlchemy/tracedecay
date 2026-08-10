@@ -102,7 +102,7 @@ pub(super) async fn execute_primitive(
             Ok(authority) => authority,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-        if !crate::application::primitives::runtime::reauthorize_primitive_evidence(
+        if !tracedecay_usecases::primitives::runtime::reauthorize_primitive_evidence(
             &mut result,
             publication_authority,
         ) {
@@ -464,7 +464,7 @@ pub(super) async fn execute_context_scout(
         );
     };
     let current = match registered.runtime.client().current().await {
-        Ok(current) => crate::application::configuration::ConfigurationCurrentStateV1 {
+        Ok(current) => tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
             revision_id: current.revision_id,
             snapshot: current.snapshot,
         },
@@ -722,7 +722,7 @@ async fn execute_context_scout_state_transition(
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
     control: &crate::application_surface::ContextScoutControlSurfaceRequest,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
-    current: crate::application::configuration::ConfigurationCurrentStateV1,
+    current: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -872,7 +872,7 @@ async fn reconcile_context_scout_configuration(
         .current()
         .await
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
-    let current = crate::application::configuration::ConfigurationCurrentStateV1 {
+    let current = tracedecay_usecases::configuration::ConfigurationCurrentStateV1 {
         revision_id: current.revision_id,
         snapshot: current.snapshot,
     };

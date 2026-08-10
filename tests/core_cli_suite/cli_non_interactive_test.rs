@@ -6,9 +6,9 @@ use crate::common::{MessageRecordBuilder, create_runtime, global_session};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::StoreInstanceUpsert;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
@@ -20,6 +20,7 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay_domain::ProjectId;
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())

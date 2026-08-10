@@ -9,13 +9,13 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::MAX_PENDING_REFRESH_REQUESTS;
 use super::history::SessionHistoricalIngestOutcome;
-use crate::application::session::{
+use crate::store::SessionRefreshRecoveryV1;
+use tracedecay_usecases::session::{
     SessionProjectionServingState, SessionProjectionServingStatus,
     SessionProjectionServingStatusPort, SessionProjectionStaleReason,
     SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
     SessionProjectionWorkerRetryClass,
 };
-use crate::store::SessionRefreshRecoveryV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionTemporalRefreshRetryClass {

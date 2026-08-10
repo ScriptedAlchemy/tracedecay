@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::application::semantic_runtime::{
+use tracedecay_usecases::semantic_runtime::{
     project_committed_semantic_pins, project_semantic_retained_vector_generations,
 };
 

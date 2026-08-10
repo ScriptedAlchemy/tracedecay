@@ -16,14 +16,14 @@ const MAX_PENDING_REFRESH_REQUESTS: usize = 128;
 
 #[cfg(test)]
 pub(crate) struct SessionTemporalRefreshTestAuthority {
-    _runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    _runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
     database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
 }
 
 #[cfg(test)]
 impl SessionTemporalRefreshTestAuthority {
     pub(crate) fn new(
-        runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+        runtime: crate::host_admission::HostAdmissionTestRuntimeV1,
         database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
     ) -> Self {
         Self {

@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 #[cfg(test)]
 use tokio::task::JoinSet;
 
-use crate::application::host_admission::{
+use tracedecay_usecases::host_admission::{
     HostAdmissionOutcome, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
     replay_backoff,
 };
@@ -1185,10 +1185,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry = ProfileHostAdmissionReplayRegistry::default();
         let passes = Arc::new(AtomicUsize::new(0));
         let passes_for_override = Arc::clone(&passes);
@@ -1242,10 +1242,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry = ProfileHostAdmissionReplayRegistry::default();
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_override = Arc::clone(&attempts);
@@ -1293,10 +1293,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         broker.admit("test:pending", b"pending").await.unwrap();
         let registry = ProfileHostAdmissionReplayRegistry::default();
         let pass_override = Arc::new(|| {
@@ -1325,10 +1325,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry = ProfileHostAdmissionReplayRegistry::default();
         let started = Arc::new(Notify::new());
         let started_for_override = Arc::clone(&started);
@@ -1359,10 +1359,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry = ProfileHostAdmissionReplayRegistry::default();
         let probe_started = Arc::new(Notify::new());
         let override_started = Arc::clone(&probe_started);
@@ -1417,10 +1417,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry = Arc::new(ProfileHostAdmissionReplayRegistry::default());
         let probe_started = Arc::new(Notify::new());
         let release_probe = Arc::new(Notify::new());
@@ -1491,10 +1491,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let cancellation = Arc::new(ProfileHostAdmissionCancellation::new());
         let probe_started = Arc::new(Notify::new());
         let release_probe = Arc::new(Notify::new());
@@ -1554,10 +1554,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         let (runtime, _) =
-            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+            tracedecay_usecases::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
                 .unwrap();
         let broker =
-            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+            Arc::new(tracedecay_usecases::host_admission::HostAdmissionBroker::new(runtime));
         let registry =
             ProfileHostAdmissionReplayRegistry::with_idle_eviction_after(Duration::from_millis(20));
         let pass_override = Arc::new(|| {

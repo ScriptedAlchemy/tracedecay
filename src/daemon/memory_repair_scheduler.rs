@@ -391,7 +391,7 @@ async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFutur
         match tick().await {
             Ok(MemoryRepairPassDecision::Advanced) => {
                 attempt = attempt.saturating_add(1);
-                let delay = crate::application::host_admission::replay_backoff(
+                let delay = tracedecay_usecases::host_admission::replay_backoff(
                     attempt,
                     MEMORY_REPAIR_BACKOFF_SHIFT_CAP,
                 );
@@ -419,7 +419,7 @@ async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFutur
             }
             Err(error) => {
                 attempt = attempt.saturating_add(1);
-                let delay = crate::application::host_admission::replay_backoff(
+                let delay = tracedecay_usecases::host_admission::replay_backoff(
                     attempt,
                     MEMORY_REPAIR_BACKOFF_SHIFT_CAP,
                 );

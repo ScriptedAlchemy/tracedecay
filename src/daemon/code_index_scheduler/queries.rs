@@ -95,7 +95,7 @@ fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
 pub(super) fn semantic_mcp_reason(
     current_source: Option<&CodeGenerationId>,
     latest_code_generation: &CodeGenerationId,
-    runtime_state: Option<&crate::application::semantic_runtime::SemanticRuntimeStateV1>,
+    runtime_state: Option<&tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1>,
 ) -> &'static str {
     if let Some(source_generation) = current_source {
         return if source_generation == latest_code_generation {
@@ -108,39 +108,39 @@ pub(super) fn semantic_mcp_reason(
     }
     match runtime_state {
         None
-        | Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+        | Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
             ..
         }) => "semantic_runtime_unavailable",
         Some(
-            crate::application::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
+            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::SelectedNotDownloaded {
                 ..
             },
         ) => "semantic_model_not_downloaded",
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Downloading {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Downloading {
             ..
         }) => "semantic_model_downloading",
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Verifying {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Verifying {
             ..
         }) => "semantic_model_verifying",
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Installed {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Installed {
             ..
         }) => "semantic_model_installed",
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Loading { .. }) => {
             "semantic_model_loading"
         }
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing { .. }) => {
-            "semantic_indexing"
-        }
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            ..
+        }) => "semantic_indexing",
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Current { .. }) => {
             "semantic_generation_incompatible"
         }
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded { .. }) => {
-            "semantic_degraded"
-        }
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Rollback { .. }) => {
-            "semantic_rollback"
-        }
-        Some(crate::application::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+            ..
+        }) => "semantic_degraded",
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Rollback {
+            ..
+        }) => "semantic_rollback",
+        Some(tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Failed { .. }) => {
             "semantic_failed"
         }
     }
@@ -189,8 +189,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let code_generation = latest.generation.manifest().generation_id.clone();
         let code_generation_display = Some(code_generation.as_str().to_owned());
         let current_source =
-            crate::application::semantic_runtime::project_semantic_source_generation(project_root);
-        let status = crate::application::semantic_runtime::project_semantic_application_status(
+            tracedecay_usecases::semantic_runtime::project_semantic_source_generation(project_root);
+        let status = tracedecay_usecases::semantic_runtime::project_semantic_application_status(
             project_root,
             None,
         );

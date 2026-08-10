@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use tracedecay_application::{Deadline, OperationTermination};
 use tracedecay_domain::UtcMicros;
 
-use crate::application::operation_stream::OperationEmitter;
 use crate::errors::Result;
+use tracedecay_usecases::operation_stream::OperationEmitter;
 
 use super::super::ToolResult;
 use super::test_runner::{TestRunFailure, TestRunOutput};

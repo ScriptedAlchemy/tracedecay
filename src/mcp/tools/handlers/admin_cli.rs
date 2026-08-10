@@ -558,7 +558,7 @@ async fn cost_summary(
     range: &str,
 ) -> Result<Value> {
     let accounting_error = |message| TraceDecayError::Config { message };
-    let since = crate::application::provider_usage::provider_usage_range_start(range)
+    let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
         .map_err(accounting_error)?;
     let since_seconds = i64::try_from(since).map_err(|_| TraceDecayError::Config {
         message: "provider usage range exceeds the supported timestamp domain".to_owned(),
@@ -575,7 +575,7 @@ async fn cost_summary(
     };
     let summary = match (provider_usage_db, provider_scope) {
         (Some(db), Some(scope)) => {
-            crate::application::provider_usage::provider_usage_cost_summary(
+            tracedecay_usecases::provider_usage::provider_usage_cost_summary(
                 db,
                 scope,
                 None,
@@ -594,14 +594,14 @@ async fn cost_summary(
         let denominator = tokens_saved.checked_add(consumed)?;
         (denominator > 0).then_some(tokens_saved as f64 / denominator as f64)
     });
-    let today_since = crate::application::provider_usage::provider_usage_range_start("today")
+    let today_since = tracedecay_usecases::provider_usage::provider_usage_range_start("today")
         .map_err(accounting_error)?;
     let today_since_seconds = i64::try_from(today_since).map_err(|_| TraceDecayError::Config {
         message: "provider usage range exceeds the supported timestamp domain".to_owned(),
     })?;
     let today = match (provider_usage_db, provider_scope) {
         (Some(db), Some(scope)) => {
-            crate::application::provider_usage::provider_usage_cost_summary(
+            tracedecay_usecases::provider_usage::provider_usage_cost_summary(
                 db,
                 scope,
                 None,
@@ -626,10 +626,10 @@ async fn cost_summary(
 }
 
 fn unavailable_provider_usage_cost_summary()
--> crate::application::provider_usage::ProviderUsageCostSummaryV1 {
-    crate::application::provider_usage::ProviderUsageCostSummaryV1 {
-        coverage: crate::application::provider_usage::ProviderUsageCoverageV1::Unavailable,
-        pricing_revision: crate::application::provider_pricing::load_table()
+-> tracedecay_usecases::provider_usage::ProviderUsageCostSummaryV1 {
+    tracedecay_usecases::provider_usage::ProviderUsageCostSummaryV1 {
+        coverage: tracedecay_usecases::provider_usage::ProviderUsageCoverageV1::Unavailable,
+        pricing_revision: tracedecay_usecases::provider_pricing::load_table()
             .revision
             .clone(),
         usage_events: 0,

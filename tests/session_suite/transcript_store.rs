@@ -1,7 +1,8 @@
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::global_db::ParseOffset;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_store::{TranscriptStore, TranscriptStoreError, TranscriptWriteBatch};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 

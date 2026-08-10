@@ -4,18 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::application::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    application_observed_at, session_application_grant_digest,
-};
-use tracedecay::application::session::{
-    AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRefreshTarget, SessionRequestBinding, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer,
-};
 use tracedecay::store::GlobalDbSessionTemporalStore;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -31,6 +19,18 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::context::{
+    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
+    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    application_observed_at, session_application_grant_digest,
+};
+use tracedecay_usecases::session::{
+    AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
+    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
+    SessionRefreshTarget, SessionRequestBinding, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer,
+};
 
 use crate::common::{LcmTestRuntime, open_lcm_db};
 

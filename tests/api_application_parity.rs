@@ -634,33 +634,33 @@ fn application_request(
 ) -> ApplicationSurfaceRequest {
     match operation {
         ApplicationSurfaceOperation::GitStatus => {
-            git_read_request(tracedecay::application::git_reads::GitReadRequestV1::Status)
+            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Status)
         }
         ApplicationSurfaceOperation::GitDiff => {
-            git_read_request(tracedecay::application::git_reads::GitReadRequestV1::Diff {
+            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Diff {
                 scope: GitDiffScopeV1::WorkingTree,
             })
         }
-        ApplicationSurfaceOperation::GitHistory => git_read_request(
-            tracedecay::application::git_reads::GitReadRequestV1::History {
+        ApplicationSurfaceOperation::GitHistory => {
+            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::History {
                 max_count: 10,
                 path: None,
                 follow: false,
                 first_parent: false,
-            },
-        ),
-        ApplicationSurfaceOperation::GitBlame => git_read_request(
-            tracedecay::application::git_reads::GitReadRequestV1::Blame {
+            })
+        }
+        ApplicationSurfaceOperation::GitBlame => {
+            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Blame {
                 path: "src/lib.rs".to_owned(),
                 follow_renames: false,
-            },
-        ),
-        ApplicationSurfaceOperation::GitHunks => git_read_request(
-            tracedecay::application::git_reads::GitReadRequestV1::Hunks {
+            })
+        }
+        ApplicationSurfaceOperation::GitHunks => {
+            git_read_request(tracedecay_usecases::git_reads::GitReadRequestV1::Hunks {
                 scope: GitDiffScopeV1::WorkingTree,
                 daemon_binding: None,
-            },
-        ),
+            })
+        }
         ApplicationSurfaceOperation::GitPreview => git_requests().0,
         ApplicationSurfaceOperation::GitApply => git_requests().1,
         ApplicationSurfaceOperation::FeedbackImpact => {
@@ -693,7 +693,7 @@ fn application_request(
 }
 
 fn git_read_request(
-    request: tracedecay::application::git_reads::GitReadRequestV1,
+    request: tracedecay_usecases::git_reads::GitReadRequestV1,
 ) -> ApplicationSurfaceRequest {
     ApplicationSurfaceRequest::GitRead(GitReadSurfaceRequest {
         request,

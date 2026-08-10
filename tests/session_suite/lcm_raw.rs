@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::SessionMessageRecord;
 use tracedecay_sessions::runtime::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_sessions::runtime::source::{
     ParsedTranscript, SessionDraft, StoredCursor, TranscriptSource,
 };
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{
     lcm_raw_message as sample_message, lcm_raw_session as sample_session,

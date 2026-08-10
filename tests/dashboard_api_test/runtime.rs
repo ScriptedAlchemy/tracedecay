@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 /// Dashboard integration authority assembled at the root composition layer.
 ///

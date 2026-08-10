@@ -58,7 +58,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
 
 struct FreshnessFixtureAuthority {
     _pin: PinnedUserDataDir,
-    _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    _runtime: Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
 async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {

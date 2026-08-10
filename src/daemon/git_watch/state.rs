@@ -13,9 +13,9 @@ use tokio::time::Instant;
 
 use super::DirtySet;
 use super::health::ProjectHealth;
-use crate::application::context::CancellationToken;
 use crate::config::SyncConfig;
 use crate::daemon::maintenance::MaintenanceCoordinator;
+use tracedecay_usecases::context::CancellationToken;
 
 pub(super) enum WorktreeRegistration {
     Ready,

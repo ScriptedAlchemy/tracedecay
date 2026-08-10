@@ -12,9 +12,9 @@ use crate::support::{
     handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
 use tracedecay::global_db::AnalyticsEventInsert;
+#[cfg(feature = "test-transport")]
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::tracedecay::current_timestamp;
 

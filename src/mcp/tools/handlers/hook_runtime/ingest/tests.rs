@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+use crate::host_admission::HostAdmissionTestRuntimeV1;
 
 use super::*;
 

@@ -3,7 +3,6 @@
 //! lineage preserved and no payload bytes in any returned structure.
 
 use tempfile::TempDir;
-use tracedecay::application::memory::MemoryApplication;
 use tracedecay::db::Database;
 use tracedecay::store::memory::DatabaseFactStore;
 use tracedecay_domain::{
@@ -23,6 +22,7 @@ use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
     FactWriteBatch, RetrievalAnchorQuery,
 };
+use tracedecay_usecases::memory::MemoryApplication;
 
 use crate::common::open_graph_db_from_template;
 

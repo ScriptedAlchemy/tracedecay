@@ -12,12 +12,6 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
 use tracedecay_domain::ProjectId;
 
-use crate::application::session::{
-    AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRequestBinding, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::{
     SessionRefreshCommand, SessionRefreshCoverageView, SessionRefreshFrontierView,
@@ -25,6 +19,12 @@ use crate::mcp::tools::{
     SessionRefreshServicePort, utc_micros_value,
 };
 use crate::store::GlobalDbSessionTemporalStore;
+use tracedecay_usecases::session::{
+    AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
+    SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
+    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
+    SessionRequestBinding, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+};
 
 const SESSION_REFRESH_PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
 const SESSION_REFRESH_CONFIG_VERSION: &str = "session-refresh-config.v1";

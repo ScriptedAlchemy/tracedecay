@@ -240,7 +240,7 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
 
     for (project_root, runtime) in runtimes {
         if let Some(semantic) = runtime.semantic {
-            crate::application::semantic_runtime::unregister_project_semantic_runtime(
+            tracedecay_usecases::semantic_runtime::unregister_project_semantic_runtime(
                 &project_root,
             );
             semantic.cancel();

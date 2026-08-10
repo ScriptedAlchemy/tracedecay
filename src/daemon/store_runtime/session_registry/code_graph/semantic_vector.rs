@@ -34,7 +34,7 @@ impl RetainedCodeGraphRuntimeV1 {
     pub(crate) fn finalize_reserved_semantic_vector_generation(
         &self,
         reservation: tracedecay_graph_db::SemanticVectorRetirementReservation,
-        authorization: &crate::application::semantic_runtime::SemanticVectorRetentionAuthorizationV1,
+        authorization: &tracedecay_usecases::semantic_runtime::SemanticVectorRetentionAuthorizationV1,
         cancellation: Arc<dyn GraphCancellation>,
         deadline: Instant,
     ) -> std::result::Result<tracedecay_graph_db::SemanticVectorRetentionAction, GraphDbError> {

@@ -354,7 +354,7 @@ fn language_server_engine_states_preserve_live_degradation() {
 #[test]
 fn empty_observation_projection_is_absent() {
     let model =
-        crate::application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("empty projection");
     assert_eq!(
         observability_read_from_model(Ok(model)),
@@ -365,7 +365,7 @@ fn empty_observation_projection_is_absent() {
 #[test]
 fn retained_or_unreported_observation_history_is_not_absent() {
     let model =
-        crate::application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             1,
             0,
@@ -382,7 +382,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let unknown =
-        crate::application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             0,
             1,
@@ -399,9 +399,9 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let mut active =
-        crate::application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("active empty projection");
-    active.coverage = crate::application::feedback::observations::FeedbackCoverageV1::Known;
+    active.coverage = tracedecay_usecases::feedback::observations::FeedbackCoverageV1::Known;
     active.watermark.producer_boot_id =
         Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
     assert_eq!(

@@ -29,12 +29,12 @@ use tracedecay_store::{
 
 use crate::store::vector_generations::GraphVectorGenerationStoreV1;
 
-use crate::application::semantic_runtime::{
+use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use tracedecay_usecases::semantic_runtime::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticRuntimeFuture,
     SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1, SemanticVectorGraphScopeV1,
     SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 
 use super::{CodeIndexSchedulerRegistryV1, registry::CodeIndexServingScopeV1};
 
@@ -64,9 +64,9 @@ pub(crate) enum ProjectVectorReadableSources {
     Ready {
         sources: BTreeSet<CodeGenerationId>,
         configuration_receipt:
-            crate::application::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
+            tracedecay_usecases::semantic_runtime::SemanticConfigurationInventoryReceiptV1,
         configured_root_receipt:
-            crate::application::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
+            tracedecay_usecases::semantic_runtime::SemanticConfiguredVectorRootReceiptV1,
     },
     ResetRequired(String),
     Corrupt(String),
@@ -120,11 +120,11 @@ pub(crate) enum ProjectSemanticVectorPublishedDependency {
 pub(crate) async fn retire_one_project_vector_generation(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-    configuration: &crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
 ) -> ProjectSemanticVectorRetentionStep {
     let Some(production_runtime) =
-        crate::application::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
     else {
         return ProjectSemanticVectorRetentionStep::Unavailable(
             "semantic vector mutation authority is not mounted".to_owned(),
@@ -530,7 +530,7 @@ pub(crate) async fn project_vector_published_dependency(
 pub(crate) async fn project_vector_readable_sources(
     schedulers: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-    configuration: &crate::application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
+    configuration: &tracedecay_usecases::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     expected_revision: tracedecay_store::SemanticVectorStageCensusRevision,
 ) -> ProjectVectorReadableSources {
     let Some(provider) = schedulers

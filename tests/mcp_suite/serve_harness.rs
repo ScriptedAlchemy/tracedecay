@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 #[cfg(unix)]
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 
 use crate::common::{TestChildProcess, canonical_existing_path, tracedecay_command_with_home};

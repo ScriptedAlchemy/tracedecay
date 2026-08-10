@@ -528,7 +528,7 @@ async fn full_file_read_credits_zero_net_savings() {
         total.saved_tokens, 0,
         "ledger must not count a full-file read as savings"
     );
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
         db_path.parent().expect("global db has a profile root"),
     )
     .await

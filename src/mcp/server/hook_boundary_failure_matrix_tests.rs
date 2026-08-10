@@ -16,12 +16,12 @@ use super::writer_test_support::{
     WriterTestFixtureAuthority, init_indexed_repo, registered_context,
 };
 use super::{CodeIndexReconcileSink, McpServer};
-use crate::application::host_admission::{
+use crate::daemon::{DaemonHookEvent, HookAgent};
+use crate::mcp::project_route::HookProjectRouteCache;
+use tracedecay_usecases::host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
     SpoolBounds,
 };
-use crate::daemon::{DaemonHookEvent, HookAgent};
-use crate::mcp::project_route::HookProjectRouteCache;
 
 fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()

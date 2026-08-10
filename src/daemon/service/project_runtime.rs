@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 
-use crate::application::feedback::FeedbackCycleRuntime;
-use crate::application::primitives::PrimitiveProjectRuntime;
 use tokio::sync::{Mutex as AsyncMutex, watch};
+use tracedecay_usecases::feedback::FeedbackCycleRuntime;
+use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
 
 use super::invocation::{
     DaemonLspInvocationOwner, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,

@@ -25,10 +25,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use crate::application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use crate::request_identity::{
     ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
 };
+use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 
 pub type ScopeSelector = InvocationTarget;
 
@@ -607,7 +607,7 @@ impl DaemonInvocationClient {
 
     pub async fn evaluate_and_publish_semantic_profile(
         &self,
-        candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
         let request_id =
             mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {

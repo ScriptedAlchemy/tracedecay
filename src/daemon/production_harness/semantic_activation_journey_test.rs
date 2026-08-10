@@ -151,7 +151,7 @@ pub(super) async fn wait_for_semantic_generation(
                 continue;
             }
             let vector_id =
-                match crate::application::semantic_runtime::project_semantic_application_status(
+                match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
                     project, None,
                 )
                 .map(|status| status.state)
@@ -852,7 +852,7 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let core_before_failure = search(&harness, &project, false).await;
     assert_ne!(core_before_failure["semantic"]["status"], "complete");
     assert!(
-        crate::application::semantic_runtime::unbind_project_semantic_cache_if_current(
+        tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
             &project,
             second_vector.generation_id(),
         )

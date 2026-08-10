@@ -59,7 +59,7 @@ impl GraphCancellation for AtomicGraphCancellationV1 {
     }
 }
 
-struct MaintenanceGraphCancellationV1(crate::application::context::CancellationToken);
+struct MaintenanceGraphCancellationV1(tracedecay_usecases::context::CancellationToken);
 
 impl GraphCancellation for MaintenanceGraphCancellationV1 {
     fn is_cancelled(&self) -> bool {
@@ -1032,7 +1032,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         project_database: &crate::db::Database,
         generation: &CodeGenerationId,
         generation_file: &str,
-        cancellation: &crate::application::context::CancellationToken,
+        cancellation: &tracedecay_usecases::context::CancellationToken,
     ) -> std::result::Result<bool, GraphDbError> {
         let sealed_digest = sealed_digest_from_generation_file(generation_file)?;
         let replay_root = project_database

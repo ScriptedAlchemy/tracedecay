@@ -38,7 +38,7 @@ pub struct TraceDecay {
     store_runtime_registry:
         Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
-    configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
+    configuration_runtime: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
     open_options: TraceDecayOpenOptions,
@@ -58,7 +58,7 @@ pub struct TraceDecay {
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     #[cfg(any(test, feature = "test-transport"))]
-    test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+    test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
 
@@ -75,7 +75,7 @@ impl TraceDecay {
 
     pub(crate) fn configuration_runtime(
         &self,
-    ) -> &Arc<crate::application::configuration::ProjectConfigurationRuntime> {
+    ) -> &Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime> {
         &self.configuration_runtime
     }
 
@@ -93,7 +93,7 @@ impl TraceDecay {
     #[cfg(any(test, feature = "test-transport"))]
     pub fn test_runtime_for_test(
         &self,
-    ) -> Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
+    ) -> Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
         self.test_runtime_guard.clone()
     }
 

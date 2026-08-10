@@ -160,13 +160,13 @@ pub(crate) async fn analytics_diagnostics_with_db(
         })
         .await
         .map_err(cli_error)?;
-    let observatory = crate::application::observability::observatory_read_model(
+    let observatory = tracedecay_usecases::observability::observatory_read_model(
         gdb,
         project_filter.as_deref(),
         0,
     )
     .await;
-    let observatory = crate::application::observability::observatory_cli_value(&observatory)
+    let observatory = tracedecay_usecases::observability::observatory_cli_value(&observatory)
         .map_err(cli_error)?;
     let provider_scope = if all_projects {
         None
@@ -181,7 +181,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         })
     };
     let provider_usage_db = if all_projects { None } else { project_sessions };
-    let costs = crate::application::observability::costs_read_model(
+    let costs = tracedecay_usecases::observability::costs_read_model(
         gdb,
         provider_usage_db,
         provider_scope.as_ref(),
@@ -189,7 +189,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         0,
     )
     .await;
-    let costs = crate::application::observability::costs_cli_value(&costs).map_err(cli_error)?;
+    let costs = tracedecay_usecases::observability::costs_cli_value(&costs).map_err(cli_error)?;
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)

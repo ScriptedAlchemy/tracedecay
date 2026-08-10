@@ -29,11 +29,6 @@ use tracedecay_domain::{
 };
 
 #[cfg(feature = "semantic-fastembed")]
-use crate::application::semantic_runtime::{
-    ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
-    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
-};
-#[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -45,6 +40,11 @@ use crate::semantic_code::{
 };
 #[cfg(feature = "semantic-fastembed")]
 use tracedecay_graph_db::NeverCancelled;
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_usecases::semantic_runtime::{
+    ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
+    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
+};
 
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
@@ -1182,22 +1182,22 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
     );
     for (state, reason) in [
         (
-            crate::application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
                 completed_units: 1,
                 total_units: 2,
             },
             "semantic_indexing",
         ),
         (
-            crate::application::semantic_runtime::SemanticRuntimeStateV1::Degraded {
+            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Degraded {
                 active_generation: None,
                 reason:
-                    crate::application::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
+                    tracedecay_usecases::semantic_runtime::SemanticFallbackReasonV1::RuntimeFailure,
             },
             "semantic_degraded",
         ),
         (
-            crate::application::semantic_runtime::SemanticRuntimeStateV1::Failed {
+            tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Failed {
                 model_id: "model.fixture".to_owned(),
                 artifact_digest: format!("sha256:{}", "a".repeat(64)),
                 detail: "fixture failure".to_owned(),
@@ -3141,7 +3141,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
         Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
             calls.fetch_add(1, Ordering::SeqCst);
             true
-        }) as crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1
+        }) as tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1
     };
     assert!(
         registry
@@ -3169,7 +3169,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
         Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
             calls.fetch_add(1, Ordering::SeqCst);
             true
-        }) as crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1
+        }) as tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1
     };
     assert!(
         !registry
@@ -5570,11 +5570,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use crate::application::lsp_runtime::{
-        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
-        LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
-        LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
-    };
     use crate::diagnostics_publication::{
         CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
         publish_compiler_diagnostics_through_code_index_v1,
@@ -5589,6 +5584,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     };
     use tracedecay_domain::{ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan};
     use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
+    use tracedecay_usecases::lsp_runtime::{
+        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
+        LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
+        LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
+    };
 
     struct FixedDocument(String);
 
@@ -5826,7 +5826,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
         Arc::new(
-            crate::application::feedback::diagnostics::DatabaseDiagnosticStore::new(
+            tracedecay_usecases::feedback::diagnostics::DatabaseDiagnosticStore::new(
                 database.clone(),
             ),
         ),

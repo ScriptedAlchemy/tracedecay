@@ -112,7 +112,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         operation: F,
     ) -> bool
     where
-        F: FnOnce(crate::application::observation::ObservationCancellation) -> Fut + Send + 'static,
+        F: FnOnce(tracedecay_usecases::observation::ObservationCancellation) -> Fut
+            + Send
+            + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         self.retained_hook_tasks

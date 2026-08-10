@@ -1,7 +1,3 @@
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
 use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
@@ -18,6 +14,10 @@ use tracedecay_domain::{
     ProviderId, RetentionClass, UtcMicros,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
+use tracedecay_usecases::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_usecases::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
 
 use super::admission::{
     HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
@@ -308,11 +308,11 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
         }
     }
     let notice =
-        serde_json::from_value::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
+        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
             required_value(args, "feedback_notice")?,
         )
         .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
-    let status = if crate::application::advisory::acknowledge_advisory_hook_notice(
+    let status = if tracedecay_usecases::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
         &notice,

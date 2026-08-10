@@ -36,7 +36,7 @@ pub(crate) struct DaemonSessionSyncService {
     admission_gate: Arc<tokio::sync::Mutex<()>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
-    shutdown: crate::application::observation::ObservationCancellation,
+    shutdown: tracedecay_usecases::observation::ObservationCancellation,
 }
 
 #[derive(Clone)]
@@ -98,7 +98,7 @@ impl Default for DaemonSessionSyncService {
             admission_gate: Arc::new(tokio::sync::Mutex::new(())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
             completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
-            shutdown: crate::application::observation::ObservationCancellation::default(),
+            shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
         }
     }
 }

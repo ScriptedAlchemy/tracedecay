@@ -16,7 +16,6 @@ use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 use crate::application_surface::{
     ApplicationSurfaceOperation, ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest,
 };
@@ -26,6 +25,7 @@ use crate::daemon::{
     execute_daemon_invocation,
 };
 use crate::daemon_contract::WorkApplicationInvocationV1;
+use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")

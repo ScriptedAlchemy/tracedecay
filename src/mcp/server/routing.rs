@@ -159,7 +159,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{resolve_initialize_roots_project_path, select_initialize_project_path};
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_usecases::host_admission::HostAdmissionScope;
 
     fn run_git(root: &Path, args: &[&str]) {
         let status = Command::new("git")

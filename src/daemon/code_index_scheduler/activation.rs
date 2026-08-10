@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_application::ResolvedScope;
 
-use crate::application::context::CancellationToken;
+use tracedecay_usecases::context::CancellationToken;
 
 use super::identity::IndexingIdentityV1;
 

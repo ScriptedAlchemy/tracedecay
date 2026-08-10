@@ -141,7 +141,7 @@ pub(super) async fn run_semantic_vector_generation_retention(
     graph: &TraceDecay,
     schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
-    cancellation: &crate::application::context::CancellationToken,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
     if cancellation.is_cancelled() {
         observations.record_semantic_vector_retention_failure(graph.project_root());
@@ -253,7 +253,7 @@ pub(super) async fn run_code_generation_retention(
     graph: &TraceDecay,
     schedulers: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     observations: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
-    cancellation: &crate::application::context::CancellationToken,
+    cancellation: &tracedecay_usecases::context::CancellationToken,
 ) -> bool {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -388,7 +388,7 @@ pub(super) async fn run_code_generation_retention(
     // retention authority: a newer unactivated candidate must not displace
     // the configured generation from this fence.
     let Some(vector_runtime) =
-        crate::application::semantic_runtime::project_semantic_production_runtime(
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
             &layout.project_root,
         )
     else {
@@ -446,7 +446,7 @@ pub(super) async fn run_code_generation_retention(
         log_code_generation_retention_degraded("vector_inventory_changed");
         return false;
     }
-    crate::application::semantic_runtime::retain_project_semantic_code_sources(
+    tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
         &layout.project_root,
         &pinned_vector_sources,
     );
@@ -845,7 +845,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
     };
     if let Some(replay) = pending_binding_cleanup {
         let Some(vector_runtime) =
-            crate::application::semantic_runtime::project_semantic_production_runtime(
+            tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
                 graph.project_root(),
             )
         else {
@@ -1011,7 +1011,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
     };
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let Some(vector_runtime) =
-        crate::application::semantic_runtime::project_semantic_production_runtime(
+        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
             graph.project_root(),
         )
     else {
@@ -1215,7 +1215,7 @@ pub(super) async fn run_code_index_scope_reconciliation(
         );
         return false;
     }
-    crate::application::semantic_runtime::retain_project_semantic_code_sources(
+    tracedecay_usecases::semantic_runtime::retain_project_semantic_code_sources(
         graph.project_root(),
         &revalidated_inputs.vector_sources,
     );

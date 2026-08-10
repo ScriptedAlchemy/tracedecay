@@ -4,7 +4,6 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay::application::semantic_runtime::SemanticEvaluationProfileCandidateV1;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::DaemonInvocationClient;
 use tracedecay::search_eval::{
@@ -13,6 +12,7 @@ use tracedecay::search_eval::{
     root_admitted_corpus_scope, validate_default_activation_workload, validate_direct_workload,
     write_generate_outputs,
 };
+use tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1;
 
 #[derive(Debug, Parser)]
 #[command(

@@ -24,10 +24,10 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{ProjectId, UtcMicros};
 
-use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::GlobalDbConfigurationControlStore;
+use tracedecay_usecases::configuration::ConfigurationControlStore;
 
 pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
@@ -1152,7 +1152,7 @@ async fn open_runtime_configuration_from_store(
                     // A concurrent open won the swap; adopt what it
                     // published and re-verify it exactly.
                     Err(
-                        crate::application::configuration::ConfigurationError::RevisionConflict,
+                        tracedecay_usecases::configuration::ConfigurationError::RevisionConflict,
                     ) => store.current().await.map_err(map_configuration_error)?,
                     Err(error) => return Err(map_configuration_error(error)),
                 };
@@ -1300,10 +1300,10 @@ fn current_utc_micros() -> UtcMicros {
 }
 
 fn map_configuration_error(
-    error: crate::application::configuration::ConfigurationError,
+    error: tracedecay_usecases::configuration::ConfigurationError,
 ) -> TraceDecayError {
     match error {
-        crate::application::configuration::ConfigurationError::ResetRequired { reason } => {
+        tracedecay_usecases::configuration::ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)
         }
         error => config_error(format!("configuration authority unavailable: {error}")),

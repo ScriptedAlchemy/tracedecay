@@ -20,8 +20,8 @@ struct SavingsTotalPayload {
 ///
 /// Pure lookup against the deterministic bundled pricing authority.
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> Option<f64> {
-    let table = tracedecay::application::provider_pricing::load_table();
-    let price = tracedecay::application::provider_pricing::resolve_model_price(
+    let table = tracedecay_usecases::provider_pricing::load_table();
+    let price = tracedecay_usecases::provider_pricing::resolve_model_price(
         table,
         "claude",
         "claude-sonnet-4-6",
@@ -35,7 +35,7 @@ pub async fn handle_gain(
     range: &str,
     json_output: bool,
 ) -> tracedecay::errors::Result<()> {
-    let since = tracedecay::application::provider_usage::provider_usage_range_start(range)
+    let since = tracedecay_usecases::provider_usage::provider_usage_range_start(range)
         .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
     let since = i64::try_from(since).map_err(|_| tracedecay::errors::TraceDecayError::Config {
         message: "savings range exceeds the supported timestamp domain".to_owned(),

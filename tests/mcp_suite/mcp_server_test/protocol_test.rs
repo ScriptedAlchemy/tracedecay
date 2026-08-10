@@ -2061,7 +2061,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // flag both leave the row untouched).
     let project_id = project_id_of(&TraceDecay::open(dir.path()).await.unwrap());
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
         dir.path(),
         project_id.clone(),
@@ -2070,7 +2070,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     .unwrap();
     runtime
         .set_lcm_schema_migration_applied_at_for_test(
-            tracedecay::application::host_admission::HostAdmissionScope::Project,
+            tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             123,
         )
         .await
@@ -2078,7 +2078,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(
         runtime
             .lcm_schema_migration_applied_at_for_test(
-                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             )
             .await
             .unwrap(),
@@ -2138,7 +2138,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             "second-session lcm_status id={id} payload"
         );
     }
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
+    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
         dir.path(),
         project_id,
@@ -2148,7 +2148,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(
         runtime
             .lcm_schema_migration_applied_at_for_test(
-                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                tracedecay_usecases::host_admission::HostAdmissionScope::Project,
             )
             .await
             .unwrap(),
