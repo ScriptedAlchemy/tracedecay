@@ -21,6 +21,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
+import type { CostsReadModelV1 } from '../contracts/generated.ts';
 
 import { resolveFixture } from '../../stories/fixtures/data.ts';
 import { MultiRootCapabilityV1Schema } from '../contracts/generated.ts';
@@ -72,6 +73,41 @@ function parse<T>(schema: ZodType<T>, pathname: string, search = ''): T {
     throw new Error('fixture ' + pathname + search + ' failed its contract:\n' + issues);
   }
   return result.data;
+}
+
+/** The mounted Savings/Costs routes have provider usage but no project scope
+ * for the latency projector. Its typed unavailable cohort must survive the
+ * fixture boundary; an omitted vector or made-up zero would hide that state. */
+function expectScopeUnavailableProviderLatency(costs: CostsReadModelV1): void {
+  expect(costs.current).toBe(false);
+  expect(costs.latency).toHaveLength(1);
+
+  const latency = costs.latency[0]!;
+  expect(latency.provider).toBeNull();
+  expect(latency.model).toBeNull();
+  expect(latency.identity_unavailable_reason).toBe('provider_latency_scope_unavailable');
+  expect(latency.identity_provenance).toMatchObject({
+    source: 'observability_envelope',
+    source_revision: 'operation-resource-observation.v1',
+    projector_revision: 'costs-provider-latency-projector.v1',
+    watermark: 'analytics:unavailable',
+  });
+
+  for (const distribution of [
+    latency.queue,
+    latency.start,
+    latency.first_progress,
+    latency.service,
+    latency.terminal,
+  ]) {
+    for (const metric of [distribution.p50, distribution.p95, distribution.p99]) {
+      expect(metric.value).toBeNull();
+      expect(metric.unavailable_reason).toBe('provider_latency_scope_unavailable');
+      expect(metric.coverage.state).toBe('unknown');
+      expect(metric.coverage.eligible).toBeNull();
+      expect(metric.denominator_value).toBeNull();
+    }
+  }
 }
 
 /* --- Faithful mirrors of module-local page schemas (not exported) ---------- */
@@ -579,6 +615,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.savings.ledger?.all_time.saved_tokens).toBeGreaterThan(0);
     expect((data.savings.lifetime_counters?.projects ?? []).length).toBeGreaterThanOrEqual(4);
     expect(data.provider_usage.available).toBe(true);
+    expectScopeUnavailableProviderLatency(data.costs);
   });
 
   it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummaryV1Schema)', () => {
@@ -858,6 +895,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(cost?.value).toBeNull();
     expect(cost?.unavailable_reason).toBe('pricing_revision_unavailable');
     expect(env.payload.pricing_revision).toBeNull();
+    expectScopeUnavailableProviderLatency(env.payload);
     // All-time window, which the wire carries as an unbounded lower edge.
     expect(env.payload.horizon.since_micros).toBe(0);
   });
@@ -872,6 +910,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     // The branch-aware part: a sealed generation names the exact reference it
     // was sealed against, so a graph read on another branch is visibly stale.
     expect(worktree?.source_reference).toMatch(/^refs\//);
+    // The synthetic fixture does not claim a sealed revision without a
+    // coherent source-reference/generation/content tuple.
+    expect(worktree?.source_revision).toBeNull();
     expect(worktree?.latest_generation_id).toBeTruthy();
     expect(worktree?.snapshot_content_identity).toBeTruthy();
     expect(worktree?.staleness_state).toBe('fresh');
