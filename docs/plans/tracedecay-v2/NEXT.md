@@ -141,6 +141,12 @@ the commit as attribution evidence.
   authority suite, generated dashboard contract check, Rust formatting, and
   diff hygiene are green. Product publication remains distinct from executor
   topology and cannot fabricate attempt hydration.
+- Pinned Work proposal routing is now exercised through registered daemon
+  dispatch in `2e2daa8b0`. The non-vacuous core lifecycle journey passed 1/1
+  and proves generation binds the exact current Work graph plus the admitted
+  configuration digest/revision. An empty pinned route set returns an
+  explained `NoEligibleRoutes` decision with no ranked candidates; it never
+  derives a provider route from executable capability alone.
 - The obsolete `test-transport` SQLite graph-projection fixture is retired in
   `8b3900960`. It no longer imports the private daemon service, calls deleted
   relational graph reads, or constructs a scheduler without the process
@@ -340,9 +346,6 @@ the commit as attribution evidence.
   saturation, restart delivery, identity tamper, authorization, drift,
   preflight cancellation/bounds, circuit transition, and anchored corpus
   journeys after the central compile is green.
-- Re-run the production daemon dispatch journey for pinned proposal routing in
-  `782486f988`. Its domain and planner tests passed, but daemon compilation was
-  terminated before the mounted route executed.
 - Checkpoint the canonical-parent cutover that removes remaining
   `crate::application` facade imports from daemon, project runtime, session
   sync/registry, MCP session retrieval, and root composition. Complete the
