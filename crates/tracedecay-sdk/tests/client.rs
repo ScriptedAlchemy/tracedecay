@@ -10,8 +10,8 @@ use tracedecay_sdk::client::{
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    ApplicationGitStatus, CodeExactOccurrence, TypedOperation, WorkflowListDefinitions,
-    WorkflowRegisterDefinition,
+    ApplicationGitStatus, CodeExactOccurrence, TypedOperation, WorkRetrieveEvidence,
+    WorkflowListDefinitions, WorkflowRegisterDefinition,
 };
 
 #[derive(Debug, Default)]
@@ -551,6 +551,56 @@ fn mounted_git_reads_use_the_generated_http_route() {
     assert!(matches!(error, ClientError::Protocol { .. }));
     let requests = server.join().unwrap();
     assert!(requests[0].contains("POST /projects/project.sdk/application/git/status HTTP/1.1"));
+}
+
+#[test]
+fn work_evidence_uses_the_generated_http_route_and_typed_request() {
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .expect("client configuration");
+    let request =
+        serde_json::from_value::<<WorkRetrieveEvidence as TypedOperation>::Request>(json!({
+            "selection": {"selection": "profile_owned_no_git"},
+            "task_id": "task.sdk.evidence",
+            "verified_version": {
+                "graph_version": 4,
+                "event_sequence": 4,
+                "source_watermark": {},
+                "recovered_graph_digest": concat!(
+                    "sha256:",
+                    "11111111111111111111111111111111",
+                    "11111111111111111111111111111111"
+                )
+            },
+            "temporal": {"kind": "forensic"},
+            "page_size": 8,
+            "expansion": {
+                "kind": "task_session",
+                "attempt": {
+                    "task_id": "task.sdk.evidence",
+                    "run_id": "run.sdk.evidence",
+                    "attempt_id": "attempt.sdk.evidence"
+                }
+            },
+            "continuation": null,
+            "observed_at": 100
+        }))
+        .expect("typed Work evidence request");
+
+    let error = client
+        .execute::<WorkRetrieveEvidence>(&request)
+        .expect_err("malformed HTTP result must fail closed");
+
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    let requests = server.join().unwrap();
+    assert!(
+        requests[0]
+            .contains("POST /projects/project.sdk/application/work/retrieve-evidence HTTP/1.1")
+    );
+    assert!(requests[0].contains("\"kind\":\"task_session\""));
+    assert!(requests[0].contains("\"attempt_id\":\"attempt.sdk.evidence\""));
 }
 
 #[test]

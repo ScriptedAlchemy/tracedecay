@@ -1,6 +1,6 @@
 use tracedecay_sdk::operations::{
     ApplicationGitStatus, OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate,
-    WorkflowRegisterDefinition,
+    WorkRetrieveEvidence, WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
@@ -74,6 +74,36 @@ fn work_create_descriptor_matches_the_mounted_binding() {
         binding.deadline().maximum_millis()
     );
     assert_eq!(WorkCreate::DEADLINE_BEHAVIOR, binding.deadline().behavior());
+}
+
+#[test]
+fn work_retrieve_evidence_descriptor_matches_the_mounted_binding() {
+    let registry = work::executable_binding_registry().expect("canonical Work registry");
+    let binding = registry
+        .get(&operation::OperationId::new(WorkRetrieveEvidence::OPERATION_ID).unwrap())
+        .and_then(|availability| availability.binding())
+        .expect("mounted Work retrieve-evidence binding");
+
+    assert_eq!(
+        WorkRetrieveEvidence::TRANSPORT,
+        OperationTransport::Http {
+            route: "/application/work/retrieve-evidence"
+        }
+    );
+    assert_eq!(
+        WorkRetrieveEvidence::BINDING_ID,
+        "binding.http.work.retrieve_evidence"
+    );
+    assert_eq!(WorkRetrieveEvidence::EFFECT, binding.effect());
+    assert_eq!(WorkRetrieveEvidence::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(
+        WorkRetrieveEvidence::MAXIMUM_DEADLINE_MILLIS,
+        binding.deadline().maximum_millis()
+    );
+    assert_eq!(
+        WorkRetrieveEvidence::DEADLINE_BEHAVIOR,
+        binding.deadline().behavior()
+    );
 }
 
 #[test]

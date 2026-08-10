@@ -248,17 +248,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_and_mutation_preserve_the_typed_http_work_envelope() {
+    async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
         let executor = RecordingWorkExecutor::default();
         let requests = [
             ("tracedecay_work_snapshot", json!({"page_size": 10})),
+            ("tracedecay_work_resume_attempts", json!({"occurred_at": 1})),
             (
-                "tracedecay_work_create",
+                "tracedecay_work_retrieve_evidence",
                 json!({
+                    "selection": {"selection": "profile_owned_no_git"},
                     "task_id": "task.work-mcp-parity",
-                    "title": "Work MCP parity",
-                    "command_id": "command.work-mcp-parity",
-                    "occurred_at": 0
+                    "verified_version": {
+                        "graph_version": 1,
+                        "event_sequence": 1,
+                        "source_watermark": {},
+                        "recovered_graph_digest": concat!(
+                            "sha256:",
+                            "11111111111111111111111111111111",
+                            "11111111111111111111111111111111"
+                        )
+                    },
+                    "temporal": {"kind": "forensic"},
+                    "page_size": 10,
+                    "expansion": null,
+                    "continuation": null,
+                    "observed_at": 1
                 }),
             ),
         ];
@@ -315,6 +329,8 @@ mod tests {
                 .lock()
                 .expect("recorded Work daemon operations"),
             vec![
+                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
+                crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
                 crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
                 crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
                 crate::daemon_contract::DaemonInvocationOperation::WorkApplication,
