@@ -34,6 +34,9 @@
 
 mod common;
 
+#[path = "work_route_exposure_conformance/work_evidence.rs"]
+mod work_evidence;
+
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -820,52 +823,10 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         "{created}"
     );
 
-    // `views` is the read the Work workspace opens with, so the write above has
-    // to be visible through both mounts. This is the leg that proves the
-    // operations share one store through the daemon rather than each answering
-    // plausibly.
-    let graph_request = current_product_graph_request(
-        effect["payload"]["event"]["occurred_at"]
-            .as_i64()
-            .expect("created event observation time"),
-    );
-    for (label, (status, graph_read)) in [
-        (
-            "daemon work/views",
-            post_envelope(
-                &agent,
-                &fixture.external_url("/application/work/views"),
-                &fixture,
-                &graph_request,
-            ),
-        ),
-        (
-            "dashboard api/work/views",
-            post_dashboard_envelope(
-                &agent,
-                &format!("{}/api/work/views", dashboard.base_url),
-                &graph_request,
-            ),
-        ),
-    ] {
-        eprintln!("{label} -> {status} {graph_read}");
-        assert_canonical_envelope(label, status, &graph_read);
-        let evidence = &graph_read["value"]["outcome"]["value"];
-        assert_eq!(
-            graph_read["value"]["outcome"]["outcome"], "evidence",
-            "{graph_read}"
-        );
-        assert_eq!(evidence["payload"]["mode"], "current", "{graph_read}");
-        let items = evidence["payload"]["snapshot"]["graph"]["items"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{label} must carry graph items: {graph_read}"));
-        assert!(
-            items
-                .iter()
-                .any(|item| item["input"]["task_id"] == "task.work-surface-conformance"),
-            "the created task must be readable through {label}: {graph_read}"
-        );
-    }
+    let observed_at = effect["payload"]["event"]["occurred_at"]
+        .as_i64()
+        .expect("created event observation time");
+    work_evidence::assert_live_task_rooted_retrieval(&agent, &fixture, &dashboard, observed_at);
 
     for retired in ["snapshot", "delta", "replan-dependencies", "accept-task"] {
         let (status, body) = post_envelope(
