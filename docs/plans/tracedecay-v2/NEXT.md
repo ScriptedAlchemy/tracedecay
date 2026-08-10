@@ -172,6 +172,25 @@ the commit as attribution evidence.
   `7bc512d82e`, `d1da115773`, `7dc8c7923b`, and `e5bff28c7b`.
 - Automatic-curation dashboard receipt UI is checkpointed in `91f9527f1b`;
   focused memory-config, RunHistory, and KnowledgeCuration tests passed 11/11.
+- The automatic-curation, memory, and configuration lane is complete on the
+  current tree. `203d7cd0b` moves automatic facts and terminal receipts onto
+  the canonical store and finishes the dashboard, CLI, and MCP receipt
+  adapters; applied, quarantined, replayed, and paraphrased receipt journeys
+  preserve immutable outcomes and never project a quarantined fact. The
+  focused host-runner suite passed 7/7, receipt terminal suites passed 3/3 and
+  1/1, the dashboard receipt endpoints passed 2/2, CLI parsing and RPC passed
+  2/2 and 1/1, and the MCP admin route passed 1/1. `6356a78f5` makes the native
+  curator consume canonical string identities, removes retired mirror reads
+  from current/as-of/delete and bounded vector convergence, preserves the full
+  initial-plus-repair backend attempt history, and keeps application error
+  source chains. Curator, scheduler, lock, merge/hydration, session-reflector,
+  and skill-writer focused suites are green. `5df70d10e` mounts the real daemon
+  configuration grant and mutation service in the dashboard endpoint fixture;
+  the 2/2 route journey proves pinned revision advancement, stale CAS,
+  reread-after-settlement, and typed JSON rejection of all retired policy
+  fields. Automatic managed-skill transaction, materialization, and lifecycle
+  suites passed 8/8, 1/1, and 16/16; dashboard typecheck and the focused
+  Automations receipt tests are green.
 - Typed terminal problem validation is checkpointed in `850265033c`.
 - Reset-required propagation is no longer downgraded at the Workflow CLI,
   multi-root MCP, generic daemon client, registered HTTP/application,
@@ -285,21 +304,6 @@ the commit as attribution evidence.
   receipts, reset-required, and post-restart reconciliation as externally
   observed typed terminals. The focused owner/application tests prove their
   internal mappings but are not a restart or end-to-end transport receipt.
-
-### Automatic curation, memory, and configuration
-
-- Normalize only the intended adapter files from `9f34595b4e`, then finish the
-  dashboard route/library/endpoint tests and CLI route for automatic fact
-  receipts. No approval, proposal, pending, staged, or human-curation state may
-  return.
-- Commit the receipt-derived outcomes files if they are not already represented
-  exactly by `ee700fae8d`; verify quarantined receipts never fabricate an
-  applied projection.
-- Finish the deferred pinned digest, dashboard, MCP-memory, and config-scout
-  callers using the validated canonical configuration snapshot.
-- Verify the automatic-fact module rename, migrations, host runner, policy,
-  scheduler, dashboard, CLI, and MCP compile together. Run the focused terminal
-  receipt tests and automatic managed-skill lifecycle tests.
 
 ### Observability and delivery
 
