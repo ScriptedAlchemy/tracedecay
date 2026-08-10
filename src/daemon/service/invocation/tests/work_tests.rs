@@ -6,8 +6,9 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_application::{
-    PrepareWorkProductMutationRequestV1, WorkGraphReadRequestV1, WorkProductChangeDraftV1,
-    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    GenerateProposalRequest, PrepareWorkProductMutationRequestV1, WorkGraphReadRequestV1,
+    WorkProductChangeDraftV1, WorkProductMutationRequestV1, WorkProductSelectionScopeV1,
+    WorkRelationScopeV1,
 };
 use tracedecay_domain::{
     InitiativeId, MilestoneId, ProposalId, TaskId, WorkHierarchyV1, WorkInitiativeV1,
@@ -15,6 +16,7 @@ use tracedecay_domain::{
     WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1, WorkScoreKindV1,
     WorkShapeAssessmentV1, WorkSizingV1,
 };
+use tracedecay_policy::work_loop::WorkProposalReasonV1;
 
 fn product_task(
     identity: &str,
@@ -142,7 +144,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             actor,
             grant,
             policy_digest,
-            configuration_digest,
+            configuration_digest.clone(),
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
             denied_work_evidence_retrieval(),
@@ -266,6 +268,56 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let replayed = effect.payload.expect("replayed product task receipt");
     assert!(replayed.replayed());
     assert_eq!(replayed.event(), created.event());
+
+    let generated = invoke!(
+        "request.work.generate-proposal",
+        WorkApplicationInvocationV1::GenerateProposal(GenerateProposalRequest {
+            selection: product_selection.clone(),
+            task_id: task_id.clone(),
+            proposal_id: ProposalId::new("proposal.work.generated-routing")
+                .expect("generated proposal id"),
+            live_git_evidence: None,
+            occurred_at: UtcMicros(100),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::GenerateProposal(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = generated
+    else {
+        panic!("proposal generation must return Work evidence: {generated:?}");
+    };
+    let generated = packet.payload.expect("generated proposal evidence");
+    assert_eq!(
+        generated.verified_graph_version.graph_version(),
+        created.verified_graph_version().graph_version(),
+        "proposal generation must bind the exact current Work graph"
+    );
+    let route_plan = generated
+        .decision
+        .route_plan
+        .as_ref()
+        .expect("an empty pinned route set remains an explained decision");
+    assert!(route_plan.ranked.is_empty());
+    assert!(
+        generated
+            .decision
+            .ordered_reason_codes
+            .contains(&WorkProposalReasonV1::NoEligibleRoutes)
+    );
+    assert_eq!(
+        generated.calibration.provenance.configuration_digest,
+        configuration_digest
+    );
+    assert_eq!(
+        generated
+            .calibration
+            .provenance
+            .configuration_revision
+            .as_ref()
+            .map(|revision| revision.as_str()),
+        Some("configuration.revision.work-empty-routing")
+    );
 
     let proposal = WorkProposalV1::new(
         ProposalId::new("proposal.work.core-invocation").expect("proposal id"),
