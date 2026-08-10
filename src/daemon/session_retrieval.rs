@@ -171,6 +171,37 @@ impl DaemonSessionRetrievalRoot {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn project_identity_for_test(
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        authorized_root: String,
+    ) -> Self {
+        let identity = ResolvedSessionIdentity::for_project(
+            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID)
+                .unwrap_or_else(|error| panic!("test profile identity: {error}")),
+            project_id.clone(),
+            SessionStoreId::new("store.project.test")
+                .unwrap_or_else(|error| panic!("test store identity: {error}")),
+            SessionRootId::new("root.project.test")
+                .unwrap_or_else(|error| panic!("test root identity: {error}")),
+            ResolvedGitRoute::new(
+                repository_id,
+                worktree_id,
+                BranchId::new("branch.project.test")
+                    .unwrap_or_else(|error| panic!("test branch identity: {error}")),
+            ),
+        );
+        Self {
+            store_scope: SessionRetrievalStoreScope::Project,
+            identity,
+            project_id: Some(project_id.as_str().to_owned()),
+            authorized_root: Some(authorized_root),
+            expected_runtime_shard: None,
+        }
+    }
+
     pub(crate) fn profile() -> Option<Self> {
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Profile,

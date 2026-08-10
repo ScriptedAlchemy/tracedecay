@@ -376,12 +376,10 @@ fn admitted_session_binding(
         context.grant().digest.as_str().as_bytes(),
         retrieval_configuration,
     ));
-    let policy = PolicyDigest::new(application_retrieval_digest(
-        b"tracedecay.application.session-retrieval.policy.v1\0",
-        &root.identity,
-        context.grant().digest.as_str().as_bytes(),
-        retrieval_configuration,
-    ));
+    let access_policy = tracedecay_store::observation_capture_access_policy_digest_v1()
+        .map_err(|_| temporal_store_unavailable())?;
+    let policy = PolicyDigest::from_access_policy_digest(&access_policy)
+        .map_err(|_| temporal_store_unavailable())?;
     let configuration = ConfigurationDigest::new(application_retrieval_digest(
         b"tracedecay.application.session-retrieval.configuration.v1\0",
         &root.identity,

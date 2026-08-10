@@ -14,7 +14,7 @@ pub use tracedecay_dashboard_api::*;
 pub(crate) mod assets;
 
 /// Canonical observation-capture seeding for dashboard integration fixtures.
-#[cfg(feature = "test-transport")]
+#[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub mod observation_seed;
 

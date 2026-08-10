@@ -22,6 +22,9 @@ pub use anchored_write::{AnchoredObservationWrite, RepositoryProvenanceAttachmen
 
 const MAX_REPLAY_LIMIT: usize = 1_000;
 
+/// Canonical authority namespace bound into every observation-capture anchor.
+pub const OBSERVATION_CAPTURE_AUTHORITY_V1: &str = "observation-capture.v1";
+
 fn cursor_transition_covers(
     expected: Option<&ObservationSourceCursorV1>,
     next: &ObservationSourceCursorV1,
@@ -181,6 +184,14 @@ fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult
         memo.insert(authority_namespace.to_owned(), digest.clone());
     }
     Ok(digest)
+}
+
+/// Returns the exact access-policy digest retained by production observation
+/// anchors so retrieval admission can bind to the same authority without
+/// duplicating its canonical digest construction.
+pub fn observation_capture_access_policy_digest_v1() -> ObservationStoreResult<AccessPolicyDigest> {
+    AccessPolicyDigest::new(access_policy_digest_for(OBSERVATION_CAPTURE_AUTHORITY_V1)?)
+        .map_err(ObservationStoreError::RetrievalAnchorContract)
 }
 
 fn build_resolution_authorization_v1(

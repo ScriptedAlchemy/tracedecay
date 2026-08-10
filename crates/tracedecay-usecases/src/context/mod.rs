@@ -10,7 +10,7 @@ pub mod source_read;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId};
 
 pub use registered_scope::RegisteredScopeResolver;
 
@@ -272,6 +272,31 @@ macro_rules! digest {
 }
 
 digest!(CapabilityDigest, PolicyDigest, ConfigurationDigest);
+
+impl PolicyDigest {
+    /// Converts the canonical algorithm-tagged observation access-policy
+    /// digest into the fixed-width session admission binding.
+    pub fn from_access_policy_digest(
+        digest: &AccessPolicyDigest,
+    ) -> Result<Self, ApplicationScopeError> {
+        let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+            ApplicationScopeError::Contract(
+                "session access policy must use a sha256 digest".to_owned(),
+            )
+        })?;
+        let bytes = hex::decode(encoded).map_err(|error| {
+            ApplicationScopeError::Contract(format!(
+                "session access policy digest is not canonical hex: {error}"
+            ))
+        })?;
+        let bytes = <[u8; 32]>::try_from(bytes).map_err(|_| {
+            ApplicationScopeError::Contract(
+                "session access policy digest has the wrong width".to_owned(),
+            )
+        })?;
+        Ok(Self::new(bytes))
+    }
+}
 
 /// The monotonic deadline and cooperative cancellation token moved into
 /// `tracedecay_runtime_core::cancellation`: the kernel bounds its store-runtime

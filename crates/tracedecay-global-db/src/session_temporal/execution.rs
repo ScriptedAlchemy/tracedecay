@@ -264,12 +264,15 @@ pub trait SessionTemporalExecutionPort: Send + Sync {
 }
 
 /// Exact points where the Work owner must prove that the Task/graph/attempt
-/// binding remains current. The second check runs after global rank selection
-/// and immediately before canonical hydration.
+/// binding remains current. Selection and hydration are checked inside the
+/// frozen temporal snapshot; the admitted Work adapter checks again before it
+/// expands the report and before it emits continuation state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskSessionReauthorizationStageV1 {
     BeforeSelection,
     BeforeHydration,
+    BeforeExpansion,
+    BeforeContinuation,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -284,8 +287,8 @@ pub enum TaskSessionSelectionCallbackErrorV1 {
     Invalid(String),
 }
 
-/// Borrowed, object-safe callback that keeps Work reauthorization and global
-/// fusion/rank inside the lifetime of one frozen session-store read snapshot.
+/// Borrowed, object-safe callback shared by the frozen rank-before-hydrate
+/// execution and the admitted Work report-expansion boundary.
 pub trait TaskSessionRankSelectorV1: Send + Sync {
     fn reauthorize(
         &self,

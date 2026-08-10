@@ -427,7 +427,16 @@ fn candidate_export_ranks_without_reading_payload_bytes() {
 #[test]
 fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
     block_on(async {
-        let port = basic_port();
+        let phrase = candidate("a", "a", 20);
+        let mut lexical = phrase.clone();
+        lexical.channel = CandidateChannel::Lexical;
+        let port = FakeReadPort::new(
+            vec![phrase, lexical, candidate("b", "b", 10)],
+            vec![
+                TemporalRecord::Occurrence(occurrence('a', "a", 20)),
+                TemporalRecord::Occurrence(occurrence('b', "b", 10)),
+            ],
+        );
         let hydrator = FakeHydrator::default();
         let mut temporal_request = request(TemporalModeV1::Current, 2);
         let participant = TemporalParticipantGeneration::new(
@@ -503,17 +512,24 @@ fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
                 .iter()
                 .all(|candidate| candidate.retriever == RetrieverKind::Temporal)
         );
-        assert_eq!(batch.coverage.examined, 2);
+        assert_eq!(batch.coverage.examined, 3);
         assert!(batch.continuation.is_some());
+        let first = batch
+            .evidence_by_occurrence
+            .values()
+            .next()
+            .expect("evidence");
+        assert_eq!(first.contributions.len(), 2);
         assert_eq!(
-            batch
-                .evidence_by_occurrence
-                .values()
-                .next()
-                .expect("evidence")
-                .contributions[0]
-                .channel,
-            TemporalCandidateChannelV1::Phrase,
+            first
+                .contributions
+                .iter()
+                .map(|contribution| contribution.channel)
+                .collect::<Vec<_>>(),
+            vec![
+                TemporalCandidateChannelV1::Phrase,
+                TemporalCandidateChannelV1::Lexical,
+            ],
         );
         assert!(
             hydrator.calls.lock().expect("calls lock").is_empty(),

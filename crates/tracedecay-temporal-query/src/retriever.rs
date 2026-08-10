@@ -49,15 +49,34 @@ impl TemporalCandidateExport {
         let mut candidates = Vec::new();
         let mut evidence_by_occurrence = BTreeMap::new();
         for ranked in &self.ranked {
-            let contributions = ranked
-                .contributions
-                .iter()
-                .map(temporal_contribution)
-                .collect::<Result<Vec<_>, _>>()?;
-            for (contribution_index, contribution) in ranked.contributions.iter().enumerate() {
-                let source_occurrence =
-                    SourceOccurrenceId::try_from(contribution.retriever_record_id.clone())
-                        .map_err(candidate_export_contract)?;
+            let mut occurrence_order = Vec::new();
+            let mut contributions_by_occurrence =
+                BTreeMap::<SourceOccurrenceId, Vec<TemporalCandidateContributionV1>>::new();
+            for contribution in &ranked.contributions {
+                let contribution = temporal_contribution(contribution)?;
+                let source_occurrence = contribution.source_occurrence.clone();
+                if !contributions_by_occurrence.contains_key(&source_occurrence) {
+                    occurrence_order.push(source_occurrence.clone());
+                }
+                contributions_by_occurrence
+                    .entry(source_occurrence)
+                    .or_default()
+                    .push(contribution);
+            }
+            let logical_identity = match &ranked.logical_message {
+                Some(logical_message) => logical_message.clone(),
+                None => ranked.stable_id.clone(),
+            };
+            let logical_evidence_id =
+                LogicalEvidenceId::try_from(logical_identity).map_err(candidate_export_contract)?;
+            for (occurrence_index, source_occurrence) in occurrence_order.into_iter().enumerate() {
+                let occurrence_contributions = contributions_by_occurrence
+                    .remove(&source_occurrence)
+                    .ok_or_else(|| {
+                        TemporalKernelError::CandidateExportContract(
+                            "temporal occurrence lost its contribution evidence".to_owned(),
+                        )
+                    })?;
                 let session_id = ranked
                     .session
                     .as_deref()
@@ -69,10 +88,19 @@ impl TemporalCandidateExport {
                     .and_then(|value| {
                         SessionId::new(value.to_owned()).map_err(candidate_export_contract)
                     })?;
-                let source_id = contribution
-                    .source
-                    .as_deref()
-                    .or(ranked.source.as_deref())
+                let source_ids = occurrence_contributions
+                    .iter()
+                    .filter_map(|contribution| contribution.source_id.clone())
+                    .collect::<BTreeSet<_>>();
+                if source_ids.len() > 1 {
+                    return Err(TemporalKernelError::CandidateExportContract(
+                        "temporal occurrence has conflicting source identities".to_owned(),
+                    ));
+                }
+                let source_id = source_ids
+                    .into_iter()
+                    .next()
+                    .or_else(|| ranked.source.clone())
                     .ok_or_else(|| {
                         TemporalKernelError::CandidateExportContract(
                             "temporal candidate omitted its owning source".to_owned(),
@@ -102,18 +130,9 @@ impl TemporalCandidateExport {
                 let source_instance =
                     SourceInstanceKey::try_from(format!("{}:{source_id}", session_id))
                         .map_err(candidate_export_contract)?;
-                // `stable_id` is the canonical temporal evidence identity when
-                // the source does not declare a cross-occurrence logical
-                // message group.
-                let logical_identity = match &ranked.logical_message {
-                    Some(logical_message) => logical_message.clone(),
-                    None => ranked.stable_id.clone(),
-                };
-                let logical_evidence_id = LogicalEvidenceId::try_from(logical_identity)
-                    .map_err(candidate_export_contract)?;
                 let ordinal_rank = u32::try_from(candidates.len())
                     .map_err(|_| TemporalKernelError::BudgetExceeded)?;
-                let raw_score = if contribution_index == 0 {
+                let raw_score = if occurrence_index == 0 {
                     ranked.normalized_score_micros
                 } else {
                     0
@@ -127,7 +146,7 @@ impl TemporalCandidateExport {
                 );
                 candidates.push(CompactCandidate {
                     anchor_id: ranked.anchor_id.clone(),
-                    logical_evidence_id,
+                    logical_evidence_id: logical_evidence_id.clone(),
                     source_occurrence_id: source_occurrence.clone(),
                     file_occurrence_id: None,
                     source_namespace,
@@ -156,9 +175,9 @@ impl TemporalCandidateExport {
                         authorization_revision: request.snapshot.authorization_revision.clone(),
                         participant_epoch: participant_epoch.clone(),
                         session_id: session_id.clone(),
-                        source_id: source_id.to_owned(),
+                        source_id,
                         hydration_anchor: ranked.anchor_id.clone(),
-                        contributions: contributions.clone(),
+                        contributions: occurrence_contributions,
                     },
                 );
                 if prior.is_some() {

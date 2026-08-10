@@ -168,7 +168,7 @@ pub async fn seed_session_message_observation_for_test(
         .map_err(|error| fixture_error("projection generation", error))?;
     let authorization = build_observation_resolution_authorization_v1(
         write.observation(),
-        "observation-capture.v1",
+        tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
     )
     .map_err(|error| fixture_error("resolution authorization", error))?;
     let anchor = build_observation_retrieval_anchor_v2(

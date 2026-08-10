@@ -400,7 +400,7 @@ where
                     let ingested_at = observation_ingested_at();
                     let authorization = build_observation_resolution_authorization_v1(
                         &observation,
-                        "observation-capture.v1",
+                        tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
                     )?;
                     let repository_provenance = repository_provenance.map_or_else(
                         crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,

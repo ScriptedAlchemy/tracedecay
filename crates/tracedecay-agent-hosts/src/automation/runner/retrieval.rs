@@ -10,15 +10,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };
 use tracedecay_domain::{
-    ActorId, PayloadReferenceV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, WorktreeId,
+    ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
+    TemporalModeV1, UtcMicros, WorktreeId,
 };
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -199,7 +199,7 @@ impl ProductionAutomationSessionRetrieval {
             &self.identity,
             provider,
         ));
-        let policy = PolicyDigest::new(automation_session_policy_digest()?);
+        let policy = automation_session_policy_digest()?;
         let configuration = ConfigurationDigest::new(automation_session_digest(
             b"tracedecay.automation.session.configuration.v1\0",
             &self.identity,
@@ -332,14 +332,9 @@ fn automation_session_digest(
     digest.finalize().into()
 }
 
-fn automation_session_policy_digest() -> Option<[u8; 32]> {
-    let encoded = PayloadReferenceV1::for_payload(&json!({
-        "domain": "tracedecay.observation-anchor.authorization.v1",
-        "authority": "observation-capture.v1",
-    }))
-    .ok()?;
-    let digest = encoded.digest().as_str().strip_prefix("sha256:")?;
-    hex::decode(digest).ok()?.try_into().ok()
+fn automation_session_policy_digest() -> Option<PolicyDigest> {
+    let digest = tracedecay_store::observation_capture_access_policy_digest_v1().ok()?;
+    PolicyDigest::from_access_policy_digest(&digest).ok()
 }
 
 pub(super) async fn retrieve_automation_session_evidence(

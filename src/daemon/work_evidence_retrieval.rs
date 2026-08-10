@@ -216,7 +216,7 @@ impl WorkTaskSessionPortV1 for DaemonWorkEvidenceRetrievalV1 {
                     &selector,
                 )
                 .await;
-            task_session_evidence(&request, outcome)
+            task_session_evidence(&request, outcome, &selector)
         })
     }
 }
@@ -364,6 +364,7 @@ fn task_session_query_text(request: &WorkTaskSessionRequestV1) -> String {
 fn task_session_evidence(
     request: &WorkTaskSessionRequestV1,
     outcome: TaskSessionRetrievalOutcomeV1,
+    selector: &dyn TaskSessionRankSelectorV1,
 ) -> Result<WorkTaskSessionEvidenceV1, WorkEvidenceHydrationErrorV1> {
     let report = match outcome {
         TaskSessionRetrievalOutcomeV1::Complete(report) => report,
@@ -398,6 +399,11 @@ fn task_session_evidence(
     if !binding_matches_request(&report.binding, request) {
         return Err(WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized);
     }
+    reauthorize_work_stage(
+        selector,
+        &report.binding,
+        TaskSessionReauthorizationStageV1::BeforeExpansion,
+    )?;
     let result = report.temporal.result();
     let participant_epoch = tracedecay_domain::ManifestDigest::new(
         result.snapshot.participant_manifest().epoch_digest(),
@@ -460,6 +466,11 @@ fn task_session_evidence(
         result.next_cursor.as_deref(),
         report.selection.continuation(),
     )?;
+    reauthorize_work_stage(
+        selector,
+        &report.binding,
+        TaskSessionReauthorizationStageV1::BeforeContinuation,
+    )?;
     let coverage = if counts.hidden == 0
         && counts.unknown == 0
         && counts.redacted == 0
@@ -492,6 +503,25 @@ fn task_session_evidence(
                 .any(|hydrated| hydrated.state() == HydrationStateV1::Redacted),
         continuation,
     })
+}
+
+fn reauthorize_work_stage(
+    selector: &dyn TaskSessionRankSelectorV1,
+    binding: &TaskSessionBindingV1,
+    stage: TaskSessionReauthorizationStageV1,
+) -> Result<(), WorkEvidenceHydrationErrorV1> {
+    selector
+        .reauthorize(binding, stage)
+        .map_err(|error| match error {
+            TaskSessionSelectionCallbackErrorV1::Denied => {
+                WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized
+            }
+            TaskSessionSelectionCallbackErrorV1::Stale => WorkEvidenceHydrationErrorV1::Stale,
+            TaskSessionSelectionCallbackErrorV1::Unavailable
+            | TaskSessionSelectionCallbackErrorV1::Invalid(_) => {
+                WorkEvidenceHydrationErrorV1::Unavailable
+            }
+        })
 }
 
 fn task_session_continuation(
@@ -545,3 +575,376 @@ const fn work_freshness(freshness: SessionDataFreshness) -> WorkEvidenceFreshnes
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_application::{
+        CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestId,
+        WorkProductSelectionScopeV1,
+    };
+    use tracedecay_domain::{
+        ActorId, AttemptId, CalibrationProfileId, DiversityPolicy, FusionProfile, ManifestDigest,
+        ObservationSourceIdentityV1, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
+        RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind, RunId,
+        ScoreDomainCalibrationV1, ScoreDomainId, SessionId, SourceStoreId, TaskId, TemporalModeV1,
+        UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1, WorkProductEventSequenceV1,
+        WorkProductSourceWatermarkV1, WorktreeId,
+    };
+    use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::*;
+
+    pub(super) fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("TaskSession fixture identity")
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("TaskSession fixture digest")
+    }
+
+    pub(super) fn context(scope: ResolvedScope) -> RequestContext {
+        let grant = CapabilityGrantSnapshot::new(
+            id("grant.work-task-session"),
+            1,
+            digest('a'),
+            id::<ActorId>("actor.work-task-session.issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            BTreeSet::from([
+                CapabilityId::new("capability.work.evidence.read").expect("capability")
+            ]),
+            BTreeSet::from([UseCaseId::new("use-case.work.evidence.read").expect("use case")]),
+            DisclosureClass::Evidence,
+        )
+        .expect("TaskSession fixture grant");
+        RequestContext::new(
+            id::<ActorId>("actor.work-task-session.requester"),
+            scope,
+            grant,
+            RequestId::new("request.work-task-session").expect("request id"),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.work-task-session").expect("cancellation"),
+        )
+        .expect("TaskSession fixture context")
+    }
+
+    pub(super) fn verified_version() -> tracedecay_application::VerifiedWorkGraphVersionV1 {
+        tracedecay_application::VerifiedWorkGraphVersionV1::new(
+            WorkGraphVersionV1::new(5).expect("graph version"),
+            WorkProductEventSequenceV1::new(5).expect("event sequence"),
+            WorkProductSourceWatermarkV1::new(BTreeMap::<SourceStoreId, u64>::new())
+                .expect("source watermark"),
+            digest('b'),
+        )
+        .expect("verified Work version")
+    }
+
+    pub(super) fn federated_authority(privacy_domain: PrivacyDomainId) -> QueryAuthorityV1 {
+        let budget = RetrievalBudget {
+            max_candidates_per_lane: 32,
+            max_fused_candidates: 16,
+            max_hydrated_results: 8,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        };
+        let calibrations = RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| {
+                (
+                    lane,
+                    id::<CalibrationProfileId>(&format!(
+                        "calibration.{}.work-task-session",
+                        lane.as_str()
+                    )),
+                )
+            })
+            .collect();
+        let score_domain_calibrations = RetrieverKind::ALL_LANES
+            .into_iter()
+            .map(|lane| {
+                let score_domain = id::<ScoreDomainId>(&format!("score.{}.v1", lane.as_str()));
+                (
+                    score_domain.clone(),
+                    ScoreDomainCalibrationV1 {
+                        calibration_profile_id: id(&format!(
+                            "calibration.{}.work-task-session",
+                            lane.as_str()
+                        )),
+                        score_domain,
+                        raw_min_micros: 0,
+                        raw_max_micros: 1_000_000,
+                    },
+                )
+            })
+            .collect();
+        let profile = FusionProfile {
+            profile_id: id("profile.work-task-session"),
+            evaluation_result_anchor: RetrievalAnchorId::new("evaluation.work-task-session")
+                .expect("evaluation anchor"),
+            calibrations,
+            score_domain_calibrations,
+            weights_micros: RetrieverKind::ALL_LANES
+                .into_iter()
+                .map(|lane| (lane, 100_000))
+                .collect(),
+            diversity_policy_id: id("diversity.work-task-session"),
+            rerank_policy_id: None,
+            retrieval_budget: budget,
+        };
+        let diversity = DiversityPolicy {
+            policy_id: id("diversity.work-task-session"),
+            evaluation_result_anchor: Some(
+                RetrievalAnchorId::new("evaluation.work-task-session").expect("evaluation anchor"),
+            ),
+            per_source_namespace: None,
+            per_source_instance: None,
+            per_repository: None,
+            per_file: None,
+            per_session_or_thread: None,
+            per_copy_cluster: None,
+            per_evidence_role: None,
+        };
+        QueryAuthorityV1::new_federated(
+            profile,
+            diversity,
+            id("ranking.work-task-session.v1"),
+            RetrievalCursorKeyringV1::new(
+                privacy_domain,
+                id::<RetrievalCursorKeyId>("cursor-key.work-task-session"),
+                1,
+                vec![7_u8; 32],
+                1_000_000,
+            )
+            .expect("cursor keyring"),
+        )
+        .expect("federated TaskSession authority")
+    }
+
+    pub(super) struct StaticFederatedAuthority(pub(super) Arc<QueryAuthorityV1>);
+
+    impl WorkFederatedQueryAuthorityPortV1 for StaticFederatedAuthority {
+        fn authority_for<'a>(
+            &'a self,
+            _scope: &'a ResolvedScope,
+        ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
+            let authority = Arc::clone(&self.0);
+            Box::pin(async move { Some(authority) })
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct CountingReauthorization(pub(super) AtomicUsize);
+
+    impl WorkTaskSessionReauthorizationPortV1 for CountingReauthorization {
+        fn reauthorize_task_session(
+            &self,
+            _context: &RequestContext,
+            _request: &WorkTaskSessionRequestV1,
+        ) -> Result<(), WorkTaskSessionReauthorizationErrorV1> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct FailingReauthorization {
+        calls: AtomicUsize,
+        fail_at: usize,
+        error: WorkTaskSessionReauthorizationErrorV1,
+    }
+
+    impl FailingReauthorization {
+        fn new(fail_at: usize, error: WorkTaskSessionReauthorizationErrorV1) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_at,
+                error,
+            }
+        }
+    }
+
+    impl WorkTaskSessionReauthorizationPortV1 for FailingReauthorization {
+        fn reauthorize_task_session(
+            &self,
+            _context: &RequestContext,
+            _request: &WorkTaskSessionRequestV1,
+        ) -> Result<(), WorkTaskSessionReauthorizationErrorV1> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_at {
+                Err(self.error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_project_session_hydrates_provider_qualified_task_evidence() {
+        let profile = tempfile::tempdir().expect("profile root");
+        let project = profile.path().join("project");
+        std::fs::create_dir_all(&project).expect("project root");
+        let project_id = id::<ProjectId>("project.work-task-session");
+        let repository_id = id::<RepositoryId>("repository.work-task-session");
+        let worktree_id = id::<WorktreeId>("worktree.work-task-session");
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile.path(),
+            &project,
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project session runtime");
+        let database = runtime
+            .registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            )
+            .expect("registered project session database");
+        let session_id = id::<SessionId>("session.work-task-session");
+        let task_id = id::<TaskId>("task.work-task-session");
+        let attempt = WorkAttemptIdentityV1::new(
+            task_id.clone(),
+            id::<RunId>("run.work-task-session"),
+            id::<AttemptId>("attempt.work-task-session"),
+        )
+        .expect("accepted Work attempt");
+        let query_text = format!(
+            "{} {}:{} codex {}",
+            task_id.as_str(),
+            attempt.run_id().as_str(),
+            attempt.attempt_id().as_str(),
+            session_id.as_str(),
+        );
+        crate::dashboard::observation_seed::seed_session_message_observation_for_test(
+            database.as_ref(),
+            crate::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                project_id: project_id.as_str(),
+                provider: "codex",
+                session_id: session_id.as_str(),
+                message_id: "message.work-task-session.1",
+                role: "assistant",
+                content: &format!("{query_text} completed with durable provider evidence"),
+                model: Some("gpt-5.6"),
+                timestamp: 101,
+                ordinal: 1,
+            },
+        )
+        .await
+        .expect("seed canonical provider observation");
+        crate::dashboard::observation_seed::materialize_session_temporal_refresh_for_test(
+            database.as_ref(),
+            session_id.as_str(),
+        )
+        .await
+        .expect("materialize provider session temporal projection");
+
+        let root =
+            crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_identity_for_test(
+                project_id,
+                repository_id,
+                worktree_id,
+                project.display().to_string(),
+            );
+        let scope = root
+            .identity()
+            .session_request_scope()
+            .expect("resolved Work scope");
+        let retrieval = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
+            database, root, None,
+        )
+        .expect("mounted project retrieval service");
+        let privacy_domain = id::<PrivacyDomainId>("privacy.work-task-session");
+        let adapter = DaemonWorkEvidenceRetrievalV1::new(Arc::new(retrieval))
+            .with_federated_authority(Arc::new(StaticFederatedAuthority(Arc::new(
+                federated_authority(privacy_domain),
+            ))));
+        let source =
+            ObservationSourceIdentityV1::for_provider(id::<ProviderId>("codex"), session_id)
+                .expect("provider-qualified session");
+        let request = WorkTaskSessionRequestV1 {
+            selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+            task_id,
+            verified_version: verified_version(),
+            accepted_attempts: BTreeSet::from([attempt.clone()]),
+            attempt,
+            source,
+            temporal: TemporalModeV1::Forensic,
+            page_size: 8,
+            continuation: None,
+            observed_at: UtcMicros(500),
+        };
+        let reauthorization = CountingReauthorization::default();
+
+        let request_context = context(scope);
+        for temporal in [
+            TemporalModeV1::Current,
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(200_000_000),
+            },
+            TemporalModeV1::Evolution,
+            TemporalModeV1::Forensic,
+        ] {
+            let mut mode_request = request.clone();
+            mode_request.temporal = temporal;
+            let evidence = adapter
+                .retrieve_task_session(&request_context, mode_request, &reauthorization)
+                .await
+                .expect("real TaskSession evidence");
+
+            assert_eq!(evidence.task_id, request.task_id);
+            assert_eq!(evidence.source, request.source);
+            assert_eq!(evidence.attempt, request.attempt);
+            assert!(
+                evidence
+                    .hydrated
+                    .iter()
+                    .filter_map(|hydrated| hydrated.content.as_deref())
+                    .any(|content| content
+                        .windows(b"durable provider evidence".len())
+                        .any(|window| window == b"durable provider evidence")),
+                "the mounted adapter must hydrate the owning provider message in {temporal:?}: {evidence:?}",
+            );
+        }
+        assert!(
+            reauthorization.0.load(Ordering::SeqCst) >= 16,
+            "every temporal mode must reopen Work authority at all four stages",
+        );
+
+        for (fail_at, error, expected) in [
+            (
+                2,
+                WorkTaskSessionReauthorizationErrorV1::Denied,
+                WorkEvidenceHydrationErrorV1::NotFoundOrNotAuthorized,
+            ),
+            (
+                1,
+                WorkTaskSessionReauthorizationErrorV1::Stale,
+                WorkEvidenceHydrationErrorV1::Stale,
+            ),
+            (
+                3,
+                WorkTaskSessionReauthorizationErrorV1::Unavailable,
+                WorkEvidenceHydrationErrorV1::Unavailable,
+            ),
+        ] {
+            let reauthorization = FailingReauthorization::new(fail_at, error);
+            let actual = adapter
+                .retrieve_task_session(&request_context, request.clone(), &reauthorization)
+                .await
+                .expect_err("reauthorization failure must remain typed");
+            assert_eq!(actual, expected);
+            assert_eq!(reauthorization.calls.load(Ordering::SeqCst), fail_at);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "work_evidence_retrieval/continuation_tests.rs"]
+mod continuation_tests;
