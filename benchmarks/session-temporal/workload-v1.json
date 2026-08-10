@@ -7,7 +7,7 @@
     },
     {
       "path": "src/session_temporal_benchmark.rs",
-      "sha256": "8691153a1b40df4c7893b5ed79a808bc6e7726e1b2f2ad45656ba0ddba22a815"
+      "sha256": "da8dd097d4cec7b372619247907d6f895e29fe6e0b9214c60e6724975e8dbb89"
     },
     {
       "path": "src/session_temporal_benchmark/root_relation_fixture.rs",
@@ -58,7 +58,7 @@
   },
   "implementation": {
     "path": "src/session_temporal_benchmark.rs",
-    "sha256": "8691153a1b40df4c7893b5ed79a808bc6e7726e1b2f2ad45656ba0ddba22a815"
+    "sha256": "da8dd097d4cec7b372619247907d6f895e29fe6e0b9214c60e6724975e8dbb89"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -98,7 +98,7 @@
     "debug_assertions": false,
     "incremental": false,
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "c1d1febf3dbf95c8b382d58a83da035fc71c1a19e5d0c40416c81fbed00f8e63",
+    "manifest_sha256": "a3a167f00b94dd789c198056de4946d3f12bb20ea0dccdaabe517ae90d3dc693",
     "opt_level": 3,
     "overflow_checks": false
   },
